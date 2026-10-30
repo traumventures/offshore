@@ -1,0 +1,403 @@
+// Package localdocker runs machines as Docker containers on the local host.
+// It is the reference backend for development and tests: provisioning,
+// FUSE, sessions, caches and lifecycle are real; only the machine is a
+// container instead of a VM.
+package localdocker
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/traumventures/cloudsourced/internal/provider"
+)
+
+const serverPort = "7443/udp"
+
+func init() {
+	provider.Register("local-docker", func(opts map[string]any) (provider.Provider, error) {
+		d := &Docker{Command: []string{"docker"}, Host: "127.0.0.1"}
+		if v, ok := opts["command"].([]string); ok && len(v) > 0 {
+			d.Command = v
+		}
+		if v, ok := opts["host"].(string); ok && v != "" {
+			d.Host = v
+		}
+		if v, ok := opts["binary"].(string); ok {
+			d.Binary = v
+		}
+		if d.Binary == "" {
+			self, err := os.Executable()
+			if err != nil {
+				return nil, err
+			}
+			d.Binary = self
+		}
+		return d, nil
+	})
+}
+
+// Docker is the local-docker provider.
+type Docker struct {
+	Command []string // docker CLI invocation
+	Host    string   // address of published ports
+	Binary  string   // static cloudsourced binary mounted into machines
+}
+
+func (d *Docker) Name() string { return "local-docker" }
+
+func (d *Docker) Caps() provider.Caps {
+	return provider.Caps{FUSE: true, StopKeepsDisk: true}
+}
+
+func (d *Docker) run(ctx context.Context, stdout io.Writer, args ...string) error {
+	argv := append(append([]string{}, d.Command[1:]...), args...)
+	cmd := exec.CommandContext(ctx, d.Command[0], argv...)
+	var stderr bytes.Buffer
+	cmd.Stdout = stdout
+	if stdout == nil {
+		cmd.Stdout = io.Discard
+	}
+	cmd.Stderr = &stderr
+	if lw, ok := stdout.(interface{ IsLog() bool }); ok && lw.IsLog() {
+		cmd.Stderr = stdout
+	}
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("docker %s: %s", args[0], msg)
+	}
+	return nil
+}
+
+func (d *Docker) output(ctx context.Context, args ...string) ([]byte, error) {
+	var out bytes.Buffer
+	err := d.run(ctx, &out, args...)
+	return out.Bytes(), err
+}
+
+// logWriter marks a writer that should also receive stderr.
+type logWriter struct{ io.Writer }
+
+func (logWriter) IsLog() bool { return true }
+
+// EnsureImage builds the environment image unless it already exists.
+func (d *Docker) EnsureImage(ctx context.Context, img provider.ImageSpec, log io.Writer) error {
+	if _, err := d.output(ctx, "image", "inspect", "--format", "{{.Id}}", img.Tag); err == nil {
+		return nil
+	}
+	if img.BaseTag != "" {
+		if _, err := d.output(ctx, "image", "inspect", "--format", "{{.Id}}", img.BaseTag); err != nil {
+			fmt.Fprintf(log, "building base image %s\n", img.BaseTag)
+			if err := d.run(ctx, logWriter{log}, "build", "-t", img.BaseTag, "-f", img.BaseFile, img.BaseDir); err != nil {
+				return err
+			}
+		}
+	}
+	fmt.Fprintf(log, "building environment image %s\n", img.Tag)
+	return d.run(ctx, logWriter{log}, "build", "-t", img.Tag, "-f", img.Dockerfile, img.ContextDir)
+}
+
+func labels(kv map[string]string) []string {
+	keys := make([]string, 0, len(kv))
+	for k := range kv {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var out []string
+	for _, k := range keys {
+		out = append(out, "--label", k+"="+kv[k])
+	}
+	return out
+}
+
+func unix(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+
+// Create starts a new machine container.
+func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provider.Machine, error) {
+	now := time.Now()
+	name := "cs-" + spec.ID
+	common := map[string]string{
+		provider.LabelOwner:     spec.Owner,
+		provider.LabelMachine:   spec.ID,
+		provider.LabelCreatedAt: unix(now),
+		provider.LabelExpiresAt: unix(spec.ExpiresAt),
+	}
+	volLabels := map[string]string{provider.LabelKind: "cache"}
+	for k, v := range common {
+		volLabels[k] = v
+	}
+	cacheVol := "cs-cache-" + spec.ID
+	if err := d.run(ctx, nil, append(append([]string{"volume", "create"}, labels(volLabels)...), cacheVol)...); err != nil {
+		return provider.Machine{}, err
+	}
+	depsVol, err := d.depsVolume(ctx, spec)
+	if err != nil {
+		return provider.Machine{}, err
+	}
+	provision, _ := json.Marshal(spec.Provision)
+	mLabels := map[string]string{
+		provider.LabelKind:    "machine",
+		provider.LabelEnvHash: spec.EnvHash,
+		provider.LabelCPU:     strconv.FormatFloat(spec.CPU, 'f', -1, 64),
+		provider.LabelMemory:  strconv.FormatInt(spec.Memory, 10),
+		provider.LabelFinger:  spec.Finger,
+	}
+	for k, v := range common {
+		mLabels[k] = v
+	}
+	args := []string{"run", "-d", "--name", name, "--hostname", name}
+	args = append(args, labels(mLabels)...)
+	args = append(args,
+		"--device", "/dev/fuse",
+		"--cap-add", "SYS_ADMIN",
+		"--security-opt", "apparmor=unconfined",
+		"--cgroupns", "private",
+		"-p", d.Host+"::"+serverPort,
+		"-v", d.Binary+":/opt/cloudsourced/bin/cloudsourced:ro",
+		"-v", cacheVol+":/cache",
+		"-v", depsVol+":/deps",
+		"--entrypoint", "/opt/cloudsourced/bin/cloudsourced",
+		"-e", "CLOUDSOURCED_MACHINE_ID="+spec.ID,
+		"-e", "CLOUDSOURCED_TOKEN="+spec.Token,
+		"-e", "CLOUDSOURCED_CERT="+spec.CertPEM,
+		"-e", "CLOUDSOURCED_KEY="+spec.KeyPEM,
+		"-e", "CLOUDSOURCED_ENV_HASH="+spec.EnvHash,
+		"-e", "CLOUDSOURCED_EXPIRES_AT="+unix(spec.ExpiresAt),
+		"-e", "CLOUDSOURCED_CPU="+strconv.FormatFloat(spec.CPU, 'f', -1, 64),
+		"-e", "CLOUDSOURCED_MEMORY="+strconv.FormatInt(spec.Memory, 10),
+		"-e", "CLOUDSOURCED_PROVISION="+string(provision),
+	)
+	if spec.BuildTTL > 0 {
+		args = append(args, "-e", "CLOUDSOURCED_BUILD_TTL="+spec.BuildTTL.String())
+	}
+	if spec.CPU > 0 {
+		args = append(args, "--cpus", strconv.FormatFloat(spec.CPU, 'f', -1, 64))
+	}
+	if spec.Memory > 0 {
+		args = append(args, "--memory", strconv.FormatInt(spec.Memory, 10))
+	}
+	args = append(args, spec.Image, "server")
+	if err := d.run(ctx, nil, args...); err != nil {
+		d.run(context.Background(), nil, "rm", "-f", name)
+		d.run(context.Background(), nil, "volume", "rm", "-f", cacheVol)
+		return provider.Machine{}, err
+	}
+	return d.inspect(ctx, spec.ID)
+}
+
+// depsVolume returns the newest unexpired shared dependency cache volume,
+// creating one if necessary.
+func (d *Docker) depsVolume(ctx context.Context, spec provider.MachineSpec) (string, error) {
+	vols, err := d.Volumes(ctx, spec.Owner)
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	best := ""
+	var bestCreated time.Time
+	for _, v := range vols {
+		if v.Kind != "deps" || !now.Before(v.ExpiresAt) {
+			continue
+		}
+		if v.CreatedAt.After(bestCreated) {
+			best, bestCreated = v.Name, v.CreatedAt
+		}
+	}
+	if best != "" {
+		return best, nil
+	}
+	ttl := spec.DepsTTL
+	if ttl <= 0 {
+		ttl = 7 * 24 * time.Hour
+	}
+	name := fmt.Sprintf("cs-deps-%s-%d", sanitize(spec.Owner), now.Unix())
+	l := map[string]string{
+		provider.LabelOwner:     spec.Owner,
+		provider.LabelKind:      "deps",
+		provider.LabelCreatedAt: unix(now),
+		provider.LabelExpiresAt: unix(now.Add(ttl)),
+	}
+	if err := d.run(ctx, nil, append(append([]string{"volume", "create"}, labels(l)...), name)...); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+func sanitize(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	return b.String()
+}
+
+type inspectResult struct {
+	Name   string
+	Config struct {
+		Labels map[string]string
+	}
+	State struct {
+		Status   string
+		ExitCode int
+	}
+	NetworkSettings struct {
+		Ports map[string][]struct {
+			HostIP   string `json:"HostIp"`
+			HostPort string
+		}
+	}
+}
+
+func (d *Docker) inspect(ctx context.Context, id string) (provider.Machine, error) {
+	ms, err := d.inspectNames(ctx, []string{"cs-" + id})
+	if err != nil {
+		return provider.Machine{}, err
+	}
+	if len(ms) == 0 {
+		return provider.Machine{}, fmt.Errorf("machine %s not found", id)
+	}
+	return ms[0], nil
+}
+
+func (d *Docker) inspectNames(ctx context.Context, names []string) ([]provider.Machine, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	out, err := d.output(ctx, append([]string{"inspect", "--type", "container"}, names...)...)
+	if err != nil {
+		return nil, err
+	}
+	var res []inspectResult
+	if err := json.Unmarshal(out, &res); err != nil {
+		return nil, err
+	}
+	var ms []provider.Machine
+	for _, r := range res {
+		l := r.Config.Labels
+		m := provider.Machine{ID: l[provider.LabelMachine], EnvHash: l[provider.LabelEnvHash], Labels: l, Fingerprint: l[provider.LabelFinger]}
+		m.CPU, _ = strconv.ParseFloat(l[provider.LabelCPU], 64)
+		m.Memory, _ = strconv.ParseInt(l[provider.LabelMemory], 10, 64)
+		if n, err := strconv.ParseInt(l[provider.LabelCreatedAt], 10, 64); err == nil {
+			m.CreatedAt = time.Unix(n, 0)
+		}
+		if n, err := strconv.ParseInt(l[provider.LabelExpiresAt], 10, 64); err == nil {
+			m.ExpiresAt = time.Unix(n, 0)
+		}
+		switch r.State.Status {
+		case "running":
+			m.State = provider.Running
+		case "created", "restarting":
+			m.State = provider.Starting
+		case "exited", "paused":
+			m.State = provider.Stopped
+		default:
+			m.State = provider.Failed
+		}
+		if b := r.NetworkSettings.Ports[serverPort]; len(b) > 0 && m.State == provider.Running {
+			host := b[0].HostIP
+			if host == "" || host == "0.0.0.0" {
+				host = d.Host
+			}
+			m.Addr = host + ":" + b[0].HostPort
+		}
+		ms = append(ms, m)
+	}
+	return ms, nil
+}
+
+// Start restarts a stopped machine.
+func (d *Docker) Start(ctx context.Context, id string) (provider.Machine, error) {
+	if err := d.run(ctx, nil, "start", "cs-"+id); err != nil {
+		return provider.Machine{}, err
+	}
+	return d.inspect(ctx, id)
+}
+
+// Stop stops a machine, keeping its cache volume.
+func (d *Docker) Stop(ctx context.Context, id string) error {
+	return d.run(ctx, nil, "stop", "-t", "10", "cs-"+id)
+}
+
+// Destroy removes the machine and its cache volume.
+func (d *Docker) Destroy(ctx context.Context, id string) error {
+	err := d.run(ctx, nil, "rm", "-f", "-v", "cs-"+id)
+	if err != nil && !strings.Contains(err.Error(), "No such container") {
+		return err
+	}
+	err = d.run(ctx, nil, "volume", "rm", "-f", "cs-cache-"+id)
+	if err != nil && !strings.Contains(err.Error(), "no such volume") {
+		return err
+	}
+	return nil
+}
+
+// List returns all machines of owner.
+func (d *Docker) List(ctx context.Context, owner string) ([]provider.Machine, error) {
+	out, err := d.output(ctx, "ps", "-a", "--filter", "label="+provider.LabelOwner+"="+owner,
+		"--filter", "label="+provider.LabelKind+"=machine", "--format", "{{.Names}}")
+	if err != nil {
+		return nil, err
+	}
+	names := strings.Fields(string(out))
+	return d.inspectNames(ctx, names)
+}
+
+// Volumes lists cache volumes of owner.
+func (d *Docker) Volumes(ctx context.Context, owner string) ([]provider.Volume, error) {
+	out, err := d.output(ctx, "volume", "ls", "-q", "--filter", "label="+provider.LabelOwner+"="+owner)
+	if err != nil {
+		return nil, err
+	}
+	names := strings.Fields(string(out))
+	if len(names) == 0 {
+		return nil, nil
+	}
+	out, err = d.output(ctx, append([]string{"volume", "inspect"}, names...)...)
+	if err != nil {
+		return nil, err
+	}
+	var res []struct {
+		Name   string
+		Labels map[string]string
+	}
+	if err := json.Unmarshal(out, &res); err != nil {
+		return nil, err
+	}
+	var vs []provider.Volume
+	for _, r := range res {
+		v := provider.Volume{Name: r.Name, Kind: r.Labels[provider.LabelKind]}
+		if n, err := strconv.ParseInt(r.Labels[provider.LabelCreatedAt], 10, 64); err == nil {
+			v.CreatedAt = time.Unix(n, 0)
+		}
+		if n, err := strconv.ParseInt(r.Labels[provider.LabelExpiresAt], 10, 64); err == nil {
+			v.ExpiresAt = time.Unix(n, 0)
+		}
+		vs = append(vs, v)
+	}
+	return vs, nil
+}
+
+// DeleteVolume removes a volume. Volumes in use are left alone.
+func (d *Docker) DeleteVolume(ctx context.Context, name string) error {
+	err := d.run(ctx, nil, "volume", "rm", name)
+	if err != nil && strings.Contains(err.Error(), "in use") {
+		return errors.New("volume in use")
+	}
+	return err
+}
