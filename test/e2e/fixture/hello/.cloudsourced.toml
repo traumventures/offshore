@@ -40,3 +40,12 @@ env   = ["RUSTFLAGS", "CARGO_TERM_*", "RUST_LOG", "RUST_BACKTRACE"]
 
 [tool.sh]
 env = ["E2E_*"]
+
+[services.web]
+image = "busybox:1.37"
+command = ["httpd", "-f", "-p", "18080", "-h", "/etc"]
+port = 18080
+
+[secrets]
+CMD_SECRET = "cmd:printf from-cmd"
+FILE_SECRET = "file:.secret"

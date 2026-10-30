@@ -114,11 +114,14 @@ type Tool struct {
 	Env    []string `toml:"env"`    // environment variable allowlist (supports trailing *)
 }
 
-// Service is an auxiliary container available to sessions.
+// Service is an auxiliary container started next to every machine of the
+// environment. It shares the machine's network namespace, so sessions reach
+// it on localhost:Port.
 type Service struct {
-	Image string            `toml:"image"`
-	Env   map[string]string `toml:"env"`
-	Port  int               `toml:"port"`
+	Image   string            `toml:"image"`
+	Env     map[string]string `toml:"env"`
+	Port    int               `toml:"port"`
+	Command []string          `toml:"command"`
 }
 
 // Valid projection modes.
@@ -301,10 +304,36 @@ func (r *Repo) Validate() error {
 	if _, err := ParseDuration(r.Cache.Deps.TTL); err != nil {
 		errs = append(errs, "cache.deps.ttl: "+err.Error())
 	}
+	for name, svc := range r.Services {
+		if !validName(name) {
+			errs = append(errs, fmt.Sprintf("services.%s: name must match [a-z0-9-]+", name))
+		}
+		if svc.Image == "" {
+			errs = append(errs, fmt.Sprintf("services.%s.image: required", name))
+		}
+	}
+	for name, ref := range r.Secrets {
+		kind, _, ok := strings.Cut(ref, ":")
+		if !ok || (kind != "env" && kind != "file" && kind != "cmd") {
+			errs = append(errs, fmt.Sprintf("secrets.%s: must be \"env:VAR\", \"file:PATH\" or \"cmd:COMMAND\"", name))
+		}
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid %s:\n  %s", filepath.Join(r.Root, RepoFileName), strings.Join(errs, "\n  "))
 	}
 	return nil
+}
+
+func validName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // ExtraRootPaths returns the absolute paths of extra roots.

@@ -44,8 +44,9 @@ type Config struct {
 
 // Request asks for capacity for one session.
 type Request struct {
-	EnvHash string
-	Image   string
+	EnvHash  string
+	Image    string
+	Services []provider.Service
 	RepoID  string
 	CPU     float64
 	Memory  int64
@@ -94,6 +95,7 @@ type Orchestrator struct {
 	waiting    map[string]int       // env hash -> waiting requests
 	recentEnvs map[string]time.Time // env hash -> last use (warm pool)
 	images     map[string]string    // env hash -> image
+	services   map[string][]provider.Service
 	changed    chan struct{}
 
 	// OnMachineDown is called when a machine stops or disappears, so that
@@ -118,7 +120,7 @@ func New(cfg Config, prov provider.Provider, stateDir string, log *slog.Logger) 
 	o := &Orchestrator{
 		cfg: cfg, prov: prov, stateDir: stateDir, log: log,
 		machines: map[string]*Machine{}, creating: map[string]int{}, waiting: map[string]int{},
-		recentEnvs: map[string]time.Time{}, images: map[string]string{}, changed: make(chan struct{}),
+		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
 		ProbeFunc: Probe,
 	}
 	o.loadRecent()
@@ -157,8 +159,9 @@ func (o *Orchestrator) loadSecret(id string) (secret, error) {
 func (o *Orchestrator) recentPath() string { return filepath.Join(o.stateDir, "recent-envs.json") }
 
 type recentEnv struct {
-	Image string `json:"image"`
-	Used  int64  `json:"used"`
+	Image    string             `json:"image"`
+	Used     int64              `json:"used"`
+	Services []provider.Service `json:"services,omitempty"`
 }
 
 func (o *Orchestrator) loadRecent() {
@@ -173,13 +176,14 @@ func (o *Orchestrator) loadRecent() {
 	for h, r := range m {
 		o.recentEnvs[h] = time.Unix(r.Used, 0)
 		o.images[h] = r.Image
+		o.services[h] = r.Services
 	}
 }
 
 func (o *Orchestrator) saveRecentLocked() {
 	m := map[string]recentEnv{}
 	for h, t := range o.recentEnvs {
-		m[h] = recentEnv{Image: o.images[h], Used: t.Unix()}
+		m[h] = recentEnv{Image: o.images[h], Used: t.Unix(), Services: o.services[h]}
 	}
 	b, _ := json.Marshal(m)
 	os.WriteFile(o.recentPath(), b, 0o600)
@@ -349,6 +353,7 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 	o.mu.Lock()
 	o.recentEnvs[req.EnvHash] = time.Now()
 	o.images[req.EnvHash] = req.Image
+	o.services[req.EnvHash] = req.Services
 	o.saveRecentLocked()
 	if req.Memory > o.cfg.MachineMemory {
 		o.mu.Unlock()
@@ -586,6 +591,9 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, envHash, image string)
 		ExpiresAt: time.Now().Add(cfg.MaxLifetime), Token: token, CertPEM: ident.CertPEM, KeyPEM: ident.KeyPEM,
 		Finger: ident.Fingerprint, Provision: cfg.Provision, BuildTTL: cfg.BuildTTL, DepsTTL: cfg.DepsTTL,
 	}
+	o.mu.Lock()
+	spec.Services = o.services[envHash]
+	o.mu.Unlock()
 	o.log.Info("creating machine", "id", id, "env", envHash[:12], "image", image)
 	m, err := o.prov.Create(ctx, spec)
 	if err != nil {

@@ -29,6 +29,7 @@ type Plan struct {
 	Hash       string
 	Tag        string
 	Dockerfile string
+	Services   []provider.Service
 	files      map[string]string // context path -> source file
 	baseDir    string
 	baseFile   string
@@ -113,6 +114,21 @@ func Resolve(r *config.Repo) (*Plan, error) {
 	for _, k := range keys {
 		v, _ := json.Marshal(env.Env[k])
 		fmt.Fprintf(&df, "ENV %s=%s\n", k, v)
+	}
+	// Services are part of the environment: machines are only shared by
+	// repositories that need the same services.
+	names := make([]string, 0, len(r.Services))
+	for n := range r.Services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		svc := r.Services[n]
+		p.Services = append(p.Services, provider.Service{Name: n, Image: svc.Image, Env: svc.Env, Command: svc.Command})
+	}
+	if len(p.Services) > 0 {
+		sj, _ := json.Marshal(p.Services)
+		add("services=" + string(sj))
 	}
 	p.Hash = manifest.HashBytes([]byte(strings.Join(hashParts, "\n")))
 	fmt.Fprintf(&df, "LABEL cloudsourced.env-hash=%s\n", p.Hash)

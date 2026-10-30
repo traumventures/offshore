@@ -55,6 +55,7 @@ trap 'cleanup; exit $?' EXIT
 docker_ info >/dev/null 2>&1 || { echo "docker not usable via: $DOCKER"; exit 2; }
 
 cp -r "$HERE/fixture/hello" "$PROJ"
+echo file-secret > "$PROJ/.secret"
 RUSTV="$(docker_ run --rm rust:1-slim-bookworm rustc --version | awk '{print $2}')"
 printf '[toolchain]\nchannel = "%s"\nprofile = "minimal"\n' "$RUSTV" > "$PROJ/rust-toolchain.toml"
 
@@ -86,12 +87,17 @@ check "compiled at the local path" contains "$out" "Compiling hello v0.1.0 ($PRO
 check "binary transferred (eager output)" test -x "$PROJ/target/debug/hello"
 check "binary runs locally" contains "$("$PROJ/target/debug/hello")" "greeting=hello ran=local"
 check "Cargo.lock written back" test -f "$PROJ/Cargo.lock"
-MACHINE="$(docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" | head -1)"
+MACHINE="$(docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" --filter label=cloudsourced.kind=machine | head -1)"
 check "machine provisioning ran" eq "$(docker_ exec "$MACHINE" cat /cache/fleet-provision)" "provisioned-by-fleet"
 check "apt packages in environment" contains "$(run sh -c 'jq --version')" "jq-"
 check "setup step ran with its inputs" eq "$(run sh -c 'cat /opt/setup-tools.txt')" "jq"
 check "environment variables from config" eq "$(run sh -c 'echo $E2E_IMAGE_ENV')" "from-image"
 check "toolchain from rust-toolchain.toml" contains "$(run sh -c 'rustc --version')" "$RUSTV"
+check "secrets resolved locally and injected" eq "$(run sh -c 'echo "$CMD_SECRET $FILE_SECRET"')" "from-cmd file-secret"
+check "secrets never reach the machine's disk" test -z "$(docker_ exec "$MACHINE" grep -rl file-secret /cache /deps 2>/dev/null)"
+http_service() { run sh -c 'for i in $(seq 50); do bash -c "exec 3<>/dev/tcp/127.0.0.1/18080 && printf \"GET /hostname HTTP/1.0\r\n\r\n\" >&3 && cat <&3" 2>/dev/null && exit 0; sleep 0.2; done; exit 1'; }
+check "service container reachable on localhost" contains "$(http_service)" "200 OK"
+check "service runs as its own container next to the machine" eq "$(docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" --filter label=cloudsourced.kind=service | wc -l)" 1
 
 step "incremental build and cargo run"
 sed -i 's/greeting=hello/greeting=changed/' "$PROJ/src/main.rs"
@@ -166,6 +172,11 @@ check "CLOUDSOURCED_DISABLE runs locally" eq "$out" "local"
 out="$(cd "$WORK" && PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" sh -c 'echo ${CLOUDSOURCED_SESSION:-local}')"
 check "outside a configured repo the real tool runs" eq "$out" "local"
 
+step "editor integration (rust-analyzer flycheck through the proxy)"
+out="$(cd "$PROJ" && "$BIN" run cargo check --workspace --message-format=json 2>/dev/null)"
+check "JSON diagnostics on stdout with local paths" contains "$(echo "$out" | head -1)" "\"reason\":\"compiler-artifact\""
+check "check reports the local manifest path" contains "$out" "\"manifest_path\":\"$PROJ/Cargo.toml\""
+
 step "lazy outputs"
 rm -f "$PROJ/target/debug/hello.d"
 out="$(cd "$PROJ" && cs fetch 'target/debug/*.d' 2>&1)"
@@ -196,7 +207,7 @@ step "lifecycle: idle stop, warm restart, lifetime expiry, cleanup"
 cs down >/dev/null; cs daemon stop >/dev/null
 write_config 75s 10s 0 2
 run cargo build -q >/dev/null 2>&1
-M="$(docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" | head -1)"
+M="$(docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" --filter label=cloudsourced.kind=machine | head -1)"
 NAME="$(docker_ inspect -f '{{.Name}}' "$M" | tr -d /)"
 for _ in $(seq 60); do [ "$(docker_ inspect -f '{{.State.Status}}' "$NAME")" = exited ] && break; sleep 1; done
 check "idle machine stopped after idle_stop" eq "$(docker_ inspect -f '{{.State.Status}}' "$NAME")" exited
@@ -204,6 +215,7 @@ check "stopped machine keeps its cache volume" test -n "$(docker_ volume ls -q -
 out="$(CLOUDSOURCED_VERBOSE=1 run cargo build 2>&1)"
 check "stopped machine restarted on demand" contains "$out" "starting machine ${NAME#cs-}"
 check "restarted machine still has a warm build cache" eq "$(echo "$out" | grep -c Compiling)" 0
+check "services restart with their machine" contains "$(http_service)" "200 OK"
 for _ in $(seq 120); do [ -z "$(docker_ ps -aq --filter "name=^$NAME\$")" ] && break; sleep 1; done
 check "machine destroyed after max_lifetime" test -z "$(docker_ ps -aq --filter "name=^$NAME\$")"
 for _ in $(seq 30); do [ -z "$(docker_ volume ls -q --filter "name=cs-cache-${NAME#cs-}")" ] && break; sleep 1; done

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -185,10 +186,18 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	}
 	defer client.Call(context.Background(), client.Request{Op: "release", Lease: prep.Lease}, nil)
 
+	env := allowedEnv(profile.Env)
+	for name, ref := range repo.Secrets {
+		v, err := resolveSecret(ref, repo.Root)
+		if err != nil {
+			return 0, &fallback{fmt.Errorf("secret %s: %w", name, err)}
+		}
+		env[name] = v
+	}
 	useTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 	req := proto.Exec{
 		Repo: repo.Root, RepoID: prep.RepoID, Roots: prep.Roots,
-		Argv: append([]string{tool}, args...), Cwd: cwd, Env: allowedEnv(profile.Env),
+		Argv: append([]string{tool}, args...), Cwd: cwd, Env: env,
 		CPU: repo.Resources.CPU, Memory: repo.MemoryBytes(),
 		Build: repo.Cache.Build.Paths, BuildTTL: prep.BuildTTL, Deps: repo.Cache.Deps.Paths,
 		Eager: profile.Eager, Lease: prep.Lease,
@@ -338,4 +347,37 @@ func copyStdin(pc *proto.Conn) {
 			}
 		}
 	}
+}
+
+// resolveSecret reads a secret reference locally. Secret values only travel
+// inside the session request and are never written to the machine's disk.
+func resolveSecret(ref, root string) (string, error) {
+	kind, arg, _ := strings.Cut(ref, ":")
+	switch kind {
+	case "env":
+		v, ok := os.LookupEnv(arg)
+		if !ok {
+			return "", fmt.Errorf("environment variable %s is not set", arg)
+		}
+		return v, nil
+	case "file":
+		p := arg
+		if strings.HasPrefix(p, "~/") {
+			p = filepath.Join(os.Getenv("HOME"), p[2:])
+		} else if !filepath.IsAbs(p) {
+			p = filepath.Join(root, p)
+		}
+		b, err := os.ReadFile(p)
+		return strings.TrimRight(string(b), "\r\n"), err
+	case "cmd":
+		cmd := exec.Command("/bin/sh", "-c", arg)
+		cmd.Dir = root
+		cmd.Stderr = os.Stderr
+		out, err := cmd.Output()
+		if err != nil {
+			return "", fmt.Errorf("%q failed: %w", arg, err)
+		}
+		return strings.TrimRight(string(out), "\r\n"), nil
+	}
+	return "", fmt.Errorf("unsupported reference %q", ref)
 }

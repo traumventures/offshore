@@ -425,7 +425,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	var lease orchestrator.Lease
 	for attempt := 1; ; attempt++ {
 		lease, err = d.orch.Acquire(ctx, orchestrator.Request{
-			EnvHash: plan.Hash, Image: plan.Tag, RepoID: repoID,
+			EnvHash: plan.Hash, Image: plan.Tag, Services: plan.Services, RepoID: repoID,
 			CPU: repo.Resources.CPU, Memory: repo.MemoryBytes(),
 		}, progress)
 		if err != nil {

@@ -41,6 +41,15 @@ type MachineSpec struct {
 	Provision []string
 	BuildTTL  time.Duration
 	DepsTTL   time.Duration
+	Services  []Service
+}
+
+// Service is an auxiliary container sharing the machine's network.
+type Service struct {
+	Name    string            `json:"name"`
+	Image   string            `json:"image"`
+	Env     map[string]string `json:"env,omitempty"`
+	Command []string          `json:"command,omitempty"`
 }
 
 // State of a machine.

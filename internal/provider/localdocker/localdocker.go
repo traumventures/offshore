@@ -194,7 +194,46 @@ func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provide
 		d.run(context.Background(), nil, "volume", "rm", "-f", cacheVol)
 		return provider.Machine{}, err
 	}
+	for _, svc := range spec.Services {
+		if err := d.startService(ctx, spec, svc); err != nil {
+			d.Destroy(context.Background(), spec.ID)
+			return provider.Machine{}, fmt.Errorf("service %s: %w", svc.Name, err)
+		}
+	}
 	return d.inspect(ctx, spec.ID)
+}
+
+// startService runs a service container in the machine's network
+// namespace, so sessions reach it on localhost.
+func (d *Docker) startService(ctx context.Context, spec provider.MachineSpec, svc provider.Service) error {
+	l := map[string]string{
+		provider.LabelOwner:     spec.Owner,
+		provider.LabelMachine:   spec.ID,
+		provider.LabelKind:      "service",
+		provider.LabelCreatedAt: unix(time.Now()),
+		provider.LabelExpiresAt: unix(spec.ExpiresAt),
+	}
+	args := append([]string{"run", "-d", "--name", "cs-" + spec.ID + "-svc-" + svc.Name, "--network", "container:cs-" + spec.ID}, labels(l)...)
+	keys := make([]string, 0, len(svc.Env))
+	for k := range svc.Env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "-e", k+"="+svc.Env[k])
+	}
+	args = append(args, svc.Image)
+	args = append(args, svc.Command...)
+	return d.run(ctx, nil, args...)
+}
+
+// services lists the service containers of a machine.
+func (d *Docker) services(ctx context.Context, id string) []string {
+	out, err := d.output(ctx, "ps", "-aq", "--filter", "label="+provider.LabelMachine+"="+id, "--filter", "label="+provider.LabelKind+"=service")
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(out))
 }
 
 // depsVolume returns the newest unexpired shared dependency cache volume,
@@ -326,16 +365,28 @@ func (d *Docker) Start(ctx context.Context, id string) (provider.Machine, error)
 	if err := d.run(ctx, nil, "start", "cs-"+id); err != nil {
 		return provider.Machine{}, err
 	}
+	// Services join the machine's (new) network namespace.
+	if svcs := d.services(ctx, id); len(svcs) > 0 {
+		if err := d.run(ctx, nil, append([]string{"start"}, svcs...)...); err != nil {
+			return provider.Machine{}, err
+		}
+	}
 	return d.inspect(ctx, id)
 }
 
 // Stop stops a machine, keeping its cache volume.
 func (d *Docker) Stop(ctx context.Context, id string) error {
+	if svcs := d.services(ctx, id); len(svcs) > 0 {
+		d.run(ctx, nil, append([]string{"stop", "-t", "5"}, svcs...)...)
+	}
 	return d.run(ctx, nil, "stop", "-t", "10", "cs-"+id)
 }
 
-// Destroy removes the machine and its cache volume.
+// Destroy removes the machine, its services and its cache volume.
 func (d *Docker) Destroy(ctx context.Context, id string) error {
+	if svcs := d.services(ctx, id); len(svcs) > 0 {
+		d.run(ctx, nil, append([]string{"rm", "-f", "-v"}, svcs...)...)
+	}
 	err := d.run(ctx, nil, "rm", "-f", "-v", "cs-"+id)
 	if err != nil && !strings.Contains(err.Error(), "No such container") {
 		return err
