@@ -204,6 +204,7 @@ type Status struct {
 	ExpiresAt  int64     `json:"expires_at"`
 	Mounts     []string  `json:"mounts"`
 	Draining   bool      `json:"draining"`
+	WarmRepos  []string  `json:"warm_repos,omitempty"` // repo IDs with unexpired build slots
 }
 
 // Session is a running remote process.

@@ -23,4 +23,5 @@ require (
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
+	pgregory.net/rapid v1.3.0 // indirect
 )

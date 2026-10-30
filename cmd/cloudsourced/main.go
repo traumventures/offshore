@@ -57,6 +57,12 @@ Environment:
   CLOUDSOURCED_VERBOSE=1          print the machine used for each run
 `
 
+func init() {
+	// quic-go warns when the kernel caps UDP buffers; that is not actionable
+	// for users of a transparent proxy.
+	os.Setenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING", "true")
+}
+
 func main() {
 	name := filepath.Base(os.Args[0])
 	if name != "cloudsourced" && !strings.HasPrefix(name, "cloudsourced.") && !strings.HasSuffix(name, ".test") {
@@ -190,10 +196,20 @@ func daemonCmd(args []string) error {
 	case "start":
 		return client.EnsureDaemon(context.Background())
 	case "stop":
-		_, err := client.Call(context.Background(), client.Request{Op: "shutdown"}, nil)
+		raw, err := client.Call(context.Background(), client.Request{Op: "ping"}, nil)
 		if err != nil {
 			fmt.Println("daemon not running")
 			return nil
+		}
+		var info struct{ PID int }
+		json.Unmarshal(raw, &info)
+		client.Call(context.Background(), client.Request{Op: "shutdown"}, nil)
+		// Wait for the process to exit, not just for the socket to close.
+		for i := 0; i < 200 && info.PID > 0; i++ {
+			if syscall.Kill(info.PID, 0) != nil {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
 		fmt.Println("daemon stopped")
 		return nil

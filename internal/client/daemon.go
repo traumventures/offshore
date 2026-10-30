@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/traumventures/cloudsourced/internal/config"
@@ -99,11 +100,24 @@ func NewDaemon(log *slog.Logger) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Daemon{
+	d := &Daemon{
 		log: log, orch: orch, prov: prov,
 		roots: map[string]*root{}, conns: map[string]*machineConn{},
 		images: map[string]bool{}, imgMu: map[string]*sync.Mutex{},
-	}, nil
+	}
+	orch.OnMachineDown = d.dropConn
+	return d, nil
+}
+
+// dropConn closes the connection to a machine that went down.
+func (d *Daemon) dropConn(id string) {
+	d.mu.Lock()
+	mc, ok := d.conns[id]
+	delete(d.conns, id)
+	d.mu.Unlock()
+	if ok {
+		mc.close()
+	}
 }
 
 // Serve listens on the daemon socket until ctx ends or a shutdown request.
@@ -114,17 +128,31 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	if err := os.MkdirAll(StateDir(), 0o700); err != nil {
 		return err
 	}
-	sock := SocketPath()
-	if c, err := net.Dial("unix", sock); err == nil {
-		c.Close()
+	// One daemon per state directory: the lock is held for the whole
+	// process lifetime, so a new daemon never races a shutting down one
+	// for the socket.
+	lock, err := os.OpenFile(filepath.Join(StateDir(), "daemon.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	locked := false
+	for i := 0; i < 100; i++ {
+		if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			locked = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !locked {
 		return errors.New("daemon already running")
 	}
+	sock := SocketPath()
 	os.Remove(sock)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(sock)
 	os.Chmod(sock, 0o600)
 	go func() {
 		<-ctx.Done()
@@ -270,10 +298,7 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 		d.mu.Unlock()
 		return nil, d.orch.DestroyAll(ctx)
 	case "shutdown":
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			d.stop()
-		}()
+		d.stop()
 		return nil, nil
 	}
 	return nil, fmt.Errorf("unknown op %q", req.Op)
@@ -345,11 +370,15 @@ func (d *Daemon) ensureImage(ctx context.Context, plan *envbuild.Plan, progress 
 	defer logf.Close()
 	fmt.Fprintf(logf, "=== %s environment %s\n", time.Now().Format(time.RFC3339), plan.Tag)
 	start := time.Now()
-	announce := time.AfterFunc(time.Second, func() {
-		fmt.Fprintf(progress, "cloudsourced: building environment image %s (log: %s)\n", plan.Tag, logf.Name())
+	// Announce only when a build actually produces output.
+	var once sync.Once
+	w := writerFunc(func(b []byte) (int, error) {
+		once.Do(func() {
+			fmt.Fprintf(progress, "cloudsourced: building environment image %s (log: %s)\n", plan.Tag, logf.Name())
+		})
+		return logf.Write(b)
 	})
-	err = d.prov.EnsureImage(ctx, spec, logf)
-	announce.Stop()
+	err = d.prov.EnsureImage(ctx, spec, w)
 	if err != nil {
 		return fmt.Errorf("environment image: %w (see %s)", err, logf.Name())
 	}
@@ -393,31 +422,58 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		roots[p], versions[p] = r, v
 	}
 	repoID := RepoID(u.Fleet.Owner, repo.Root)
-	lease, err := d.orch.Acquire(ctx, orchestrator.Request{
-		EnvHash: plan.Hash, Image: plan.Tag, RepoID: repoID,
-		CPU: repo.Resources.CPU, Memory: repo.MemoryBytes(),
-	}, progress)
-	if err != nil {
-		return nil, err
-	}
-	mc, err := d.machineConn(ctx, lease.MachineID, lease.Addr, lease.Fingerprint, lease.Token)
-	if err != nil {
-		d.orch.Release(lease.ID)
-		return nil, err
-	}
-	for p, r := range roots {
-		var wl []string
-		if p == repo.Root {
-			wl = repo.Cache.Build.Paths
+	var lease orchestrator.Lease
+	for attempt := 1; ; attempt++ {
+		lease, err = d.orch.Acquire(ctx, orchestrator.Request{
+			EnvHash: plan.Hash, Image: plan.Tag, RepoID: repoID,
+			CPU: repo.Resources.CPU, Memory: repo.MemoryBytes(),
+		}, progress)
+		if err != nil {
+			return nil, err
 		}
-		if _, err := mc.attach(ctx, r, wl); err != nil {
-			d.orch.Release(lease.ID)
-			return nil, fmt.Errorf("attach %s: %w", p, err)
+		err = d.attachAll(ctx, lease, repo, roots)
+		if err == nil {
+			break
 		}
+		// The machine may have stopped or moved since it was last probed.
+		d.orch.Unreachable(lease.ID, lease.MachineID)
+		if attempt == 3 || ctx.Err() != nil {
+			return nil, err
+		}
+		d.log.Warn("machine unreachable, retrying placement", "machine", lease.MachineID, "err", err)
 	}
 	ttl := fleetConfig(u, repo).BuildTTL
 	return &Prepared{
 		Machine: lease.MachineID, Addr: lease.Addr, Fingerprint: lease.Fingerprint, Token: lease.Token,
 		Lease: lease.ID, RepoID: repoID, EnvHash: plan.Hash, Roots: versions, BuildTTL: ttl.String(),
 	}, nil
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
+
+func (d *Daemon) attachAll(ctx context.Context, lease orchestrator.Lease, repo *config.Repo, roots map[string]*root) error {
+	actx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	mc, err := d.machineConn(actx, lease.MachineID, lease.Addr, lease.Fingerprint, lease.Token)
+	if err != nil {
+		return err
+	}
+	for p, r := range roots {
+		var wl []string
+		if p == repo.Root {
+			wl = repo.Cache.Build.Paths
+		}
+		if _, err := mc.attach(actx, r, wl); err != nil {
+			mc.close()
+			d.mu.Lock()
+			if d.conns[lease.MachineID] == mc {
+				delete(d.conns, lease.MachineID)
+			}
+			d.mu.Unlock()
+			return fmt.Errorf("attach %s: %w", p, err)
+		}
+	}
+	return nil
 }

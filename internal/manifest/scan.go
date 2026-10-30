@@ -218,7 +218,7 @@ func (s *Scanner) rescanDir(rel string, prev, next Tree) error {
 	s.loadIgnore(rel)
 	children := map[string]bool{}
 	des, err := os.ReadDir(s.abs(rel))
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil && !os.IsNotExist(err) && !os.IsPermission(err) {
 		return err
 	}
 	for _, de := range des {
@@ -234,16 +234,16 @@ func (s *Scanner) rescanDir(rel string, prev, next Tree) error {
 		}
 		old, existed := next[childRel]
 		if e.Kind == Dir {
-			next[childRel] = e
-			if !existed || old.Kind != Dir {
-				if existed {
-					next.DeleteSubtree(childRel)
-					next[childRel] = e
-				}
+			// New, replaced or re-permissioned directories are scanned fully;
+			// unchanged ones are left to their own events.
+			if !existed || old.Kind != Dir || old.Mode != e.Mode {
+				next.DeleteSubtree(childRel)
+				next[childRel] = e
 				if err := s.scanDir(childRel, prev, next, true); err != nil {
 					return err
 				}
 			}
+			next[childRel] = e
 			continue
 		}
 		if existed && old.Kind == Dir {
@@ -299,8 +299,8 @@ func (s *Scanner) scanDir(rel string, prev, out Tree, recursive bool) error {
 func (s *Scanner) entry(rel string, prev Tree) (Entry, bool, error) {
 	fi, err := os.Lstat(s.abs(rel))
 	if err != nil {
-		if os.IsNotExist(err) {
-			return Entry{}, false, nil
+		if os.IsNotExist(err) || os.IsPermission(err) {
+			return Entry{}, false, nil // vanished or unreadable: not projected
 		}
 		return Entry{}, false, err
 	}

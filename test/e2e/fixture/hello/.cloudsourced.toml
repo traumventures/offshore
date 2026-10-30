@@ -1,0 +1,42 @@
+version = 1
+
+[resources]
+cpu = 2
+memory = "2G"
+
+[environment]
+image = "rust:1-slim-bookworm"
+
+[environment.packages]
+apt = ["jq"]
+
+[environment.toolchains]
+rust = "rust-toolchain.toml"
+
+[[environment.setup]]
+run = "cp tools.txt /opt/setup-tools.txt"
+inputs = ["tools.txt"]
+
+[environment.env]
+E2E_IMAGE_ENV = "from-image"
+
+[source]
+respect_gitignore = true
+
+[[source.rule]]
+paths = ["vendor/**"]
+mode = "immutable"
+
+[cache.build]
+paths = ["target"]
+
+[cache.deps]
+paths = ["$CARGO_HOME/registry", "$CARGO_HOME/git"]
+
+[tool.cargo]
+local = ["publish", "login", "install", "new", "init", "add", "remove"]
+eager = ["target/debug/hello"]
+env   = ["RUSTFLAGS", "CARGO_TERM_*", "RUST_LOG", "RUST_BACKTRACE"]
+
+[tool.sh]
+env = ["E2E_*"]

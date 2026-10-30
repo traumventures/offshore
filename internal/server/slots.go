@@ -199,3 +199,15 @@ func (s *slots) gc(ttl time.Duration) (removed int) {
 	}
 	return removed
 }
+
+// warmRepos lists repositories with at least one unexpired slot.
+func (s *slots) warmRepos(ttl time.Duration) []string {
+	var out []string
+	repos, _ := os.ReadDir(s.dir)
+	for _, r := range repos {
+		if _, err := s.latest(r.Name(), ttl); err == nil {
+			out = append(out, r.Name())
+		}
+	}
+	return out
+}

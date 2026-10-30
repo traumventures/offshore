@@ -166,6 +166,7 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 			cancel()
 		}
 	}()
+	t0 := time.Now()
 	if err := client.EnsureDaemon(ctx); err != nil {
 		return 0, &fallback{err}
 	}
@@ -218,10 +219,13 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	if err := pc.Expect(proto.TStarted, &started); err != nil {
 		return 0, &fallback{err}
 	}
-	if os.Getenv("CLOUDSOURCED_VERBOSE") != "" {
-		warn("running on %s (slot %s, prepared in %dms)", started.Machine, started.Slot, started.WaitMs)
+	verbose := os.Getenv("CLOUDSOURCED_VERBOSE") != ""
+	t1 := time.Now()
+	if verbose {
+		warn("running on %s (slot %s, prepare %s, server wait %dms)", started.Machine, started.Slot, t1.Sub(t0).Round(time.Millisecond), started.WaitMs)
 	}
 	code, err := stream(pc, useTTY)
+	t2 := time.Now()
 	if err != nil {
 		return code, fmt.Errorf("remote session: %w", err)
 	}
@@ -240,6 +244,9 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	}
 	if err := pc.Expect(proto.TDone, nil); err != nil {
 		return code, err
+	}
+	if verbose {
+		warn("exit %d (run %s, write back and outputs %s)", code, t2.Sub(t1).Round(time.Millisecond), time.Since(t2).Round(time.Millisecond))
 	}
 	return code, nil
 }

@@ -95,6 +95,13 @@ type Orchestrator struct {
 	recentEnvs map[string]time.Time // env hash -> last use (warm pool)
 	images     map[string]string    // env hash -> image
 	changed    chan struct{}
+
+	// OnMachineDown is called when a machine stops or disappears, so that
+	// connections to it can be dropped.
+	OnMachineDown func(id string)
+
+	// ProbeFunc fetches a server status; replaceable in tests.
+	ProbeFunc func(ctx context.Context, addr, fingerprint, token string) (proto.Status, error)
 }
 
 // New creates an orchestrator.
@@ -112,6 +119,7 @@ func New(cfg Config, prov provider.Provider, stateDir string, log *slog.Logger) 
 		cfg: cfg, prov: prov, stateDir: stateDir, log: log,
 		machines: map[string]*Machine{}, creating: map[string]int{}, waiting: map[string]int{},
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, changed: make(chan struct{}),
+		ProbeFunc: Probe,
 	}
 	o.loadRecent()
 	return o, nil
@@ -197,6 +205,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 	var wg sync.WaitGroup
 	o.mu.Lock()
 	seen := map[string]bool{}
+	var down []string
 	for _, pm := range list {
 		seen[pm.ID] = true
 		m, ok := o.machines[pm.ID]
@@ -207,6 +216,9 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 			}
 			o.machines[pm.ID] = m
 		}
+		if m.State == provider.Running && pm.State != provider.Running {
+			down = append(down, pm.ID)
+		}
 		m.Machine = pm
 		if pm.State != provider.Running {
 			m.Status = nil
@@ -215,7 +227,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 			wg.Add(1)
 			go func(id, addr, fp, token string) {
 				defer wg.Done()
-				st, err := Probe(ctx, addr, fp, token)
+				st, err := o.ProbeFunc(ctx, addr, fp, token)
 				if err != nil {
 					results <- probe{id, nil}
 					return
@@ -227,9 +239,16 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 	for id := range o.machines {
 		if !seen[id] && o.machines[id].State != provider.Starting {
 			delete(o.machines, id)
+			down = append(down, id)
 		}
 	}
+	cb := o.OnMachineDown
 	o.mu.Unlock()
+	if cb != nil {
+		for _, id := range down {
+			cb(id)
+		}
+	}
 	wg.Wait()
 	close(results)
 	o.mu.Lock()
@@ -261,6 +280,29 @@ func Probe(ctx context.Context, addr, fingerprint, token string) (proto.Status, 
 	var st proto.Status
 	err = pc.Expect(proto.TStatus, &st)
 	return st, err
+}
+
+// rank orders machines for a repository: machines holding a warm build
+// cache for it first, then by rendezvous score.
+func rank(ms []*Machine, repoID string) {
+	warm := func(m *Machine) bool {
+		if m.Status == nil {
+			return false
+		}
+		for _, r := range m.Status.WarmRepos {
+			if r == repoID {
+				return true
+			}
+		}
+		return false
+	}
+	sort.SliceStable(ms, func(i, j int) bool {
+		wi, wj := warm(ms[i]), warm(ms[j])
+		if wi != wj {
+			return wi
+		}
+		return score(repoID, ms[i].ID) > score(repoID, ms[j].ID)
+	})
 }
 
 // score implements rendezvous hashing: each repository has a stable
@@ -322,13 +364,18 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 	deadline := time.Now().Add(o.cfg.QueueTimeout)
 	announced := false
 	for {
+		// Fast path: place on known state; the daemon is the only scheduler
+		// for this owner and tracks its own pending leases.
 		o.mu.Lock()
-		stale := time.Since(o.refreshed) > 2*time.Second
+		fresh := time.Since(o.refreshed) < 30*time.Second
 		o.mu.Unlock()
-		if stale {
-			if err := o.Refresh(ctx); err != nil {
-				return Lease{}, err
+		if fresh {
+			if lease, ok := o.tryPlaceCached(req); ok {
+				return lease, nil
 			}
+		}
+		if err := o.Refresh(ctx); err != nil {
+			return Lease{}, err
 		}
 		lease, action, err := o.tryPlace(req)
 		if err != nil {
@@ -365,6 +412,30 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 	}
 }
 
+// tryPlaceCached places a request using cached machine state only.
+func (o *Orchestrator) tryPlaceCached(req Request) (Lease, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	now := time.Now()
+	var cands []*Machine
+	for _, m := range o.machines {
+		if o.usable(m, req.EnvHash, now) && now.Sub(m.StatusAt) < 30*time.Second {
+			cands = append(cands, m)
+		}
+	}
+	rank(cands, req.RepoID)
+	for _, m := range cands {
+		cpu, mem := o.free(m, now)
+		if mem >= req.Memory && cpu >= req.CPU {
+			id := newID(8)
+			m.pending[id] = pendingLease{cpu: req.CPU, mem: req.Memory, expires: now.Add(2 * time.Minute)}
+			// Count the lease as a session until the next probe confirms it.
+			return Lease{ID: id, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: m.Token}, true
+		}
+	}
+	return Lease{}, false
+}
+
 type action struct {
 	kind string // "", "start", "create"
 	id   string
@@ -380,9 +451,7 @@ func (o *Orchestrator) tryPlace(req Request) (*Lease, action, error) {
 			cands = append(cands, m)
 		}
 	}
-	sort.Slice(cands, func(i, j int) bool {
-		return score(req.RepoID, cands[i].ID) > score(req.RepoID, cands[j].ID)
-	})
+	rank(cands, req.RepoID)
 	for _, m := range cands {
 		cpu, mem := o.free(m, now)
 		if mem >= req.Memory && cpu >= req.CPU {
@@ -446,6 +515,33 @@ func (o *Orchestrator) totalCreatingLocked() int {
 		n += c
 	}
 	return n
+}
+
+func (o *Orchestrator) setState(id string, st provider.State) {
+	o.mu.Lock()
+	if m, ok := o.machines[id]; ok {
+		m.State = st
+		m.Status = nil
+		m.Addr = ""
+	}
+	cb := o.OnMachineDown
+	o.mu.Unlock()
+	if cb != nil {
+		cb(id)
+	}
+}
+
+// Unreachable reports that a leased machine could not be reached; its
+// cached state is dropped so the next placement re-probes it.
+func (o *Orchestrator) Unreachable(leaseID, machineID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if m, ok := o.machines[machineID]; ok {
+		delete(m.pending, leaseID)
+		m.Status = nil
+	}
+	o.refreshed = time.Time{}
+	o.notify()
 }
 
 // Release drops a pending lease (the session has ended or never started).
@@ -555,7 +651,7 @@ func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 				if pm.Addr == "" || token == "" {
 					continue
 				}
-				st, err := Probe(ctx, pm.Addr, pm.Fingerprint, token)
+				st, err := o.ProbeFunc(ctx, pm.Addr, pm.Fingerprint, token)
 				if err == nil {
 					o.mu.Lock()
 					if m := o.machines[id]; m != nil {
@@ -667,14 +763,20 @@ func (o *Orchestrator) Reconcile(ctx context.Context) error {
 
 	for _, id := range destroy {
 		o.log.Info("destroying machine", "id", id, "reason", "expired or failed")
+		o.setState(id, provider.Failed)
 		if err := o.prov.Destroy(ctx, id); err != nil {
 			o.log.Error("destroy", "id", id, "err", err)
 			continue
 		}
 		os.Remove(o.secretPath(id))
+		o.mu.Lock()
+		delete(o.machines, id)
+		o.mu.Unlock()
 	}
 	for _, id := range stop {
 		o.log.Info("stopping idle machine", "id", id)
+		// Mark first so no session is placed on a machine going down.
+		o.setState(id, provider.Stopped)
 		if err := o.prov.Stop(ctx, id); err != nil {
 			o.log.Error("stop", "id", id, "err", err)
 		}

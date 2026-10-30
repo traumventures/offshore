@@ -327,6 +327,7 @@ func (s *Server) Status() proto.Status {
 	for r := range s.mounts {
 		st.Mounts = append(st.Mounts, r)
 	}
+	st.WarmRepos = s.slots.warmRepos(s.cfg.BuildTTL)
 	return st
 }
 
