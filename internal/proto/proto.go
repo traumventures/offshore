@@ -110,7 +110,7 @@ type TTY struct {
 
 // Exec starts a remote process.
 type Exec struct {
-	Repo     string            `json:"repo"`  // primary root
+	Repo     string            `json:"repo"` // primary root
 	RepoID   string            `json:"repo_id"`
 	Roots    map[string]uint64 `json:"roots"` // root -> minimum manifest version (barrier)
 	Argv     []string          `json:"argv"`
@@ -153,15 +153,15 @@ type Exit struct {
 
 // Change is a file written remotely into a projected root.
 type Change struct {
-	Root     string `json:"root"`
-	Path     string `json:"path"`
-	Deleted  bool   `json:"deleted,omitempty"`
+	Root     string        `json:"root"`
+	Path     string        `json:"path"`
+	Deleted  bool          `json:"deleted,omitempty"`
 	Kind     manifest.Kind `json:"kind,omitempty"`
-	Mode     uint32 `json:"mode,omitempty"`
-	Hash     string `json:"hash,omitempty"`
-	Size     int64  `json:"size,omitempty"`
-	Target   string `json:"target,omitempty"`
-	BaseHash string `json:"base,omitempty"` // content the change was based on ("" = did not exist)
+	Mode     uint32        `json:"mode,omitempty"`
+	Hash     string        `json:"hash,omitempty"`
+	Size     int64         `json:"size,omitempty"`
+	Target   string        `json:"target,omitempty"`
+	BaseHash string        `json:"base,omitempty"` // content the change was based on ("" = did not exist)
 }
 
 // Writeback lists remote changes to projected roots.

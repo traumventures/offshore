@@ -47,9 +47,9 @@ type Request struct {
 	EnvHash  string
 	Image    string
 	Services []provider.Service
-	RepoID  string
-	CPU     float64
-	Memory  int64
+	RepoID   string
+	CPU      float64
+	Memory   int64
 }
 
 // Lease is a reservation on a machine.

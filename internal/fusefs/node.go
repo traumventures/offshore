@@ -444,4 +444,3 @@ func (h *handle) Lseek(ctx context.Context, off uint64, whence uint32) (uint64, 
 	n, err := h.f.Seek(int64(off), int(whence))
 	return uint64(n), errno(err)
 }
-

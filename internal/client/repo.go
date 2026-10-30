@@ -21,15 +21,15 @@ type root struct {
 	scanner *manifest.Scanner
 	log     *slog.Logger
 
-	mu      sync.Mutex
-	tree    manifest.Tree
-	version uint64
-	subs    map[*rootSync]bool
-	watcher *fsnotify.Watcher
-	watched map[string]bool
+	mu       sync.Mutex
+	tree     manifest.Tree
+	version  uint64
+	subs     map[*rootSync]bool
+	watcher  *fsnotify.Watcher
+	watched  map[string]bool
 	overflow bool
-	lastUse time.Time
-	closed  bool
+	lastUse  time.Time
+	closed   bool
 }
 
 func rulesFor(r *config.Repo, rootPath string) manifest.Rules {
