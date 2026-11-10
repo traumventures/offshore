@@ -8,7 +8,8 @@
 //
 // Shared infrastructure (security group, instance role, artifact bucket,
 // image repository, reaper) is a CloudFormation stack, created on first use.
-// Environment images are built with the local Docker CLI and pushed to ECR.
+// Environment images are pushed to the stack's ECR repository by the image
+// pipeline (internal/image) before an instance is launched.
 package awsec2
 
 import (
@@ -24,7 +25,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -38,11 +38,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
-	ecrtypes "github.com/aws/aws-sdk-go-v2/service/ecr/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
+	"github.com/traumventures/cloudsourced/internal/image"
 	"github.com/traumventures/cloudsourced/internal/provider"
 )
 
@@ -83,7 +83,12 @@ type EC2 struct {
 	binMu      sync.Mutex
 	binKey     string
 	ingressSet bool
+
+	builderOnce sync.Once
+	builder     *image.DockerBuilder
 }
+
+var _ provider.ImageHost = (*EC2)(nil)
 
 type infra struct {
 	sg, profile, bucket, repo string
@@ -332,83 +337,33 @@ func publicIP(ctx context.Context) (string, error) {
 
 // --- images ---
 
-func (e *EC2) dockerRun(ctx context.Context, stdin io.Reader, log io.Writer, args ...string) error {
-	argv := append(append([]string{}, e.docker[1:]...), args...)
-	cmd := exec.CommandContext(ctx, e.docker[0], argv...)
-	cmd.Stdin = stdin
-	var stderr bytes.Buffer
-	cmd.Stdout = log
-	cmd.Stderr = io.MultiWriter(log, &stderr)
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if len(msg) > 2000 {
-			msg = msg[len(msg)-2000:]
+// ImagePlatform is the platform of the instances.
+func (e *EC2) ImagePlatform(string) image.Platform { return image.LinuxAMD64 }
+
+// ImageRegistry is the ECR repository of the stack.
+func (e *EC2) ImageRegistry() image.Registry {
+	return &image.ECR{Client: e.ecr, CLI: e.docker, Repository: func(ctx context.Context) (string, error) {
+		in, err := e.ensureInfra(ctx)
+		if err != nil {
+			return "", err
 		}
-		return fmt.Errorf("docker %s: %v: %s", args[0], err, msg)
-	}
-	return nil
+		return in.repo, nil
+	}}
 }
 
-// remoteTag maps a local environment tag to its ECR image.
-func remoteTag(repo, tag string) string {
-	_, t, ok := strings.Cut(tag, ":")
-	if !ok {
-		t = tag
-	}
-	return repo + ":" + t
+// ImageBuilder builds with the configured Docker CLI (docker_command).
+func (e *EC2) ImageBuilder() image.Builder {
+	e.builderOnce.Do(func() { e.builder = &image.DockerBuilder{CLI: e.docker} })
+	return e.builder
 }
 
-// EnsureImage builds the image locally unless ECR already has it, then
-// pushes it.
-func (e *EC2) EnsureImage(ctx context.Context, img provider.ImageSpec, log io.Writer) error {
-	in, err := e.ensureInfra(ctx)
-	if err != nil {
-		return err
+// machineImage returns the ECR reference of spec's image: the pipeline
+// passes it resolved; a bare environment tag is mapped to the repository.
+func machineImage(repo string, spec provider.MachineSpec) string {
+	if strings.HasPrefix(spec.Image, repo+":") {
+		return spec.Image
 	}
-	remote := remoteTag(in.repo, img.Tag)
-	repoName := in.repo[strings.Index(in.repo, "/")+1:]
-	_, tag, _ := strings.Cut(remote[len(in.repo):], ":")
-	_, err = e.ecr.DescribeImages(ctx, &ecr.DescribeImagesInput{RepositoryName: aws.String(repoName), ImageIds: []ecrtypes.ImageIdentifier{{ImageTag: aws.String(tag)}}})
-	if err == nil {
-		return nil
-	}
-	if !strings.Contains(err.Error(), "ImageNotFound") {
-		return fmt.Errorf("aws-ec2: describe image: %w", err)
-	}
-	if e.dockerRun(ctx, nil, io.Discard, "image", "inspect", img.Tag) != nil {
-		if img.BaseTag != "" && e.dockerRun(ctx, nil, io.Discard, "image", "inspect", img.BaseTag) != nil {
-			fmt.Fprintf(log, "building base image %s\n", img.BaseTag)
-			if err := e.dockerRun(ctx, nil, log, "build", "-t", img.BaseTag, "-f", img.BaseFile, img.BaseDir); err != nil {
-				return err
-			}
-		}
-		fmt.Fprintf(log, "building environment image %s\n", img.Tag)
-		if err := e.dockerRun(ctx, nil, log, "build", "--platform", "linux/amd64", "-t", img.Tag, "-f", img.Dockerfile, img.ContextDir); err != nil {
-			return err
-		}
-	}
-	if err := e.dockerLogin(ctx, in.repo); err != nil {
-		return err
-	}
-	fmt.Fprintf(log, "pushing %s\n", remote)
-	if err := e.dockerRun(ctx, nil, log, "tag", img.Tag, remote); err != nil {
-		return err
-	}
-	return e.dockerRun(ctx, nil, log, "push", remote)
-}
-
-func (e *EC2) dockerLogin(ctx context.Context, repo string) error {
-	out, err := e.ecr.GetAuthorizationToken(ctx, &ecr.GetAuthorizationTokenInput{})
-	if err != nil || len(out.AuthorizationData) == 0 {
-		return fmt.Errorf("aws-ec2: ecr token: %v", err)
-	}
-	raw, err := base64.StdEncoding.DecodeString(aws.ToString(out.AuthorizationData[0].AuthorizationToken))
-	if err != nil {
-		return err
-	}
-	_, pass, _ := strings.Cut(string(raw), ":")
-	registry := repo[:strings.Index(repo, "/")]
-	return e.dockerRun(ctx, strings.NewReader(pass), io.Discard, "login", "--username", "AWS", "--password-stdin", registry)
+	return image.RemoteTag(repo, spec.Image, image.LinuxAMD64)
 }
 
 // ensureBinary uploads the server binary (content addressed) once.
@@ -461,7 +416,7 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	if err != nil {
 		return provider.Machine{}, err
 	}
-	ud, err := userData(spec, e.region, e.stack, in, key, remoteTag(in.repo, spec.Image))
+	ud, err := userData(spec, e.region, e.stack, in, key, machineImage(in.repo, spec))
 	if err != nil {
 		return provider.Machine{}, err
 	}

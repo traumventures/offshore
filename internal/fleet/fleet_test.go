@@ -10,12 +10,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/cloudsourced/internal/image"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
 )
@@ -26,24 +28,44 @@ type imgProvider struct {
 	files  map[string]string
 }
 
-func (p *imgProvider) Name() string        { return "img" }
-func (p *imgProvider) Caps() provider.Caps { return provider.Caps{} }
-func (p *imgProvider) EnsureImage(_ context.Context, s provider.ImageSpec, log io.Writer) error {
+func (p *imgProvider) Name() string                        { return "img" }
+func (p *imgProvider) Caps() provider.Caps                 { return provider.Caps{} }
+func (p *imgProvider) ImagePlatform(string) image.Platform { return image.LinuxAMD64 }
+func (p *imgProvider) ImageRegistry() image.Registry       { return imgRegistry{p} }
+func (p *imgProvider) ImageBuilder() image.Builder         { return p }
+func (p *imgProvider) ID() string                          { return "img" }
+func (p *imgProvider) Build(_ context.Context, s image.Spec, _ image.Platform, log io.Writer) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	df, err := os.ReadFile(s.Dockerfile)
 	if err != nil {
-		return err
+		return "", err
 	}
 	data, err := os.ReadFile(filepath.Join(s.ContextDir, "sub", "data"))
 	if err != nil {
-		return err
+		return "", err
 	}
 	link, _ := os.Readlink(filepath.Join(s.ContextDir, "link"))
 	p.builds = append(p.builds, s.Tag)
 	p.files = map[string]string{"Dockerfile": string(df), "data": string(data), "link": link}
 	io.WriteString(log, "built\n")
-	return nil
+	return s.Tag, nil
+}
+
+// imgRegistry is the provider's local image store.
+type imgRegistry struct{ p *imgProvider }
+
+func (imgRegistry) Local() bool { return true }
+func (imgRegistry) Ref(_ context.Context, tag string, _ image.Platform) (string, error) {
+	return tag, nil
+}
+func (r imgRegistry) Has(_ context.Context, ref string) (bool, error) {
+	r.p.mu.Lock()
+	defer r.p.mu.Unlock()
+	return slices.Contains(r.p.builds, ref), nil
+}
+func (imgRegistry) Push(_ context.Context, ref string, _ image.Platform, _ io.Writer) (string, error) {
+	return ref, nil
 }
 func (p *imgProvider) Create(context.Context, provider.MachineSpec) (provider.Machine, error) {
 	return provider.Machine{}, io.EOF

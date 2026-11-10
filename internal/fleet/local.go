@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/cloudsourced/internal/image"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	_ "github.com/traumventures/cloudsourced/internal/provider/awsec2"
@@ -30,10 +32,11 @@ type Local struct {
 	cfgMu sync.Mutex
 	cfg   *config.FleetConfig // applied fleet configuration
 
-	mu     sync.Mutex
-	envs   map[string]Env  // env hash -> source, for machines created later
-	images map[string]bool // provider + "\x00" + env hash
-	imgMu  map[string]*sync.Mutex
+	mu      sync.Mutex
+	envs    map[string]Env // env hash -> source, for machines created later
+	pipe    image.Pipeline
+	waiters map[string]map[*syncWriter]bool // env hash -> progress of waiting acquires
+	logMu   sync.Mutex                      // env-build.log
 }
 
 var _ Fleet = (*Local)(nil)
@@ -62,17 +65,9 @@ func NewLocal(u *config.FleetConfig, stateDir string, log *slog.Logger) (*Local,
 	}
 	l := &Local{
 		log: log, stateDir: stateDir, orch: orch, provs: provs, est: est, cfg: u,
-		envs: map[string]Env{}, images: map[string]bool{}, imgMu: map[string]*sync.Mutex{},
+		envs: map[string]Env{}, waiters: map[string]map[*syncWriter]bool{},
 	}
-	orch.EnsureImage = func(ctx context.Context, p provider.Provider, envHash string) error {
-		l.mu.Lock()
-		env, ok := l.envs[envHash]
-		l.mu.Unlock()
-		if !ok {
-			return fmt.Errorf("environment %s is unknown", envHash)
-		}
-		return l.ensureImage(ctx, p, env, io.Discard)
-	}
+	orch.PrepareImage = l.prepareImage
 	return l, nil
 }
 
@@ -146,15 +141,28 @@ func (l *Local) Run(ctx context.Context, every time.Duration) {
 	}
 }
 
-// EnsureEnv builds the environment on all providers in parallel.
+// EnsureEnv registers the environment and builds it eagerly for providers
+// whose machines use the local image store (fast path: the first build is
+// reported to the user right away). Remote registries receive the image
+// lazily, right before a machine is created there (prepareImage).
 func (l *Local) EnsureEnv(ctx context.Context, env Env, progress io.Writer) error {
 	l.Register(env)
-	errs := make(chan error, len(l.provs))
-	for _, p := range l.provs {
-		go func(p provider.Provider) { errs <- l.ensureImage(ctx, p, env, progress) }(p)
+	var eager []string
+	for _, name := range sortedNames(l.provs) {
+		if h, ok := l.provs[name].(provider.ImageHost); ok && h.ImageRegistry().Local() {
+			eager = append(eager, name)
+		}
+	}
+	pw := &syncWriter{w: progress}
+	errs := make(chan error, len(eager))
+	for _, name := range eager {
+		go func(name string) {
+			_, err := l.ensureImage(ctx, name, "", env, pw)
+			errs <- err
+		}(name)
 	}
 	var first error
-	for range l.provs {
+	for range eager {
 		if err := <-errs; err != nil && first == nil {
 			first = err
 		}
@@ -162,68 +170,139 @@ func (l *Local) EnsureEnv(ctx context.Context, env Env, progress io.Writer) erro
 	return first
 }
 
-func (l *Local) ensureImage(ctx context.Context, p provider.Provider, env Env, progress io.Writer) error {
-	key := p.Name() + "\x00" + env.Hash
-	l.mu.Lock()
-	if l.images[key] {
-		l.mu.Unlock()
-		return nil
+func sortedNames(provs map[string]provider.Provider) []string {
+	names := make([]string, 0, len(provs))
+	for n := range provs {
+		names = append(names, n)
 	}
-	m, ok := l.imgMu[key]
+	sort.Strings(names)
+	return names
+}
+
+// prepareImage is the orchestrator hook run before a machine is created:
+// it builds and pushes the image for that provider only. Its progress goes
+// to the acquires waiting for the environment.
+func (l *Local) prepareImage(ctx context.Context, provName string, _ provider.Provider, envHash, size string) (string, error) {
+	l.mu.Lock()
+	env, ok := l.envs[envHash]
+	l.mu.Unlock()
 	if !ok {
-		m = &sync.Mutex{}
-		l.imgMu[key] = m
+		return "", fmt.Errorf("environment %s is unknown", envHash)
 	}
-	l.mu.Unlock()
-	m.Lock()
-	defer m.Unlock()
-	l.mu.Lock()
-	done := l.images[key]
-	l.mu.Unlock()
-	if done {
-		return nil
-	}
-	spec, dir, err := env.Context()
+	w := writerFunc(func(b []byte) (int, error) {
+		l.mu.Lock()
+		ws := make([]*syncWriter, 0, len(l.waiters[envHash]))
+		for sw := range l.waiters[envHash] {
+			ws = append(ws, sw)
+		}
+		l.mu.Unlock()
+		for _, sw := range ws {
+			sw.Write(b)
+		}
+		return len(b), nil
+	})
+	ref, err := l.ensureImage(ctx, provName, size, env, w)
 	if err != nil {
-		return err
+		fmt.Fprintf(w, "cloudsourced: %v\n", err)
 	}
-	defer os.RemoveAll(dir)
+	return ref, err
+}
+
+// target returns the image target of a provider (false: the provider
+// manages images itself and runs the environment tag).
+func (l *Local) target(name, size string) (image.Target, bool) {
+	h, ok := l.provs[name].(provider.ImageHost)
+	if !ok {
+		return image.Target{}, false
+	}
+	return image.Target{Name: name, Platform: h.ImagePlatform(size), Registry: h.ImageRegistry(), Builder: h.ImageBuilder()}, true
+}
+
+// ensureImage makes env available to machines of a provider and returns
+// the reference they run. Build and push output goes to env-build.log; the
+// first output is announced on progress.
+func (l *Local) ensureImage(ctx context.Context, name, size string, env Env, progress io.Writer) (string, error) {
+	t, ok := l.target(name, size)
+	if !ok {
+		return "", nil
+	}
+	if ref, ok := l.pipe.Ready(t, env.Hash); ok {
+		return ref, nil
+	}
 	if err := os.MkdirAll(l.stateDir, 0o700); err != nil {
-		return err
+		return "", err
 	}
-	logf, err := os.OpenFile(filepath.Join(l.stateDir, "env-build.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	logPath := filepath.Join(l.stateDir, "env-build.log")
+	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer logf.Close()
-	fmt.Fprintf(logf, "=== %s environment %s on %s\n", time.Now().Format(time.RFC3339), env.Tag, p.Name())
 	start := time.Now()
-	// Announce only when a build actually produces output.
+	// Announce only when a build or push actually produces output.
 	var once sync.Once
 	w := writerFunc(func(b []byte) (int, error) {
 		once.Do(func() {
-			fmt.Fprintf(progress, "cloudsourced: preparing environment image %s on %s (log: %s)\n", env.Tag, p.Name(), logf.Name())
+			l.logMu.Lock()
+			fmt.Fprintf(logf, "=== %s environment %s on %s (%s)\n", time.Now().Format(time.RFC3339), env.Tag, name, t.Platform)
+			l.logMu.Unlock()
+			fmt.Fprintf(progress, "cloudsourced: preparing environment image %s on %s (log: %s)\n", env.Tag, name, logPath)
 		})
+		l.logMu.Lock()
+		defer l.logMu.Unlock()
 		return logf.Write(b)
 	})
-	err = p.EnsureImage(ctx, spec, w)
-	l.imageBuilt(p, start, err)
+	src := image.Source{Hash: env.Hash, Tag: env.Tag, Context: env.Context}
+	ref, err := l.pipe.Ensure(ctx, src, t, w)
+	l.imageBuilt(name, start, err)
 	if err != nil {
-		return fmt.Errorf("environment image on %s: %w (see %s)", p.Name(), err, logf.Name())
+		return "", fmt.Errorf("environment image on %s: %w (see %s)", name, err, logPath)
 	}
-	l.log.Info("environment image ready", "provider", p.Name(), "tag", env.Tag, "duration", time.Since(start).Round(time.Millisecond))
-	l.mu.Lock()
-	l.images[key] = true
-	l.mu.Unlock()
-	return nil
+	l.log.Info("environment image ready", "provider", name, "tag", env.Tag, "ref", ref, "duration", time.Since(start).Round(time.Millisecond))
+	return ref, nil
+}
+
+// syncWriter serializes writes of concurrent producers to one writer.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(b []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.w == nil {
+		return len(b), nil
+	}
+	return s.w.Write(b)
 }
 
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
 
+// Acquire places a session. While it waits, image preparation for new
+// machines of its environment reports on its progress writer.
 func (l *Local) Acquire(ctx context.Context, req orchestrator.Request, progress io.Writer) (orchestrator.Lease, error) {
-	return l.orch.Acquire(ctx, req, progress)
+	pw := &syncWriter{w: progress}
+	l.mu.Lock()
+	if l.waiters[req.EnvHash] == nil {
+		l.waiters[req.EnvHash] = map[*syncWriter]bool{}
+	}
+	l.waiters[req.EnvHash][pw] = true
+	l.mu.Unlock()
+	defer func() {
+		l.mu.Lock()
+		delete(l.waiters[req.EnvHash], pw)
+		if len(l.waiters[req.EnvHash]) == 0 {
+			delete(l.waiters, req.EnvHash)
+		}
+		l.mu.Unlock()
+		pw.mu.Lock()
+		pw.w = nil // the caller's writer is gone after return
+		pw.mu.Unlock()
+	}()
+	return l.orch.Acquire(ctx, req, pw)
 }
 
 func (l *Local) Release(_ context.Context, leaseID, usageKey string, usage *scheduler.Usage) error {
