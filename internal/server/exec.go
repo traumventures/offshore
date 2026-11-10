@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -33,7 +34,12 @@ type session struct {
 	cgroup  string
 	cg      *cgroups
 	pgid    int
+	done    chan struct{} // closed when the process has exited
+	endOnce sync.Once
 }
+
+// end marks the session's process as exited (idempotent).
+func (se *session) end() { se.endOnce.Do(func() { close(se.done) }) }
 
 func (se *session) kill() {
 	if se.cgroup != "" {
@@ -119,7 +125,7 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		}
 	}
 	// Admission: memory is never overcommitted.
-	se := &session{id: newID(), req: req, started: time.Now(), cg: s.cg}
+	se := &session{id: newID(), req: req, started: time.Now(), cg: s.cg, done: make(chan struct{})}
 	s.mu.Lock()
 	var used int64
 	for _, o := range s.sessions {
@@ -135,6 +141,7 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	}
 	s.sessions[se.id] = se
 	s.mu.Unlock()
+	defer se.end()
 	defer func() {
 		s.mu.Lock()
 		delete(s.sessions, se.id)
@@ -278,7 +285,8 @@ loop:
 		<-outDone
 		ptmx.Close()
 	}
-	// Nothing of the session may outlive it.
+	// Nothing of the session may outlive it, forwarded ports included.
+	se.end()
 	se.kill()
 	exit := proto.Exit{}
 	if cmd.ProcessState != nil {

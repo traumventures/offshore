@@ -46,7 +46,7 @@ func (f *fakeProvider) Create(_ context.Context, s provider.MachineSpec) (provid
 	f.created++
 	f.specs = append(f.specs, s)
 	m := &provider.Machine{ID: s.ID, State: provider.Running, Addr: f.name + "-" + s.ID, EnvHash: s.EnvHash, CPU: s.CPU, Memory: s.Memory,
-		CreatedAt: time.Now(), ExpiresAt: s.ExpiresAt, Fingerprint: s.Finger}
+		CreatedAt: time.Now(), ExpiresAt: s.ExpiresAt, Fingerprint: s.Finger, Labels: map[string]string{provider.LabelSize: s.Size}}
 	f.machines[s.ID] = m
 	f.status[s.ID] = &proto.Status{Machine: s.ID, Ready: true, CPU: s.CPU, Memory: s.Memory, IdleSince: time.Now().Unix()}
 	f.volumes["cs-cache-"+s.ID] = provider.Volume{Name: "cs-cache-" + s.ID, Kind: "cache"}
@@ -378,5 +378,33 @@ func TestMultiProviderBurst(t *testing.T) {
 	}
 	if len(local.machines)+len(cloud.machines) != 0 {
 		t.Fatal("DestroyAll left machines")
+	}
+}
+
+func TestLeaseDetailsAndCostHistory(t *testing.T) {
+	f := newFake()
+	o := newTestOrch(t, f, func(c *Config) { c.Sizes[0].PricePerHour = 0.5 })
+	l, err := o.Acquire(context.Background(), req("r1"), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Provider != "fake" || l.Size != "m4" || l.PricePerHour != 0.5 || l.Reason == "" {
+		t.Fatalf("lease %+v", l)
+	}
+	ms := o.Snapshot()
+	if len(ms) != 1 || ms[0].PricePerHour != 0.5 || len(ms[0].Uptime) != 1 || !ms[0].Removed.IsZero() {
+		t.Fatalf("snapshot %+v", ms)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if err := o.DestroyAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ms = o.Snapshot()
+	if len(ms) != 1 || ms[0].Removed.IsZero() || ms[0].Uptime[0].End.IsZero() {
+		t.Fatalf("removed machine not kept for cost accounting: %+v", ms)
+	}
+	r := Costs(ms, StartOfDay(time.Now()).Add(-time.Hour), time.Now())
+	if len(r.Sizes) != 1 || r.Sizes[0].Running != 0 || r.Total <= 0 {
+		t.Fatalf("costs %+v", r)
 	}
 }
