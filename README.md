@@ -120,6 +120,57 @@ max_machines = 4
 The legacy form (`machine_cpu`/`machine_memory` plus `[docker]`) still works and
 maps to a single provider named `local`.
 
+### Shared control plane
+
+The orchestrator can run as a shared service instead of inside every daemon.
+Clients only fetch leases from it; build traffic goes directly to the machines.
+
+```sh
+# fleet and providers in the control plane's config.toml
+cloudsourced controlplane --listen :7443
+# prints the API key (generated once, <state>/api-key) and, without
+# --tls-cert, the fingerprint of its self-signed certificate
+```
+
+Behind a domain, pass `--tls-cert/--tls-key` or terminate TLS in a reverse proxy
+and use `--insecure-http`. Clients:
+
+```toml
+[orchestrator]
+mode        = "remote"
+url         = "https://10.0.0.5:7443"   # or https://cs.example.com
+fingerprint = "0b91…"                    # only for the self-signed certificate
+api_key     = "env:CLOUDSOURCED_API_KEY" # or file:…, cmd:…
+```
+
+### AWS EC2
+
+```toml
+[[fleet.size]]
+provider = "aws"
+name     = "c7a.2xlarge"     # instance type
+cpu      = 8
+memory   = "15G"
+price_per_hour = 0.42
+
+[providers.aws]
+backend        = "aws-ec2"
+profile        = "my-profile"           # optional
+region         = "eu-central-1"
+allow_cidrs    = ["203.0.113.4/32"]     # who may reach machines (QUIC, UDP 7443); default: own public IP
+docker_command = ["docker"]             # builds and pushes environment images
+disk_gb        = 100
+```
+
+On first use the provider creates the CloudFormation stack `cloudsourced`
+(`internal/provider/awsec2/stack.yaml`): security group, instance role, S3
+bucket for the server binary, ECR repository for environment images, a reaper
+Lambda (every 10 minutes it terminates machines past their expiry) and a
+resource group of everything tagged `project=cloudsourced`. Machines are
+Amazon Linux 2023 instances running the same container layout as local-docker;
+they terminate themselves at `max_lifetime`, and the metadata service is not
+reachable from sessions (IMDSv2, hop limit 1).
+
 Add `.cloudsourced.toml` to a repository:
 
 ```toml

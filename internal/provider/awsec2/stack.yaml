@@ -243,7 +243,7 @@ Resources:
     Type: AWS::ResourceGroups::Group
     Properties:
       Name: !Ref AWS::StackName
-      Description: Everything tagged project=cloudsourced, including build machines
+      Description: Everything tagged with project cloudsourced including build machines
       ResourceQuery:
         Type: TAG_FILTERS_1_0
         Query:

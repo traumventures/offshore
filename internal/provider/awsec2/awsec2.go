@@ -233,7 +233,7 @@ func (e *EC2) deployStack(ctx context.Context, st *cftypes.Stack) error {
 	tags := []cftypes.Tag{{Key: aws.String(tagProject), Value: aws.String(project)}}
 	caps := []cftypes.Capability{cftypes.CapabilityCapabilityIam}
 	if st == nil {
-		_, err = e.cf.CreateStack(ctx, &cloudformation.CreateStackInput{
+		out, err := e.cf.CreateStack(ctx, &cloudformation.CreateStackInput{
 			StackName: aws.String(e.stack), TemplateBody: aws.String(stackTemplate),
 			Parameters: params, Tags: tags, Capabilities: caps, OnFailure: cftypes.OnFailureDelete,
 		})
@@ -242,7 +242,7 @@ func (e *EC2) deployStack(ctx context.Context, st *cftypes.Stack) error {
 		}
 		w := cloudformation.NewStackCreateCompleteWaiter(e.cf)
 		if err := w.Wait(ctx, &cloudformation.DescribeStacksInput{StackName: aws.String(e.stack)}, 20*time.Minute); err != nil {
-			return fmt.Errorf("aws-ec2: stack %s: %w (see the stack events in the CloudFormation console)", e.stack, err)
+			return fmt.Errorf("aws-ec2: creating stack %s failed: %s", e.stack, e.failureReason(ctx, out.StackId))
 		}
 		return nil
 	}
@@ -257,7 +257,27 @@ func (e *EC2) deployStack(ctx context.Context, st *cftypes.Stack) error {
 		return fmt.Errorf("aws-ec2: update stack: %w", err)
 	}
 	w := cloudformation.NewStackUpdateCompleteWaiter(e.cf)
-	return w.Wait(ctx, &cloudformation.DescribeStacksInput{StackName: aws.String(e.stack)}, 20*time.Minute)
+	if err := w.Wait(ctx, &cloudformation.DescribeStacksInput{StackName: aws.String(e.stack)}, 20*time.Minute); err != nil {
+		return fmt.Errorf("aws-ec2: updating stack %s failed: %s", e.stack, e.failureReason(ctx, st.StackId))
+	}
+	return nil
+}
+
+// failureReason returns the first resource failure of a stack operation
+// that is not merely a consequence of another failure.
+func (e *EC2) failureReason(ctx context.Context, stackID *string) string {
+	out, err := e.cf.DescribeStackEvents(ctx, &cloudformation.DescribeStackEventsInput{StackName: stackID})
+	if err != nil {
+		return err.Error()
+	}
+	reason := "unknown reason (see the stack events)"
+	for _, ev := range out.StackEvents { // newest first; keep the oldest real cause
+		r := aws.ToString(ev.ResourceStatusReason)
+		if strings.HasSuffix(string(ev.ResourceStatus), "FAILED") && r != "" && !strings.Contains(r, "Resource creation cancelled") {
+			reason = aws.ToString(ev.LogicalResourceId) + ": " + r
+		}
+	}
+	return reason
 }
 
 // ensureIngress allows QUIC from the configured CIDRs; by default from the
