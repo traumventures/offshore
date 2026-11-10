@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/traumventures/cloudsourced/internal/auth"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/transport"
 )
@@ -22,7 +23,7 @@ const forwardDialWindow = 5 * time.Second
 // 127.0.0.1:port. Sessions share the machine's network namespace (and so
 // do service containers), so the server dials from its own namespace. The
 // connection is torn down when the session's process exits.
-func (s *Server) serveForward(ctx context.Context, pc *proto.Conn, st *quic.Stream) error {
+func (s *Server) serveForward(ctx context.Context, pc *proto.Conn, st *quic.Stream, claims auth.Claims) error {
 	var req proto.Forward
 	if err := pc.Expect(proto.TForward, &req); err != nil {
 		return err
@@ -32,6 +33,10 @@ func (s *Server) serveForward(ctx context.Context, pc *proto.Conn, st *quic.Stre
 	s.mu.Unlock()
 	if se == nil {
 		return pc.SendError("forward", fmt.Errorf("session %s is not running", req.Session))
+	}
+	// Only the lease that started a session may reach into it.
+	if !claims.AllowsLease(se.req.Lease) {
+		return pc.SendError("auth", fmt.Errorf("%w: token is not valid for session %s", auth.ErrInvalidToken, req.Session))
 	}
 	if req.Port < 1 || req.Port > 65535 {
 		return pc.SendError("forward", fmt.Errorf("invalid port %d", req.Port))

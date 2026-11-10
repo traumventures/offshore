@@ -148,7 +148,17 @@ mode        = "remote"
 url         = "https://10.0.0.5:7443"   # or https://cs.example.com
 fingerprint = "0b91…"                    # only for the self-signed certificate
 api_key     = "env:CLOUDSOURCED_API_KEY" # or file:…, cmd:…
+client_cert = "client.pem"               # only with controlplane --client-ca
+client_key  = "client-key.pem"
 ```
+
+`--client-ca ca.pem` additionally requires a client certificate signed by that
+CA (mutual TLS); the API key is still checked. The control plane keeps the
+fleet master key in `<state>/master.key` (0600, created on first start). It is
+the only secret that matters: every machine identity and token is derived from
+it. Replicas or a rebuilt control plane share a fleet by importing the same key
+with `CLOUDSOURCED_MASTER_KEY` (hex or base64) or
+`CLOUDSOURCED_MASTER_KEY_FILE`.
 
 Container image (`make image`), running it on a Docker host and on AWS
 (`deploy/aws/controlplane.yaml`): [docs/CONTROLPLANE.md](docs/CONTROLPLANE.md).
@@ -180,6 +190,37 @@ resource group of everything tagged `project=cloudsourced`. Machines are
 Amazon Linux 2023 instances running the same container layout as local-docker;
 they terminate themselves at `max_lifetime`, and the metadata service is not
 reachable from sessions (IMDSv2, hop limit 1).
+
+Do not use root or admin credentials. `deploy/aws/iam.yaml` creates the managed
+policies `cloudsourced-operator` (machines, images, artifacts, machine secrets)
+and `cloudsourced-operator-stack` (resources of the shared stack) and the role
+`cloudsourced-operator` with both attached:
+
+```sh
+aws cloudformation deploy --stack-name cloudsourced-iam \
+  --template-file deploy/aws/iam.yaml --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides TrustedPrincipalArn=arn:aws:iam::123456789012:user/alice RequireMfa=true
+```
+
+```ini
+# ~/.aws/config
+[profile cloudsourced]
+source_profile = alice          # your own credentials
+role_arn       = arn:aws:iam::123456789012:role/cloudsourced-operator
+mfa_serial     = arn:aws:iam::123456789012:mfa/alice   # with RequireMfa=true
+region         = eu-central-1
+```
+
+and `profile = "cloudsourced"` in `[providers.aws]`. A control plane on EC2
+trusts its instance role (`TrustedPrincipalArn=<instance role ARN>`) and
+assumes the operator role, or gets the two policies attached directly
+(exported as `cloudsourced-operator-policy` and
+`cloudsourced-operator-stack-policy`). `CreateUser=true` adds an IAM user for
+hosts that cannot assume roles. The policies only cover stacks named
+`StackPrefix*` (default `cloudsourced`), instances tagged
+`project=cloudsourced` launched with IMDSv2 and hop limit 1, the `cloudsourced*`
+bucket and repository and SSM parameters under `/cloudsourced/`. Once the
+shared stack exists, day to day operation only needs `cloudsourced-operator`.
 
 Add `.cloudsourced.toml` to a repository:
 
@@ -333,9 +374,20 @@ Design notes and roadmap: [docs/PLAN.md](docs/PLAN.md).
 
 ## Security notes
 
-* Server connections use QUIC with TLS 1.3; the client pins the
-  self-signed certificate generated per machine, and every stream carries a
-  per-machine token.
+* Server connections use QUIC with TLS 1.3. Each machine's Ed25519 key and
+  self-signed certificate are derived from the fleet master key
+  (HKDF-SHA256 over the machine id; the certificate is deterministic in id
+  and expiry), so clients pin a fingerprint the orchestrator can always
+  recompute and provider labels need not be trusted. A machine only receives
+  the seed of its own key (`CLOUDSOURCED_TLS_SEED`, secret) and the control
+  plane's public key (`CLOUDSOURCED_SIGNER_PUB`).
+* Every stream carries a token signed by the control plane (Ed25519): claims
+  `scope`, `machine`, `lease`, `exp`, `iat`. Sessions, root sync and output
+  fetch need a `session` token, which is minted per lease, valid until the
+  machine expires and only for that lease's sessions; status needs a `probe`
+  token (minted per probe, two minutes); `admin` allows everything. There is
+  no shared per-machine secret any more. `cloudsourced debug token|probe`
+  mints and tests tokens for operators.
 * Only allowlisted environment variables are forwarded; `PATH` and `HOME`
   come from the remote environment. Secrets are resolved locally per run.
 * local-docker machines need `CAP_SYS_ADMIN` and `/dev/fuse` for FUSE,

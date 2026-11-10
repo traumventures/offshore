@@ -60,6 +60,7 @@ type cpOptions struct {
 	ACMEDirectory string
 	ACMEHTTP      string // listen address for HTTP-01 challenges ("" = off)
 	MachineBinary string // "" auto, "self", or a path on the Docker host
+	ClientCA      string // require client certificates signed by this CA (mutual TLS)
 }
 
 // cpState is what a running control plane publishes for "controlplane
@@ -109,6 +110,7 @@ func parseControlplaneFlags(args []string) (*cpOptions, error) {
 	fs.StringVar(&o.CertFile, "tls-cert", "", "TLS certificate (PEM) instead of self-signed or ACME")
 	fs.StringVar(&o.KeyFile, "tls-key", "", "TLS private key (PEM)")
 	fs.BoolVar(&o.Plain, "insecure-http", false, "serve plain HTTP (only behind a TLS terminating proxy)")
+	fs.StringVar(&o.ClientCA, "client-ca", "", "require client certificates signed by this CA (PEM) in addition to the API key (mutual TLS)")
 	fs.StringVar(&o.APIKeyFile, "api-key-file", "", "file with the API key (default $CLOUDSOURCED_API_KEY or a generated <state>/api-key)")
 	fs.StringVar(&o.MachineBinary, "machine-binary", os.Getenv("CLOUDSOURCED_MACHINE_BINARY"), "server binary of local-docker machines as a path on the Docker host; \"self\" = this executable; default: this executable, or a copy in <state>/bin when running in a container ($CLOUDSOURCED_MACHINE_BINARY)")
 	fs.Usage = controlplaneUsage(fs)
@@ -143,6 +145,9 @@ func parseControlplaneFlags(args []string) (*cpOptions, error) {
 	}
 	if o.CertFile != "" && o.Plain {
 		return nil, errors.New("controlplane: --tls-cert and --insecure-http exclude each other")
+	}
+	if o.ClientCA != "" && o.Plain {
+		return nil, errors.New("controlplane: --client-ca needs TLS (drop --insecure-http)")
 	}
 	if o.Listen == "" {
 		o.Listen = defaultListenSelfSigned
@@ -229,6 +234,19 @@ func serveControlplane(o *cpOptions) error {
 	tc, mgr, st, err := cpTLS(o, dir)
 	if err != nil {
 		return err
+	}
+	if o.ClientCA != "" {
+		pem, err := os.ReadFile(o.ClientCA)
+		if err != nil {
+			return err
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return fmt.Errorf("--client-ca %s: no certificates found", o.ClientCA)
+		}
+		tc.ClientCAs = pool
+		tc.ClientAuth = tls.RequireAndVerifyClientCert
+		log.Info("client auth: mutual TLS", "ca", o.ClientCA)
 	}
 	local, err := fleet.NewLocal(u, dir, log)
 	if err != nil {

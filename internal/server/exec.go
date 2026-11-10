@@ -20,6 +20,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/creack/pty"
 	"github.com/quic-go/quic-go"
+	"github.com/traumventures/cloudsourced/internal/auth"
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/sandbox"
@@ -62,7 +63,7 @@ type frame struct {
 
 // serveExec runs one remote process with full stream, signal and exit code
 // forwarding, followed by write back and output transfer.
-func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream) error {
+func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream, claims auth.Claims) error {
 	begin := time.Now()
 	var req proto.Exec
 	if err := pc.Expect(proto.TExec, &req); err != nil {
@@ -70,6 +71,15 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream)
 	}
 	prepErr := func(err error) error {
 		pc.SendError("prepare", err)
+		return err
+	}
+	// A session token runs sessions of its own lease only.
+	if req.Lease == "" && claims.Scope == auth.ScopeSession {
+		req.Lease = claims.Lease
+	}
+	if !claims.AllowsLease(req.Lease) {
+		err := fmt.Errorf("%w: token is not valid for lease %q", auth.ErrInvalidToken, req.Lease)
+		pc.SendError("auth", err)
 		return err
 	}
 	if len(req.Argv) == 0 {

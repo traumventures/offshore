@@ -161,7 +161,7 @@ check "exit code forwarded" eq "$code" 7
 check "stdout separated" eq "$out" "to-stdout"
 check "stderr separated" contains "$(cat "$WORK/err")" "to-stderr"
 check "stdin forwarded" eq "$(printf 'a\nb\n' | run sh -c 'wc -l')" "2"
-out="$(E2E_VISIBLE=yes HIDDEN_SECRET=no run sh -c 'echo "v=$E2E_VISIBLE s=$HIDDEN_SECRET t=$(env | grep -c CLOUDSOURCED_TOKEN)"')"
+out="$(E2E_VISIBLE=yes HIDDEN_SECRET=no run sh -c 'echo "v=$E2E_VISIBLE s=$HIDDEN_SECRET t=$(env | grep -c -e CLOUDSOURCED_TLS_SEED -e CLOUDSOURCED_SIGNER_PUB)"')"
 check "environment allowlist" eq "$out" "v=yes s= t=0"
 (cd "$PROJ" && exec "$BIN" run sh -c 'trap "echo trapped; exit 42" INT; echo ready; sleep 30' > "$WORK/sig" 2>&1) & pid=$!
 for _ in $(seq 50); do grep -q ready "$WORK/sig" 2>/dev/null && break; sleep 0.2; done
@@ -284,6 +284,30 @@ check "cleaned dependency recompiled" contains "$out" "Compiling itoa"
 check "recompiled dependency served from the compiler cache" test "$(sccache_hits "$out")" -ge 1
 check "why shows the run's sccache counters" contains "$(cs why)" "sccache_hits="
 check "compiler cache entries on the shared dependency volume" test "$(docker_ exec "$MACHINE" sh -c 'find /deps/sccache -type f | wc -l')" -ge 1
+
+step "machine authentication (derived identity, signed scoped tokens)"
+MDIR="$CLOUDSOURCED_STATE_DIR"; [ -n "$REMOTE" ] && MDIR="$CPSTATE"
+label() { docker_ inspect -f "{{index .Config.Labels \"$1\"}}" "$MACHINE"; }
+MID="$(label cloudsourced.machine)"; MFP="$(label cloudsourced.fingerprint)"
+MADDR="$(docker_ port "$MACHINE" 7443/udp | head -1)"
+SEED="$(docker_ inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$MACHINE" | sed -n 's/^CLOUDSOURCED_TLS_SEED=//p')"
+probe() { cs debug probe "$MADDR" "$MFP" "$1" 2>&1; }
+token() { cs debug token --state-dir "$MDIR" --machine "$MID" "$@"; }
+check "fleet master key stored with mode 600" eq "$(stat -c %a "$MDIR/master.key")" 600
+check "no per-machine secret files" test -z "$(ls "$MDIR/machines" 2>/dev/null)"
+check "machine got only a TLS seed as secret" test -n "$SEED"
+check "probe token reads machine status" contains "$(probe "$(token --scope probe)")" "\"machine\": \"$MID\""
+check "token signed by another key rejected" contains "$(probe "$(CLOUDSOURCED_MASTER_KEY="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" cs debug token --machine "$MID" --scope admin)")" "invalid token: bad signature"
+check "token for another machine rejected" contains "$(probe "$(cs debug token --state-dir "$MDIR" --machine other --scope probe)")" "another machine"
+check "expired token rejected" contains "$(probe "$(token --scope probe --ttl -10m)")" "expired"
+check "session token cannot probe" contains "$(probe "$(token --scope session --lease l1)")" "does not allow status"
+check "garbage token rejected" contains "$(probe "not-a-token")" "invalid token"
+if [ -n "$REMOTE" ]; then
+  st="$(curl -sk -X POST -H "Authorization: Bearer $(cat "$CPSTATE/api-key")" "https://127.0.0.1:$CPPORT/v1/status")"
+else
+  st="$(cs status)"
+fi
+check "status carries no tokens or seeds" sh -c 'case "$1" in *Token*|*"$2"*) exit 1;; esac' _ "$st" "$SEED"
 
 step "parallel sessions: one machine runs several, scale out beyond capacity"
 pids=""
