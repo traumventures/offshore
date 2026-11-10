@@ -314,13 +314,16 @@ func (s *Server) Status() proto.Status {
 		st.ExpiresAt = s.cfg.ExpiresAt.Unix()
 	}
 	for _, se := range s.sessions {
-		st.UsedCPU += se.req.CPU
-		st.UsedMemory += se.req.Memory
+		r := se.req.Grant.Reserve
+		st.UsedCPU += r.CPU
+		st.UsedMemory += r.Memory
+		st.Measured.Memory += s.cg.current(se.cgroup)
 		st.Sessions = append(st.Sessions, proto.Session{
 			ID: se.id, Repo: se.req.Repo, Argv: se.req.Argv, Started: se.started.Unix(),
-			CPU: se.req.CPU, Memory: se.req.Memory, Lease: se.req.Lease,
+			CPU: r.CPU, Memory: r.Memory, Lease: se.req.Lease,
 		})
 	}
+	st.Pressure = pressure()
 	if len(s.sessions) == 0 {
 		st.IdleSince = s.idleSince.Unix()
 	}

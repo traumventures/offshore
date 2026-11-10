@@ -20,6 +20,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/client"
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/cloudsourced/internal/scheduler"
 	"github.com/traumventures/cloudsourced/internal/transport"
 	"golang.org/x/term"
 )
@@ -171,7 +172,7 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	if err := client.EnsureDaemon(ctx); err != nil {
 		return 0, &fallback{err}
 	}
-	raw, err := client.Call(ctx, client.Request{Op: "prepare", Root: repo.Root, Cwd: cwd, Tool: tool}, os.Stderr)
+	raw, err := client.Call(ctx, client.Request{Op: "prepare", Root: repo.Root, Cwd: cwd, Tool: tool, Args: args}, os.Stderr)
 	signal.Stop(prepSig)
 	close(prepSig)
 	if err != nil {
@@ -184,7 +185,8 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	if err := json.Unmarshal(raw, &prep); err != nil {
 		return 0, &fallback{err}
 	}
-	defer client.Call(context.Background(), client.Request{Op: "release", Lease: prep.Lease}, nil)
+	release := client.Request{Op: "release", Lease: prep.Lease, UsageKey: prep.UsageKey}
+	defer func() { client.Call(context.Background(), release, nil) }()
 
 	env := allowedEnv(profile.Env)
 	for name, ref := range repo.Secrets {
@@ -198,7 +200,7 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	req := proto.Exec{
 		Repo: repo.Root, RepoID: prep.RepoID, Roots: prep.Roots,
 		Argv: append([]string{tool}, args...), Cwd: cwd, Env: env,
-		CPU: repo.Resources.CPU, Memory: repo.MemoryBytes(),
+		Grant: prep.Grant, MemoryOvercommit: prep.MemoryOvercommit,
 		Build: repo.Cache.Build.Paths, BuildTTL: prep.BuildTTL, Deps: repo.Cache.Deps.Paths,
 		Eager: profile.Eager, Lease: prep.Lease,
 	}
@@ -233,7 +235,10 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	if verbose {
 		warn("running on %s (slot %s, prepare %s, server wait %dms)", started.Machine, started.Slot, t1.Sub(t0).Round(time.Millisecond), started.WaitMs)
 	}
-	code, err := stream(pc, useTTY)
+	code, usage, err := stream(pc, useTTY)
+	if err == nil {
+		release.Usage = &usage
+	}
 	t2 := time.Now()
 	if err != nil {
 		return code, fmt.Errorf("remote session: %w", err)
@@ -261,7 +266,7 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 }
 
 // stream forwards stdio, terminal and signals until the remote exits.
-func stream(pc *proto.Conn, useTTY bool) (int, error) {
+func stream(pc *proto.Conn, useTTY bool) (int, scheduler.Usage, error) {
 	if useTTY {
 		if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
 			defer term.Restore(int(os.Stdin.Fd()), old)
@@ -290,7 +295,7 @@ func stream(pc *proto.Conn, useTTY bool) (int, error) {
 	for {
 		t, p, err := pc.Read()
 		if err != nil {
-			return 255, err
+			return 255, scheduler.Usage{}, err
 		}
 		switch t {
 		case proto.TStdout:
@@ -300,11 +305,11 @@ func stream(pc *proto.Conn, useTTY bool) (int, error) {
 		case proto.TExit:
 			var ex proto.Exit
 			if err := json.Unmarshal(p, &ex); err != nil {
-				return 255, err
+				return 255, scheduler.Usage{}, err
 			}
-			return ex.Code, nil
+			return ex.Code, ex.Usage, nil
 		case proto.TError:
-			return 255, proto.Decode(t, p, proto.TExit, nil)
+			return 255, scheduler.Usage{}, proto.Decode(t, p, proto.TExit, nil)
 		}
 	}
 }

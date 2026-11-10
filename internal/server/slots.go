@@ -55,14 +55,14 @@ func writeMeta(slot string, m slotMeta) error {
 	return os.Rename(tmp, filepath.Join(slot, "meta.json"))
 }
 
-// lease returns an exclusive slot directory for repoID. The data directory
-// is slot/data.
-func (s *slots) lease(repoID string, ttl time.Duration) (string, error) {
+// lease returns an exclusive slot directory for repoID and whether it holds
+// previous build data. The data directory is slot/data.
+func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	repoDir := filepath.Join(s.dir, repoID)
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
-		return "", err
+		return "", false, err
 	}
 	now := time.Now()
 	des, _ := os.ReadDir(repoDir)
@@ -102,10 +102,10 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, error) {
 		c := free[0]
 		c.meta.LastUsed = now.Unix()
 		if err := writeMeta(c.path, c.meta); err != nil {
-			return "", err
+			return "", false, err
 		}
 		s.leased[c.path] = true
-		return c.path, nil
+		return c.path, true, nil
 	}
 	n := 0
 	for used[n] {
@@ -113,7 +113,7 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, error) {
 	}
 	p := filepath.Join(repoDir, strconv.Itoa(n))
 	if err := os.MkdirAll(p, 0o755); err != nil {
-		return "", err
+		return "", false, err
 	}
 	meta := slotMeta{Created: now.Unix(), LastUsed: now.Unix()}
 	// Warm start: clone the most recently used slot if reflinks are cheap.
@@ -133,14 +133,14 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, error) {
 	}
 	if !cloned {
 		if err := os.MkdirAll(filepath.Join(p, "data"), 0o755); err != nil {
-			return "", err
+			return "", false, err
 		}
 	}
 	if err := writeMeta(p, meta); err != nil {
-		return "", err
+		return "", false, err
 	}
 	s.leased[p] = true
-	return p, nil
+	return p, cloned, nil
 }
 
 func (s *slots) release(slot string) {

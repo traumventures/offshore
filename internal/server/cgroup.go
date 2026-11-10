@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/traumventures/cloudsourced/internal/scheduler"
 )
 
 const cgroupRoot = "/sys/fs/cgroup"
@@ -70,8 +72,9 @@ func writable(dir string) bool {
 	}()
 }
 
-// create makes a session cgroup with limits and returns its path.
-func (c *cgroups) create(id string, cpu float64, memory int64) (string, error) {
+// create makes a session cgroup with the limits of a grant and returns
+// its path.
+func (c *cgroups) create(id string, g scheduler.Grant) (string, error) {
 	if !c.enabled {
 		return "", nil
 	}
@@ -79,25 +82,91 @@ func (c *cgroups) create(id string, cpu float64, memory int64) (string, error) {
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		return "", err
 	}
-	if memory > 0 {
-		if err := os.WriteFile(filepath.Join(dir, "memory.max"), []byte(strconv.FormatInt(memory, 10)), 0o644); err != nil {
+	write := func(file, v string) error {
+		return os.WriteFile(filepath.Join(dir, file), []byte(v), 0o644)
+	}
+	if g.MemoryMax > 0 {
+		if err := write("memory.max", strconv.FormatInt(g.MemoryMax, 10)); err != nil {
 			return dir, fmt.Errorf("memory.max: %w", err)
 		}
-		os.WriteFile(filepath.Join(dir, "memory.swap.max"), []byte("0"), 0o644)
 	}
-	if cpu > 0 {
+	if g.MemoryHigh > 0 {
+		if err := write("memory.high", strconv.FormatInt(g.MemoryHigh, 10)); err != nil {
+			return dir, fmt.Errorf("memory.high: %w", err)
+		}
+	}
+	switch {
+	case g.Swap < 0:
+		write("memory.swap.max", "max")
+	default:
+		write("memory.swap.max", strconv.FormatInt(g.Swap, 10))
+	}
+	if g.CPUWeight > 0 {
 		// Proportional sharing: idle CPU stays usable by every session.
-		w := int(cpu * 100)
-		if w < 1 {
-			w = 1
-		}
-		if w > 10000 {
-			w = 10000
-		}
-		os.WriteFile(filepath.Join(dir, "cpu.weight"), []byte(strconv.Itoa(w)), 0o644)
+		w := min(max(int(g.CPUWeight*100), 1), 10000)
+		write("cpu.weight", strconv.Itoa(w))
 	}
-	os.WriteFile(filepath.Join(dir, "pids.max"), []byte("32768"), 0o644)
+	write("pids.max", "32768")
 	return dir, nil
+}
+
+// usage reads what a session cgroup consumed.
+func (c *cgroups) usage(dir string) (peak int64, cpuSeconds float64) {
+	if dir == "" {
+		return 0, 0
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "memory.peak")); err == nil {
+		peak, _ = strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "cpu.stat")); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			f := strings.Fields(line)
+			if len(f) == 2 && f[0] == "usage_usec" {
+				us, _ := strconv.ParseFloat(f[1], 64)
+				cpuSeconds = us / 1e6
+			}
+		}
+	}
+	return peak, cpuSeconds
+}
+
+// current returns the memory currently used by a session cgroup.
+func (c *cgroups) current(dir string) int64 {
+	if dir == "" {
+		return 0
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "memory.current"))
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	return n
+}
+
+// pressure reads PSI "some avg10" of the machine for cpu and memory.
+func pressure() scheduler.Pressure {
+	read := func(res string) float64 {
+		b, err := os.ReadFile(filepath.Join(cgroupRoot, res+".pressure"))
+		if err != nil {
+			b, err = os.ReadFile(filepath.Join("/proc/pressure", res))
+			if err != nil {
+				return 0
+			}
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if !strings.HasPrefix(line, "some ") {
+				continue
+			}
+			for _, kv := range strings.Fields(line)[1:] {
+				if v, ok := strings.CutPrefix(kv, "avg10="); ok {
+					f, _ := strconv.ParseFloat(v, 64)
+					return f / 100
+				}
+			}
+		}
+		return 0
+	}
+	return scheduler.Pressure{CPU: read("cpu"), Memory: read("memory")}
 }
 
 // kill terminates all processes in a session cgroup.

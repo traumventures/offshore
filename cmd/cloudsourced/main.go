@@ -23,6 +23,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/envbuild"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/proxy"
 	"github.com/traumventures/cloudsourced/internal/sandbox"
 	"github.com/traumventures/cloudsourced/internal/server"
@@ -246,7 +247,7 @@ func status() error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "MACHINE\tSTATE\tENV\tADDR\tCPU\tMEMORY\tSESSIONS\tAGE\tEXPIRES IN")
+	fmt.Fprintln(tw, "MACHINE\tPROVIDER\tSIZE\tSTATE\tENV\tADDR\tCPU\tMEMORY\tSESSIONS\tAGE\tEXPIRES IN")
 	for _, m := range ms {
 		state := string(m.State)
 		sessions := "-"
@@ -264,7 +265,14 @@ func status() error {
 		if len(env) > 12 {
 			env = env[:12]
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%g\t%s\t%s\t%s\t%s\n", m.ID, state, env, m.Addr, m.CPU, human(m.Memory), sessions,
+		if m.Draining && !strings.Contains(state, "draining") {
+			state += " (draining)"
+		}
+		size := m.Labels[provider.LabelSize]
+		if size == "" {
+			size = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%g\t%s\t%s\t%s\t%s\n", m.ID, m.Provider, size, state, env, m.Addr, m.CPU, human(m.Memory), sessions,
 			time.Since(m.CreatedAt).Round(time.Second), time.Until(m.ExpiresAt).Round(time.Minute))
 	}
 	tw.Flush()

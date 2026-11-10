@@ -40,10 +40,13 @@ type Repo struct {
 }
 
 // Resources is the per-session resource request used for scheduling.
+// CPU and Memory are the initial estimate; with the history estimator the
+// scheduler replaces them with measured values. MaxMemory is a hard limit.
 type Resources struct {
-	CPU    float64 `toml:"cpu"`
-	Memory string  `toml:"memory"`
-	Arch   string  `toml:"arch"`
+	CPU       float64 `toml:"cpu"`
+	Memory    string  `toml:"memory"`
+	MaxMemory string  `toml:"max_memory"`
+	Arch      string  `toml:"arch"`
 }
 
 // Environment describes how the remote environment image is built.
@@ -245,6 +248,11 @@ func (r *Repo) Validate() error {
 	if _, err := ParseBytes(r.Resources.Memory); err != nil {
 		errs = append(errs, "resources.memory: "+err.Error())
 	}
+	if r.Resources.MaxMemory != "" {
+		if _, err := ParseBytes(r.Resources.MaxMemory); err != nil {
+			errs = append(errs, "resources.max_memory: "+err.Error())
+		}
+	}
 	switch r.Resources.Arch {
 	case "x86_64", "aarch64":
 	default:
@@ -352,6 +360,15 @@ func (r *Repo) ExtraRootPaths() []string {
 // MemoryBytes returns the requested session memory in bytes.
 func (r *Repo) MemoryBytes() int64 {
 	b, _ := ParseBytes(r.Resources.Memory)
+	return b
+}
+
+// MaxMemoryBytes returns the hard memory limit (0 = none).
+func (r *Repo) MaxMemoryBytes() int64 {
+	if r.Resources.MaxMemory == "" {
+		return 0
+	}
+	b, _ := ParseBytes(r.Resources.MaxMemory)
 	return b
 }
 

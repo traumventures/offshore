@@ -26,7 +26,7 @@ const serverPort = "7443/udp"
 func init() {
 	provider.Register("local-docker", func(opts map[string]any) (provider.Provider, error) {
 		d := &Docker{Command: []string{"docker"}, Host: "127.0.0.1"}
-		if v, ok := opts["command"].([]string); ok && len(v) > 0 {
+		if v := provider.StringList(opts["command"]); len(v) > 0 {
 			d.Command = v
 		}
 		if v, ok := opts["host"].(string); ok && v != "" {
@@ -153,6 +153,7 @@ func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provide
 		provider.LabelCPU:     strconv.FormatFloat(spec.CPU, 'f', -1, 64),
 		provider.LabelMemory:  strconv.FormatInt(spec.Memory, 10),
 		provider.LabelFinger:  spec.Finger,
+		provider.LabelSize:    spec.Size,
 	}
 	for k, v := range common {
 		mLabels[k] = v
@@ -187,6 +188,9 @@ func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provide
 	}
 	if spec.Memory > 0 {
 		args = append(args, "--memory", strconv.FormatInt(spec.Memory, 10))
+		if spec.Swap {
+			args = append(args, "--memory-swap", "-1")
+		}
 	}
 	args = append(args, spec.Image, "server")
 	if err := d.run(ctx, nil, args...); err != nil {

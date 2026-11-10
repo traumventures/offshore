@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	_ "github.com/traumventures/cloudsourced/internal/provider/localdocker"
+	"github.com/traumventures/cloudsourced/internal/scheduler"
 )
 
 // StateDir returns the daemon state directory.
@@ -44,31 +46,52 @@ func LogPath() string { return filepath.Join(StateDir(), "daemon.log") }
 
 // Daemon is the local client service.
 type Daemon struct {
-	log  *slog.Logger
-	orch *orchestrator.Orchestrator
-	prov provider.Provider
+	log   *slog.Logger
+	orch  *orchestrator.Orchestrator
+	provs map[string]provider.Provider
+	est   scheduler.Estimator
 
 	mu     sync.Mutex
 	roots  map[string]*root
 	conns  map[string]*machineConn
-	images map[string]bool
+	images map[string]bool // provider + "\x00" + env hash
 	imgMu  map[string]*sync.Mutex
+	plans  map[string]*envbuild.Plan // env hash -> plan
 	stop   context.CancelFunc
 }
 
 func fleetConfig(u *config.User, r *config.Repo) orchestrator.Config {
 	idle, lifetime, queue := u.Fleet.Durations()
-	mem, _ := config.ParseBytes(u.Fleet.MachineMemory)
 	var provision []string
 	for _, p := range u.Fleet.Provision {
 		provision = append(provision, p.Run)
 	}
+	var sizes []scheduler.Size
+	for _, sz := range u.Fleet.Sizes {
+		mem, _ := config.ParseBytes(sz.Memory)
+		sizes = append(sizes, scheduler.Size{Provider: sz.Provider, Name: sz.Name,
+			Capacity: scheduler.Resources{CPU: sz.CPU, Memory: mem}, PricePerHour: sz.PricePerHour})
+	}
+	f := u.Fleet
 	c := orchestrator.Config{
-		Owner: u.Fleet.Owner, MachineCPU: u.Fleet.MachineCPU, MachineMemory: mem,
-		MinMachines: u.Fleet.MinMachines, MaxMachines: u.Fleet.MaxMachines,
-		IdleStop: idle, MaxLifetime: lifetime, QueueTimeout: queue,
-		CPUOvercommit: u.Fleet.CPUOvercommit, Provision: provision,
+		Owner: f.Owner, Sizes: sizes, MaxLifetime: lifetime, QueueTimeout: queue,
+		Provision: provision, Swap: f.Swap,
 		BuildTTL: 24 * time.Hour, DepsTTL: 7 * 24 * time.Hour,
+		Policy: scheduler.Config{
+			CPUOvercommit: f.CPUOvercommit, MemoryOvercommit: f.MemoryOvercommit,
+			MaxCPUPressure: f.MaxCPUPressure, MaxMemoryPressure: f.MaxMemoryPressure,
+			SoftLimit: f.SoftLimit, Swap: f.Swap, LimitJobs: f.LimitJobs,
+			MinMachines: f.MinMachines, MaxMachines: f.MaxMachines, IdleStop: idle,
+			ProviderMax: map[string]int{},
+		},
+	}
+	for name, opts := range u.Providers {
+		switch v := opts["max_machines"].(type) {
+		case int64:
+			c.Policy.ProviderMax[name] = int(v)
+		case float64:
+			c.Policy.ProviderMax[name] = int(v)
+		}
 	}
 	if r != nil {
 		c.BuildTTL, _ = config.ParseDuration(r.Cache.Build.TTL)
@@ -88,22 +111,39 @@ func NewDaemon(log *slog.Logger) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	prov, err := provider.Open(u.Fleet.Backend, map[string]any{
-		"command": u.Docker.Command,
-		"host":    u.Docker.Host,
-		"binary":  os.Getenv("CLOUDSOURCED_SERVER_BINARY"),
-	})
+	provs := map[string]provider.Provider{}
+	for _, name := range u.ProviderNames() {
+		opts := map[string]any{"binary": os.Getenv("CLOUDSOURCED_SERVER_BINARY")}
+		for k, v := range u.Providers[name] {
+			opts[k] = v
+		}
+		p, err := provider.Open(u.ProviderBackend(name), opts)
+		if err != nil {
+			return nil, fmt.Errorf("provider %s: %w", name, err)
+		}
+		provs[name] = p
+	}
+	orch, err := orchestrator.New(fleetConfig(u, nil), provs, StateDir(), log)
 	if err != nil {
 		return nil, err
 	}
-	orch, err := orchestrator.New(fleetConfig(u, nil), prov, StateDir(), log)
-	if err != nil {
-		return nil, err
+	var est scheduler.Estimator = scheduler.Static{}
+	if u.Fleet.Estimator == "history" {
+		est = scheduler.NewHistory(filepath.Join(StateDir(), "usage-history.json"))
 	}
 	d := &Daemon{
-		log: log, orch: orch, prov: prov,
+		log: log, orch: orch, provs: provs, est: est,
 		roots: map[string]*root{}, conns: map[string]*machineConn{},
-		images: map[string]bool{}, imgMu: map[string]*sync.Mutex{},
+		images: map[string]bool{}, imgMu: map[string]*sync.Mutex{}, plans: map[string]*envbuild.Plan{},
+	}
+	orch.EnsureImage = func(ctx context.Context, p provider.Provider, envHash string) error {
+		d.mu.Lock()
+		plan := d.plans[envHash]
+		d.mu.Unlock()
+		if plan == nil {
+			return fmt.Errorf("environment %s is unknown to this daemon", envHash)
+		}
+		return d.ensureImage(ctx, p, plan, io.Discard)
 	}
 	orch.OnMachineDown = d.dropConn
 	return d, nil
@@ -199,11 +239,15 @@ func (d *Daemon) reconcileLoop(ctx context.Context) {
 
 // Request is a daemon RPC request.
 type Request struct {
-	Op    string `json:"op"` // prepare | release | sync | status | down | reconcile | shutdown | ping
-	Root  string `json:"root,omitempty"`
-	Cwd   string `json:"cwd,omitempty"`
-	Tool  string `json:"tool,omitempty"`
-	Lease string `json:"lease,omitempty"`
+	Op    string   `json:"op"` // prepare | release | sync | status | down | reconcile | shutdown | ping
+	Root  string   `json:"root,omitempty"`
+	Cwd   string   `json:"cwd,omitempty"`
+	Tool  string   `json:"tool,omitempty"`
+	Args  []string `json:"args,omitempty"`
+	Lease string   `json:"lease,omitempty"`
+	// Usage reports what a finished session consumed (op "release").
+	UsageKey string           `json:"usage_key,omitempty"`
+	Usage    *scheduler.Usage `json:"usage,omitempty"`
 }
 
 // Prepared is the result of a prepare request.
@@ -217,6 +261,10 @@ type Prepared struct {
 	EnvHash     string            `json:"env_hash"`
 	Roots       map[string]uint64 `json:"roots"`
 	BuildTTL    string            `json:"build_ttl"`
+	Grant       scheduler.Grant   `json:"grant"`
+	UsageKey    string            `json:"usage_key"`
+	// MemoryOvercommit is passed to the server as admission safety net.
+	MemoryOvercommit float64 `json:"memory_overcommit"`
 }
 
 // Response is one line of a daemon RPC response.
@@ -274,6 +322,9 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 		return d.prepare(ctx, req, progress)
 	case "release":
 		d.orch.Release(req.Lease)
+		if req.Usage != nil && req.UsageKey != "" {
+			d.est.Observe(req.UsageKey, *req.Usage)
+		}
 		return nil, nil
 	case "sync":
 		r := d.rootByPath(req.Root)
@@ -338,22 +389,42 @@ func RepoID(owner, root string) string {
 	return manifest.HashBytes([]byte(owner + "\x00" + root))[:20]
 }
 
-func (d *Daemon) ensureImage(ctx context.Context, plan *envbuild.Plan, progress io.Writer) error {
+// ensureImages makes the environment available on every provider that
+// may host it, in parallel.
+func (d *Daemon) ensureImages(ctx context.Context, plan *envbuild.Plan, progress io.Writer) error {
 	d.mu.Lock()
-	if d.images[plan.Hash] {
+	d.plans[plan.Hash] = plan
+	d.mu.Unlock()
+	errs := make(chan error, len(d.provs))
+	for _, p := range d.provs {
+		go func(p provider.Provider) { errs <- d.ensureImage(ctx, p, plan, progress) }(p)
+	}
+	var first error
+	for range d.provs {
+		if err := <-errs; err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+func (d *Daemon) ensureImage(ctx context.Context, p provider.Provider, plan *envbuild.Plan, progress io.Writer) error {
+	key := p.Name() + "\x00" + plan.Hash
+	d.mu.Lock()
+	if d.images[key] {
 		d.mu.Unlock()
 		return nil
 	}
-	m, ok := d.imgMu[plan.Hash]
+	m, ok := d.imgMu[key]
 	if !ok {
 		m = &sync.Mutex{}
-		d.imgMu[plan.Hash] = m
+		d.imgMu[key] = m
 	}
 	d.mu.Unlock()
 	m.Lock()
 	defer m.Unlock()
 	d.mu.Lock()
-	done := d.images[plan.Hash]
+	done := d.images[key]
 	d.mu.Unlock()
 	if done {
 		return nil
@@ -374,17 +445,17 @@ func (d *Daemon) ensureImage(ctx context.Context, plan *envbuild.Plan, progress 
 	var once sync.Once
 	w := writerFunc(func(b []byte) (int, error) {
 		once.Do(func() {
-			fmt.Fprintf(progress, "cloudsourced: building environment image %s (log: %s)\n", plan.Tag, logf.Name())
+			fmt.Fprintf(progress, "cloudsourced: preparing environment image %s on %s (log: %s)\n", plan.Tag, p.Name(), logf.Name())
 		})
 		return logf.Write(b)
 	})
-	err = d.prov.EnsureImage(ctx, spec, w)
+	err = p.EnsureImage(ctx, spec, w)
 	if err != nil {
 		return fmt.Errorf("environment image: %w (see %s)", err, logf.Name())
 	}
-	d.log.Info("environment image ready", "tag", plan.Tag, "duration", time.Since(start).Round(time.Millisecond))
+	d.log.Info("environment image ready", "provider", p.Name(), "tag", plan.Tag, "duration", time.Since(start).Round(time.Millisecond))
 	d.mu.Lock()
-	d.images[plan.Hash] = true
+	d.images[key] = true
 	d.mu.Unlock()
 	return nil
 }
@@ -403,7 +474,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	if err != nil {
 		return nil, err
 	}
-	if err := d.ensureImage(ctx, plan, progress); err != nil {
+	if err := d.ensureImages(ctx, plan, progress); err != nil {
 		return nil, err
 	}
 	// Track all roots and bring their manifests up to date.
@@ -422,11 +493,16 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		roots[p], versions[p] = r, v
 	}
 	repoID := RepoID(u.Fleet.Owner, repo.Root)
+	key := UsageKey(repoID, req.Tool, req.Args)
+	need := d.est.Estimate(key, scheduler.Resources{CPU: repo.Resources.CPU, Memory: repo.MemoryBytes()})
+	if max := repo.MaxMemoryBytes(); max > 0 && need.Memory > max {
+		need.Memory = max
+	}
 	var lease orchestrator.Lease
 	for attempt := 1; ; attempt++ {
 		lease, err = d.orch.Acquire(ctx, orchestrator.Request{
 			EnvHash: plan.Hash, Image: plan.Tag, Services: plan.Services, RepoID: repoID,
-			CPU: repo.Resources.CPU, Memory: repo.MemoryBytes(),
+			Key: key, Need: need, Limit: scheduler.Resources{Memory: repo.MaxMemoryBytes()},
 		}, progress)
 		if err != nil {
 			return nil, err
@@ -446,6 +522,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	return &Prepared{
 		Machine: lease.MachineID, Addr: lease.Addr, Fingerprint: lease.Fingerprint, Token: lease.Token,
 		Lease: lease.ID, RepoID: repoID, EnvHash: plan.Hash, Roots: versions, BuildTTL: ttl.String(),
+		Grant: lease.Grant, UsageKey: key, MemoryOvercommit: u.Fleet.MemoryOvercommit,
 	}, nil
 }
 
@@ -476,4 +553,23 @@ func (d *Daemon) attachAll(ctx context.Context, lease orchestrator.Lease, repo *
 		}
 	}
 	return nil
+}
+
+// UsageKey is the unit of resource learning: repository, tool and
+// subcommand (e.g. "cargo test" and "cargo check" differ a lot).
+func UsageKey(repoID, tool string, args []string) string {
+	sub := ""
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "+") {
+			sub = a
+			break
+		}
+	}
+	release := ""
+	for _, a := range args {
+		if a == "--release" || a == "-r" {
+			release = "/release"
+		}
+	}
+	return repoID + "/" + tool + "/" + sub + release
 }

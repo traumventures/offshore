@@ -11,10 +11,12 @@ import (
 
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/cloudsourced/internal/scheduler"
 )
 
 // fakeProvider keeps machines in memory; servers are simulated by fakeStatus.
 type fakeProvider struct {
+	name      string
 	mu        sync.Mutex
 	machines  map[string]*provider.Machine
 	status    map[string]*proto.Status
@@ -24,11 +26,13 @@ type fakeProvider struct {
 	stopped   []string
 }
 
-func newFake() *fakeProvider {
-	return &fakeProvider{machines: map[string]*provider.Machine{}, status: map[string]*proto.Status{}, volumes: map[string]provider.Volume{}}
+func newFake() *fakeProvider { return newNamedFake("fake") }
+
+func newNamedFake(name string) *fakeProvider {
+	return &fakeProvider{name: name, machines: map[string]*provider.Machine{}, status: map[string]*proto.Status{}, volumes: map[string]provider.Volume{}}
 }
 
-func (f *fakeProvider) Name() string        { return "fake" }
+func (f *fakeProvider) Name() string        { return f.name }
 func (f *fakeProvider) Caps() provider.Caps { return provider.Caps{} }
 func (f *fakeProvider) EnsureImage(context.Context, provider.ImageSpec, io.Writer) error {
 	return nil
@@ -38,7 +42,7 @@ func (f *fakeProvider) Create(_ context.Context, s provider.MachineSpec) (provid
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.created++
-	m := &provider.Machine{ID: s.ID, State: provider.Running, Addr: "addr-" + s.ID, EnvHash: s.EnvHash, CPU: s.CPU, Memory: s.Memory,
+	m := &provider.Machine{ID: s.ID, State: provider.Running, Addr: f.name + "-" + s.ID, EnvHash: s.EnvHash, CPU: s.CPU, Memory: s.Memory,
 		CreatedAt: time.Now(), ExpiresAt: s.ExpiresAt, Fingerprint: s.Finger}
 	f.machines[s.ID] = m
 	f.status[s.ID] = &proto.Status{Machine: s.ID, Ready: true, CPU: s.CPU, Memory: s.Memory, IdleSince: time.Now().Unix()}
@@ -123,15 +127,20 @@ func (f *fakeProvider) startSession(id string, lease string, cpu float64, mem in
 
 const gib = int64(1) << 30
 
-func newTestOrch(t *testing.T, f *fakeProvider, mod func(*Config)) *Orchestrator {
-	cfg := Config{
-		Owner: "test", MachineCPU: 4, MachineMemory: 4 * gib, MinMachines: 0, MaxMachines: 3,
-		IdleStop: time.Minute, MaxLifetime: 24 * time.Hour, QueueTimeout: 3 * time.Second, CPUOvercommit: 2,
+func testConfig(prov string) Config {
+	return Config{
+		Owner: "test", MaxLifetime: 24 * time.Hour, QueueTimeout: 3 * time.Second,
+		Sizes:  []scheduler.Size{{Provider: prov, Name: "m4", Capacity: scheduler.Resources{CPU: 4, Memory: 4 * gib}}},
+		Policy: scheduler.Config{CPUOvercommit: 2, MemoryOvercommit: 1, MinMachines: 0, MaxMachines: 3, IdleStop: time.Minute},
 	}
+}
+
+func newTestOrch(t *testing.T, f *fakeProvider, mod func(*Config)) *Orchestrator {
+	cfg := testConfig("fake")
 	if mod != nil {
 		mod(&cfg)
 	}
-	o, err := New(cfg, f, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	o, err := New(cfg, map[string]provider.Provider{"fake": f}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +149,7 @@ func newTestOrch(t *testing.T, f *fakeProvider, mod func(*Config)) *Orchestrator
 }
 
 func req(repo string) Request {
-	return Request{EnvHash: "env1env1env1env1", Image: "img", RepoID: repo, CPU: 2, Memory: 2 * gib}
+	return Request{EnvHash: "env1env1env1env1", Image: "img", RepoID: repo, Need: scheduler.Resources{CPU: 2, Memory: 2 * gib}}
 }
 
 func TestAcquireCreatesMachine(t *testing.T) {
@@ -176,7 +185,7 @@ func TestScaleOutWhenFull(t *testing.T) {
 
 func TestQueueTimeoutAtMaxMachines(t *testing.T) {
 	f := newFake()
-	o := newTestOrch(t, f, func(c *Config) { c.MaxMachines = 1; c.QueueTimeout = 500 * time.Millisecond })
+	o := newTestOrch(t, f, func(c *Config) { c.Policy.MaxMachines = 1; c.QueueTimeout = 500 * time.Millisecond })
 	ctx := context.Background()
 	for i := 0; i < 2; i++ {
 		l, err := o.Acquire(ctx, req("r1"), io.Discard)
@@ -201,10 +210,10 @@ func TestWarmCacheAffinity(t *testing.T) {
 	// holds its warm cache.
 	for _, id := range []string{"m1", "m2"} {
 		f.Create(ctx, provider.MachineSpec{ID: id, EnvHash: "env1env1env1env1", CPU: 4, Memory: 4 * gib, ExpiresAt: time.Now().Add(time.Hour)})
-		o.machines[id] = &Machine{Token: "t", pending: map[string]pendingLease{}}
+		o.machines[id] = &Machine{Provider: "fake", Token: "t", pending: map[string]pendingLease{}}
 	}
 	pref := "m1"
-	if score("repo", "m2") > score("repo", "m1") {
+	if scheduler.Score("repo", "m2") > scheduler.Score("repo", "m1") {
 		pref = "m2"
 	}
 	other := map[string]string{"m1": "m2", "m2": "m1"}[pref]
@@ -234,7 +243,7 @@ func TestWarmCacheAffinity(t *testing.T) {
 
 func TestReconcileIdleExpiryAndWarmPool(t *testing.T) {
 	f := newFake()
-	o := newTestOrch(t, f, func(c *Config) { c.MinMachines = 1; c.IdleStop = time.Second })
+	o := newTestOrch(t, f, func(c *Config) { c.Policy.MinMachines = 1; c.Policy.IdleStop = time.Second })
 	ctx := context.Background()
 	var ids []string
 	for i := 0; i < 3; i++ {
@@ -305,12 +314,65 @@ func TestExpiringMachineGetsNoSessions(t *testing.T) {
 	o := newTestOrch(t, f, nil)
 	ctx := context.Background()
 	f.Create(ctx, provider.MachineSpec{ID: "old", EnvHash: "env1env1env1env1", CPU: 4, Memory: 4 * gib, ExpiresAt: time.Now().Add(time.Minute)})
-	o.machines["old"] = &Machine{Token: "t", pending: map[string]pendingLease{}}
+	o.machines["old"] = &Machine{Provider: "fake", Token: "t", pending: map[string]pendingLease{}}
 	l, err := o.Acquire(ctx, req("r"), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if l.MachineID == "old" {
 		t.Fatal("session placed on a machine about to expire")
+	}
+}
+
+// multiProbe routes probes to the fake that owns the address.
+func multiProbe(fs ...*fakeProvider) func(context.Context, string, string, string) (proto.Status, error) {
+	return func(ctx context.Context, addr, fp, tok string) (proto.Status, error) {
+		for _, f := range fs {
+			if st, err := f.probe(ctx, addr, fp, tok); err == nil {
+				return st, nil
+			}
+		}
+		return proto.Status{}, fmt.Errorf("unreachable")
+	}
+}
+
+// One orchestrator spans several providers: the cheapest size is used
+// first, a more expensive provider only once the first one is full.
+func TestMultiProviderBurst(t *testing.T) {
+	local, cloud := newNamedFake("local"), newNamedFake("aws")
+	cfg := testConfig("local")
+	cfg.Sizes = []scheduler.Size{
+		{Provider: "aws", Name: "c7a.xlarge", Capacity: scheduler.Resources{CPU: 4, Memory: 4 * gib}, PricePerHour: 0.2},
+		{Provider: "local", Name: "box", Capacity: scheduler.Resources{CPU: 4, Memory: 4 * gib}, PricePerHour: 0},
+	}
+	cfg.Policy.MaxMachines = 3
+	cfg.Policy.ProviderMax = map[string]int{"local": 1}
+	o, err := New(cfg, map[string]provider.Provider{"local": local, "aws": cloud}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.ProbeFunc = multiProbe(local, cloud)
+	ctx := context.Background()
+	placed := map[string]int{}
+	for i := 0; i < 3; i++ {
+		l, err := o.Acquire(ctx, req("r1"), io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []*fakeProvider{local, cloud} {
+			if _, ok := f.machines[l.MachineID]; ok {
+				f.startSession(l.MachineID, l.ID, 2, 2*gib)
+				placed[f.name]++
+			}
+		}
+	}
+	if placed["local"] != 2 || placed["aws"] != 1 || local.created != 1 || cloud.created != 1 {
+		t.Fatalf("placements=%v created local=%d aws=%d", placed, local.created, cloud.created)
+	}
+	if err := o.DestroyAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(local.machines)+len(cloud.machines) != 0 {
+		t.Fatal("DestroyAll left machines")
 	}
 }

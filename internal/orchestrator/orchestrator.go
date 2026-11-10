@@ -18,28 +18,24 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/cloudsourced/internal/scheduler"
 	"github.com/traumventures/cloudsourced/internal/transport"
 )
 
-// Config is the fleet policy.
+// Config is the fleet configuration. Placement and scaling decisions are
+// made by Policy; the orchestrator only gathers state and executes them.
 type Config struct {
-	Owner         string
-	MachineCPU    float64
-	MachineMemory int64
-	MinMachines   int
-	MaxMachines   int
-	IdleStop      time.Duration
-	MaxLifetime   time.Duration
-	QueueTimeout  time.Duration
-	CPUOvercommit float64
-	Provision     []string
-	BuildTTL      time.Duration
-	DepsTTL       time.Duration
-	// ExpiryMargin: machines expiring sooner do not receive new sessions.
-	ExpiryMargin time.Duration
+	Owner        string
+	Sizes        []scheduler.Size // machine types; the first is the default
+	MaxLifetime  time.Duration
+	QueueTimeout time.Duration
+	Provision    []string
+	BuildTTL     time.Duration
+	DepsTTL      time.Duration
+	Swap         bool // machines allow sessions to swap
+	Policy       scheduler.Config
 }
 
 // Request asks for capacity for one session.
@@ -48,8 +44,9 @@ type Request struct {
 	Image    string
 	Services []provider.Service
 	RepoID   string
-	CPU      float64
-	Memory   int64
+	Key      string              // learning key (repo/tool/subcommand)
+	Need     scheduler.Resources // estimated need
+	Limit    scheduler.Resources // hard ceiling (0 = none)
 }
 
 // Lease is a reservation on a machine.
@@ -59,21 +56,31 @@ type Lease struct {
 	Addr        string
 	Fingerprint string
 	Token       string
+	Grant       scheduler.Grant
 }
 
 // Machine is the orchestrator view of a machine.
 type Machine struct {
 	provider.Machine
+	Provider string // name of the provider instance
 	Token    string
 	Status   *proto.Status
 	StatusAt time.Time
+	Draining bool
 	pending  map[string]pendingLease
 }
 
 type pendingLease struct {
-	cpu     float64
-	mem     int64
+	res     scheduler.Resources
 	expires time.Time
+}
+
+// creation is a machine being created; it is capacity on its way.
+type creation struct {
+	prov string
+	env  string
+	size scheduler.Size
+	at   time.Time
 }
 
 type secret struct {
@@ -84,17 +91,18 @@ type secret struct {
 // Orchestrator manages one owner's fleet.
 type Orchestrator struct {
 	cfg      Config
-	prov     provider.Provider
+	provs    map[string]provider.Provider // by provider instance name
 	stateDir string
 	log      *slog.Logger
 
 	mu         sync.Mutex
+	policy     scheduler.Policy
 	machines   map[string]*Machine
 	refreshed  time.Time
-	creating   map[string]int       // env hash -> machines being created
-	waiting    map[string]int       // env hash -> waiting requests
-	recentEnvs map[string]time.Time // env hash -> last use (warm pool)
-	images     map[string]string    // env hash -> image
+	creating   map[string]creation       // machine id -> creation
+	queue      map[string]scheduler.Task // waiting tasks
+	recentEnvs map[string]time.Time      // env hash -> last use (warm pool)
+	images     map[string]string         // env hash -> image
 	services   map[string][]provider.Service
 	changed    chan struct{}
 
@@ -104,22 +112,28 @@ type Orchestrator struct {
 
 	// ProbeFunc fetches a server status; replaceable in tests.
 	ProbeFunc func(ctx context.Context, addr, fingerprint, token string) (proto.Status, error)
+
+	// EnsureImage makes the environment image available on a provider
+	// before a machine is created there (nil: images are assumed present).
+	EnsureImage func(ctx context.Context, prov provider.Provider, envHash string) error
 }
 
 // New creates an orchestrator.
-func New(cfg Config, prov provider.Provider, stateDir string, log *slog.Logger) (*Orchestrator, error) {
+// New creates an orchestrator over one or more named providers. One
+// orchestrator may span several providers (e.g. local Docker plus AWS); the
+// policy chooses among their sizes.
+func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *slog.Logger) (*Orchestrator, error) {
+	if len(provs) == 0 {
+		return nil, errors.New("orchestrator: no providers")
+	}
 	if err := os.MkdirAll(filepath.Join(stateDir, "machines"), 0o700); err != nil {
 		return nil, err
 	}
-	if cfg.ExpiryMargin == 0 {
-		cfg.ExpiryMargin = 15 * time.Minute
-		if cfg.MaxLifetime > 0 && cfg.MaxLifetime < time.Hour {
-			cfg.ExpiryMargin = cfg.MaxLifetime / 4
-		}
-	}
+	fixConfig(&cfg)
 	o := &Orchestrator{
-		cfg: cfg, prov: prov, stateDir: stateDir, log: log,
-		machines: map[string]*Machine{}, creating: map[string]int{}, waiting: map[string]int{},
+		cfg: cfg, provs: provs, stateDir: stateDir, log: log,
+		policy:   scheduler.Default{Cfg: cfg.Policy},
+		machines: map[string]*Machine{}, creating: map[string]creation{}, queue: map[string]scheduler.Task{},
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
 		ProbeFunc: Probe,
 	}
@@ -127,14 +141,34 @@ func New(cfg Config, prov provider.Provider, stateDir string, log *slog.Logger) 
 	return o, nil
 }
 
-// SetConfig updates the fleet policy.
+// SetConfig updates the fleet configuration and rebuilds the default policy.
 func (o *Orchestrator) SetConfig(cfg Config) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if cfg.ExpiryMargin == 0 {
-		cfg.ExpiryMargin = o.cfg.ExpiryMargin
+	fixConfig(&cfg)
+	if _, ok := o.policy.(scheduler.Default); ok {
+		o.policy = scheduler.Default{Cfg: cfg.Policy}
 	}
 	o.cfg = cfg
+}
+
+// SetPolicy replaces the scheduling policy.
+func (o *Orchestrator) SetPolicy(p scheduler.Policy) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.policy = p
+}
+
+func fixConfig(cfg *Config) {
+	if cfg.Policy.ExpiryMargin == 0 {
+		cfg.Policy.ExpiryMargin = 15 * time.Minute
+		if cfg.MaxLifetime > 0 && cfg.MaxLifetime < time.Hour {
+			cfg.Policy.ExpiryMargin = cfg.MaxLifetime / 4
+		}
+	}
+	if cfg.Policy.MaxMachines == 0 {
+		cfg.Policy.MaxMachines = 1
+	}
 }
 
 func (o *Orchestrator) notify() {
@@ -197,7 +231,7 @@ func newID(n int) string {
 
 // Refresh reloads machines from the provider and probes running servers.
 func (o *Orchestrator) Refresh(ctx context.Context) error {
-	list, err := o.prov.List(ctx, o.cfg.Owner)
+	list, err := o.listAll(ctx)
 	if err != nil {
 		return err
 	}
@@ -210,11 +244,12 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 	o.mu.Lock()
 	seen := map[string]bool{}
 	var down []string
-	for _, pm := range list {
+	for _, tm := range list {
+		pm := tm.Machine
 		seen[pm.ID] = true
 		m, ok := o.machines[pm.ID]
 		if !ok {
-			m = &Machine{pending: map[string]pendingLease{}}
+			m = &Machine{Provider: tm.prov, pending: map[string]pendingLease{}}
 			if s, err := o.loadSecret(pm.ID); err == nil {
 				m.Token = s.Token
 			}
@@ -268,6 +303,44 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 	return nil
 }
 
+type taggedMachine struct {
+	provider.Machine
+	prov string
+}
+
+// listAll lists machines of every provider. A failing provider fails the
+// whole listing, so that its machines are never mistaken for gone.
+func (o *Orchestrator) listAll(ctx context.Context) ([]taggedMachine, error) {
+	var out []taggedMachine
+	for name, p := range o.provs {
+		ms, err := p.List(ctx, o.cfg.Owner)
+		if err != nil {
+			return nil, fmt.Errorf("provider %s: %w", name, err)
+		}
+		for _, m := range ms {
+			out = append(out, taggedMachine{m, name})
+		}
+	}
+	return out, nil
+}
+
+// provOf returns the provider of a known machine.
+func (o *Orchestrator) provOf(id string) (provider.Provider, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	name := ""
+	if m, ok := o.machines[id]; ok {
+		name = m.Provider
+	} else if c, ok := o.creating[id]; ok {
+		name = c.prov
+	}
+	p, ok := o.provs[name]
+	if !ok {
+		return nil, fmt.Errorf("machine %s: unknown provider %q", id, name)
+	}
+	return p, nil
+}
+
 // Probe fetches a server's status.
 func Probe(ctx context.Context, addr, fingerprint, token string) (proto.Status, error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -286,240 +359,266 @@ func Probe(ctx context.Context, addr, fingerprint, token string) (proto.Status, 
 	return st, err
 }
 
-// rank orders machines for a repository: machines holding a warm build
-// cache for it first, then by rendezvous score.
-func rank(ms []*Machine, repoID string) {
-	warm := func(m *Machine) bool {
-		if m.Status == nil {
-			return false
+// fleetLocked builds the scheduler's view of the fleet.
+func (o *Orchestrator) fleetLocked(now time.Time) scheduler.Fleet {
+	f := scheduler.Fleet{Now: now, Sizes: o.cfg.Sizes, Recent: map[string]time.Time{}}
+	for env, t := range o.recentEnvs {
+		f.Recent[env] = t
+	}
+	for id, m := range o.machines {
+		sm := scheduler.Machine{
+			ID: id, Provider: m.Provider, EnvHash: m.EnvHash, Size: m.Labels[provider.LabelSize], Draining: m.Draining,
+			Capacity:  scheduler.Resources{CPU: m.CPU, Memory: m.Memory},
+			CreatedAt: m.CreatedAt, ExpiresAt: m.ExpiresAt,
 		}
-		for _, r := range m.Status.WarmRepos {
-			if r == repoID {
-				return true
+		switch {
+		case m.State == provider.Running && m.Status != nil && m.Status.Ready && m.Addr != "" && m.Token != "":
+			sm.State = scheduler.Running
+		case m.State == provider.Running || m.State == provider.Starting:
+			sm.State = scheduler.Starting
+		case m.State == provider.Stopped:
+			sm.State = scheduler.Stopped
+		default:
+			sm.State = scheduler.Gone
+		}
+		if st := m.Status; st != nil {
+			sm.Reserved = scheduler.Resources{CPU: st.UsedCPU, Memory: st.UsedMemory}
+			sm.Used = st.Measured
+			sm.Pressure = st.Pressure
+			sm.Sessions = len(st.Sessions)
+			sm.WarmRepos = st.WarmRepos
+			sm.Draining = sm.Draining || st.Draining
+			if st.IdleSince > 0 {
+				sm.IdleSince = time.Unix(st.IdleSince, 0)
 			}
 		}
-		return false
-	}
-	sort.SliceStable(ms, func(i, j int) bool {
-		wi, wj := warm(ms[i]), warm(ms[j])
-		if wi != wj {
-			return wi
+		for lid, p := range m.pending {
+			if now.After(p.expires) {
+				delete(m.pending, lid)
+				continue
+			}
+			counted := false
+			if m.Status != nil {
+				for _, se := range m.Status.Sessions {
+					if se.Lease == lid {
+						counted = true
+					}
+				}
+			}
+			if !counted {
+				sm.Reserved = sm.Reserved.Add(p.res)
+				sm.IdleSince = time.Time{}
+			}
 		}
-		return score(repoID, ms[i].ID) > score(repoID, ms[j].ID)
-	})
-}
-
-// score implements rendezvous hashing: each repository has a stable
-// preference order over machines, so its builds land on warm caches.
-func score(repoID, machineID string) string {
-	return manifest.HashBytes([]byte(repoID + "\x00" + machineID))
-}
-
-func (o *Orchestrator) usable(m *Machine, envHash string, now time.Time) bool {
-	return m.State == provider.Running && m.Status != nil && m.Status.Ready && !m.Status.Draining &&
-		m.EnvHash == envHash && m.Addr != "" && m.Token != "" &&
-		(m.ExpiresAt.IsZero() || m.ExpiresAt.Sub(now) > o.cfg.ExpiryMargin)
-}
-
-func (o *Orchestrator) free(m *Machine, now time.Time) (cpu float64, mem int64) {
-	cpu = m.CPU*o.cfg.CPUOvercommit - m.Status.UsedCPU
-	mem = m.Memory - m.Status.UsedMemory
-	for id, p := range m.pending {
-		if now.After(p.expires) {
-			delete(m.pending, id)
+		f.Machines = append(f.Machines, sm)
+	}
+	for id, c := range o.creating {
+		if _, known := o.machines[id]; known {
 			continue
 		}
-		// Pending leases that already show up as sessions are not counted twice.
-		counted := false
-		for _, s := range m.Status.Sessions {
-			if s.Lease == id {
-				counted = true
-			}
-		}
-		if !counted {
-			cpu -= p.cpu
-			mem -= p.mem
-		}
+		f.Machines = append(f.Machines, scheduler.Machine{
+			ID: id, Provider: c.prov, EnvHash: c.env, Size: c.size.Name, State: scheduler.Starting,
+			Capacity: c.size.Capacity, CreatedAt: c.at, ExpiresAt: c.at.Add(o.cfg.MaxLifetime),
+		})
 	}
-	return cpu, mem
+	sort.Slice(f.Machines, func(i, j int) bool { return f.Machines[i].ID < f.Machines[j].ID })
+	for _, t := range o.queue {
+		f.Queue = append(f.Queue, t)
+	}
+	sort.Slice(f.Queue, func(i, j int) bool { return f.Queue[i].Since.Before(f.Queue[j].Since) })
+	return f
 }
 
 // ErrQueueTimeout means no capacity became available in time.
 var ErrQueueTimeout = errors.New("no machine capacity available")
 
-// Acquire reserves capacity for a session, starting or creating machines
-// as needed. log receives progress messages for the user.
+// Acquire reserves capacity for a session. The policy decides placement;
+// while the task waits, the policy's fleet plan is executed (start, create,
+// stop, destroy, drain). log receives progress messages for the user.
 func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) (Lease, error) {
+	now := time.Now()
+	task := scheduler.Task{ID: newID(8), EnvHash: req.EnvHash, RepoID: req.RepoID, Key: req.Key, Request: req.Need, Limit: req.Limit, Since: now}
 	o.mu.Lock()
-	o.recentEnvs[req.EnvHash] = time.Now()
+	o.recentEnvs[req.EnvHash] = now
 	o.images[req.EnvHash] = req.Image
 	o.services[req.EnvHash] = req.Services
 	o.saveRecentLocked()
-	if req.Memory > o.cfg.MachineMemory {
-		o.mu.Unlock()
-		return Lease{}, fmt.Errorf("session needs %d bytes memory, machines have %d", req.Memory, o.cfg.MachineMemory)
-	}
-	o.waiting[req.EnvHash]++
+	stale := time.Since(o.refreshed) > 30*time.Second
 	o.mu.Unlock()
-	defer func() {
-		o.mu.Lock()
-		o.waiting[req.EnvHash]--
-		o.mu.Unlock()
-	}()
-	deadline := time.Now().Add(o.cfg.QueueTimeout)
-	announced := false
-	for {
-		// Fast path: place on known state; the daemon is the only scheduler
-		// for this owner and tracks its own pending leases.
-		o.mu.Lock()
-		fresh := time.Since(o.refreshed) < 30*time.Second
-		o.mu.Unlock()
-		if fresh {
-			if lease, ok := o.tryPlaceCached(req); ok {
-				return lease, nil
-			}
-		}
+	if stale {
 		if err := o.Refresh(ctx); err != nil {
 			return Lease{}, err
 		}
-		lease, action, err := o.tryPlace(req)
-		if err != nil {
-			return Lease{}, err
+	}
+	defer func() {
+		o.mu.Lock()
+		delete(o.queue, task.ID)
+		o.mu.Unlock()
+	}()
+	deadline := now.Add(o.cfg.QueueTimeout)
+	announced := map[string]bool{}
+	refreshed := false
+	for {
+		o.mu.Lock()
+		f := o.fleetLocked(time.Now())
+		pl := o.policy.Place(f, task)
+		switch pl.Kind {
+		case scheduler.Assign:
+			m := o.machines[pl.Machine]
+			lease := Lease{ID: task.ID, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: m.Token, Grant: pl.Grant}
+			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: time.Now().Add(2 * time.Minute)}
+			o.mu.Unlock()
+			return lease, nil
+		case scheduler.Reject:
+			o.mu.Unlock()
+			return Lease{}, fmt.Errorf("cannot schedule: %s (needs %.1f CPU, %d bytes memory)", pl.Reason, req.Need.CPU, req.Need.Memory)
 		}
-		if lease != nil {
-			return *lease, nil
-		}
-		switch action.kind {
-		case "start":
-			fmt.Fprintf(log, "cloudsourced: starting machine %s\n", action.id)
-			go o.startMachine(context.WithoutCancel(ctx), action.id, req.EnvHash)
-		case "create":
-			fmt.Fprintf(log, "cloudsourced: creating machine for environment %s\n", req.EnvHash[:12])
-			go o.createMachine(context.WithoutCancel(ctx), req.EnvHash, req.Image)
-		default:
-			if !announced {
-				fmt.Fprintf(log, "cloudsourced: waiting for machine capacity\n")
-				announced = true
+		if !refreshed {
+			// Placement failed on cached state: retry once with fresh state.
+			o.mu.Unlock()
+			refreshed = true
+			if err := o.Refresh(ctx); err != nil {
+				return Lease{}, err
 			}
+			continue
+		}
+		o.queue[task.ID] = task
+		f = o.fleetLocked(time.Now())
+		acts := o.policy.Plan(f)
+		o.markLocked(acts)
+		ch := o.changed
+		o.mu.Unlock()
+		for _, a := range acts {
+			msg := ""
+			switch a.Kind {
+			case scheduler.Start:
+				msg = "starting machine " + a.Machine
+			case scheduler.Create:
+				msg = fmt.Sprintf("creating %s machine for environment %s", a.Size.Name, a.EnvHash[:min(12, len(a.EnvHash))])
+			}
+			if msg != "" && !announced[msg] {
+				fmt.Fprintf(log, "cloudsourced: %s\n", msg)
+				announced[msg] = true
+			}
+		}
+		o.execute(context.WithoutCancel(ctx), acts, false)
+		if len(acts) == 0 && !announced["wait"] {
+			fmt.Fprintf(log, "cloudsourced: waiting for machine capacity\n")
+			announced["wait"] = true
 		}
 		if time.Now().After(deadline) {
 			return Lease{}, ErrQueueTimeout
 		}
-		o.mu.Lock()
-		ch := o.changed
-		o.mu.Unlock()
 		select {
 		case <-ch:
 		case <-time.After(time.Second):
+			if err := o.Refresh(ctx); err != nil {
+				return Lease{}, err
+			}
 		case <-ctx.Done():
 			return Lease{}, ctx.Err()
 		}
 	}
 }
 
-// tryPlaceCached places a request using cached machine state only.
-func (o *Orchestrator) tryPlaceCached(req Request) (Lease, bool) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	now := time.Now()
-	var cands []*Machine
-	for _, m := range o.machines {
-		if o.usable(m, req.EnvHash, now) && now.Sub(m.StatusAt) < 30*time.Second {
-			cands = append(cands, m)
-		}
-	}
-	rank(cands, req.RepoID)
-	for _, m := range cands {
-		cpu, mem := o.free(m, now)
-		if mem >= req.Memory && cpu >= req.CPU {
-			id := newID(8)
-			m.pending[id] = pendingLease{cpu: req.CPU, mem: req.Memory, expires: now.Add(2 * time.Minute)}
-			// Count the lease as a session until the next probe confirms it.
-			return Lease{ID: id, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: m.Token}, true
-		}
-	}
-	return Lease{}, false
-}
-
-type action struct {
-	kind string // "", "start", "create"
-	id   string
-}
-
-func (o *Orchestrator) tryPlace(req Request) (*Lease, action, error) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	now := time.Now()
-	var cands []*Machine
-	for _, m := range o.machines {
-		if o.usable(m, req.EnvHash, now) {
-			cands = append(cands, m)
-		}
-	}
-	rank(cands, req.RepoID)
-	for _, m := range cands {
-		cpu, mem := o.free(m, now)
-		if mem >= req.Memory && cpu >= req.CPU {
-			id := newID(8)
-			m.pending[id] = pendingLease{cpu: req.CPU, mem: req.Memory, expires: now.Add(2 * time.Minute)}
-			return &Lease{ID: id, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: m.Token}, action{}, nil
-		}
-	}
-	// No capacity: count machines that will become available.
-	active := 0
-	starting := 0
-	var stopped []*Machine
-	for _, m := range o.machines {
-		switch {
-		case m.State == provider.Running || m.State == provider.Starting:
-			active++
-			if m.EnvHash == req.EnvHash && (m.State == provider.Starting || m.Status == nil || !m.Status.Ready) {
-				starting++
+// markLocked records the immediate state effects of actions so that
+// concurrent decisions see them (capacity on its way, machines going down).
+func (o *Orchestrator) markLocked(acts []scheduler.Action) {
+	for i, a := range acts {
+		switch a.Kind {
+		case scheduler.Create:
+			id := newID(6)
+			acts[i].Machine = id
+			o.creating[id] = creation{prov: a.Size.Provider, env: a.EnvHash, size: a.Size, at: time.Now()}
+		case scheduler.Start:
+			if m, ok := o.machines[a.Machine]; ok {
+				m.State = provider.Starting
+				m.Status = nil
+				o.creating[a.Machine] = creation{prov: m.Provider, env: m.EnvHash, at: time.Now()}
 			}
-		case m.State == provider.Stopped && m.EnvHash == req.EnvHash && (m.ExpiresAt.IsZero() || m.ExpiresAt.Sub(now) > o.cfg.ExpiryMargin):
-			stopped = append(stopped, m)
-		}
-	}
-	active += o.totalCreatingLocked()
-	starting += o.creating[req.EnvHash]
-	perMachine := 1
-	if req.Memory > 0 {
-		perMachine = max(1, int(o.cfg.MachineMemory/req.Memory))
-	}
-	if o.waiting[req.EnvHash] <= starting*perMachine {
-		return nil, action{}, nil // capacity is on its way
-	}
-	if len(stopped) > 0 {
-		sort.Slice(stopped, func(i, j int) bool {
-			return score(req.RepoID, stopped[i].ID) > score(req.RepoID, stopped[j].ID)
-		})
-		m := stopped[0]
-		m.State = provider.Starting
-		return nil, action{kind: "start", id: m.ID}, nil
-	}
-	if active < o.cfg.MaxMachines {
-		o.creating[req.EnvHash]++
-		return nil, action{kind: "create"}, nil
-	}
-	if len(o.machines) >= o.cfg.MaxMachines {
-		// Make room: destroy an idle machine of another environment.
-		for _, m := range o.machines {
-			if m.EnvHash != req.EnvHash && m.State == provider.Stopped {
-				m.State = provider.Failed
-				go o.prov.Destroy(context.Background(), m.ID)
-				break
+		case scheduler.Stop, scheduler.Destroy:
+			if m, ok := o.machines[a.Machine]; ok {
+				m.Draining = true
+			}
+		case scheduler.Drain:
+			if m, ok := o.machines[a.Machine]; ok {
+				m.Draining = true
+			}
+		case scheduler.Undrain:
+			if m, ok := o.machines[a.Machine]; ok {
+				m.Draining = false
 			}
 		}
 	}
-	return nil, action{}, nil
 }
 
-func (o *Orchestrator) totalCreatingLocked() int {
-	n := 0
-	for _, c := range o.creating {
-		n += c
+// execute performs actions. Create and Start always run in the background;
+// Stop and Destroy run synchronously when wait is set.
+func (o *Orchestrator) execute(ctx context.Context, acts []scheduler.Action, wait bool) {
+	var wg sync.WaitGroup
+	for _, a := range acts {
+		a := a
+		switch a.Kind {
+		case scheduler.Create:
+			o.mu.Lock()
+			image := o.images[a.EnvHash]
+			o.mu.Unlock()
+			go o.createMachine(ctx, a.Machine, a.EnvHash, image, a.Size)
+		case scheduler.Start:
+			go o.startMachine(ctx, a.Machine)
+		case scheduler.Stop, scheduler.Destroy:
+			run := func() {
+				if a.Kind == scheduler.Stop {
+					o.stopMachine(ctx, a.Machine, a.Reason)
+				} else {
+					o.destroyMachine(ctx, a.Machine, a.Reason)
+				}
+			}
+			if wait {
+				wg.Add(1)
+				go func() { defer wg.Done(); run() }()
+			} else {
+				go run()
+			}
+		}
 	}
-	return n
+	wg.Wait()
+}
+
+func (o *Orchestrator) stopMachine(ctx context.Context, id, reason string) {
+	o.log.Info("stopping machine", "id", id, "reason", reason)
+	p, err := o.provOf(id)
+	if err != nil {
+		o.log.Error("stop", "id", id, "err", err)
+		return
+	}
+	o.setState(id, provider.Stopped)
+	if err := p.Stop(ctx, id); err != nil {
+		o.log.Error("stop", "id", id, "err", err)
+	}
+	o.mu.Lock()
+	if m, ok := o.machines[id]; ok {
+		m.Draining = false
+	}
+	o.mu.Unlock()
+}
+
+func (o *Orchestrator) destroyMachine(ctx context.Context, id, reason string) {
+	o.log.Info("destroying machine", "id", id, "reason", reason)
+	p, err := o.provOf(id)
+	if err != nil {
+		o.log.Error("destroy", "id", id, "err", err)
+		return
+	}
+	o.setState(id, provider.Failed)
+	if err := p.Destroy(ctx, id); err != nil {
+		o.log.Error("destroy", "id", id, "err", err)
+		return
+	}
+	os.Remove(o.secretPath(id))
+	o.mu.Lock()
+	delete(o.machines, id)
+	o.mu.Unlock()
 }
 
 func (o *Orchestrator) setState(id string, st provider.State) {
@@ -559,65 +658,77 @@ func (o *Orchestrator) Release(leaseID string) {
 	o.notify()
 }
 
-func (o *Orchestrator) createMachine(ctx context.Context, envHash, image string) {
+func (o *Orchestrator) createMachine(ctx context.Context, id, envHash, image string, size scheduler.Size) {
 	defer func() {
 		o.mu.Lock()
-		o.creating[envHash]--
+		delete(o.creating, id)
 		o.notify()
 		o.mu.Unlock()
 	}()
-	if _, err := o.CreateMachine(ctx, envHash, image); err != nil {
-		o.log.Error("create machine", "err", err)
+	if err := o.CreateMachine(ctx, id, envHash, image, size); err != nil {
+		o.log.Error("create machine", "id", id, "err", err)
 	}
 }
 
-// CreateMachine provisions a new machine and waits until it is ready.
-func (o *Orchestrator) CreateMachine(ctx context.Context, envHash, image string) (string, error) {
+// CreateMachine provisions a new machine of size and waits until it is ready.
+func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image string, size scheduler.Size) error {
 	o.mu.Lock()
 	cfg := o.cfg
+	services := o.services[envHash]
 	o.mu.Unlock()
-	id := newID(6)
 	ident, err := transport.NewIdentity("cs-"+id, cfg.MaxLifetime)
 	if err != nil {
-		return "", err
+		return err
 	}
 	token := newID(32)
 	b, _ := json.Marshal(secret{Token: token, Fingerprint: ident.Fingerprint})
 	if err := os.WriteFile(o.secretPath(id), b, 0o600); err != nil {
-		return "", err
+		return err
 	}
 	spec := provider.MachineSpec{
-		ID: id, Owner: cfg.Owner, Image: image, EnvHash: envHash, CPU: cfg.MachineCPU, Memory: cfg.MachineMemory,
+		ID: id, Owner: cfg.Owner, Image: image, EnvHash: envHash, Size: size.Name,
+		CPU: size.Capacity.CPU, Memory: size.Capacity.Memory, Swap: cfg.Swap,
 		ExpiresAt: time.Now().Add(cfg.MaxLifetime), Token: token, CertPEM: ident.CertPEM, KeyPEM: ident.KeyPEM,
 		Finger: ident.Fingerprint, Provision: cfg.Provision, BuildTTL: cfg.BuildTTL, DepsTTL: cfg.DepsTTL,
+		Services: services,
 	}
-	o.mu.Lock()
-	spec.Services = o.services[envHash]
-	o.mu.Unlock()
-	o.log.Info("creating machine", "id", id, "env", envHash[:12], "image", image)
-	m, err := o.prov.Create(ctx, spec)
+	prov, ok := o.provs[size.Provider]
+	if !ok {
+		os.Remove(o.secretPath(id))
+		return fmt.Errorf("size %s: unknown provider %q", size.Name, size.Provider)
+	}
+	if o.EnsureImage != nil {
+		if err := o.EnsureImage(ctx, prov, envHash); err != nil {
+			os.Remove(o.secretPath(id))
+			return err
+		}
+	}
+	o.log.Info("creating machine", "id", id, "provider", size.Provider, "size", size.Name, "env", envHash[:min(12, len(envHash))], "image", image)
+	m, err := prov.Create(ctx, spec)
 	if err != nil {
 		os.Remove(o.secretPath(id))
-		return "", err
+		return err
 	}
 	o.mu.Lock()
-	o.machines[id] = &Machine{Machine: m, Token: token, pending: map[string]pendingLease{}}
+	o.machines[id] = &Machine{Machine: m, Provider: size.Provider, Token: token, pending: map[string]pendingLease{}}
 	o.mu.Unlock()
-	return id, o.waitReady(ctx, id)
+	return o.waitReady(ctx, id)
 }
 
-func (o *Orchestrator) startMachine(ctx context.Context, id, envHash string) {
-	o.mu.Lock()
-	o.creating[envHash]++
-	o.mu.Unlock()
+func (o *Orchestrator) startMachine(ctx context.Context, id string) {
 	defer func() {
 		o.mu.Lock()
-		o.creating[envHash]--
+		delete(o.creating, id)
 		o.notify()
 		o.mu.Unlock()
 	}()
 	o.log.Info("starting machine", "id", id)
-	m, err := o.prov.Start(ctx, id)
+	p, err := o.provOf(id)
+	if err != nil {
+		o.log.Error("start machine", "id", id, "err", err)
+		return
+	}
+	m, err := p.Start(ctx, id)
 	if err != nil {
 		o.log.Error("start machine", "id", id, "err", err)
 		return
@@ -626,6 +737,7 @@ func (o *Orchestrator) startMachine(ctx context.Context, id, envHash string) {
 	if mm, ok := o.machines[id]; ok {
 		mm.Machine = m
 		mm.Status = nil
+		mm.Draining = false
 	}
 	o.mu.Unlock()
 	if err := o.waitReady(ctx, id); err != nil {
@@ -636,8 +748,12 @@ func (o *Orchestrator) startMachine(ctx context.Context, id, envHash string) {
 // waitReady polls the machine until its server reports ready.
 func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 	deadline := time.Now().Add(10 * time.Minute)
+	p, perr := o.provOf(id)
+	if perr != nil {
+		return perr
+	}
 	for time.Now().Before(deadline) {
-		list, err := o.prov.List(ctx, o.cfg.Owner)
+		list, err := p.List(ctx, o.cfg.Owner)
 		if err == nil {
 			for _, pm := range list {
 				if pm.ID != id {
@@ -698,124 +814,62 @@ func (o *Orchestrator) Snapshot() []Machine {
 	return out
 }
 
-// Reconcile applies the fleet policy once: destroys expired or failed
-// machines and orphaned volumes, stops idle machines and keeps the warm
-// pool filled.
+// Reconcile enforces hard invariants (expired and failed machines are
+// destroyed, expiring busy machines drain, orphaned volumes are deleted)
+// and executes the policy's fleet plan.
 func (o *Orchestrator) Reconcile(ctx context.Context) error {
 	if err := o.Refresh(ctx); err != nil {
 		return err
 	}
 	now := time.Now()
 	o.mu.Lock()
-	cfg := o.cfg
-	var destroy, stop []string
-	running := map[string]int{}
-	stoppedByEnv := map[string][]string{}
+	var invariant []scheduler.Action
 	for _, m := range o.machines {
 		expired := !m.ExpiresAt.IsZero() && !now.Before(m.ExpiresAt)
-		switch m.State {
-		case provider.Running:
-			busy := m.Status != nil && len(m.Status.Sessions) > 0
-			if expired && !busy {
-				destroy = append(destroy, m.ID)
-				continue
-			}
-			if expired {
-				continue
-			}
-			running[m.EnvHash]++
-		case provider.Stopped:
-			if expired {
-				destroy = append(destroy, m.ID)
-			} else {
-				stoppedByEnv[m.EnvHash] = append(stoppedByEnv[m.EnvHash], m.ID)
-			}
-		case provider.Failed:
-			destroy = append(destroy, m.ID)
+		busy := m.Status != nil && len(m.Status.Sessions) > 0
+		switch {
+		case m.State == provider.Failed:
+			invariant = append(invariant, scheduler.Action{Kind: scheduler.Destroy, Machine: m.ID, Reason: "failed"})
+		case expired && m.State == provider.Running && busy:
+			m.Draining = true
+		case expired && m.State != provider.Starting:
+			invariant = append(invariant, scheduler.Action{Kind: scheduler.Destroy, Machine: m.ID, Reason: "expired"})
 		}
 	}
-	// Idle stop, keeping min_machines per recently used environment.
-	for _, m := range o.machines {
-		if m.State != provider.Running || m.Status == nil || !m.Status.Ready || len(m.Status.Sessions) > 0 || len(m.pending) > 0 {
-			continue
-		}
-		if m.Status.IdleSince == 0 || now.Sub(time.Unix(m.Status.IdleSince, 0)) < cfg.IdleStop {
-			continue
-		}
-		if running[m.EnvHash] <= o.warmTargetLocked(m.EnvHash, now) {
-			continue
-		}
-		running[m.EnvHash]--
-		stop = append(stop, m.ID)
-	}
-	// Warm pool.
-	type warm struct{ env, image, start string }
-	var fill []warm
 	for env, used := range o.recentEnvs {
 		if now.Sub(used) > 24*time.Hour {
 			delete(o.recentEnvs, env)
-			continue
-		}
-		for running[env]+o.creating[env] < o.warmTargetLocked(env, now) && len(o.machines)+o.totalCreatingLocked()+len(fill) < cfg.MaxMachines+len(stoppedByEnv[env]) {
-			w := warm{env: env, image: o.images[env]}
-			if s := stoppedByEnv[env]; len(s) > 0 {
-				w.start, stoppedByEnv[env] = s[0], s[1:]
-			} else if len(o.machines)+o.totalCreatingLocked()+len(fill) >= cfg.MaxMachines {
-				break
-			}
-			fill = append(fill, w)
-			running[env]++
 		}
 	}
+	o.markLocked(invariant)
 	o.mu.Unlock()
+	o.execute(ctx, invariant, true)
 
-	for _, id := range destroy {
-		o.log.Info("destroying machine", "id", id, "reason", "expired or failed")
-		o.setState(id, provider.Failed)
-		if err := o.prov.Destroy(ctx, id); err != nil {
-			o.log.Error("destroy", "id", id, "err", err)
-			continue
-		}
-		os.Remove(o.secretPath(id))
-		o.mu.Lock()
-		delete(o.machines, id)
-		o.mu.Unlock()
-	}
-	for _, id := range stop {
-		o.log.Info("stopping idle machine", "id", id)
-		// Mark first so no session is placed on a machine going down.
-		o.setState(id, provider.Stopped)
-		if err := o.prov.Stop(ctx, id); err != nil {
-			o.log.Error("stop", "id", id, "err", err)
-		}
-	}
-	for _, w := range fill {
-		if w.start != "" {
-			go o.startMachine(context.WithoutCancel(ctx), w.start, w.env)
-		} else if w.image != "" {
-			o.mu.Lock()
-			o.creating[w.env]++
-			o.mu.Unlock()
-			go o.createMachine(context.WithoutCancel(ctx), w.env, w.image)
-		}
-	}
+	o.mu.Lock()
+	acts := o.policy.Plan(o.fleetLocked(time.Now()))
+	o.markLocked(acts)
+	o.mu.Unlock()
+	o.execute(context.WithoutCancel(ctx), acts, true)
 	return o.reapVolumes(ctx)
 }
 
-func (o *Orchestrator) warmTargetLocked(env string, now time.Time) int {
-	if used, ok := o.recentEnvs[env]; ok && now.Sub(used) < 24*time.Hour {
-		return o.cfg.MinMachines
+// reapVolumes deletes expired dependency caches and orphaned cache volumes
+// on every provider.
+func (o *Orchestrator) reapVolumes(ctx context.Context) error {
+	for name, p := range o.provs {
+		if err := o.reapProvider(ctx, p); err != nil {
+			return fmt.Errorf("provider %s: %w", name, err)
+		}
 	}
-	return 0
+	return nil
 }
 
-// reapVolumes deletes expired dependency caches and orphaned cache volumes.
-func (o *Orchestrator) reapVolumes(ctx context.Context) error {
-	vols, err := o.prov.Volumes(ctx, o.cfg.Owner)
+func (o *Orchestrator) reapProvider(ctx context.Context, p provider.Provider) error {
+	vols, err := p.Volumes(ctx, o.cfg.Owner)
 	if err != nil {
 		return err
 	}
-	list, err := o.prov.List(ctx, o.cfg.Owner)
+	list, err := p.List(ctx, o.cfg.Owner)
 	if err != nil {
 		return err
 	}
@@ -828,32 +882,34 @@ func (o *Orchestrator) reapVolumes(ctx context.Context) error {
 		expired := !v.ExpiresAt.IsZero() && !now.Before(v.ExpiresAt)
 		orphan := v.Kind == "cache" && !alive[v.Name]
 		if expired || orphan {
-			if err := o.prov.DeleteVolume(ctx, v.Name); err == nil {
-				o.log.Info("deleted volume", "name", v.Name, "expired", expired, "orphan", orphan)
+			if err := p.DeleteVolume(ctx, v.Name); err == nil {
+				o.log.Info("deleted volume", "provider", p.Name(), "name", v.Name, "expired", expired, "orphan", orphan)
 			}
 		}
 	}
 	return nil
 }
 
-// DestroyAll removes every machine and volume of the owner.
+// DestroyAll removes every machine and volume of the owner on every provider.
 func (o *Orchestrator) DestroyAll(ctx context.Context) error {
-	list, err := o.prov.List(ctx, o.cfg.Owner)
-	if err != nil {
-		return err
-	}
-	for _, m := range list {
-		if err := o.prov.Destroy(ctx, m.ID); err != nil {
-			return err
+	for name, p := range o.provs {
+		list, err := p.List(ctx, o.cfg.Owner)
+		if err != nil {
+			return fmt.Errorf("provider %s: %w", name, err)
 		}
-		os.Remove(o.secretPath(m.ID))
-	}
-	vols, err := o.prov.Volumes(ctx, o.cfg.Owner)
-	if err != nil {
-		return err
-	}
-	for _, v := range vols {
-		o.prov.DeleteVolume(ctx, v.Name)
+		for _, m := range list {
+			if err := p.Destroy(ctx, m.ID); err != nil {
+				return fmt.Errorf("provider %s: %w", name, err)
+			}
+			os.Remove(o.secretPath(m.ID))
+		}
+		vols, err := p.Volumes(ctx, o.cfg.Owner)
+		if err != nil {
+			return fmt.Errorf("provider %s: %w", name, err)
+		}
+		for _, v := range vols {
+			p.DeleteVolume(ctx, v.Name)
+		}
 	}
 	o.mu.Lock()
 	o.machines = map[string]*Machine{}

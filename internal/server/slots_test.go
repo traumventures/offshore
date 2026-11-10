@@ -12,11 +12,11 @@ func TestSlotsExclusiveAndWarm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := s.lease("repo", time.Hour)
+	a, _, err := s.lease("repo", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := s.lease("repo", time.Hour)
+	b, _, err := s.lease("repo", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,11 +28,11 @@ func TestSlotsExclusiveAndWarm(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond) // last_used has second resolution
 	s.release(b)
 	// The most recently released slot is reused first.
-	c, _ := s.lease("repo", time.Hour)
+	c, _, _ := s.lease("repo", time.Hour)
 	if c != b {
 		t.Fatalf("got %s, want most recently used %s", c, b)
 	}
-	d, _ := s.lease("repo", time.Hour)
+	d, _, _ := s.lease("repo", time.Hour)
 	if d != a {
 		t.Fatalf("got %s, want %s", d, a)
 	}
@@ -46,7 +46,7 @@ func TestSlotsExpire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, _ := s.lease("repo", time.Hour)
+	a, _, _ := s.lease("repo", time.Hour)
 	os.WriteFile(filepath.Join(a, "data", "artifact"), []byte("x"), 0o644)
 	s.release(a)
 	// Age the slot beyond the TTL.
@@ -56,7 +56,7 @@ func TestSlotsExpire(t *testing.T) {
 	if got := s.warmRepos(24 * time.Hour); len(got) != 0 {
 		t.Fatalf("expired slot reported warm: %v", got)
 	}
-	b, _ := s.lease("repo", 24*time.Hour)
+	b, _, _ := s.lease("repo", 24*time.Hour)
 	if _, err := os.Stat(filepath.Join(b, "data", "artifact")); err == nil {
 		t.Fatal("expired build data was reused")
 	}

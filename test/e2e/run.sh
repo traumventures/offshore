@@ -70,6 +70,7 @@ idle_stop = "$2"
 min_machines = $3
 max_machines = $4
 queue_timeout = "3m"
+estimator = "static"
 
 [[fleet.provision]]
 run = "echo provisioned-by-fleet > /cache/fleet-provision"

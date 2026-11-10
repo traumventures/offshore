@@ -87,6 +87,39 @@ run = "echo ready"
 command = ["sudo", "-n", "docker"]
 ```
 
+### Scheduling, overcommit and multiple providers
+
+Placement and scaling are decided by a pure policy (`internal/scheduler`,
+interfaces `Policy` and `Estimator`); the orchestrator only executes its
+actions. One orchestrator can span several providers:
+
+```toml
+[fleet]
+policy            = "default"
+estimator         = "history"  # learn per repo/tool/subcommand from cgroup usage, or "static"
+cpu_overcommit    = 2.0        # only slows builds down
+memory_overcommit = 1.25       # requires soft_limit or swap, otherwise OOM
+soft_limit        = 1.2        # memory.high = request * 1.2
+swap              = true
+max_memory_pressure = 0.4      # PSI; no new sessions above this
+limit_jobs        = true       # CARGO_BUILD_JOBS = granted cores
+
+[[fleet.size]]
+provider = "local"
+name     = "small"
+cpu      = 4
+memory   = "8G"
+price_per_hour = 0.1
+
+[providers.local]
+backend      = "local-docker"
+command      = ["sudo", "-n", "docker"]
+max_machines = 4
+```
+
+The legacy form (`machine_cpu`/`machine_memory` plus `[docker]`) still works and
+maps to a single provider named `local`.
+
 Add `.cloudsourced.toml` to a repository:
 
 ```toml

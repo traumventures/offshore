@@ -1,0 +1,287 @@
+# 2026/11/10 10:48:24.123132 [TestRescanMatchesScan] [rapid] draw steps: 27
+# 2026/11/10 10:48:24.123966 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.123974 [TestRescanMatchesScan] [rapid] draw name: "y"
+# 2026/11/10 10:48:24.123978 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.124095 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.124193 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.124195 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.124307 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.124309 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.124312 [TestRescanMatchesScan] [rapid] draw op: 0
+# 2026/11/10 10:48:24.124324 [TestRescanMatchesScan] [rapid] draw content: 0
+# 2026/11/10 10:48:24.124523 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.124525 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.124528 [TestRescanMatchesScan] [rapid] draw op: 0
+# 2026/11/10 10:48:24.124540 [TestRescanMatchesScan] [rapid] draw content: 0
+# 2026/11/10 10:48:24.124629 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.124630 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.124632 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.124757 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.124759 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.124760 [TestRescanMatchesScan] [rapid] draw op: 2
+# 2026/11/10 10:48:24.124833 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.124834 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.124836 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.124953 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.124955 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.124956 [TestRescanMatchesScan] [rapid] draw op: 2
+# 2026/11/10 10:48:24.125029 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.125030 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.125032 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.125183 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.125185 [TestRescanMatchesScan] [rapid] draw name: "z"
+# 2026/11/10 10:48:24.125186 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.125333 [TestRescanMatchesScan] [rapid] draw dir: "y"
+# 2026/11/10 10:48:24.125335 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.125337 [TestRescanMatchesScan] [rapid] draw op: 2
+# 2026/11/10 10:48:24.125439 [TestRescanMatchesScan] [rapid] draw dir: "x"
+# 2026/11/10 10:48:24.125441 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.125444 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.125599 [TestRescanMatchesScan] [rapid] draw dir: "y"
+# 2026/11/10 10:48:24.125601 [TestRescanMatchesScan] [rapid] draw name: "ign"
+# 2026/11/10 10:48:24.125602 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.125770 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.125771 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.125773 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.125968 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.125970 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.125972 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.126124 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.126126 [TestRescanMatchesScan] [rapid] draw name: "z"
+# 2026/11/10 10:48:24.126127 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.126284 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.126285 [TestRescanMatchesScan] [rapid] draw name: "z"
+# 2026/11/10 10:48:24.126287 [TestRescanMatchesScan] [rapid] draw op: 2
+# 2026/11/10 10:48:24.126411 [TestRescanMatchesScan] [rapid] draw dir: "y/ign"
+# 2026/11/10 10:48:24.126413 [TestRescanMatchesScan] [rapid] draw name: "z"
+# 2026/11/10 10:48:24.126414 [TestRescanMatchesScan] [rapid] draw op: 3
+# 2026/11/10 10:48:24.126546 [TestRescanMatchesScan] [rapid] draw dir: "x"
+# 2026/11/10 10:48:24.126547 [TestRescanMatchesScan] [rapid] draw name: "y"
+# 2026/11/10 10:48:24.126549 [TestRescanMatchesScan] [rapid] draw op: 3
+# 2026/11/10 10:48:24.126689 [TestRescanMatchesScan] [rapid] draw dir: "x"
+# 2026/11/10 10:48:24.126691 [TestRescanMatchesScan] [rapid] draw name: ".gitignore"
+# 2026/11/10 10:48:24.126693 [TestRescanMatchesScan] [rapid] draw op: 4
+# 2026/11/10 10:48:24.126982 [TestRescanMatchesScan] [rapid] draw dir: "y"
+# 2026/11/10 10:48:24.126984 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.126986 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.127162 [TestRescanMatchesScan] [rapid] draw dir: "y"
+# 2026/11/10 10:48:24.127163 [TestRescanMatchesScan] [rapid] draw name: "ign"
+# 2026/11/10 10:48:24.127165 [TestRescanMatchesScan] [rapid] draw op: 4
+# 2026/11/10 10:48:24.127308 [TestRescanMatchesScan] [rapid] draw dir: "x"
+# 2026/11/10 10:48:24.127310 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.127311 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.127491 [TestRescanMatchesScan] [rapid] draw dir: "x/x"
+# 2026/11/10 10:48:24.127493 [TestRescanMatchesScan] [rapid] draw name: "z"
+# 2026/11/10 10:48:24.127495 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.127704 [TestRescanMatchesScan] [rapid] draw dir: "y/ign"
+# 2026/11/10 10:48:24.127705 [TestRescanMatchesScan] [rapid] draw name: "x"
+# 2026/11/10 10:48:24.127707 [TestRescanMatchesScan] [rapid] draw op: 3
+# 2026/11/10 10:48:24.133480 [TestRescanMatchesScan] [rapid] draw dir: "x/x/z"
+# 2026/11/10 10:48:24.133858 [TestRescanMatchesScan] [rapid] draw name: "target"
+# 2026/11/10 10:48:24.133869 [TestRescanMatchesScan] [rapid] draw op: 1
+# 2026/11/10 10:48:24.134253 [TestRescanMatchesScan] [rapid] draw dir: ""
+# 2026/11/10 10:48:24.134256 [TestRescanMatchesScan] [rapid] draw name: "y"
+# 2026/11/10 10:48:24.134258 [TestRescanMatchesScan] [rapid] draw op: 2
+# 2026/11/10 10:48:24.134542 [TestRescanMatchesScan] step 26 (y): incremental tree differs from full scan
+# incremental=x:dir,x/x:dir,x/x/z:dir,x/x/z/target:dir,x/y:symlink,y:dir,y/ign:dir,y/x:dir
+# full=x:dir,x/x:dir,x/x/z:dir,x/x/z/target:dir,x/y:symlink,y:dir,y/ign:dir
+# 
+v0.4.8#9980941880158728591
+0x0
+0xc05c654ab866b
+0x1a
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x1
+0x0
+0x0
+0x38e38e38e38e4
+0x0
+0x0
+0x38e38e38e38e4
+0x1
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x6b74f03291620
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x6b74f03291620
+0x0
+0x0
+0x6b74f03291620
+0x2
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x38e38e38e38e4
+0x0
+0x0
+0x6b74f03291620
+0x2
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x6b74f03291620
+0x2
+0x0
+0x0
+0x1
+0x38e38e38e38e4
+0x1
+0x0
+0x0
+0x0
+0x6b74f03291620
+0x2
+0x38e38e38e38e4
+0x2
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x1
+0x1f2b5a0e61c3a6
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x38e38e38e38e4
+0x2
+0x0
+0x38e38e38e38e4
+0x1
+0x0
+0x0
+0x38e38e38e38e4
+0x2
+0x0
+0x38e38e38e38e4
+0x2
+0x57f1676461c86
+0x3
+0x9d88f54f938f4
+0x2
+0x3eccd9340b1e1
+0x906c9ff30baea
+0x3
+0x115086ac4d5785
+0x4
+0x9acd7be0ba45e
+0x1
+0x1ac0d1e72cb129
+0x5a4d235ee6957
+0x3
+0x1ee21f033cdff8
+0x5
+0x14144eb92bafb3
+0x4
+0x1651f75a580a5e
+0x14d1e7f669a635
+0x4
+0xf65c402b55261
+0x1
+0x15c1b7fa905c09
+0x0
+0xc02fde58331f9
+0x133e242cfccbe9
+0x1
+0x588d2b5b94949
+0x1
+0x139527dac6e14c
+0x5
+0xc19daae16d6fa
+0x6fa68097a721e
+0x4
+0x13875db4c2c06c
+0x5
+0xb15927e73dbe8
+0x0
+0x18032b2c932be9
+0x332e486bdbd27
+0x1
+0x945b89945c403
+0x7
+0x6cc30e9d7d857
+0x2
+0x1a61be05a68346
+0xc4c73aaa09e8f
+0x1
+0xeb61cc66bfe9c
+0x3
+0x13932bdc66925b
+0x0
+0x1bca94a868f864
+0x16c610c6c82dcd
+0x3
+0x1a46ab28e95f6d
+0x8
+0x17b214551ae996
+0x3
+0x1a5de9e71faa6f
+0x10659945b2ee8
+0x1
+0x12174541aa785d
+0x0
+0xc7eccf3cd9cb
+0x1
+0x1db55625393fa0
+0xf522ea0640ede
+0x2

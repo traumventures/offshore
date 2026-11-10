@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/traumventures/cloudsourced/internal/manifest"
+	"github.com/traumventures/cloudsourced/internal/scheduler"
 )
 
 // ALPN is the TLS application protocol of cloudsourced.
@@ -110,20 +111,23 @@ type TTY struct {
 
 // Exec starts a remote process.
 type Exec struct {
-	Repo     string            `json:"repo"` // primary root
-	RepoID   string            `json:"repo_id"`
-	Roots    map[string]uint64 `json:"roots"` // root -> minimum manifest version (barrier)
-	Argv     []string          `json:"argv"`
-	Cwd      string            `json:"cwd"`
-	Env      map[string]string `json:"env"`
-	TTY      *TTY              `json:"tty,omitempty"`
-	CPU      float64           `json:"cpu"`
-	Memory   int64             `json:"memory"`
-	Build    []string          `json:"build"`     // worker-local dirs relative to Repo
-	BuildTTL string            `json:"build_ttl"` // e.g. "24h"
-	Deps     []string          `json:"deps"`      // shared dependency cache paths
-	Eager    []string          `json:"eager"`     // output globs relative to Repo
-	Lease    string            `json:"lease,omitempty"`
+	Repo   string            `json:"repo"` // primary root
+	RepoID string            `json:"repo_id"`
+	Roots  map[string]uint64 `json:"roots"` // root -> minimum manifest version (barrier)
+	Argv   []string          `json:"argv"`
+	Cwd    string            `json:"cwd"`
+	Env    map[string]string `json:"env"`
+	TTY    *TTY              `json:"tty,omitempty"`
+	// Grant holds the reservation and limits decided by the scheduler.
+	Grant scheduler.Grant `json:"grant"`
+	// MemoryOvercommit bounds the sum of memory reservations on the
+	// machine (server side safety net for the scheduler).
+	MemoryOvercommit float64  `json:"memory_overcommit"`
+	Build            []string `json:"build"`     // worker-local dirs relative to Repo
+	BuildTTL         string   `json:"build_ttl"` // e.g. "24h"
+	Deps             []string `json:"deps"`      // shared dependency cache paths
+	Eager            []string `json:"eager"`     // output globs relative to Repo
+	Lease            string   `json:"lease,omitempty"`
 }
 
 // Started confirms the remote process runs.
@@ -147,8 +151,9 @@ type Resize struct {
 
 // Exit reports process termination.
 type Exit struct {
-	Code   int `json:"code"`
-	Signal int `json:"signal,omitempty"`
+	Code   int             `json:"code"`
+	Signal int             `json:"signal,omitempty"`
+	Usage  scheduler.Usage `json:"usage"`
 }
 
 // Change is a file written remotely into a projected root.
@@ -192,19 +197,22 @@ type Outputs struct {
 
 // Status describes a server.
 type Status struct {
-	Machine    string    `json:"machine"`
-	EnvHash    string    `json:"env_hash"`
-	Ready      bool      `json:"ready"`
-	CPU        float64   `json:"cpu"`
-	Memory     int64     `json:"memory"`
-	UsedCPU    float64   `json:"used_cpu"`
-	UsedMemory int64     `json:"used_memory"`
-	Sessions   []Session `json:"sessions"`
-	IdleSince  int64     `json:"idle_since"` // unix seconds, 0 while busy
-	ExpiresAt  int64     `json:"expires_at"`
-	Mounts     []string  `json:"mounts"`
-	Draining   bool      `json:"draining"`
-	WarmRepos  []string  `json:"warm_repos,omitempty"` // repo IDs with unexpired build slots
+	Machine    string  `json:"machine"`
+	EnvHash    string  `json:"env_hash"`
+	Ready      bool    `json:"ready"`
+	CPU        float64 `json:"cpu"`
+	Memory     int64   `json:"memory"`
+	UsedCPU    float64 `json:"used_cpu"`    // sum of session reservations
+	UsedMemory int64   `json:"used_memory"` // sum of session reservations
+	// Measured is the actual usage of all sessions.
+	Measured  scheduler.Resources `json:"measured"`
+	Pressure  scheduler.Pressure  `json:"pressure"`
+	Sessions  []Session           `json:"sessions"`
+	IdleSince int64               `json:"idle_since"` // unix seconds, 0 while busy
+	ExpiresAt int64               `json:"expires_at"`
+	Mounts    []string            `json:"mounts"`
+	Draining  bool                `json:"draining"`
+	WarmRepos []string            `json:"warm_repos,omitempty"` // repo IDs with unexpired build slots
 }
 
 // Session is a running remote process.

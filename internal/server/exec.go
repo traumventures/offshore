@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -112,11 +113,15 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream)
 	s.mu.Lock()
 	var used int64
 	for _, o := range s.sessions {
-		used += o.req.Memory
+		used += o.req.Grant.Reserve.Memory
 	}
-	if s.cfg.Memory > 0 && used+req.Memory > s.cfg.Memory {
+	limit := s.cfg.Memory
+	if req.MemoryOvercommit > 1 {
+		limit = int64(float64(limit) * req.MemoryOvercommit)
+	}
+	if limit > 0 && used+req.Grant.Reserve.Memory > limit {
 		s.mu.Unlock()
-		return prepErr(fmt.Errorf("machine full: %d of %d bytes memory reserved", used, s.cfg.Memory))
+		return prepErr(fmt.Errorf("machine full: %d of %d bytes memory reserved", used, limit))
 	}
 	s.sessions[se.id] = se
 	s.mu.Unlock()
@@ -133,7 +138,7 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream)
 	if d, err := time.ParseDuration(req.BuildTTL); err == nil && d > 0 && d < ttl {
 		ttl = d
 	}
-	slot, err := s.slots.lease(req.RepoID, ttl)
+	slot, warm, err := s.slots.lease(req.RepoID, ttl)
 	if err != nil {
 		return prepErr(fmt.Errorf("build slot: %w", err))
 	}
@@ -154,7 +159,7 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream)
 		src := filepath.Join(s.cfg.DepsDir, strings.ReplaceAll(strings.Trim(dst, "/"), "/", "__"))
 		binds = append(binds, sandbox.Bind{Src: src, Dst: dst})
 	}
-	cgDir, err := s.cg.create(se.id, req.CPU, req.Memory)
+	cgDir, err := s.cg.create(se.id, req.Grant)
 	if err != nil {
 		s.log.Warn("session cgroup", "err", err)
 	}
@@ -278,8 +283,13 @@ loop:
 	} else if waitErr != nil {
 		exit.Code = 127
 	}
+	exit.Usage.Wall = time.Since(se.started)
+	exit.Usage.PeakMemory, exit.Usage.CPUSeconds = s.cg.usage(cgDir)
+	exit.Usage.Warm = warm
+	exit.Usage.ExitCode = exit.Code
 	if s.cg.oomKilled(cgDir) {
-		pc.Write(proto.TStderr, []byte(fmt.Sprintf("cloudsourced: session exceeded its memory limit (%d bytes)\n", req.Memory)))
+		exit.Usage.OOM = true
+		pc.Write(proto.TStderr, []byte(fmt.Sprintf("cloudsourced: session exceeded its memory limit (%d bytes); the next run reserves more\n", req.Grant.MemoryMax)))
 	}
 	s.log.Info("session finished", "session", se.id, "code", exit.Code, "duration", time.Since(se.started).Round(time.Millisecond))
 	if clientGone {
@@ -319,6 +329,12 @@ func (s *Server) sessionEnv(req proto.Exec, id string) []string {
 	}
 	if req.TTY != nil && req.TTY.Term != "" {
 		set("TERM", req.TTY.Term)
+	}
+	if j := req.Grant.Jobs; j > 0 {
+		set("CLOUDSOURCED_JOBS", strconv.Itoa(j))
+		if _, ok := req.Env["CARGO_BUILD_JOBS"]; !ok {
+			set("CARGO_BUILD_JOBS", strconv.Itoa(j))
+		}
 	}
 	set("PWD", req.Cwd)
 	set("CLOUDSOURCED_ACTIVE", "1")

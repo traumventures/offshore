@@ -23,6 +23,7 @@ const (
 	LabelCPU       = "cloudsourced.cpu"
 	LabelMemory    = "cloudsourced.memory"
 	LabelFinger    = "cloudsourced.fingerprint"
+	LabelSize      = "cloudsourced.size"
 )
 
 // MachineSpec describes a machine to create.
@@ -31,8 +32,10 @@ type MachineSpec struct {
 	Owner     string
 	Image     string // environment image reference
 	EnvHash   string
+	Size      string // machine type name
 	CPU       float64
 	Memory    int64
+	Swap      bool // allow sessions to swap
 	ExpiresAt time.Time
 	Token     string
 	CertPEM   string
@@ -159,4 +162,29 @@ func Names() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// StringList converts a decoded option ([]string or []any) to []string.
+func StringList(v any) []string {
+	switch x := v.(type) {
+	case []string:
+		return x
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, e := range x {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// String returns a string option or def.
+func String(opts map[string]any, key, def string) string {
+	if s, ok := opts[key].(string); ok && s != "" {
+		return s
+	}
+	return def
 }

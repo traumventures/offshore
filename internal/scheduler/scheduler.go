@@ -1,0 +1,192 @@
+// Package scheduler contains the scheduling decisions of cloudsourced as
+// pure functions over a fleet snapshot: where a task runs (Place), how the
+// fleet changes (Plan) and how much a task needs (Estimator).
+//
+// The orchestrator gathers state, calls a Policy and executes its
+// decisions; it contains no placement or scaling logic itself. Policies can
+// therefore be swapped, tuned and tested (or simulated) without machines.
+package scheduler
+
+import (
+	"time"
+)
+
+// Resources is an amount of CPU (cores) and memory (bytes).
+type Resources struct {
+	CPU    float64 `json:"cpu"`
+	Memory int64   `json:"memory"`
+}
+
+// Add returns r + o.
+func (r Resources) Add(o Resources) Resources {
+	return Resources{CPU: r.CPU + o.CPU, Memory: r.Memory + o.Memory}
+}
+
+// Sub returns r - o.
+func (r Resources) Sub(o Resources) Resources {
+	return Resources{CPU: r.CPU - o.CPU, Memory: r.Memory - o.Memory}
+}
+
+// Fits reports whether o fits into r.
+func (r Resources) Fits(o Resources) bool { return o.CPU <= r.CPU && o.Memory <= r.Memory }
+
+// Scale multiplies CPU and memory by separate factors.
+func (r Resources) Scale(cpu, mem float64) Resources {
+	return Resources{CPU: r.CPU * cpu, Memory: int64(float64(r.Memory) * mem)}
+}
+
+// Size is a machine type a backend can create.
+type Size struct {
+	Provider     string    `json:"provider"` // provider instance that creates it
+	Name         string    `json:"name"`
+	Capacity     Resources `json:"capacity"`
+	PricePerHour float64   `json:"price_per_hour"` // 0 when unknown
+}
+
+// Task is a session that needs capacity.
+type Task struct {
+	ID      string
+	EnvHash string
+	RepoID  string
+	Key     string    // repository + tool + subcommand, the unit of learning
+	Request Resources // estimated need, used for packing
+	Limit   Resources // hard ceiling for the session; 0 = machine capacity
+	Since   time.Time // when the task started waiting
+}
+
+// State of a machine as seen by the scheduler.
+type State int
+
+const (
+	Running  State = iota // ready to accept sessions
+	Starting              // being created or started; capacity on its way
+	Stopped               // compute released, disk (warm caches) kept
+	Gone                  // failed or being destroyed
+)
+
+// Pressure is Linux PSI "some avg10" as a fraction (0..1).
+type Pressure struct {
+	CPU    float64 `json:"cpu"`
+	Memory float64 `json:"memory"`
+}
+
+// Machine is the scheduler's view of one machine.
+type Machine struct {
+	ID        string
+	Provider  string
+	EnvHash   string
+	Size      string
+	State     State
+	Draining  bool      // no new sessions; stop when empty
+	Capacity  Resources // physical capacity
+	Reserved  Resources // sum of reservations of sessions and pending leases
+	Used      Resources // measured usage (best effort)
+	Pressure  Pressure
+	Sessions  int
+	WarmRepos []string  // repositories with an unexpired build cache
+	IdleSince time.Time // zero while sessions run
+	CreatedAt time.Time
+	ExpiresAt time.Time
+}
+
+// Warm reports whether the machine holds a build cache for repo.
+func (m Machine) Warm(repo string) bool {
+	for _, r := range m.WarmRepos {
+		if r == repo {
+			return true
+		}
+	}
+	return false
+}
+
+// Fleet is a snapshot of everything the scheduler may decide on.
+type Fleet struct {
+	Now      time.Time
+	Machines []Machine
+	Queue    []Task               // tasks waiting for capacity
+	Sizes    []Size               // machine types that can be created
+	Recent   map[string]time.Time // environment hash -> last use
+}
+
+// PlacementKind is the outcome of Place.
+type PlacementKind int
+
+const (
+	Wait   PlacementKind = iota // no capacity yet; Plan decides how to get some
+	Assign                      // run on Placement.Machine
+	Reject                      // the task can never be placed (too large)
+)
+
+// Grant is what a session is given on its machine.
+type Grant struct {
+	Reserve    Resources `json:"reserve"`     // counted against machine capacity
+	CPUWeight  float64   `json:"cpu_weight"`  // relative CPU share (cores)
+	MemoryHigh int64     `json:"memory_high"` // soft limit: throttle/reclaim above (0 = none)
+	MemoryMax  int64     `json:"memory_max"`  // hard limit: OOM above (0 = machine)
+	Swap       int64     `json:"swap"`        // memory.swap.max (-1 = unlimited, 0 = none)
+	Jobs       int       `json:"jobs"`        // build parallelism hint (0 = tool default)
+}
+
+// Placement is the decision for one task.
+type Placement struct {
+	Kind    PlacementKind
+	Machine string
+	Grant   Grant
+	Reason  string
+}
+
+// ActionKind is a fleet change.
+type ActionKind int
+
+const (
+	Create  ActionKind = iota // new machine of Size for EnvHash
+	Start                     // start stopped Machine
+	Stop                      // stop Machine (keeps disk)
+	Destroy                   // remove Machine and its disk
+	Drain                     // no new sessions on Machine
+	Undrain                   // accept sessions again
+)
+
+func (k ActionKind) String() string {
+	return [...]string{"create", "start", "stop", "destroy", "drain", "undrain"}[k]
+}
+
+// Action is one fleet change decided by Plan.
+type Action struct {
+	Kind    ActionKind
+	Machine string // for everything but Create
+	EnvHash string // for Create
+	Size    Size   // for Create
+	Reason  string
+}
+
+// Policy makes all placement and scaling decisions. Implementations must be
+// deterministic functions of their input and configuration.
+type Policy interface {
+	// Place decides where task runs. It is called with the task not part of
+	// f.Queue.
+	Place(f Fleet, t Task) Placement
+	// Plan returns fleet changes. It is called periodically and whenever
+	// tasks wait. Hard invariants (destroying expired machines, deleting
+	// orphaned volumes) are enforced by the orchestrator, not the policy.
+	Plan(f Fleet) []Action
+}
+
+// Usage is what a finished session consumed.
+type Usage struct {
+	PeakMemory int64         `json:"peak_memory"`
+	CPUSeconds float64       `json:"cpu_seconds"`
+	Wall       time.Duration `json:"wall"`
+	OOM        bool          `json:"oom"`
+	Warm       bool          `json:"warm"` // build cache was reused
+	ExitCode   int           `json:"exit_code"`
+}
+
+// Estimator predicts the resource need of tasks from past runs.
+type Estimator interface {
+	// Estimate returns the expected need for key. fallback is the
+	// configured value used until enough observations exist.
+	Estimate(key string, fallback Resources) Resources
+	// Observe records a finished run.
+	Observe(key string, u Usage)
+}
