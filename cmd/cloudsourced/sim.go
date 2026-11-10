@@ -28,7 +28,7 @@ Flags:
 func simCmd(args []string) error {
 	fs := flag.NewFlagSet("sim", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(fs.Output(), simUsage); fs.PrintDefaults() }
-	cfgPath := fs.String("config", "", "user configuration (TOML, [fleet] section); default: the active user configuration")
+	cfgPath := fs.String("config", "", "fleet configuration (TOML, [fleet] section); default: the active fleet configuration")
 	policies := fs.String("policy", "default,classic", "comma separated policies to compare (default, binpack, classic)")
 	estimator := fs.String("estimator", "", "static | history (default: fleet.estimator)")
 	boot := fs.String("boot", "60s", "create latency until a machine is ready: DUR or provider=DUR,...")
@@ -68,14 +68,14 @@ func simCmd(args []string) error {
 		fs.Usage()
 		return errors.New("sim: no trace given")
 	}
-	if *cfgPath != "" {
-		os.Setenv("CLOUDSOURCED_CONFIG", *cfgPath)
+	if *cfgPath == "" {
+		*cfgPath = config.FleetConfigPath()
 	}
-	u, err := config.LoadUser()
+	u, err := config.LoadFleet(*cfgPath)
 	if err != nil {
 		return err
 	}
-	oc := fleet.Config(u, nil)
+	oc := fleet.Config(u)
 	bootLat, err := latencies(*boot)
 	if err != nil {
 		return fmt.Errorf("-boot: %w", err)

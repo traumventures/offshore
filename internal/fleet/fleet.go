@@ -9,7 +9,6 @@ package fleet
 import (
 	"context"
 	"io"
-	"time"
 
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
@@ -45,9 +44,10 @@ type Env struct {
 	Context func() (provider.ImageSpec, string, error)
 }
 
-// Config derives the orchestrator configuration from the user (or control
-// plane) configuration and, when known, the repository.
-func Config(u *config.User, r *config.Repo) orchestrator.Config {
+// Config derives the orchestrator configuration from the fleet
+// configuration. Repository settings are not part of it: they travel in
+// each orchestrator.Request.
+func Config(u *config.FleetConfig) orchestrator.Config {
 	idle, lifetime, queue := u.Fleet.Durations()
 	var provision []string
 	for _, p := range u.Fleet.Provision {
@@ -61,9 +61,8 @@ func Config(u *config.User, r *config.Repo) orchestrator.Config {
 	}
 	f := u.Fleet
 	c := orchestrator.Config{
-		Owner: f.Owner, Sizes: sizes, MaxLifetime: lifetime, QueueTimeout: queue,
+		Owner: f.ID, Sizes: sizes, MaxLifetime: lifetime, QueueTimeout: queue,
 		Provision: provision, Swap: f.Swap,
-		BuildTTL: 24 * time.Hour, DepsTTL: 7 * 24 * time.Hour,
 		Policy: scheduler.Config{
 			CPUOvercommit: f.CPUOvercommit, MemoryOvercommit: f.MemoryOvercommit,
 			MaxCPUPressure: f.MaxCPUPressure, MaxMemoryPressure: f.MaxMemoryPressure,
@@ -89,15 +88,6 @@ func Config(u *config.User, r *config.Repo) orchestrator.Config {
 		case float64:
 			c.Policy.ProviderMax[name] = int(v)
 		}
-	}
-	if r != nil {
-		c.BuildTTL, _ = config.ParseDuration(r.Cache.Build.TTL)
-		c.DepsTTL, _ = config.ParseDuration(r.Cache.Deps.TTL)
-	}
-	// The build cache never outlives a machine, and machines never outlive
-	// max_lifetime; cap the build TTL accordingly.
-	if c.BuildTTL <= 0 || c.BuildTTL > lifetime {
-		c.BuildTTL = lifetime
 	}
 	return c
 }

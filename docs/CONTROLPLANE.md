@@ -32,6 +32,15 @@ cloudsourced controlplane health                   liveness check (container HEA
 | `--api-key-file` | `$CLOUDSOURCED_API_KEY`, else generated `<state>/api-key` | the key is never logged; `info --show-key` prints it |
 | `--state-dir` | `$CLOUDSOURCED_STATE_DIR` or `~/.local/state/cloudsourced/controlplane` | |
 | `--machine-binary` | see below | server binary for local-docker machines, as a path on the Docker host |
+| `--config` | `$CLOUDSOURCED_FLEET_CONFIG`, else `$CLOUDSOURCED_CONFIG`/`~/.config/cloudsourced/config.toml` | fleet configuration (`[fleet]`, `[providers.*]`); `[orchestrator]` and `user` in it are ignored with a warning |
+
+The fleet configuration is reloaded when the file changes (checked before
+each lease and every 15 s), on `SIGHUP` and on `cloudsourced reconcile` from a
+client; an invalid file is logged and the previous configuration stays in
+effect. `fleet.id`, the providers and `fleet.estimator` apply only after a
+restart. Repository settings (build and dependency cache TTLs) come with each
+request and never change the fleet configuration. `cloudsourced config check
+--fleet FILE` validates a fleet file before deploying it.
 
 The state directory holds `api-key`, `tls.json` (self-signed certificate,
 created once, so the fingerprint survives restarts; replaced only when a new
