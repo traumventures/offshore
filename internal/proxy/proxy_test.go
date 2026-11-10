@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,13 +24,17 @@ func TestRemoteAllowed(t *testing.T) {
 		if args != "" {
 			a = splitArgs(args)
 		}
-		if got := remoteAllowed(p, a); got != want {
+		if _, got := remoteAllowed(p, "cargo", a); got != want {
 			t.Errorf("remoteAllowed(%q) = %v, want %v", args, got, want)
 		}
 	}
 	only := config.Tool{Remote: []string{"build", "test"}}
-	if remoteAllowed(only, []string{"run"}) || !remoteAllowed(only, []string{"test"}) {
+	why, ok := remoteAllowed(only, "cargo", []string{"run"})
+	if _, ok2 := remoteAllowed(only, "cargo", []string{"test"}); ok || !ok2 {
 		t.Error("remote allowlist not honoured")
+	}
+	if why != `subcommand "run" is not listed in [tool.cargo] remote` {
+		t.Errorf("reason %q", why)
 	}
 }
 
@@ -89,5 +95,40 @@ func TestAllowedEnv(t *testing.T) {
 	}
 	if _, ok := env["PATH"]; ok {
 		t.Fatal("PATH must come from the remote environment")
+	}
+}
+
+func TestPortsFromEnvAndConfig(t *testing.T) {
+	prof := config.Tool{Ports: []any{int64(8080)}}
+	t.Setenv("CLOUDSOURCED_PORTS", "")
+	ps, err := ports(prof)
+	if err != nil || len(ps) != 1 || ps[0] != (config.Port{Local: 8080, Remote: 8080}) {
+		t.Fatalf("config ports: %v %v", ps, err)
+	}
+	t.Setenv("CLOUDSOURCED_PORTS", "3000:3001")
+	ps, err = ports(prof)
+	if err != nil || len(ps) != 1 || ps[0] != (config.Port{Local: 3000, Remote: 3001}) {
+		t.Fatalf("env ports: %v %v", ps, err)
+	}
+	t.Setenv("CLOUDSOURCED_PORTS", "x")
+	if _, err := ports(prof); err == nil {
+		t.Fatal("invalid env accepted")
+	}
+}
+
+func TestBusyLocalPortIsSkipped(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	port := busy.Addr().(*net.TCPAddr).Port
+	free, _ := net.Listen("tcp", "127.0.0.1:0")
+	fport := free.Addr().(*net.TCPAddr).Port
+	free.Close()
+	f := listenPorts([]config.Port{{Local: port, Remote: 1}, {Local: fport, Remote: 2}})
+	defer f.close()
+	if got := f.forwarded(); len(got) != 1 || got[0] != fmt.Sprintf("%d:2", fport) {
+		t.Fatalf("forwarded %v", got)
 	}
 }

@@ -296,6 +296,8 @@ func (s *Server) serveStream(ctx context.Context, conn *quic.Conn, st *quic.Stre
 		err = s.serveFetch(ctx, pc)
 	case proto.KindOutputs:
 		err = s.serveOutputs(ctx, pc)
+	case proto.KindForward:
+		err = s.serveForward(ctx, pc, st)
 	default:
 		err = pc.SendError("protocol", fmt.Errorf("unknown stream kind %q", hello.Kind))
 	}

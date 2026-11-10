@@ -117,6 +117,9 @@ type Tool struct {
 	Local  []string `toml:"local"`  // subcommands always executed locally
 	Eager  []string `toml:"eager"`  // output globs copied back after every run
 	Env    []string `toml:"env"`    // environment variable allowlist (supports trailing *)
+	// Ports are forwarded from 127.0.0.1 locally into the session while
+	// it runs: 8080 or "local:remote" (e.g. "3000:3001").
+	Ports []any `toml:"ports"`
 }
 
 // Service is an auxiliary container started next to every machine of the
@@ -358,6 +361,11 @@ func (r *Repo) Validate() error {
 	}
 	if r.Editor.RustAnalyzer != RustAnalyzerLocal && r.Editor.RustAnalyzer != RustAnalyzerLSPRemote {
 		errs = append(errs, fmt.Sprintf("editor.rust_analyzer: unsupported %q (local, lsp-remote)", r.Editor.RustAnalyzer))
+	}
+	for name, t := range r.Tools {
+		if _, err := ParsePorts(t.Ports); err != nil {
+			errs = append(errs, fmt.Sprintf("tool.%s.ports: %v", name, err))
+		}
 	}
 	for name, svc := range r.Services {
 		if !validName(name) {

@@ -54,6 +54,7 @@ const (
 	TOutList
 	TOutDir
 	TOutRead
+	TForward
 )
 
 // Stream kinds sent in Hello.
@@ -66,6 +67,10 @@ const (
 	// KindOutputs serves the output FUSE on the laptop: one TOutList or
 	// TOutRead request per stream against the latest build slot of a repo.
 	KindOutputs = "outputs"
+	// KindForward carries one forwarded TCP connection into a session's
+	// network namespace: TForward, then TAck (or TError), then raw bytes
+	// in both directions until either side closes.
+	KindForward = "forward"
 )
 
 // Hello opens every stream.
@@ -160,6 +165,16 @@ type Exit struct {
 	Code   int             `json:"code"`
 	Signal int             `json:"signal,omitempty"`
 	Usage  scheduler.Usage `json:"usage"`
+	// Cache holds counters of cache integrations (e.g. "sccache_hits",
+	// "sccache_misses"); shown by `cloudsourced why`.
+	Cache map[string]int64 `json:"cache,omitempty"`
+}
+
+// Forward asks the server to connect to 127.0.0.1:Port in the network
+// namespace of a running session.
+type Forward struct {
+	Session string `json:"session"`
+	Port    int    `json:"port"`
 }
 
 // Change is a file written remotely into a projected root.
