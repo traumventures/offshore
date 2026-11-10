@@ -22,6 +22,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/auth"
 	"github.com/traumventures/cloudsourced/internal/cas"
 	"github.com/traumventures/cloudsourced/internal/fusefs"
+	"github.com/traumventures/cloudsourced/internal/machine"
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/transport"
@@ -42,6 +43,9 @@ type Config struct {
 	CacheDir  string
 	DepsDir   string
 	BuildTTL  time.Duration // upper bound for build cache age
+	// HostStatus is a file the server publishes machine.HostStatus to for
+	// the host agent (CLOUDSOURCED_HOST_STATUS; empty: none).
+	HostStatus string
 	// SccacheEndpoint replaces the built-in compiler cache endpoint with an
 	// external blobcache (CLOUDSOURCED_SCCACHE_ENDPOINT, set by a host
 	// agent). SccacheDir is the built-in cache's directory
@@ -54,12 +58,13 @@ type Config struct {
 // ConfigFromEnv reads the server configuration.
 func ConfigFromEnv() (Config, error) {
 	c := Config{
-		MachineID: os.Getenv("CLOUDSOURCED_MACHINE_ID"),
-		Listen:    envOr("CLOUDSOURCED_LISTEN", ":7443"),
-		EnvHash:   os.Getenv("CLOUDSOURCED_ENV_HASH"),
-		CacheDir:  envOr("CLOUDSOURCED_CACHE_DIR", "/cache"),
-		DepsDir:   envOr("CLOUDSOURCED_DEPS_DIR", "/deps"),
-		BuildTTL:  24 * time.Hour,
+		MachineID:  os.Getenv("CLOUDSOURCED_MACHINE_ID"),
+		Listen:     envOr("CLOUDSOURCED_LISTEN", ":7443"),
+		EnvHash:    os.Getenv("CLOUDSOURCED_ENV_HASH"),
+		CacheDir:   envOr("CLOUDSOURCED_CACHE_DIR", "/cache"),
+		DepsDir:    envOr("CLOUDSOURCED_DEPS_DIR", "/deps"),
+		BuildTTL:   24 * time.Hour,
+		HostStatus: os.Getenv(machine.HostStatusEnv),
 	}
 	c.SccacheEndpoint = os.Getenv("CLOUDSOURCED_SCCACHE_ENDPOINT")
 	c.SccacheDir = envOr("CLOUDSOURCED_SCCACHE_DIR", filepath.Join(c.DepsDir, "sccache"))
@@ -130,6 +135,7 @@ type Server struct {
 	sources   map[string]*quic.Conn // root -> client connection serving blobs
 	sessions  map[string]*session
 	idleSince time.Time
+	lastProbe time.Time // last status request (an orchestrator probe)
 	ready     bool
 	draining  bool
 
@@ -167,7 +173,7 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 	s := &Server{
 		cfg: cfg, log: log, store: store, slots: sl, self: self, env: env,
 		mounts: map[string]*fusefs.Projection{}, sources: map[string]*quic.Conn{},
-		sessions: map[string]*session{}, idleSince: time.Now(), inflight: map[string]*fetchCall{},
+		sessions: map[string]*session{}, idleSince: time.Now(), lastProbe: time.Now(), inflight: map[string]*fetchCall{},
 	}
 	s.metrics = newServerMetrics(s)
 	return s, nil
@@ -200,6 +206,9 @@ func (s *Server) Run(ctx context.Context) error {
 		s.log.Info("machine ready")
 	}()
 	go s.lifecycle(ctx, cancel)
+	if s.cfg.HostStatus != "" {
+		go s.publishHostStatus(ctx)
+	}
 	go func() {
 		<-ctx.Done()
 		ln.Close()
@@ -325,6 +334,9 @@ func (s *Server) serveStream(ctx context.Context, conn *quic.Conn, st *quic.Stre
 	case proto.KindExec:
 		err = s.serveExec(ctx, pc, st, claims)
 	case proto.KindStatus:
+		s.mu.Lock()
+		s.lastProbe = time.Now()
+		s.mu.Unlock()
 		err = pc.Send(proto.TStatus, s.Status())
 	case proto.KindFetch:
 		err = s.serveFetch(ctx, pc)
@@ -335,6 +347,39 @@ func (s *Server) serveStream(ctx context.Context, conn *quic.Conn, st *quic.Stre
 	}
 	if err != nil && !errors.Is(err, io.EOF) && ctx.Err() == nil {
 		s.log.Debug("stream ended", "kind", hello.Kind, "err", err)
+	}
+}
+
+// HostStatus is the status published for the host agent.
+func (s *Server) HostStatus() machine.HostStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := machine.HostStatus{
+		UpdatedAt: time.Now().Unix(), LastProbe: s.lastProbe.Unix(),
+		Sessions: len(s.sessions), Ready: s.ready,
+	}
+	if len(s.sessions) == 0 {
+		st.IdleSince = s.idleSince.Unix()
+	}
+	return st
+}
+
+// publishHostStatus refreshes the host status file every few seconds.
+func (s *Server) publishHostStatus(ctx context.Context) {
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	failing := false
+	for {
+		err := machine.WriteHostStatus(s.cfg.HostStatus, s.HostStatus())
+		if err != nil && !failing {
+			s.log.Warn("publishing host status", "path", s.cfg.HostStatus, "err", err)
+		}
+		failing = err != nil
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
 	}
 }
 

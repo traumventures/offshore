@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -21,6 +23,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/client"
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/envbuild"
+	"github.com/traumventures/cloudsourced/internal/hostagent"
 	"github.com/traumventures/cloudsourced/internal/logs"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 	"github.com/traumventures/cloudsourced/internal/proto"
@@ -61,6 +64,7 @@ Usage:
 
 Internal:
   cloudsourced server                      machine server (started by providers)
+  cloudsourced host [--spec F] [--state D] host agent on VM machines (systemd, root)
   cloudsourced sandbox-init                session namespace init
 
 Environment:
@@ -137,6 +141,8 @@ func run(cmd string, args []string) error {
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 		defer cancel()
 		return s.Run(ctx)
+	case "host":
+		return hostCmd(args)
 	case "sandbox-init":
 		err := sandbox.Init()
 		fmt.Fprintln(os.Stderr, err)
@@ -510,4 +516,29 @@ func fetch(globs []string) error {
 		return errors.New("no matching outputs on the machine")
 	}
 	return nil
+}
+
+// hostCmd runs the host agent of a VM machine.
+func hostCmd(args []string) error {
+	fs := flag.NewFlagSet("host", flag.ContinueOnError)
+	specPath := fs.String("spec", hostagent.SpecPath, "public machine spec")
+	stateDir := fs.String("state", hostagent.StateDir, "root-only agent state")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	spec, err := hostagent.LoadSpec(*specPath)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+	plat, err := hostagent.OpenPlatform(ctx, spec)
+	if err != nil {
+		return err
+	}
+	a := &hostagent.Agent{
+		Spec: spec, Platform: plat, StateDir: *stateDir, Docker: hostagent.DockerCLI("docker"), Log: logger(),
+		Shutdown: func() error { return exec.Command("shutdown", "-h", "now").Run() },
+	}
+	return a.Run(ctx)
 }

@@ -389,6 +389,93 @@ func TestMultiProviderBurst(t *testing.T) {
 	}
 }
 
+// slowStart is a provider whose machines take a while to start, so that
+// refreshes and reconciles observe them still stopped mid-start.
+type slowStart struct {
+	*fakeProvider
+	delay  time.Duration
+	starts int
+	smu    sync.Mutex
+}
+
+func (s *slowStart) Start(ctx context.Context, id string) (provider.Machine, error) {
+	s.smu.Lock()
+	s.starts++
+	s.smu.Unlock()
+	time.Sleep(s.delay)
+	return s.fakeProvider.Start(ctx, id)
+}
+
+func (s *slowStart) Caps() provider.Caps {
+	return provider.Caps{PollInterval: 20 * time.Millisecond, PollMax: 80 * time.Millisecond}
+}
+
+func TestWarmRestartStartsOnce(t *testing.T) {
+	f := &slowStart{fakeProvider: newFake(), delay: 2500 * time.Millisecond}
+	cfg := testConfig("fake")
+	cfg.Policy.MaxMachines = 2
+	o, err := New(cfg, map[string]provider.Provider{"fake": f}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.ProbeFunc = f.probe
+	ctx := context.Background()
+	l, err := o.Acquire(ctx, req("r1"), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Release(l.ID)
+	f.Stop(ctx, l.MachineID)
+	if err := o.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// While the start is in progress, the waiting session refreshes every
+	// second and reconciles run concurrently; none may start it again.
+	stopRec := make(chan struct{})
+	recDone := make(chan struct{})
+	go func() {
+		defer close(recDone)
+		for {
+			select {
+			case <-stopRec:
+				return
+			case <-time.After(300 * time.Millisecond):
+				o.Reconcile(ctx)
+			}
+		}
+	}()
+	l2, err := o.Acquire(ctx, req("r1"), io.Discard)
+	close(stopRec)
+	<-recDone
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l2.MachineID != l.MachineID {
+		t.Fatalf("placed on %s, want the restarted machine %s", l2.MachineID, l.MachineID)
+	}
+	if f.starts != 1 || f.created != 1 {
+		t.Fatalf("starts=%d created=%d, want one start and no new machine", f.starts, f.created)
+	}
+}
+
+func TestPollBackoff(t *testing.T) {
+	first, max := pollIntervals(provider.Caps{})
+	if first != 500*time.Millisecond || max != first {
+		t.Fatalf("default poll %v/%v", first, max)
+	}
+	first, max = pollIntervals(provider.Caps{PollInterval: 2 * time.Second, PollMax: 10 * time.Second})
+	var seq []time.Duration
+	for d := first; len(seq) < 6; d = nextPoll(d, max) {
+		seq = append(seq, d)
+	}
+	want := []time.Duration{2 * time.Second, 3 * time.Second, 4500 * time.Millisecond, 6750 * time.Millisecond, 10 * time.Second, 10 * time.Second}
+	for i := range want {
+		if seq[i] != want[i] {
+			t.Fatalf("poll sequence %v, want %v", seq, want)
+		}
+	}
+}
+
 func TestLeaseDetailsAndCostHistory(t *testing.T) {
 	f := newFake()
 	o := newTestOrch(t, f, func(c *Config) { c.Sizes[0].PricePerHour = 0.5 })

@@ -1,7 +1,10 @@
 // Package awsec2 runs machines as EC2 instances. Each instance runs Docker
-// with the same machine container layout as the local-docker backend (server
-// with FUSE, services in its network namespace, cache volumes on the
-// instance disk), so behaviour matches the reference backend.
+// and the host agent ("cloudsourced host"), which applies the same machine
+// container layout as the local-docker backend (machine.Layout: server with
+// FUSE, services in its network namespace, cache volumes on the instance
+// disk), so behaviour matches the reference backend. User data carries only
+// the public machine spec; the secret server environment travels through
+// an SSM SecureString parameter that the agent reads once and deletes.
 //
 // Shared infrastructure (security group, instance role, artifact bucket,
 // image repository, reaper) is a CloudFormation stack, created on first use.
@@ -15,6 +18,7 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +41,7 @@ import (
 	ecrtypes "github.com/aws/aws-sdk-go-v2/service/ecr/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/traumventures/cloudsourced/internal/provider"
 )
@@ -45,7 +50,7 @@ import (
 var stackTemplate string
 
 // templateVersion must match the TemplateVersion output of stack.yaml.
-const templateVersion = "4"
+const templateVersion = "5"
 
 const (
 	serverPort = 7443
@@ -140,7 +145,8 @@ func open(opts map[string]any) (provider.Provider, error) {
 func (e *EC2) Name() string { return "aws-ec2" }
 
 func (e *EC2) Caps() provider.Caps {
-	return provider.Caps{FUSE: true, StopKeepsDisk: true}
+	// Instances boot in tens of seconds: poll readiness slowly, backing off.
+	return provider.Caps{FUSE: true, StopKeepsDisk: true, PollInterval: 2 * time.Second, PollMax: 10 * time.Second}
 }
 
 // ensureInfra creates or updates the shared stack and reads its outputs.
@@ -455,7 +461,7 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	if err != nil {
 		return provider.Machine{}, err
 	}
-	ud, err := userData(spec, e.region, in, key, remoteTag(in.repo, spec.Image))
+	ud, err := userData(spec, e.region, e.stack, in, key, remoteTag(in.repo, spec.Image))
 	if err != nil {
 		return provider.Machine{}, err
 	}
@@ -507,16 +513,52 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	if e.subnet != "" {
 		input.NetworkInterfaces[0].SubnetId = aws.String(e.subnet)
 	}
+	// The secret environment goes through SSM: the host agent reads it
+	// with the instance role and deletes it.
+	if err := e.putSecrets(ctx, spec); err != nil {
+		return provider.Machine{}, err
+	}
 	out, err := e.ec2.RunInstances(ctx, input)
 	if err != nil {
+		e.deleteSecrets(context.Background(), spec.ID)
 		return provider.Machine{}, fmt.Errorf("aws-ec2: run instance %s: %w", spec.Size, err)
 	}
 	id := aws.ToString(out.Instances[0].InstanceId)
 	if err := e.waitRunning(ctx, id); err != nil {
 		e.ec2.TerminateInstances(context.Background(), &ec2.TerminateInstancesInput{InstanceIds: []string{id}})
+		e.deleteSecrets(context.Background(), spec.ID)
 		return provider.Machine{}, err
 	}
 	return e.byMachine(ctx, spec.ID)
+}
+
+func (e *EC2) putSecrets(ctx context.Context, spec provider.MachineSpec) error {
+	b, err := json.Marshal(spec.SecretEnv)
+	if err != nil {
+		return err
+	}
+	in := &ssm.PutParameterInput{
+		Name: aws.String(secretParameter(e.stack, spec.ID)), Type: ssmtypes.ParameterTypeSecureString,
+		Value:       aws.String(string(b)),
+		Description: aws.String("cloudsourced machine secrets, deleted by the machine after boot"),
+		Tags:        []ssmtypes.Tag{{Key: aws.String(tagProject), Value: aws.String(project)}, {Key: aws.String(provider.LabelMachine), Value: aws.String(spec.ID)}},
+	}
+	if len(b) > 4096 {
+		in.Tier = ssmtypes.ParameterTierAdvanced
+	}
+	if _, err := e.ssm.PutParameter(ctx, in); err != nil {
+		return fmt.Errorf("aws-ec2: store machine secrets: %w", err)
+	}
+	return nil
+}
+
+func (e *EC2) deleteSecrets(ctx context.Context, id string) error {
+	_, err := e.ssm.DeleteParameter(ctx, &ssm.DeleteParameterInput{Name: aws.String(secretParameter(e.stack, id))})
+	var nf *ssmtypes.ParameterNotFound
+	if err != nil && !errors.As(err, &nf) {
+		return fmt.Errorf("aws-ec2: delete machine secrets: %w", err)
+	}
+	return nil
 }
 
 func (e *EC2) waitRunning(ctx context.Context, instanceID string) error {
@@ -642,11 +684,13 @@ func (e *EC2) Destroy(ctx context.Context, id string) error {
 	for _, i := range is {
 		ids = append(ids, aws.ToString(i.InstanceId))
 	}
-	if len(ids) == 0 {
-		return nil
+	if len(ids) > 0 {
+		if _, err := e.ec2.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: ids}); err != nil {
+			return err
+		}
 	}
-	_, err = e.ec2.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: ids})
-	return err
+	// Normally the agent has deleted it already.
+	return e.deleteSecrets(ctx, id)
 }
 
 // List returns the machines of owner.

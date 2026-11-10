@@ -219,9 +219,16 @@ On first use the provider creates the CloudFormation stack `cloudsourced`
 bucket for the server binary, ECR repository for environment images, a reaper
 Lambda (every 10 minutes it terminates machines past their expiry) and a
 resource group of everything tagged `project=cloudsourced`. Machines are
-Amazon Linux 2023 instances running the same container layout as local-docker;
-they terminate themselves at `max_lifetime`, and the metadata service is not
-reachable from sessions (IMDSv2, hop limit 1).
+Amazon Linux 2023 instances running the same container layout as local-docker
+(`internal/machine`), applied by the host agent `cloudsourced host` (a systemd
+unit). User data carries only the public machine spec; the machine's secrets
+(server key, token) travel in an SSM SecureString parameter
+`/cloudsourced/<stack>/machines/<id>` that the agent reads once with the
+instance role and deletes. Machines terminate themselves at `max_lifetime`,
+and stop themselves when idle for `idle_stop` while no orchestrator has probed
+them for `max(idle_stop, 10m)` (an offline control plane does not leave them
+running). The metadata service is not reachable from sessions (IMDSv2, hop
+limit 1). The caller's credentials need `ssm:PutParameter`/`DeleteParameter`.
 
 Do not use root or admin credentials. `deploy/aws/iam.yaml` creates the managed
 policies `cloudsourced-operator` (machines, images, artifacts, machine secrets)
@@ -393,11 +400,14 @@ directory); it ends with the session. The cache backend is WebDAV
   dependency volume is shared by the fleet's machines, so a new machine gets
   hits for everything an earlier one compiled. Keys are prefixed with the
   environment hash, so toolchains never mix.
-* A host agent may serve the cache itself (for example from S3 with the
-  instance role: `blobcache.S3StoreFromEnv`, `CLOUDSOURCED_SCCACHE_S3=bucket/cache/sccache`,
-  optional `CLOUDSOURCED_SCCACHE_TTL`) and pass `CLOUDSOURCED_SCCACHE_ENDPOINT`
-  to the machine server; the server appends the environment hash to that URL
-  (`blobcache.Handler` without a fixed namespace).
+* On AWS the host agent serves the cache itself on the Docker bridge
+  gateway (port 7480, reachable from sessions, not from outside the host)
+  from the stack's bucket with the instance role (`s3://<bucket>/cache/<owner>/sccache/`,
+  deleted after a day by the bucket lifecycle rule), and passes
+  `CLOUDSOURCED_SCCACHE_ENDPOINT` to the machine server; the server appends
+  the environment hash to that URL (`blobcache.Handler` without a fixed
+  namespace). `blobcache.S3StoreFromEnv` (`CLOUDSOURCED_SCCACHE_S3=bucket/prefix`)
+  offers the same store to other hosts.
 
 sccache cannot cache incremental compilations, which cargo uses for
 workspace crates in dev profiles; dependencies are cached regardless.
