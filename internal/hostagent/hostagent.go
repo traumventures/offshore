@@ -161,13 +161,13 @@ type Agent struct {
 	StateDir string
 	Docker   Runner
 	Log      *slog.Logger
-	Every    time.Duration       // lifecycle check interval
+	Every    time.Duration // lifecycle check interval
 	// InterruptEvery is the interruption poll interval (default 5s; spot
 	// notices come two minutes ahead).
 	InterruptEvery time.Duration
-	Shutdown func() error        // powers the host off (terminates the instance)
-	Now      func() time.Time    // for tests
-	Sleep    func(time.Duration) // for tests
+	Shutdown       func() error        // powers the host off (terminates the instance)
+	Now            func() time.Time    // for tests
+	Sleep          func(time.Duration) // for tests
 }
 
 func (a *Agent) now() time.Time {

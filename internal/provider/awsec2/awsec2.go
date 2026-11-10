@@ -495,8 +495,8 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	input := &ec2.RunInstancesInput{
 		ImageId:  aws.String(ami),
 		MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
-		UserData:                          aws.String(base64.StdEncoding.EncodeToString([]byte(ud))),
-		IamInstanceProfile:                &ec2types.IamInstanceProfileSpecification{Arn: aws.String(in.profile)},
+		UserData:           aws.String(base64.StdEncoding.EncodeToString([]byte(ud))),
+		IamInstanceProfile: &ec2types.IamInstanceProfileSpecification{Arn: aws.String(in.profile)},
 		// Shutting down at expiry terminates the instance; its spot
 		// request (if any) has expired by then and does not relaunch it.
 		InstanceInitiatedShutdownBehavior: ec2types.ShutdownBehaviorTerminate,

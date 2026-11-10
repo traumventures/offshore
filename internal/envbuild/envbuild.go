@@ -34,11 +34,11 @@ type Plan struct {
 	// Platform is the image platform of the repository's architecture
 	// (resources.arch), e.g. "linux/arm64".
 	Platform string
-	files      map[string]string // context path -> source file
-	tools      map[string]tool   // context path -> pinned release binary
-	baseDir    string
-	baseFile   string
-	baseTag    string
+	files    map[string]string // context path -> source file
+	tools    map[string]tool   // context path -> pinned release binary
+	baseDir  string
+	baseFile string
+	baseTag  string
 }
 
 // Resolve computes the environment hash and Dockerfile for a repository.

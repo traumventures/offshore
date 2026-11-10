@@ -94,25 +94,25 @@ type Pressure struct {
 
 // Machine is the scheduler's view of one machine.
 type Machine struct {
-	ID        string
-	Provider  string
-	EnvHash   string
-	Size      string
-	State     State
-	Draining  bool      // no new sessions; stop when empty
+	ID       string
+	Provider string
+	EnvHash  string
+	Size     string
+	State    State
+	Draining bool // no new sessions; stop when empty
 	// Interrupted machines are being taken away (spot interruption or
 	// rebalance notice): they drain and are never undrained, started or
 	// counted as capacity again.
 	Interrupted bool
-	Capacity  Resources // physical capacity
-	Reserved  Resources // sum of reservations of sessions and pending leases
-	Used      Resources // measured usage (best effort)
-	Pressure  Pressure
-	Sessions  int
-	WarmRepos []string  // repositories with an unexpired build cache
-	IdleSince time.Time // zero while sessions run
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	Capacity    Resources // physical capacity
+	Reserved    Resources // sum of reservations of sessions and pending leases
+	Used        Resources // measured usage (best effort)
+	Pressure    Pressure
+	Sessions    int
+	WarmRepos   []string  // repositories with an unexpired build cache
+	IdleSince   time.Time // zero while sessions run
+	CreatedAt   time.Time
+	ExpiresAt   time.Time
 }
 
 // Warm reports whether the machine holds a build cache for repo.

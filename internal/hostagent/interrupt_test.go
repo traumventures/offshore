@@ -15,7 +15,9 @@ type spotPlatform struct {
 	notice *machine.DrainNotice
 }
 
-func (p *spotPlatform) Interruption(context.Context) (*machine.DrainNotice, error) { return p.notice, nil }
+func (p *spotPlatform) Interruption(context.Context) (*machine.DrainNotice, error) {
+	return p.notice, nil
+}
 
 func TestInterruptionNoticeDrainsServer(t *testing.T) {
 	dir := t.TempDir()
