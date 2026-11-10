@@ -87,7 +87,7 @@ func userData(spec provider.MachineSpec, region, stack string, in *infra, binKey
 	w("chmod 755 %s", hostBinary)
 	// The agent creates the containers, starts them on every boot and
 	// enforces expiry and idle stop.
-	w(`cat > /etc/systemd/system/cloudsourced-host.service <<'EOF'
+	w(`cat > /etc/systemd/system/cloudsourced-supervisor.service <<'EOF'
 [Unit]
 Description=cloudsourced supervisor
 After=docker.service network-online.target
@@ -100,7 +100,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF`, hostBinary)
-	w("systemctl daemon-reload && systemctl enable --now cloudsourced-host.service")
+	w("systemctl daemon-reload && systemctl enable --now cloudsourced-supervisor.service")
 	w("echo cloudsourced machine %s handed to the supervisor", spec.ID)
 	return b.String(), nil
 }

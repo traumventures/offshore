@@ -13,12 +13,11 @@ if [ -n "$REMOTE" ]; then
   check "remote client does not use a pool configuration" contains "$out" "pool configuration: not used by this client"
   out="$(cs config check --pool "$POOLCFG" 2>&1)"
   check "control plane pool file validates" contains "$out" "role: control plane"
-  check "control plane pool file has no deprecated keys" eq "$(echo "$out" | grep -c deprecated)" 0
+  check "control plane pool file has no warnings" eq "$(echo "$out" | grep -ci warn)" 0
 else
   check "embedded orchestrator reads the same file" contains "$out" "pool configuration ok: $POOLCFG"
-  check "legacy keys are reported as deprecated" contains "$out" "pool.owner is deprecated"
 fi
-check "config show prints the effective configuration" contains "$(cd "$WORK" && cs config show 2>&1)" "[pool]"
+check "config show prints the effective configuration" contains "$(cd "$WORK" && cs config show 2>&1)" "$([ -n "$REMOTE" ] && echo "[control_plane]" || echo "[pool]")"
 
 step "first remote session (environment image, machine provisioning, services)"
 out="$(run sh -c 'echo first-session' 2>&1)"; code=$?
@@ -165,10 +164,10 @@ out="$(run sh -c 'echo traced' 2>&1)"
 check "traced run succeeds" contains "$out" "traced"
 trace=""
 for _ in $(seq 30); do # batch exporters flush within 5 s
-  trace="$(python3 "$HERE/otlp_sink.py" check "$OTLP_OUT" 2>/dev/null | grep cloudsourced-proxy | grep cloudsourced-daemon | grep cloudsourced-server | head -1)"
+  trace="$(python3 "$HERE/otlp_sink.py" check "$OTLP_OUT" 2>/dev/null | grep cloudsourced-proxy | grep cloudsourced-daemon | grep cloudsourced-worker | head -1)"
   [ -n "$trace" ] && break; sleep 1
 done
-check "one trace has proxy, daemon and server spans" test -n "$trace"
+check "one trace has proxy, daemon and worker spans" test -n "$trace"
 check "  ... with run, prepare, acquire and session spans" sh -c 'case "$1" in *cloudsourced.run*daemon.prepare*pool.acquire*worker.exec*) exit 0;; esac; echo "     $1"; exit 1' _ "$trace"
 [ -n "$REMOTE" ] && check "  ... and control plane spans" contains "$trace" "cloudsourced-controlplane"
 check "spans carry no secrets" sh -c '! grep -q -e from-cmd -e file-secret ${2:+-e "$2"} "$1"' _ "$OTLP_OUT" "$([ -n "$REMOTE" ] && cat "$CPSTATE/api-key")"

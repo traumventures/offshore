@@ -21,7 +21,7 @@ const (
 	BinaryPath    = "/opt/cloudsourced/bin/cloudsourced"
 	CacheDir      = "/cache"
 	DepsDir       = "/deps"
-	HostStatusDir = "/run/cloudsourced-host"
+	HostStatusDir = "/run/cloudsourced-supervisor"
 	// HostStatusEnv names the file the server publishes its status to for
 	// the supervisor (see HostStatus).
 	HostStatusEnv  = "CLOUDSOURCED_HOST_STATUS"

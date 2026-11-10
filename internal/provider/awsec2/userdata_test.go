@@ -47,7 +47,7 @@ func TestUserDataHasNoSecrets(t *testing.T) {
 	if hs.Params[paramSccache] != "bkt/cache/default/sccache" || hs.CompilerCache == nil || hs.CompilerCache.Port != sccachePort {
 		t.Fatalf("compiler cache %+v %v", hs.Params, hs.CompilerCache)
 	}
-	if !strings.Contains(ud, "systemctl enable --now cloudsourced-host.service") {
+	if !strings.Contains(ud, "systemctl enable --now cloudsourced-supervisor.service") {
 		t.Fatal("agent unit not started")
 	}
 }
