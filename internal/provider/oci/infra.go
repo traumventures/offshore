@@ -82,8 +82,31 @@ func (o *OCI) ensureInfra(ctx context.Context) (*infra, error) {
 			return nil, err
 		}
 	}
+	o.ensureLifecycle(ctx, in)
 	o.infra = in
 	return in, nil
+}
+
+// ensureLifecycle expires compiler cache objects and left-over secrets
+// after a day. It needs the objectstorage service policy of ensureIAM,
+// which may take a while to apply: failures are not fatal (the cache
+// store never serves objects older than a day), it is retried by the
+// next process.
+func (o *OCI) ensureLifecycle(ctx context.Context, in *infra) {
+	ns := in.namespace
+	// Compiler cache objects and left-over secrets expire after a day
+	// (needs the objectstorage service policy of ensureIAM).
+	_, err := o.objects.PutObjectLifecyclePolicy(ctx, objectstorage.PutObjectLifecyclePolicyRequest{
+		NamespaceName: common.String(ns), BucketName: common.String(o.bucket),
+		PutObjectLifecyclePolicyDetails: objectstorage.PutObjectLifecyclePolicyDetails{Items: []objectstorage.ObjectLifecycleRule{{
+			Name: common.String("expire-cache"), Action: common.String("DELETE"), TimeAmount: common.Int64(1),
+			TimeUnit: objectstorage.ObjectLifecycleRuleTimeUnitDays, IsEnabled: common.Bool(true),
+			ObjectNameFilter: &objectstorage.ObjectNameFilter{InclusionPrefixes: []string{"cache/", "secrets/"}},
+		}}},
+	})
+	if err != nil {
+		o.log.Warn("oci: bucket lifecycle policy (cache objects are not deleted automatically)", "err", err)
+	}
 }
 
 // ensureCompartment returns the compartment OCID: the compartment option
@@ -368,20 +391,6 @@ func (o *OCI) ensureBucket(ctx context.Context, compartment string) (string, err
 	}})
 	if err != nil && !conflict(err) {
 		return "", fmt.Errorf("oci: create bucket %s: %w", o.bucket, err)
-	}
-	// Compiler cache objects and left-over secrets expire after a day
-	// (needs the objectstorage service policy of ensureIAM).
-	_, err = o.objects.PutObjectLifecyclePolicy(ctx, objectstorage.PutObjectLifecyclePolicyRequest{
-		NamespaceName: common.String(ns), BucketName: common.String(o.bucket),
-		PutObjectLifecyclePolicyDetails: objectstorage.PutObjectLifecyclePolicyDetails{Items: []objectstorage.ObjectLifecycleRule{{
-			Name: common.String("expire-cache"), Action: common.String("DELETE"), TimeAmount: common.Int64(1),
-			TimeUnit: objectstorage.ObjectLifecycleRuleTimeUnitDays, IsEnabled: common.Bool(true),
-			ObjectNameFilter: &objectstorage.ObjectNameFilter{InclusionPrefixes: []string{"cache/", "secrets/"}},
-		}}},
-	})
-	if err != nil {
-		// Not fatal: the cache store never serves objects older than a day.
-		o.log.Warn("oci: bucket lifecycle policy (cache objects are not deleted automatically)", "err", err)
 	}
 	return ns, nil
 }

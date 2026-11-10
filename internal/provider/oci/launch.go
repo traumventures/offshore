@@ -84,8 +84,8 @@ func applyAttempt(d *core.LaunchInstanceDetails, a attempt, spec provider.Machin
 	for k, v := range d.FreeformTags {
 		tags[k] = v
 	}
-	tags[provider.LabelMarket] = a.market()
-	tags[provider.LabelSpot] = strconv.FormatBool(a.spot)
+	setLabel(tags, provider.LabelMarket, a.market())
+	setLabel(tags, provider.LabelSpot, strconv.FormatBool(a.spot))
 	d.FreeformTags = tags
 }
 

@@ -82,7 +82,7 @@ func TestLaunchFallsBackOnCapacity(t *testing.T) {
 	var tried []string
 	run := func(_ context.Context, req core.LaunchInstanceRequest) (core.LaunchInstanceResponse, error) {
 		d := req.LaunchInstanceDetails
-		a := *d.Shape + "/" + d.FreeformTags[provider.LabelMarket]
+		a := *d.Shape + "/" + labels(d.FreeformTags)[provider.LabelMarket]
 		tried = append(tried, a)
 		if d.PreemptibleInstanceConfig != nil {
 			return core.LaunchInstanceResponse{}, svcErr{500, "InternalError", "Out of host capacity."}
@@ -117,11 +117,11 @@ func TestPreemptibleAttempt(t *testing.T) {
 	if !ok || pa.PreserveBootVolume == nil || *pa.PreserveBootVolume {
 		t.Errorf("preemption action %+v", d.PreemptibleInstanceConfig)
 	}
-	if d.FreeformTags[provider.LabelSpot] != "true" {
+	if labels(d.FreeformTags)[provider.LabelSpot] != "true" {
 		t.Errorf("tags %v", d.FreeformTags)
 	}
 	applyAttempt(&d, attempt{shape: "VM.Standard.A1.Flex"}, spotSpec())
-	if d.PreemptibleInstanceConfig != nil || d.FreeformTags[provider.LabelSpot] != "false" {
+	if d.PreemptibleInstanceConfig != nil || labels(d.FreeformTags)[provider.LabelSpot] != "false" {
 		t.Error("an on-demand attempt must clear the preemptible config")
 	}
 }
@@ -143,10 +143,20 @@ func TestCapacityError(t *testing.T) {
 func TestToMachine(t *testing.T) {
 	spec := provider.MachineSpec{ID: "m1", Owner: "pool", EnvHash: "eh", CPU: 4, Memory: 8 << 30, Finger: "fp", Size: "x4",
 		ExpiresAt: time.Unix(2_000_000_000, 0)}
-	tags := machineTags(spec, "amd64", time.Unix(1_900_000_000, 0))
-	for k := range tags {
-		if strings.Contains(k, ".") {
-			t.Errorf("tag key %q contains a dot", k)
+	tags, err := machineTags(spec, "amd64", time.Unix(1_900_000_000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d core.LaunchInstanceDetails
+	d.FreeformTags = tags
+	applyAttempt(&d, attempt{shape: "VM.Standard.E5.Flex"}, spec)
+	tags = d.FreeformTags
+	if len(tags) > 10 {
+		t.Errorf("%d tags, OCI allows 10", len(tags))
+	}
+	for k, v := range tags {
+		if strings.Contains(k, ".") || len(v) > maxTagSize {
+			t.Errorf("tag %q=%q", k, v)
 		}
 	}
 	i := core.Instance{Id: common.String("ocid1.instance"), Shape: common.String("VM.Standard.E5.Flex"),
@@ -156,7 +166,8 @@ func TestToMachine(t *testing.T) {
 	}
 	m := toMachine(i, "203.0.113.7")
 	if m.ID != "m1" || m.State != provider.Running || m.Addr != "203.0.113.7:7443" || m.EnvHash != "eh" || m.CPU != 4 ||
-		m.Memory != 8<<30 || !m.ExpiresAt.Equal(spec.ExpiresAt) || m.Labels[provider.LabelPool] != "pool" || m.Labels["instance-id"] != "ocid1.instance" {
+		m.Memory != 8<<30 || !m.ExpiresAt.Equal(spec.ExpiresAt) || m.Labels[provider.LabelPool] != "pool" || m.Labels["instance-id"] != "ocid1.instance" ||
+		m.Labels[provider.LabelSize] != "x4" || m.Labels[provider.LabelMarket] != "on-demand" {
 		t.Errorf("machine %+v", m)
 	}
 	i.LifecycleState = core.InstanceLifecycleStateStopped

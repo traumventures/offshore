@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -437,8 +438,24 @@ func deref(s *string) string {
 
 // --- machines ---
 
+// OCI allows at most 10 freeform tags, with keys without dots. The
+// labels that select instances (pool, machine, kind) and identify their
+// content (env hash, fingerprint) are tags of their own, keyed
+// "cloudsourced_pool" etc.; the others are packed into one tag
+// (specTag: "size=x4,arch=amd64,...").
+const (
+	specTag    = project + "_spec"
+	maxTagSize = 256
+)
+
+// ownTags are the labels kept as tags of their own.
+var ownTags = map[string]bool{
+	provider.LabelPool: true, provider.LabelMachine: true, provider.LabelKind: true,
+	provider.LabelEnvHash: true, provider.LabelFinger: true,
+}
+
 // tagKey maps a label to a freeform tag key ("cloudsourced.pool" becomes
-// "cloudsourced_pool"; OCI tag keys avoid dots), labelKey back.
+// "cloudsourced_pool"), labelKey back.
 func tagKey(label string) string {
 	if rest, ok := strings.CutPrefix(label, project+"."); ok {
 		return project + "_" + rest
@@ -453,29 +470,83 @@ func labelKey(tag string) string {
 	return tag
 }
 
+// setLabel sets a label in an instance's freeform tags.
+func setLabel(tags map[string]string, label, value string) {
+	if ownTags[label] || !strings.HasPrefix(label, project+".") {
+		tags[tagKey(label)] = value
+		return
+	}
+	m := parseSpecTag(tags[specTag])
+	m[strings.TrimPrefix(label, project+".")] = value
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(k + "=" + m[k])
+	}
+	tags[specTag] = b.String()
+}
+
+func parseSpecTag(v string) map[string]string {
+	m := map[string]string{}
+	for _, kv := range strings.Split(v, ",") {
+		if k, val, ok := strings.Cut(kv, "="); ok {
+			m[k] = val
+		}
+	}
+	return m
+}
+
+// labels returns the labels of an instance's freeform tags.
+func labels(tags map[string]string) map[string]string {
+	l := map[string]string{}
+	for k, v := range tags {
+		if k == specTag {
+			for sk, sv := range parseSpecTag(v) {
+				l[project+"."+sk] = sv
+			}
+			continue
+		}
+		l[labelKey(k)] = v
+	}
+	return l
+}
+
 func unix(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
 
 // machineTags are the freeform tags of a machine's instance.
-func machineTags(spec provider.MachineSpec, arch string, now time.Time) map[string]string {
-	l := map[string]string{
-		tagProject:              project,
-		provider.LabelPool:      spec.Owner,
-		provider.LabelMachine:   spec.ID,
-		provider.LabelKind:      "machine",
-		provider.LabelEnvHash:   spec.EnvHash,
-		provider.LabelCreatedAt: unix(now),
-		provider.LabelExpiresAt: unix(spec.ExpiresAt),
-		provider.LabelCPU:       strconv.FormatFloat(spec.CPU, 'f', -1, 64),
-		provider.LabelMemory:    strconv.FormatInt(spec.Memory, 10),
-		provider.LabelFinger:    spec.Finger,
-		provider.LabelSize:      spec.Size,
-		provider.LabelArch:      arch,
+func machineTags(spec provider.MachineSpec, arch string, now time.Time) (map[string]string, error) {
+	t := map[string]string{tagProject: project}
+	for _, kv := range [][2]string{
+		{provider.LabelPool, spec.Owner},
+		{provider.LabelMachine, spec.ID},
+		{provider.LabelKind, "machine"},
+		{provider.LabelEnvHash, spec.EnvHash},
+		{provider.LabelCreatedAt, unix(now)},
+		{provider.LabelExpiresAt, unix(spec.ExpiresAt)},
+		{provider.LabelCPU, strconv.FormatFloat(spec.CPU, 'f', -1, 64)},
+		{provider.LabelMemory, strconv.FormatInt(spec.Memory, 10)},
+		{provider.LabelFinger, spec.Finger},
+		{provider.LabelSize, spec.Size},
+		{provider.LabelArch, arch},
+	} {
+		if strings.ContainsAny(kv[1], ",=") && !ownTags[kv[0]] {
+			return nil, fmt.Errorf("oci: label %s value %q contains ',' or '='", kv[0], kv[1])
+		}
+		setLabel(t, kv[0], kv[1])
 	}
-	t := make(map[string]string, len(l))
-	for k, v := range l {
-		t[tagKey(k)] = v
+	for k, v := range t {
+		if len(v) > maxTagSize-32 { // room for market and spot
+			return nil, fmt.Errorf("oci: tag %s too long (%d characters)", k, len(v))
+		}
 	}
-	return t
+	return t, nil
 }
 
 // secretObject is the object holding a machine's secret environment until
@@ -508,6 +579,10 @@ func (o *OCI) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	if len(ud) > 16000 {
 		return provider.Machine{}, fmt.Errorf("oci: user data too large (%d bytes)", len(ud))
 	}
+	tags, err := machineTags(spec, arch, time.Now())
+	if err != nil {
+		return provider.Machine{}, err
+	}
 	base := core.LaunchInstanceDetails{
 		AvailabilityDomain: common.String(in.ad),
 		CompartmentId:      common.String(in.compartment),
@@ -519,7 +594,7 @@ func (o *OCI) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 		// Metadata service v2 only (requests need the Authorization
 		// header; containers are cut off from it, see userData).
 		InstanceOptions: &core.InstanceOptions{AreLegacyImdsEndpointsDisabled: common.Bool(true)},
-		FreeformTags:    machineTags(spec, arch, time.Now()),
+		FreeformTags:    tags,
 	}
 	// The secret environment goes through Object Storage: the supervisor
 	// reads it with the instance principal and deletes it.
@@ -629,10 +704,7 @@ func selected(i core.Instance, owner, machine string) bool {
 
 // toMachine maps an instance (and its public address, "" if unknown).
 func toMachine(i core.Instance, publicIP string) provider.Machine {
-	l := map[string]string{}
-	for k, v := range i.FreeformTags {
-		l[labelKey(k)] = v
-	}
+	l := labels(i.FreeformTags)
 	m := provider.Machine{ID: l[provider.LabelMachine], EnvHash: l[provider.LabelEnvHash], Labels: l, Fingerprint: l[provider.LabelFinger]}
 	l["instance-id"] = deref(i.Id)
 	l["shape"] = deref(i.Shape)

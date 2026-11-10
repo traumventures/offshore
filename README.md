@@ -402,6 +402,68 @@ time; restarts and removals that happened while the daemon or control plane
 was not running are not visible, and provider billing granularity is
 ignored.
 
+### Oracle Cloud Infrastructure (OCI)
+
+```toml
+[providers.oci]
+type        = "oci"
+profile     = "DEFAULT"            # ~/.oci/config profile (config_file overrides the path)
+region      = "eu-frankfurt-1"     # default: the profile's region
+compartment = "cloudsourced"       # name below the tenancy root (created) or an OCID
+allow_cidrs = ["203.0.113.4/32"]   # who may reach machines (QUIC, UDP 7443); default: own public IP
+disk_gb     = 100                  # boot volume (min 50)
+docker_command = ["docker"]        # builds and pushes environment images
+
+[[providers.oci.size]]
+name           = "e5-4"
+cpu            = 4                 # vCPUs: 2 OCPUs on x86 shapes, 4 on Ampere A1
+memory         = "16G"
+price_per_hour = 0.11
+instance_types = ["VM.Standard.E5.Flex"]   # shapes, tried in order (default: E5.Flex, A1.Flex for arm64)
+
+[[providers.oci.size]]
+name           = "a1-4-preemptible"
+arch           = "arm64"
+cpu            = 4
+memory         = "24G"
+price_per_hour = 0.07
+spot           = true              # preemptible capacity
+```
+
+On first use the provider creates, idempotently: the compartment, a VCN
+`cloudsourced` (10.77.0.0/16) with internet gateway, default route and one
+public subnet, whose security list admits only UDP 7443 from `allow_cidrs`
+(no SSH); a private Object Storage bucket `cloudsourced` (server binaries,
+machine secrets, compiler cache below `cache/`, expired after a day by a
+lifecycle rule); a container repository `cloudsourced-env` in OCIR; and a
+dynamic group of the compartment's instances with a policy that lets them
+stop and terminate instances of the compartment, use the bucket and pull
+images (`iam = false` skips the IAM part when the API user may not manage
+it; an administrator then creates the dynamic group and the policy from
+`policyStatements` in `internal/provider/oci/infra.go`). Options `subnet`,
+`availability_domain`, `image`/`image_arm64`, `bucket`, `repository` and
+`registry` override the defaults.
+
+Machines boot the newest Oracle Linux 9 platform image, install Docker CE and
+run the same supervisor and container layout as on AWS. Flexible shapes are
+sized from the size's `cpu` (one OCPU is two vCPUs on x86, one core on A1)
+and `memory`. The machine's secrets travel in the object `secrets/<id>.json`,
+which the supervisor reads once with its instance principal and deletes;
+user data holds only the public spec and a read-only pre-authenticated link
+to the server binary. Containers cannot reach the metadata service (the
+supervisor unit rejects forwarded traffic to 169.254.0.0/16). Images are
+pushed with a registry token of the API key (`docker login -u BEARER_TOKEN`),
+and machines pull with a token of their instance principal.
+
+Differences to AWS: an OS shutdown only stops an OCI instance, so at
+`max_lifetime` the supervisor terminates its instance through the API; there
+is no reaper function. `spot = true` launches preemptible instances, which
+OCI terminates on preemption without notice to drain on and which cannot be
+stopped: idle stop terminates them. Shapes are tried preemptible first, then
+(with `spot_fallback`) on regular capacity; "Out of host capacity", service
+limit and unavailable-shape errors move on to the next attempt. A live smoke
+test is in `internal/orchestrator/ocismoke_test.go` (build tag `ocismoke`).
+
 ### Output FUSE
 
 By default only `eager` outputs come back after a run; `cloudsourced fetch`
