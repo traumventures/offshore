@@ -536,8 +536,12 @@ func (s *Server) serveSync(ctx context.Context, conn *quic.Conn, pc *proto.Conn)
 		if err := proto.Decode(t, payload, proto.TDelta, &d); err != nil {
 			return err
 		}
+		t0 := time.Now()
 		p.Apply(d)
 		p.Settle()
+		if dt := time.Since(t0); dt > 5*time.Second {
+			s.log.Warn("slow manifest apply", "root", root, "version", d.Version, "duration", dt.Round(time.Millisecond))
+		}
 		if err := pc.Send(proto.TAck, proto.Ack{Version: p.Version()}); err != nil {
 			return err
 		}

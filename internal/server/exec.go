@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -113,6 +114,14 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		}
 		if err := p.WaitVersion(bctx, v); err != nil {
 			cancel()
+			if bctx.Err() != nil && ctx.Err() == nil {
+				// Diagnostics for a stalled sync stream (seen rarely under
+				// extreme host load): where are the sync loop and the
+				// FUSE handlers stuck?
+				buf := make([]byte, 256<<10)
+				buf = buf[:runtime.Stack(buf, true)]
+				s.log.Warn("manifest barrier timed out", "root", root, "want", v, "have", p.Version(), "goroutines", string(buf))
+			}
 			return prepErr(err)
 		}
 	}
