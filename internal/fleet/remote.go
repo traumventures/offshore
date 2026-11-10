@@ -33,12 +33,13 @@ var _ Fleet = (*Remote)(nil)
 
 // NewRemote connects to the control plane at baseURL. A non-empty
 // fingerprint pins its (self-signed) certificate instead of using the
-// system certificate authorities.
-func NewRemote(baseURL, fingerprint, apiKey string) (*Remote, error) {
+// system certificate authorities. Client certificates are presented to
+// control planes that require mutual TLS.
+func NewRemote(baseURL, fingerprint, apiKey string, clientCerts ...tls.Certificate) (*Remote, error) {
 	if _, err := url.Parse(baseURL); err != nil {
 		return nil, err
 	}
-	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+	tc := &tls.Config{MinVersion: tls.VersionTLS12, Certificates: clientCerts}
 	if fingerprint != "" {
 		want := strings.ToLower(strings.TrimPrefix(fingerprint, "sha256:"))
 		tc.InsecureSkipVerify = true // replaced by fingerprint pinning

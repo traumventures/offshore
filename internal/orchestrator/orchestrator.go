@@ -5,6 +5,7 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/traumventures/cloudsourced/internal/auth"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
@@ -56,8 +58,10 @@ type Lease struct {
 	MachineID   string
 	Addr        string
 	Fingerprint string
-	Token       string
-	Grant       scheduler.Grant
+	// Token is a session token signed by the control plane, valid only for
+	// this lease on this machine until shortly after the machine expires.
+	Token string
+	Grant scheduler.Grant
 	// MemoryOvercommit is the fleet's memory overcommit factor; the server
 	// uses it as admission safety net.
 	MemoryOvercommit float64
@@ -67,7 +71,6 @@ type Lease struct {
 type Machine struct {
 	provider.Machine
 	Provider string // name of the provider instance
-	Token    string
 	Status   *proto.Status
 	StatusAt time.Time
 	Draining bool
@@ -87,17 +90,14 @@ type creation struct {
 	at   time.Time
 }
 
-type secret struct {
-	Token       string `json:"token"`
-	Fingerprint string `json:"fingerprint"`
-}
-
 // Orchestrator manages one owner's fleet.
 type Orchestrator struct {
 	cfg      Config
 	provs    map[string]provider.Provider // by provider instance name
 	stateDir string
 	log      *slog.Logger
+	master   auth.Master
+	signer   ed25519.PrivateKey
 
 	mu         sync.Mutex
 	policy     scheduler.Policy
@@ -130,12 +130,16 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 	if len(provs) == 0 {
 		return nil, errors.New("orchestrator: no providers")
 	}
-	if err := os.MkdirAll(filepath.Join(stateDir, "machines"), 0o700); err != nil {
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, err
+	}
+	master, err := auth.LoadMaster(stateDir)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: fleet master key: %w", err)
 	}
 	fixConfig(&cfg)
 	o := &Orchestrator{
-		cfg: cfg, provs: provs, stateDir: stateDir, log: log,
+		cfg: cfg, provs: provs, stateDir: stateDir, log: log, master: master, signer: master.Signer(),
 		policy:   scheduler.Default{Cfg: cfg.Policy},
 		machines: map[string]*Machine{}, creating: map[string]creation{}, queue: map[string]scheduler.Task{},
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
@@ -180,18 +184,42 @@ func (o *Orchestrator) notify() {
 	o.changed = make(chan struct{})
 }
 
-func (o *Orchestrator) secretPath(id string) string {
-	return filepath.Join(o.stateDir, "machines", id+".json")
+// fingerprint returns the certificate fingerprint of a machine, recomputed
+// from the master key so that provider labels need not be trusted. Machines
+// without an expiry fall back to their label.
+func (o *Orchestrator) fingerprint(m provider.Machine) string {
+	if m.ExpiresAt.IsZero() {
+		return m.Fingerprint
+	}
+	fp, err := o.master.MachineFingerprint(m.ID, m.ExpiresAt)
+	if err != nil {
+		return m.Fingerprint
+	}
+	if m.Fingerprint != "" && m.Fingerprint != fp {
+		o.log.Debug("machine fingerprint label differs from derived identity", "id", m.ID)
+	}
+	return fp
 }
 
-func (o *Orchestrator) loadSecret(id string) (secret, error) {
-	var s secret
-	b, err := os.ReadFile(o.secretPath(id))
-	if err != nil {
-		return s, err
+// probeToken mints a short-lived token that only reads a machine's status.
+func (o *Orchestrator) probeToken(machineID string) string {
+	return auth.NewToken(o.signer, auth.ScopeProbe, machineID, "", time.Now().Add(2*time.Minute))
+}
+
+// sessionToken mints the token of a lease. It lives as long as the machine
+// (builds may be long) but is bound to the lease.
+func (o *Orchestrator) sessionToken(m provider.Machine, leaseID string) string {
+	until := m.ExpiresAt.Add(time.Hour)
+	if m.ExpiresAt.IsZero() {
+		until = time.Now().Add(24 * time.Hour)
 	}
-	err = json.Unmarshal(b, &s)
-	return s, err
+	return auth.NewToken(o.signer, auth.ScopeSession, m.ID, leaseID, until)
+}
+
+// AdminToken mints a token with every permission on a machine (operator
+// use; the orchestrator itself never needs one).
+func (o *Orchestrator) AdminToken(machineID string, ttl time.Duration) string {
+	return auth.NewToken(o.signer, auth.ScopeAdmin, machineID, "", time.Now().Add(ttl))
 }
 
 func (o *Orchestrator) recentPath() string { return filepath.Join(o.stateDir, "recent-envs.json") }
@@ -254,19 +282,17 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		m, ok := o.machines[pm.ID]
 		if !ok {
 			m = &Machine{Provider: tm.prov, pending: map[string]pendingLease{}}
-			if s, err := o.loadSecret(pm.ID); err == nil {
-				m.Token = s.Token
-			}
 			o.machines[pm.ID] = m
 		}
 		if m.State == provider.Running && pm.State != provider.Running {
 			down = append(down, pm.ID)
 		}
+		pm.Fingerprint = o.fingerprint(pm)
 		m.Machine = pm
 		if pm.State != provider.Running {
 			m.Status = nil
 		}
-		if pm.State == provider.Running && pm.Addr != "" && m.Token != "" {
+		if pm.State == provider.Running && pm.Addr != "" {
 			wg.Add(1)
 			go func(id, addr, fp, token string) {
 				defer wg.Done()
@@ -276,7 +302,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 					return
 				}
 				results <- probe{id, &st}
-			}(pm.ID, pm.Addr, pm.Fingerprint, m.Token)
+			}(pm.ID, pm.Addr, pm.Fingerprint, o.probeToken(pm.ID))
 		}
 	}
 	for id := range o.machines {
@@ -376,7 +402,7 @@ func (o *Orchestrator) fleetLocked(now time.Time) scheduler.Fleet {
 			CreatedAt: m.CreatedAt, ExpiresAt: m.ExpiresAt,
 		}
 		switch {
-		case m.State == provider.Running && m.Status != nil && m.Status.Ready && m.Addr != "" && m.Token != "":
+		case m.State == provider.Running && m.Status != nil && m.Status.Ready && m.Addr != "":
 			sm.State = scheduler.Running
 		case m.State == provider.Running || m.State == provider.Starting:
 			sm.State = scheduler.Starting
@@ -469,7 +495,10 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 		switch pl.Kind {
 		case scheduler.Assign:
 			m := o.machines[pl.Machine]
-			lease := Lease{ID: task.ID, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: m.Token, Grant: pl.Grant, MemoryOvercommit: o.cfg.Policy.MemoryOvercommit}
+			lease := Lease{
+				ID: task.ID, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: o.sessionToken(m.Machine, task.ID),
+				Grant: pl.Grant, MemoryOvercommit: o.cfg.Policy.MemoryOvercommit,
+			}
 			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: time.Now().Add(2 * time.Minute)}
 			o.mu.Unlock()
 			return lease, nil
@@ -619,7 +648,6 @@ func (o *Orchestrator) destroyMachine(ctx context.Context, id, reason string) {
 		o.log.Error("destroy", "id", id, "err", err)
 		return
 	}
-	os.Remove(o.secretPath(id))
 	o.mu.Lock()
 	delete(o.machines, id)
 	o.mu.Unlock()
@@ -680,16 +708,14 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	cfg := o.cfg
 	services := o.services[envHash]
 	o.mu.Unlock()
-	ident, err := transport.NewIdentity("cs-"+id, cfg.MaxLifetime)
+	// Whole seconds: the expiry travels as Unix seconds and is an input of
+	// the derived certificate.
+	expires := time.Unix(time.Now().Add(cfg.MaxLifetime).Unix(), 0)
+	seed := o.master.MachineSeed(id)
+	ident, err := auth.MachineIdentity(seed, id, expires)
 	if err != nil {
 		return err
 	}
-	token := newID(32)
-	b, _ := json.Marshal(secret{Token: token, Fingerprint: ident.Fingerprint})
-	if err := os.WriteFile(o.secretPath(id), b, 0o600); err != nil {
-		return err
-	}
-	expires := time.Now().Add(cfg.MaxLifetime)
 	provision, _ := json.Marshal(cfg.Provision)
 	spec := provider.MachineSpec{
 		ID: id, Owner: cfg.Owner, Image: image, EnvHash: envHash, Size: size.Name,
@@ -703,11 +729,11 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 			"CLOUDSOURCED_CPU":        strconv.FormatFloat(size.Capacity.CPU, 'f', -1, 64),
 			"CLOUDSOURCED_MEMORY":     strconv.FormatInt(size.Capacity.Memory, 10),
 			"CLOUDSOURCED_PROVISION":  string(provision),
+			auth.EnvSignerPub:         o.master.SignerPublic(),
+			auth.EnvFingerprint:       ident.Fingerprint,
 		},
 		SecretEnv: map[string]string{
-			"CLOUDSOURCED_TOKEN": token,
-			"CLOUDSOURCED_CERT":  ident.CertPEM,
-			"CLOUDSOURCED_KEY":   ident.KeyPEM,
+			auth.EnvTLSSeed: auth.EncodeKey(seed),
 		},
 	}
 	if cfg.BuildTTL > 0 {
@@ -715,23 +741,21 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	}
 	prov, ok := o.provs[size.Provider]
 	if !ok {
-		os.Remove(o.secretPath(id))
 		return fmt.Errorf("size %s: unknown provider %q", size.Name, size.Provider)
 	}
 	if o.EnsureImage != nil {
 		if err := o.EnsureImage(ctx, prov, envHash); err != nil {
-			os.Remove(o.secretPath(id))
 			return err
 		}
 	}
 	o.log.Info("creating machine", "id", id, "provider", size.Provider, "size", size.Name, "env", envHash[:min(12, len(envHash))], "image", image)
 	m, err := prov.Create(ctx, spec)
 	if err != nil {
-		os.Remove(o.secretPath(id))
 		return err
 	}
+	m.Fingerprint = ident.Fingerprint
 	o.mu.Lock()
-	o.machines[id] = &Machine{Machine: m, Provider: size.Provider, Token: token, pending: map[string]pendingLease{}}
+	o.machines[id] = &Machine{Machine: m, Provider: size.Provider, pending: map[string]pendingLease{}}
 	o.mu.Unlock()
 	return o.waitReady(ctx, id)
 }
@@ -783,20 +807,16 @@ func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 				if pm.State == provider.Stopped || pm.State == provider.Failed {
 					return fmt.Errorf("machine %s stopped during startup", id)
 				}
+				pm.Fingerprint = o.fingerprint(pm)
 				o.mu.Lock()
-				m := o.machines[id]
-				if m != nil {
+				if m := o.machines[id]; m != nil {
 					m.Machine = pm
 				}
-				token := ""
-				if m != nil {
-					token = m.Token
-				}
 				o.mu.Unlock()
-				if pm.Addr == "" || token == "" {
+				if pm.Addr == "" {
 					continue
 				}
-				st, err := o.ProbeFunc(ctx, pm.Addr, pm.Fingerprint, token)
+				st, err := o.ProbeFunc(ctx, pm.Addr, pm.Fingerprint, o.probeToken(id))
 				if err == nil {
 					o.mu.Lock()
 					if m := o.machines[id]; m != nil {
@@ -827,7 +847,6 @@ func (o *Orchestrator) Snapshot() []Machine {
 	var out []Machine
 	for _, m := range o.machines {
 		c := *m
-		c.Token = ""
 		c.pending = nil
 		out = append(out, c)
 	}
@@ -922,7 +941,6 @@ func (o *Orchestrator) DestroyAll(ctx context.Context) error {
 			if err := p.Destroy(ctx, m.ID); err != nil {
 				return fmt.Errorf("provider %s: %w", name, err)
 			}
-			os.Remove(o.secretPath(m.ID))
 		}
 		vols, err := p.Volumes(ctx, o.cfg.Owner)
 		if err != nil {

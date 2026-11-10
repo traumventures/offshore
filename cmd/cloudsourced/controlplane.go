@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,7 @@ func controlplane(args []string) error {
 	certFile := fs.String("tls-cert", "", "TLS certificate (PEM); default: self-signed, pinned by fingerprint")
 	keyFile := fs.String("tls-key", "", "TLS private key (PEM)")
 	plain := fs.Bool("insecure-http", false, "serve plain HTTP (only behind a TLS terminating proxy)")
+	clientCA := fs.String("client-ca", "", "require client certificates signed by this CA (PEM) in addition to the API key (mutual TLS)")
 	keyPath := fs.String("api-key-file", "", "file with the API key (default $CLOUDSOURCED_API_KEY or a generated <state>/api-key)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -65,7 +67,23 @@ func controlplane(args []string) error {
 		return err
 	}
 	srv.Reload = config.LoadUser
-	hs := &http.Server{Addr: *listen, Handler: srv, ReadHeaderTimeout: 30 * time.Second}
+	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+	if *clientCA != "" {
+		if *plain {
+			return errors.New("--client-ca needs TLS (drop --insecure-http)")
+		}
+		pem, err := os.ReadFile(*clientCA)
+		if err != nil {
+			return err
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return fmt.Errorf("--client-ca %s: no certificates found", *clientCA)
+		}
+		tc.ClientCAs = pool
+		tc.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	hs := &http.Server{Addr: *listen, Handler: srv, ReadHeaderTimeout: 30 * time.Second, TLSConfig: tc}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	go local.Run(ctx, 15*time.Second)
@@ -80,6 +98,9 @@ func controlplane(args []string) error {
 		version, *listen, config.UserConfigPath(), dir, strings.Join(u.ProviderNames(), ", "))
 	if generated {
 		fmt.Fprintf(os.Stderr, "  api key:     %s (generated, stored in %s)\n", apiKey, filepath.Join(dir, "api-key"))
+	}
+	if *clientCA != "" {
+		fmt.Fprintf(os.Stderr, "  client auth: mutual TLS, CA %s\n", *clientCA)
 	}
 	switch {
 	case *plain:
@@ -97,7 +118,7 @@ func controlplane(args []string) error {
 		if cerr != nil {
 			return cerr
 		}
-		hs.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+		tc.Certificates = []tls.Certificate{cert}
 		fmt.Fprintf(os.Stderr, "  tls:         self-signed, fingerprint %s\n", id.Fingerprint)
 		err = hs.ListenAndServeTLS("", "")
 	}

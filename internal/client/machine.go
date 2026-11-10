@@ -20,11 +20,12 @@ import (
 // machineConn is the daemon's long-lived connection to one machine. It
 // carries one sync stream per attached root and serves blob requests.
 type machineConn struct {
-	id, addr, fingerprint, token string
-	d                            *Daemon
-	log                          *slog.Logger
+	id, addr, fingerprint string
+	d                     *Daemon
+	log                   *slog.Logger
 
 	mu    sync.Mutex
+	token string // session token of the newest lease on this machine
 	conn  *quic.Conn
 	roots map[string]*rootSync
 }
@@ -91,6 +92,11 @@ func (d *Daemon) machineConn(ctx context.Context, id, addr, fingerprint, token s
 		d.conns[id] = mc
 	}
 	d.mu.Unlock()
+	// Sync streams use the newest lease's session token (tokens are bound
+	// to a lease; an old one would outlive its lease's purpose).
+	mc.mu.Lock()
+	mc.token = token
+	mc.mu.Unlock()
 	return mc, mc.ensureConn(ctx)
 }
 
@@ -160,12 +166,12 @@ func (mc *machineConn) attach(ctx context.Context, r *root, workerLocal []string
 		}
 		delete(mc.roots, r.path)
 	}
-	conn := mc.conn
+	conn, token := mc.conn, mc.token
 	rs := &rootSync{mc: mc, root: r, wake: make(chan struct{}, 1), ackCh: make(chan struct{})}
 	mc.roots[r.path] = rs
 	mc.mu.Unlock()
 
-	st, pc, err := transport.OpenStream(ctx, conn, mc.token, proto.KindSync)
+	st, pc, err := transport.OpenStream(ctx, conn, token, proto.KindSync)
 	if err != nil {
 		rs.stop(err)
 		return nil, err

@@ -37,6 +37,11 @@ type Orchestrator struct {
 	Fingerprint string `toml:"fingerprint"`
 	// APIKey is a reference (env:VAR, file:PATH, cmd:COMMAND) to the API key.
 	APIKey string `toml:"api_key"`
+	// ClientCert and ClientKey are PEM files of a client certificate for
+	// control planes that require mutual TLS (--client-ca). Relative paths
+	// are relative to the configuration file.
+	ClientCert string `toml:"client_cert"`
+	ClientKey  string `toml:"client_key"`
 }
 
 // Fleet configures machine provisioning and scaling.
@@ -232,6 +237,12 @@ func (u *User) Validate() error {
 		}
 		if o.Fingerprint != "" && !strings.HasPrefix(o.URL, "https://") {
 			errs = append(errs, "orchestrator.fingerprint: requires an https URL")
+		}
+		if (o.ClientCert == "") != (o.ClientKey == "") {
+			errs = append(errs, "orchestrator.client_cert and client_key must be set together")
+		}
+		if o.ClientCert != "" && !strings.HasPrefix(o.URL, "https://") {
+			errs = append(errs, "orchestrator.client_cert: requires an https URL")
 		}
 	default:
 		errs = append(errs, fmt.Sprintf("orchestrator.mode: unsupported %q (embedded, remote)", o.Mode))

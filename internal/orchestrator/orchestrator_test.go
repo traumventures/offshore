@@ -22,6 +22,8 @@ type fakeProvider struct {
 	status    map[string]*proto.Status
 	volumes   map[string]provider.Volume
 	created   int
+	specs     []provider.MachineSpec
+	tokens    []string // tokens seen by probe
 	destroyed []string
 	stopped   []string
 }
@@ -42,6 +44,7 @@ func (f *fakeProvider) Create(_ context.Context, s provider.MachineSpec) (provid
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.created++
+	f.specs = append(f.specs, s)
 	m := &provider.Machine{ID: s.ID, State: provider.Running, Addr: f.name + "-" + s.ID, EnvHash: s.EnvHash, CPU: s.CPU, Memory: s.Memory,
 		CreatedAt: time.Now(), ExpiresAt: s.ExpiresAt, Fingerprint: s.Finger}
 	f.machines[s.ID] = m
@@ -103,9 +106,10 @@ func (f *fakeProvider) DeleteVolume(_ context.Context, name string) error {
 	return nil
 }
 
-func (f *fakeProvider) probe(_ context.Context, addr, _, _ string) (proto.Status, error) {
+func (f *fakeProvider) probe(_ context.Context, addr, _, token string) (proto.Status, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.tokens = append(f.tokens, token)
 	for id, m := range f.machines {
 		if m.Addr == addr && m.State == provider.Running {
 			return *f.status[id], nil
@@ -210,7 +214,7 @@ func TestWarmCacheAffinity(t *testing.T) {
 	// holds its warm cache.
 	for _, id := range []string{"m1", "m2"} {
 		f.Create(ctx, provider.MachineSpec{ID: id, EnvHash: "env1env1env1env1", CPU: 4, Memory: 4 * gib, ExpiresAt: time.Now().Add(time.Hour)})
-		o.machines[id] = &Machine{Provider: "fake", Token: "t", pending: map[string]pendingLease{}}
+		o.machines[id] = &Machine{Provider: "fake", pending: map[string]pendingLease{}}
 	}
 	pref := "m1"
 	if scheduler.Score("repo", "m2") > scheduler.Score("repo", "m1") {
@@ -314,7 +318,7 @@ func TestExpiringMachineGetsNoSessions(t *testing.T) {
 	o := newTestOrch(t, f, nil)
 	ctx := context.Background()
 	f.Create(ctx, provider.MachineSpec{ID: "old", EnvHash: "env1env1env1env1", CPU: 4, Memory: 4 * gib, ExpiresAt: time.Now().Add(time.Minute)})
-	o.machines["old"] = &Machine{Provider: "fake", Token: "t", pending: map[string]pendingLease{}}
+	o.machines["old"] = &Machine{Provider: "fake", pending: map[string]pendingLease{}}
 	l, err := o.Acquire(ctx, req("r"), io.Discard)
 	if err != nil {
 		t.Fatal(err)

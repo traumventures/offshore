@@ -1,0 +1,451 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  cloudsourced operator identity - a least privilege managed policy for what the
+  aws-ec2 provider does (shared CloudFormation stack, build machine instances,
+  image push, artifact bucket, machine secrets in SSM) and a role to assume it,
+  so that neither the control plane nor developers use root or admin
+  credentials.
+Metadata:
+  com.aws.cloudformation.Context:
+    why: >-
+      The provider deploys its shared stack with the caller's credentials (no
+      CloudFormation service role), so the caller needs the permissions of every
+      resource in internal/provider/awsec2/stack.yaml, scoped to the names
+      CloudFormation generates for stacks named StackPrefix*.
+    must:
+      - Keep in sync with internal/provider/awsec2 (API calls) and stack.yaml (resources).
+      - Machine instances, volumes and interfaces carry the tag project=cloudsourced.
+Parameters:
+  StackPrefix:
+    Type: String
+    Default: cloudsourced
+    AllowedPattern: "[a-z][a-z0-9-]*"
+    Description: >-
+      Name (or prefix) of the provider's shared stack (provider option "stack",
+      default cloudsourced). Lower case, because bucket and repository names are
+      derived from it.
+  TrustedPrincipalArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Principal allowed to assume the operator role (an IAM user, an SSO role or
+      the control plane's instance role). Empty - any principal of this account
+      that is itself allowed to call sts:AssumeRole on the role.
+  RequireMfa:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Require MFA when assuming the role (interactive operators).
+  CreateUser:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Also create an IAM user cloudsourced-operator with the policy attached, for
+      hosts that cannot assume roles. Create its access key yourself; it is never
+      put into stack outputs.
+
+Conditions:
+  AnyPrincipal: !Equals [!Ref TrustedPrincipalArn, ""]
+  Mfa: !Equals [!Ref RequireMfa, "true"]
+  WithUser: !Equals [!Ref CreateUser, "true"]
+
+Resources:
+  OperatorPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: cloudsourced-operator
+      Description: Least privilege for the cloudsourced aws-ec2 provider
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # --- CloudFormation: the provider's shared stack only.
+          - Sid: SharedStack
+            Effect: Allow
+            Action:
+              - cloudformation:CreateStack
+              - cloudformation:UpdateStack
+              - cloudformation:DeleteStack
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:DescribeStackResource
+              - cloudformation:DescribeStackResources
+              - cloudformation:ListStackResources
+              - cloudformation:GetTemplate
+              - cloudformation:GetTemplateSummary
+              - cloudformation:TagResource
+              - cloudformation:UntagResource
+            Resource: !Sub "arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/${StackPrefix}*/*"
+          - Sid: TemplateValidation
+            Effect: Allow
+            Action: cloudformation:ValidateTemplate
+            Resource: "*"
+
+          # --- EC2: read everything, change only cloudsourced machines.
+          - Sid: Ec2Read
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeInstanceStatus
+              - ec2:DescribeInstanceTypes
+              - ec2:DescribeImages
+              - ec2:DescribeVpcs
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeSecurityGroupRules
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeVolumes
+              - ec2:DescribeTags
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeAccountAttributes
+            Resource: "*"
+          - Sid: RunTaggedMachines
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource:
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:volume/*"
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:network-interface/*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/project: cloudsourced
+          - Sid: RunMachinesWithImdsV2HopLimit1
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/project: cloudsourced
+                ec2:MetadataHttpTokens: required
+              NumericLessThanEquals:
+                ec2:MetadataHttpPutResponseHopLimit: "1"
+          - Sid: RunFromAmazonImages
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource: !Sub "arn:${AWS::Partition}:ec2:*::image/*"
+            Condition:
+              StringEquals:
+                ec2:Owner: amazon
+          - Sid: RunInNetwork
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource:
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:subnet/*"
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*"
+          - Sid: TagOnCreate
+            Effect: Allow
+            Action: ec2:CreateTags
+            Resource:
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*"
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:volume/*"
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:network-interface/*"
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*"
+            Condition:
+              StringEquals:
+                ec2:CreateAction: [RunInstances, CreateSecurityGroup]
+          - Sid: RetagOwnResources
+            Effect: Allow
+            Action: [ec2:CreateTags, ec2:DeleteTags]
+            Resource:
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*"
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*"
+            Condition:
+              StringEquals:
+                aws:ResourceTag/project: cloudsourced
+          - Sid: MachineLifecycle
+            Effect: Allow
+            Action:
+              - ec2:StartInstances
+              - ec2:StopInstances
+              - ec2:RebootInstances
+              - ec2:TerminateInstances
+            Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*"
+            Condition:
+              StringEquals:
+                aws:ResourceTag/project: cloudsourced
+          - Sid: MachineSecurityGroupIngress
+            Effect: Allow
+            Action:
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:ModifySecurityGroupRules
+              - ec2:DeleteSecurityGroup
+            Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*"
+            Condition:
+              StringEquals:
+                aws:ResourceTag/project: cloudsourced
+          # --- Instance role of the machines (created by the stack).
+          - Sid: PassMachineRole
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StackPrefix}*-MachineRole-*"
+            Condition:
+              StringEquals:
+                iam:PassedToService: ec2.amazonaws.com
+          - Sid: PassReaperRole
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StackPrefix}*-ReaperRole-*"
+            Condition:
+              StringEquals:
+                iam:PassedToService: lambda.amazonaws.com
+          # --- Environment images.
+          - Sid: EcrLogin
+            Effect: Allow
+            Action: ecr:GetAuthorizationToken
+            Resource: "*"
+          - Sid: EnvImages
+            Effect: Allow
+            Action:
+              - ecr:DescribeImages
+              - ecr:ListImages
+              - ecr:BatchCheckLayerAvailability
+              - ecr:InitiateLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:CompleteLayerUpload
+              - ecr:PutImage
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Resource: !Sub "arn:${AWS::Partition}:ecr:*:${AWS::AccountId}:repository/${StackPrefix}*"
+
+          # --- Artifact bucket (server binaries, compiler cache objects).
+          - Sid: ArtifactObjects
+            Effect: Allow
+            Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${StackPrefix}*/*"
+
+          # --- SSM: public AMI parameters, machine secrets under /cloudsourced/.
+          - Sid: PublicAmiParameters
+            Effect: Allow
+            Action: [ssm:GetParameter, ssm:GetParameters]
+            Resource: !Sub "arn:${AWS::Partition}:ssm:*::parameter/aws/service/ami-amazon-linux-latest/*"
+          - Sid: MachineSecrets
+            Effect: Allow
+            Action:
+              - ssm:PutParameter
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:GetParametersByPath
+              - ssm:DeleteParameter
+              - ssm:DeleteParameters
+              - ssm:AddTagsToResource
+              - ssm:ListTagsForResource
+            Resource: !Sub "arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/cloudsourced/*"
+          - Sid: ListMachineSecrets
+            Effect: Allow
+            Action: ssm:DescribeParameters
+            Resource: "*"
+
+  StackPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Separate from OperatorPolicy because one managed policy holds at most
+          6144 characters. Only needed to create, update or delete the shared
+          stack.
+    Properties:
+      ManagedPolicyName: cloudsourced-operator-stack
+      Description: Resources of the cloudsourced aws-ec2 shared stack (created through CloudFormation with the caller's credentials)
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: MachineSecurityGroupCreate
+            # CloudFormation creates the group and sets its egress before stack
+            # tags are guaranteed to be present, so these are not tag scoped.
+            Effect: Allow
+            Action:
+              - ec2:CreateSecurityGroup
+              - ec2:AuthorizeSecurityGroupEgress
+              - ec2:RevokeSecurityGroupEgress
+            Resource:
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*"
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:vpc/*"
+
+          - Sid: StackRoles
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:UpdateRole
+              - iam:UpdateAssumeRolePolicy
+              - iam:PutRolePolicy
+              - iam:GetRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:ListRolePolicies
+              - iam:ListAttachedRolePolicies
+              - iam:ListInstanceProfilesForRole
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:ListRoleTags
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StackPrefix}*-*"
+          - Sid: StackRoleManagedPolicies
+            Effect: Allow
+            Action: [iam:AttachRolePolicy, iam:DetachRolePolicy]
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StackPrefix}*-*"
+            Condition:
+              ArnEquals:
+                iam:PolicyARN:
+                  - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+                  - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+          - Sid: StackInstanceProfile
+            Effect: Allow
+            Action:
+              - iam:CreateInstanceProfile
+              - iam:DeleteInstanceProfile
+              - iam:GetInstanceProfile
+              - iam:AddRoleToInstanceProfile
+              - iam:RemoveRoleFromInstanceProfile
+              - iam:TagInstanceProfile
+              - iam:UntagInstanceProfile
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/${StackPrefix}*-*"
+
+          - Sid: EnvRepository
+            Effect: Allow
+            Action:
+              - ecr:CreateRepository
+              - ecr:DeleteRepository
+              - ecr:DescribeRepositories
+              - ecr:PutLifecyclePolicy
+              - ecr:GetLifecyclePolicy
+              - ecr:DeleteLifecyclePolicy
+              - ecr:PutImageScanningConfiguration
+              - ecr:PutImageTagMutability
+              - ecr:TagResource
+              - ecr:UntagResource
+              - ecr:ListTagsForResource
+              - ecr:BatchDeleteImage
+            Resource: !Sub "arn:${AWS::Partition}:ecr:*:${AWS::AccountId}:repository/${StackPrefix}*"
+          - Sid: ArtifactBucket
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:ListBucket
+              - s3:GetBucketLocation
+              - s3:GetBucketPolicy
+              - s3:PutBucketPolicy
+              - s3:DeleteBucketPolicy
+              - s3:GetBucketPublicAccessBlock
+              - s3:PutBucketPublicAccessBlock
+              - s3:GetEncryptionConfiguration
+              - s3:PutEncryptionConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:PutLifecycleConfiguration
+              - s3:GetBucketTagging
+              - s3:PutBucketTagging
+              - s3:GetBucketOwnershipControls
+              - s3:PutBucketOwnershipControls
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${StackPrefix}*"
+          # --- Reaper (Lambda, schedule, logs) and resource group of the stack.
+          - Sid: Reaper
+            Effect: Allow
+            Action:
+              - lambda:CreateFunction
+              - lambda:DeleteFunction
+              - lambda:GetFunction
+              - lambda:GetFunctionConfiguration
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+              - lambda:AddPermission
+              - lambda:RemovePermission
+              - lambda:GetPolicy
+              - lambda:TagResource
+              - lambda:UntagResource
+              - lambda:ListTags
+              - lambda:GetRuntimeManagementConfig
+            Resource: !Sub "arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${StackPrefix}*-*"
+          - Sid: ReaperSchedule
+            Effect: Allow
+            Action:
+              - events:PutRule
+              - events:DeleteRule
+              - events:DescribeRule
+              - events:EnableRule
+              - events:DisableRule
+              - events:PutTargets
+              - events:RemoveTargets
+              - events:ListTargetsByRule
+              - events:TagResource
+              - events:UntagResource
+              - events:ListTagsForResource
+            Resource: !Sub "arn:${AWS::Partition}:events:*:${AWS::AccountId}:rule/${StackPrefix}*-*"
+          - Sid: ReaperLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:PutRetentionPolicy
+              - logs:DeleteRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+              - logs:TagLogGroup
+              - logs:UntagLogGroup
+              - logs:ListTagsForResource
+              - logs:ListTagsLogGroup
+            Resource:
+              - !Sub "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/lambda/${StackPrefix}*-*"
+          - Sid: DescribeLogGroups
+            Effect: Allow
+            Action: logs:DescribeLogGroups
+            Resource: "*"
+          - Sid: ResourceGroup
+            Effect: Allow
+            Action:
+              - resource-groups:CreateGroup
+              - resource-groups:DeleteGroup
+              - resource-groups:GetGroup
+              - resource-groups:GetGroupQuery
+              - resource-groups:GetGroupConfiguration
+              - resource-groups:UpdateGroup
+              - resource-groups:UpdateGroupQuery
+              - resource-groups:Tag
+              - resource-groups:Untag
+              - resource-groups:GetTags
+            Resource: !Sub "arn:${AWS::Partition}:resource-groups:*:${AWS::AccountId}:group/${StackPrefix}*"
+
+
+  OperatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cloudsourced-operator
+      Description: Assumed by the cloudsourced control plane or daemon to manage build machines
+      MaxSessionDuration: 43200
+      ManagedPolicyArns: [!Ref OperatorPolicy, !Ref StackPolicy]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !If [AnyPrincipal, !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root", !Ref TrustedPrincipalArn]
+            Action: [sts:AssumeRole, sts:TagSession, sts:SetSourceIdentity]
+            Condition: !If
+              - Mfa
+              - Bool: { aws:MultiFactorAuthPresent: "true" }
+              - !Ref AWS::NoValue
+      Tags:
+        - { Key: project, Value: cloudsourced }
+
+  OperatorUser:
+    Type: AWS::IAM::User
+    Condition: WithUser
+    Properties:
+      UserName: cloudsourced-operator
+      ManagedPolicyArns: [!Ref OperatorPolicy, !Ref StackPolicy]
+      Tags:
+        - { Key: project, Value: cloudsourced }
+
+Outputs:
+  PolicyArn:
+    Value: !Ref OperatorPolicy
+    Export:
+      Name: cloudsourced-operator-policy
+  StackPolicyArn:
+    Value: !Ref StackPolicy
+    Export:
+      Name: cloudsourced-operator-stack-policy
+  RoleArn:
+    Value: !GetAtt OperatorRole.Arn
+  UserName:
+    Condition: WithUser
+    Value: !Ref OperatorUser

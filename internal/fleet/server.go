@@ -111,11 +111,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	case pathStatus:
 		h = func(ctx context.Context, _ *http.Request, _ io.Writer) (any, error) {
-			ms, err := s.fleet.Status(ctx)
-			for i := range ms {
-				ms[i].Token = "" // leases carry the token; status does not
-			}
-			return ms, err
+			return s.fleet.Status(ctx) // machines carry no secrets; only leases carry tokens
 		}
 	case pathReconcile:
 		h = func(ctx context.Context, _ *http.Request, _ io.Writer) (any, error) {

@@ -157,6 +157,8 @@ func run(cmd string, args []string) error {
 		return shimCmd(args)
 	case "fetch":
 		return fetch(args)
+	case "debug":
+		return debugCmd(args)
 	case "env":
 		return envCmd(args)
 	case "editor":
