@@ -41,6 +41,13 @@ type Config struct {
 	CacheDir  string
 	DepsDir   string
 	BuildTTL  time.Duration // upper bound for build cache age
+	// SccacheEndpoint replaces the built-in compiler cache endpoint with an
+	// external blobcache (CLOUDSOURCED_SCCACHE_ENDPOINT, set by a host
+	// agent). SccacheDir is the built-in cache's directory
+	// (CLOUDSOURCED_SCCACHE_DIR, default <deps dir>/sccache: the dependency
+	// volume is shared by the owner's machines, the cache volume is not).
+	SccacheEndpoint string
+	SccacheDir      string
 }
 
 // ConfigFromEnv reads the server configuration.
@@ -54,6 +61,8 @@ func ConfigFromEnv() (Config, error) {
 		DepsDir:   envOr("CLOUDSOURCED_DEPS_DIR", "/deps"),
 		BuildTTL:  24 * time.Hour,
 	}
+	c.SccacheEndpoint = os.Getenv("CLOUDSOURCED_SCCACHE_ENDPOINT")
+	c.SccacheDir = envOr("CLOUDSOURCED_SCCACHE_DIR", filepath.Join(c.DepsDir, "sccache"))
 	c.Identity.CertPEM = os.Getenv("CLOUDSOURCED_CERT")
 	c.Identity.KeyPEM = os.Getenv("CLOUDSOURCED_KEY")
 	if c.MachineID == "" || c.Token == "" || c.Identity.CertPEM == "" || c.Identity.KeyPEM == "" {
@@ -99,6 +108,8 @@ type Server struct {
 	cg    *cgroups
 	self  string
 	env   []string // base environment for sessions
+
+	ccEndpoint string // compiler cache WebDAV endpoint for sessions ("" = off)
 
 	mu        sync.Mutex
 	mounts    map[string]*fusefs.Projection
@@ -149,6 +160,7 @@ func (s *Server) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.cg = setupCgroups(s.log)
+	s.startCompilerCache(ctx)
 	if n := s.slots.gc(s.cfg.BuildTTL); n > 0 {
 		s.log.Info("removed expired build slots", "count", n)
 	}

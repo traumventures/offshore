@@ -42,6 +42,8 @@ check() { local name="$1"; shift; if "$@"; then ok "$name"; else bad "$name"; fi
 eq()   { [ "$1" = "$2" ] || { echo "     expected: $2"; echo "     got:      $1"; return 1; }; }
 contains() { case "$1" in *"$2"*) return 0;; esac; echo "     '$2' not in output:"; echo "$1" | sed 's/^/       /' | tail -20; return 1; }
 cs()   { "$BIN" "$@"; }
+# sccache_hits extracts N from the verbose line "cloudsourced: sccache: N hits / M misses ...".
+sccache_hits() { local n; n="$(echo "$1" | sed -n 's/.*sccache: \([0-9]*\) hits.*/\1/p' | tail -1)"; echo "${n:-0}"; [ -n "$n" ] || echo "$1" | tail -5 | sed 's/^/       /' >&2; }
 run()  { (cd "$PROJ" && "$BIN" run "$@"); }
 docker_() { $DOCKER "$@"; }
 
@@ -273,6 +275,16 @@ check "crate downloaded and used remotely" contains "$out" "itoa=42"
 check "Cargo.lock updated by remote cargo" contains "$(cat "$PROJ/Cargo.lock")" 'name = "itoa"'
 check "registry cache stored on the deps volume" contains "$(docker_ exec "$MACHINE" sh -c 'ls /deps/usr__local__cargo__registry/cache/*/')" "itoa-"
 
+step "compiler cache (sccache) and linker (mold)"
+check "sessions use sccache as rustc wrapper" eq "$(run sh -c 'echo $RUSTC_WRAPPER')" "sccache"
+check "binary linked with mold" contains "$(run sh -c 'readelf -p .comment target/debug/hello')" "mold"
+run cargo clean -q -p itoa >/dev/null 2>&1
+out="$(CLOUDSOURCED_VERBOSE=1 run cargo build 2>&1)"
+check "cleaned dependency recompiled" contains "$out" "Compiling itoa"
+check "recompiled dependency served from the compiler cache" test "$(sccache_hits "$out")" -ge 1
+check "why shows the run's sccache counters" contains "$(cs why)" "sccache_hits="
+check "compiler cache entries on the shared dependency volume" test "$(docker_ exec "$MACHINE" sh -c 'find /deps/sccache -type f | wc -l')" -ge 1
+
 step "parallel sessions: one machine runs several, scale out beyond capacity"
 pids=""
 for i in 1 2 3; do (run sh -c "sleep 6; hostname" > "$WORK/par$i" 2>&1) & pids="$pids $!"; done
@@ -302,6 +314,9 @@ for _ in $(seq 120); do [ -z "$(docker_ ps -aq --filter "name=^$NAME\$")" ] && b
 check "machine destroyed after max_lifetime" test -z "$(docker_ ps -aq --filter "name=^$NAME\$")"
 for _ in $(seq 30); do [ -z "$(docker_ volume ls -q --filter "name=cs-cache-${NAME#cs-}")" ] && break; sleep 1; done
 check "its build cache volume is gone" test -z "$(docker_ volume ls -q --filter "name=cs-cache-${NAME#cs-}")"
+out="$(CLOUDSOURCED_VERBOSE=1 run cargo build 2>&1)"
+check "fresh machine builds with an empty build cache" contains "$out" "Compiling itoa"
+check "fresh machine gets compiler cache hits for dependencies" test "$(sccache_hits "$out")" -ge 1
 
 step "fail open when no machine can be provisioned"
 write_config 24h 10m 0 2
