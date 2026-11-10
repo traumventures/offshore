@@ -4,9 +4,20 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 
 .PHONY: build test e2e vet clean image image-push
 
-# The binary is mounted into machines, so it must be static.
+# The binary is mounted into machines, so it must be static. Machines of
+# the other architecture (aws-ec2 sizes with arch = "arm64" or "amd64") run
+# bin/cloudsourced-linux-<arch>, which the provider finds next to the
+# orchestrator's binary.
+HOST_PLATFORM := $(shell $(GO) env GOOS)/$(shell $(GO) env GOARCH)
+MACHINE_ARCHES ?= amd64 arm64
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/cloudsourced ./cmd/cloudsourced
+	@for a in $(MACHINE_ARCHES); do \
+	  if [ "$(HOST_PLATFORM)" != "linux/$$a" ]; then \
+	    echo "building bin/cloudsourced-linux-$$a"; \
+	    CGO_ENABLED=0 GOOS=linux GOARCH=$$a $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/cloudsourced-linux-$$a ./cmd/cloudsourced || exit 1; \
+	  fi; \
+	done
 
 test:
 	$(GO) test ./...

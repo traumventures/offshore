@@ -494,7 +494,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	for attempt := 1; ; attempt++ {
 		lease, err = d.fleet.Acquire(ctx, orchestrator.Request{
 			EnvHash: plan.Hash, Image: plan.Tag, Services: plan.Services, RepoID: repoID,
-			Key: key, Need: need, Limit: scheduler.Resources{Memory: repo.MaxMemoryBytes()},
+			Key: key, Need: need, Limit: scheduler.Resources{Memory: repo.MaxMemoryBytes()}, Arch: repo.Resources.Arch,
 			BuildTTL: buildTTL, DepsTTL: depsTTL,
 		}, progress)
 		if err != nil {

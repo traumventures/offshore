@@ -97,6 +97,13 @@ type Platform interface {
 	CompilerCacheStore(ctx context.Context) (blobcache.Store, error)
 }
 
+// Interrupter is implemented by platforms whose machines can be taken away
+// with notice (spot capacity). Interruption returns the pending notice, nil
+// when there is none.
+type Interrupter interface {
+	Interruption(ctx context.Context) (*machine.DrainNotice, error)
+}
+
 // PlatformFactory creates a platform for a spec.
 type PlatformFactory func(ctx context.Context, spec Spec) (Platform, error)
 
@@ -154,10 +161,13 @@ type Agent struct {
 	StateDir string
 	Docker   Runner
 	Log      *slog.Logger
-	Every    time.Duration       // lifecycle check interval
-	Shutdown func() error        // powers the host off (terminates the instance)
-	Now      func() time.Time    // for tests
-	Sleep    func(time.Duration) // for tests
+	Every    time.Duration // lifecycle check interval
+	// InterruptEvery is the interruption poll interval (default 5s; spot
+	// notices come two minutes ahead).
+	InterruptEvery time.Duration
+	Shutdown       func() error        // powers the host off (terminates the instance)
+	Now            func() time.Time    // for tests
+	Sleep          func(time.Duration) // for tests
 }
 
 func (a *Agent) now() time.Time {
@@ -388,6 +398,51 @@ func (a *Agent) status() *machine.HostStatus {
 	return &st
 }
 
+// CheckInterruption polls the platform for an interruption notice and hands
+// a new one to the server (drain notice file). It returns the current
+// notice (nil: none).
+func (a *Agent) CheckInterruption(ctx context.Context, last *machine.DrainNotice) *machine.DrainNotice {
+	ip, ok := a.Platform.(Interrupter)
+	if !ok || a.Spec.Layout.StatusDir == "" {
+		return last
+	}
+	n, err := ip.Interruption(ctx)
+	if err != nil {
+		a.Log.Debug("interruption notice", "err", err)
+		return last
+	}
+	if n == nil || (last != nil && last.Reason == n.Reason && last.Deadline == n.Deadline) {
+		return last
+	}
+	if last != nil && last.Reason == machine.DrainSpotInterruption && n.Reason != machine.DrainSpotInterruption {
+		return last // an interruption is not downgraded
+	}
+	os.MkdirAll(a.Spec.Layout.StatusDir, 0o755)
+	if err := machine.WriteDrainNotice(a.Spec.Layout.StatusDir, *n); err != nil {
+		a.Log.Error("writing drain notice", "err", err)
+		return last
+	}
+	a.Log.Warn("machine interruption notice: draining", "reason", n.Reason, "action", n.Action,
+		"deadline", time.Unix(n.Deadline, 0).UTC().Format(time.RFC3339))
+	return n
+}
+
+// watchInterruptions polls for interruption notices until ctx ends.
+func (a *Agent) watchInterruptions(ctx context.Context) {
+	if _, ok := a.Platform.(Interrupter); !ok || a.Spec.Layout.StatusDir == "" {
+		return
+	}
+	every := a.InterruptEvery
+	if every == 0 {
+		every = 5 * time.Second
+	}
+	var last *machine.DrainNotice
+	for ctx.Err() == nil {
+		last = a.CheckInterruption(ctx, last)
+		a.sleep(ctx, every)
+	}
+}
+
 // Check makes one lifecycle decision and acts on it.
 func (a *Agent) Check(ctx context.Context) machine.Decision {
 	d := machine.Decide(a.now(), a.Spec.Expires(), a.Spec.IdleStopAfter(), a.status())
@@ -420,6 +475,12 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 	a.StartCompilerCache(ctx)
+	if dir := a.Spec.Layout.StatusDir; dir != "" {
+		// A notice is about this boot only; a stopped and started machine
+		// starts afresh (the directory is on tmpfs anyway).
+		os.Remove(filepath.Join(dir, machine.DrainNoticeFile))
+	}
+	go a.watchInterruptions(ctx)
 	for i := 0; ; i++ {
 		err := a.EnsureContainers(ctx)
 		if err == nil {

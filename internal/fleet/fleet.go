@@ -57,8 +57,13 @@ func Config(u *config.FleetConfig) orchestrator.Config {
 	var sizes []scheduler.Size
 	for _, sz := range u.Fleet.Sizes {
 		mem, _ := config.ParseBytes(sz.Memory)
-		sizes = append(sizes, scheduler.Size{Provider: sz.Provider, Name: sz.Name,
-			Capacity: scheduler.Resources{CPU: sz.CPU, Memory: mem}, PricePerHour: sz.PricePerHour})
+		s := scheduler.Size{Provider: sz.Provider, Name: sz.Name,
+			Capacity: scheduler.Resources{CPU: sz.CPU, Memory: mem}, PricePerHour: sz.EffectivePrice(),
+			Arch: config.MachineArch(sz.Arch), Spot: sz.Spot, InstanceTypes: sz.InstanceTypes}
+		if sz.Spot {
+			s.OnDemandPrice, s.SpotFallback = sz.PricePerHour, sz.Fallback()
+		}
+		sizes = append(sizes, s)
 	}
 	f := u.Fleet
 	c := orchestrator.Config{

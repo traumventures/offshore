@@ -139,6 +139,11 @@ type Server struct {
 	lastProbe time.Time // last status request (an orchestrator probe)
 	ready     bool
 	draining  bool
+	// drainReason and interruptAt describe a drain the server started on
+	// its own (expiry, host drain notice).
+	drainReason string
+	interruptAt time.Time
+	atRisk      bool // rebalance recommendation: keep serving
 
 	fetchMu  sync.Mutex
 	inflight map[string]*fetchCall
@@ -277,6 +282,9 @@ func (s *Server) lifecycle(ctx context.Context, cancel func()) {
 			s.log.Info("machine lifetime reached, draining")
 		}
 		s.draining = true
+		if s.drainReason == "" {
+			s.drainReason = "expired"
+		}
 		n := len(s.sessions)
 		s.mu.Unlock()
 		if n == 0 || time.Now().After(s.cfg.ExpiresAt.Add(10*time.Minute)) {
@@ -374,6 +382,7 @@ func (s *Server) publishHostStatus(ctx context.Context) {
 	defer t.Stop()
 	failing := false
 	for {
+		s.checkDrainNotice()
 		err := machine.WriteHostStatus(s.cfg.HostStatus, s.HostStatus())
 		if err != nil && !failing {
 			s.log.Warn("publishing host status", "path", s.cfg.HostStatus, "err", err)
@@ -385,6 +394,36 @@ func (s *Server) publishHostStatus(ctx context.Context) {
 		case <-t.C:
 		}
 	}
+}
+
+// checkDrainNotice drains the server when the host agent announced that
+// the machine goes away (spot interruption): no new sessions, running
+// sessions continue until the machine is taken away.
+func (s *Server) checkDrainNotice() {
+	n, ok, err := machine.ReadDrainNotice(filepath.Dir(s.cfg.HostStatus))
+	if err != nil || !ok {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n.Reason == machine.DrainSpotRebalance {
+		// Only a higher risk: keep serving, the orchestrator prefers
+		// other machines for new work.
+		if !s.atRisk {
+			s.log.Warn("machine at risk of interruption (rebalance recommendation)", "noticed", time.Unix(n.Noticed, 0).UTC().Format(time.RFC3339))
+		}
+		s.atRisk = true
+		return
+	}
+	if s.drainReason == n.Reason {
+		return
+	}
+	at := time.Unix(n.Deadline, 0)
+	if n.Deadline == 0 {
+		at = time.Unix(n.Noticed, 0)
+	}
+	s.draining, s.drainReason, s.interruptAt = true, n.Reason, at
+	s.log.Warn("machine drains: host notice", "reason", n.Reason, "deadline", at.UTC().Format(time.RFC3339), "sessions", len(s.sessions))
 }
 
 // authorize checks that a token's scope allows a stream kind. Lease
@@ -418,7 +457,10 @@ func (s *Server) statusOnly() proto.Status {
 	defer s.mu.Unlock()
 	st := proto.Status{
 		Machine: s.cfg.MachineID, EnvHash: s.cfg.EnvHash, Ready: s.ready,
-		CPU: s.cfg.CPU, Memory: s.cfg.Memory, Draining: s.draining,
+		CPU: s.cfg.CPU, Memory: s.cfg.Memory, Draining: s.draining, DrainReason: s.drainReason, AtRisk: s.atRisk,
+	}
+	if !s.interruptAt.IsZero() {
+		st.InterruptAt = s.interruptAt.Unix()
 	}
 	if !s.cfg.ExpiresAt.IsZero() {
 		st.ExpiresAt = s.cfg.ExpiresAt.Unix()

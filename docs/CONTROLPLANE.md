@@ -86,8 +86,9 @@ with Route 53, `HostedZoneId=Z…`.
 make image DOCKER="sudo -n docker"     # cloudsourced-controlplane:<version>, :latest
 ```
 
-`Dockerfile` builds the static linux/amd64 binary (machines are amd64 and get
-the control plane's own binary) and puts it on `docker:cli` (Docker CLI with
+`Dockerfile` builds the static linux/amd64 binary (amd64 machines get the
+control plane's own binary, arm64 machines `/usr/local/bin/cloudsourced-linux-arm64`,
+built alongside) and puts it on `docker:cli` (Docker CLI with
 buildx, which the providers use to build environment images, plus CA
 certificates). It runs as uid 10001 with `cap_net_bind_service` on the binary
 (for 443/80), state in `/var/lib/cloudsourced` (also `$HOME`, so the Docker

@@ -70,6 +70,11 @@ type Request struct {
 	// machine created for this request starts (cache.deps.ttl; 0 =
 	// DefaultDepsTTL). Existing machines keep the volume they have.
 	DepsTTL time.Duration `json:",omitempty"`
+	// Arch is the machine architecture the environment image is built for
+	// (resources.arch: "x86_64"/"amd64" or "aarch64"/"arm64"; empty:
+	// amd64). Machines for the environment are only created from sizes of
+	// this architecture.
+	Arch string `json:",omitempty"`
 }
 
 // buildTTL returns the effective build TTL of a request.
@@ -90,10 +95,23 @@ func (r Request) buildTTL(maxLifetime time.Duration) time.Duration {
 // repository, applied when a machine is created for it.
 type repoParams struct {
 	DepsTTL time.Duration `json:"deps_ttl,omitempty"`
+	Arch    string        `json:"arch,omitempty"` // machine architecture (amd64, arm64)
+}
+
+// machineArch normalizes an architecture name to the size naming
+// ("amd64", "arm64").
+func machineArch(a string) string {
+	switch a {
+	case "", "x86_64", "amd64":
+		return "amd64"
+	case "aarch64", "arm64":
+		return "arm64"
+	}
+	return a
 }
 
 func (r Request) params() repoParams {
-	p := repoParams{DepsTTL: r.DepsTTL}
+	p := repoParams{DepsTTL: r.DepsTTL, Arch: machineArch(r.Arch)}
 	if p.DepsTTL <= 0 {
 		p.DepsTTL = DefaultDepsTTL
 	}
@@ -486,6 +504,10 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 	o.mu.Lock()
 	for r := range results {
 		if m, ok := o.machines[r.id]; ok {
+			if st := r.status; st != nil && st.InterruptAt > 0 && (m.Status == nil || m.Status.InterruptAt == 0) {
+				o.log.Warn("machine interruption notice", "id", r.id, "reason", st.DrainReason,
+					"deadline", time.Unix(st.InterruptAt, 0).UTC().Format(time.RFC3339), "sessions", len(st.Sessions))
+			}
 			m.Status = r.status
 			m.StatusAt = time.Now()
 		}
@@ -555,9 +577,19 @@ func Probe(ctx context.Context, addr, fingerprint, token string) (proto.Status, 
 
 // fleetLocked builds the scheduler's view of the fleet.
 func (o *Orchestrator) fleetLocked(now time.Time) scheduler.Fleet {
-	f := scheduler.Fleet{Now: now, Sizes: o.cfg.Sizes, Recent: map[string]time.Time{}}
+	f := scheduler.Fleet{Now: now, Sizes: o.cfg.Sizes, Recent: map[string]time.Time{}, EnvArch: map[string]string{}}
 	for env, t := range o.recentEnvs {
 		f.Recent[env] = t
+	}
+	for _, m := range o.machines {
+		if a := m.Labels[provider.LabelArch]; a != "" && m.EnvHash != "" {
+			f.EnvArch[m.EnvHash] = a
+		}
+	}
+	for env, p := range o.envParams {
+		if p.Arch != "" {
+			f.EnvArch[env] = p.Arch
+		}
 	}
 	for id, m := range o.machines {
 		sm := scheduler.Machine{
@@ -586,6 +618,12 @@ func (o *Orchestrator) fleetLocked(now time.Time) scheduler.Fleet {
 			if st.IdleSince > 0 {
 				sm.IdleSince = time.Unix(st.IdleSince, 0)
 			}
+			// A machine with an interruption notice (spot) drains and is
+			// not undrained for new work: capacity is planned elsewhere.
+			if st.InterruptAt > 0 {
+				sm.Interrupted, sm.Draining = true, true
+			}
+			sm.AtRisk = st.AtRisk
 		}
 		for lid, p := range m.pending {
 			if now.After(p.expires) {
@@ -694,7 +732,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			lease := Lease{
 				ID: task.ID, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: o.sessionToken(m.Machine, task.ID),
 				Grant: pl.Grant, MemoryOvercommit: o.cfg.Policy.MemoryOvercommit,
-				Provider: m.Provider, Size: size, PricePerHour: o.priceLocked(m.Provider, size), Reason: pl.Reason,
+				Provider: m.Provider, Size: size, PricePerHour: o.priceLocked(m.Provider, size, m.Labels[provider.LabelMarket]), Reason: pl.Reason,
 				BuildTTL: req.buildTTL(o.cfg.MaxLifetime),
 			}
 			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: time.Now().Add(2 * time.Minute)}
@@ -947,6 +985,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	provision, _ := json.Marshal(cfg.Provision)
 	spec := provider.MachineSpec{
 		ID: id, Owner: cfg.Owner, Image: image, EnvHash: envHash, Size: size.Name,
+		Arch: size.ArchOf(), InstanceTypes: size.InstanceTypes, Spot: size.Spot, SpotFallback: size.SpotFallback,
 		CPU: size.Capacity.CPU, Memory: size.Capacity.Memory, Swap: cfg.Swap,
 		ExpiresAt: expires, Finger: ident.Fingerprint, DepsTTL: params.DepsTTL,
 		IdleStop: cfg.Policy.IdleStop, Services: services,
@@ -1123,7 +1162,7 @@ func (o *Orchestrator) Snapshot() []Machine {
 		c := *m
 		c.pending = nil
 		c.Uptime = append([]Span(nil), m.Uptime...)
-		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize])
+		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize], m.Labels[provider.LabelMarket])
 		out = append(out, c)
 	}
 	kept := o.removed[:0]
@@ -1134,7 +1173,7 @@ func (o *Orchestrator) Snapshot() []Machine {
 		kept = append(kept, m)
 		c := *m
 		c.Uptime = append([]Span(nil), m.Uptime...)
-		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize])
+		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize], m.Labels[provider.LabelMarket])
 		out = append(out, c)
 	}
 	o.removed = kept
@@ -1142,10 +1181,15 @@ func (o *Orchestrator) Snapshot() []Machine {
 	return out
 }
 
-// priceLocked returns the hourly price of a fleet size (0: unknown).
-func (o *Orchestrator) priceLocked(prov, size string) float64 {
+// priceLocked returns the hourly price of a fleet size (0: unknown). A
+// machine of a spot size that fell back to on-demand capacity (market)
+// costs the on-demand price.
+func (o *Orchestrator) priceLocked(prov, size, market string) float64 {
 	for _, sz := range o.cfg.Sizes {
 		if sz.Name == size && (sz.Provider == prov || sz.Provider == "") {
+			if sz.Spot && market == provider.MarketOnDemand && sz.OnDemandPrice > 0 {
+				return sz.OnDemandPrice
+			}
 			return sz.PricePerHour
 		}
 	}

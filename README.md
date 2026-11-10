@@ -230,6 +230,65 @@ them for `max(idle_stop, 10m)` (an offline control plane does not leave them
 running). The metadata service is not reachable from sessions (IMDSv2, hop
 limit 1). The caller's credentials need `ssm:PutParameter`/`DeleteParameter`.
 
+#### Spot and arm64
+
+```toml
+[[fleet.size]]
+provider       = "aws"
+name           = "x4-spot"            # a name of your choice
+cpu            = 4
+memory         = "7G"
+price_per_hour = 0.21                 # on-demand price
+spot           = true
+instance_types = ["c7a.xlarge", "c6a.xlarge", "m7a.xlarge"]   # tried in order
+spot_discount  = 0.5                  # expected discount (default 0.5) for sizing and costs
+spot_fallback  = true                 # on-demand when no type has spot capacity (default)
+
+[[fleet.size]]
+provider       = "aws"
+name           = "c7g.xlarge"
+arch           = "arm64"              # default "amd64"
+cpu            = 4
+memory         = "7G"
+price_per_hour = 0.17
+```
+
+Spot machines are launched as persistent spot requests with interruption
+behaviour `stop` (only persistent requests can stop instead of terminate, and
+stopping keeps the disk with the warm caches; one-time spot instances cannot
+be stopped at all). The request ends at the machine's expiry. The types are
+tried in order on spot, then, with `spot_fallback`, in order on-demand; any
+capacity error (`InsufficientInstanceCapacity`, `SpotMaxPriceTooLow`, spot
+quota, type not offered) moves on. The optional provider option
+`spot_max_price` caps the spot price (AWS recommends against it: it causes
+more interruptions). The policy sizes with `price_per_hour × (1 −
+spot_discount)` and prefers spot at equal cost; a machine that fell back is
+accounted at the on-demand price.
+
+The risk: AWS can take a spot machine back with two minutes' notice. The host
+agent polls the metadata service (`spot/instance-action` and the rebalance
+recommendation). A rebalance recommendation only marks the machine at risk
+(new work prefers other machines). On an interruption notice the server
+drains: no new sessions, running
+sessions continue until the deadline and fail if they are still running
+then. The orchestrator places new
+work elsewhere and stops the machine as soon as it is empty (then it stays a
+warm machine); a machine stopped by AWS can only be restarted by AWS, so it
+is destroyed and replaced. Do not use spot sizes for builds that take longer
+than you can afford to lose.
+
+`arch = "arm64"` sizes (Graviton: c7g, m7g, t4g, ...) boot the arm64 Amazon
+Linux 2023 AMI and run `bin/cloudsourced-linux-arm64`, which `make build`
+puts next to `bin/cloudsourced` (provider options `binary_amd64`,
+`binary_arm64` and `ami_arm64` override). Environments are per architecture:
+a repository pins `resources.arch = "aarch64"` (default `"x86_64"`, because
+build outputs must run on the client) and only sizes of that architecture
+are created for it; its environment image is built for `linux/arm64`, which
+needs either a native arm64 builder or, on an amd64 control plane, Docker with
+BuildKit and QEMU binfmt handlers (`docker run --privileged --rm
+tonistiigi/binfmt:qemu-v9.2.2 --install arm64`; emulated builds are several
+times slower).
+
 Do not use root or admin credentials. `deploy/aws/iam.yaml` creates the managed
 policies `cloudsourced-operator` (machines, images, artifacts, machine secrets)
 and `cloudsourced-operator-stack` (resources of the shared stack) and the role

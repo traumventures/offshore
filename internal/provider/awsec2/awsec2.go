@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"runtime"
@@ -50,7 +51,7 @@ import (
 var stackTemplate string
 
 // templateVersion must match the TemplateVersion output of stack.yaml.
-const templateVersion = "5"
+const templateVersion = "6"
 
 const (
 	serverPort = 7443
@@ -68,10 +69,11 @@ type EC2 struct {
 	stack      string
 	allow      []string // CIDRs allowed to reach machines
 	diskGB     int32
-	ami        string // optional fixed AMI
+	amis       map[string]string // optional fixed AMI per architecture
 	docker     []string
-	binary     string
+	binaries   map[string]string // server binary per architecture
 	subnet     string
+	spotMax    string // optional spot max price (USD per hour)
 	cfg        aws.Config
 	ec2        *ec2.Client
 	ecr        *ecr.Client
@@ -81,7 +83,7 @@ type EC2 struct {
 	infraMu    sync.Mutex
 	infra      *infra
 	binMu      sync.Mutex
-	binKey     string
+	binKeys    map[string]string // architecture -> uploaded binary key
 	ingressSet bool
 
 	builderOnce sync.Once
@@ -95,14 +97,16 @@ type infra struct {
 }
 
 func open(opts map[string]any) (provider.Provider, error) {
-	e := &EC2{stack: project, diskGB: 100, docker: []string{"docker"}}
+	e := &EC2{stack: project, diskGB: 100, docker: []string{"docker"}, amis: map[string]string{}, binKeys: map[string]string{}}
 	e.region = provider.String(opts, "region", "")
 	if v := provider.String(opts, "stack", ""); v != "" {
 		e.stack = v
 	}
 	e.allow = provider.StringList(opts["allow_cidrs"])
-	e.ami = provider.String(opts, "ami", "")
+	e.amis[archAMD64] = provider.String(opts, "ami", "")
+	e.amis[archARM64] = provider.String(opts, "ami_arm64", "")
 	e.subnet = provider.String(opts, "subnet", "")
+	e.spotMax = provider.String(opts, "spot_max_price", "")
 	if v := provider.StringList(opts["docker_command"]); len(v) > 0 {
 		e.docker = v
 	}
@@ -112,17 +116,11 @@ func open(opts map[string]any) (provider.Provider, error) {
 	case float64:
 		e.diskGB = int32(v)
 	}
-	e.binary = provider.String(opts, "binary", "")
-	if e.binary == "" {
-		self, err := os.Executable()
-		if err != nil {
-			return nil, err
-		}
-		e.binary = self
+	self, err := os.Executable()
+	if err != nil {
+		return nil, err
 	}
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		return nil, fmt.Errorf("aws-ec2: machines are linux/amd64; run the orchestrator from a linux/amd64 build (have %s/%s)", runtime.GOOS, runtime.GOARCH)
-	}
+	e.binaries = serverBinaries(opts, self, runtime.GOOS, runtime.GOARCH)
 	var lopts []func(*awsconfig.LoadOptions) error
 	if p := provider.String(opts, "profile", ""); p != "" {
 		lopts = append(lopts, awsconfig.WithSharedConfigProfile(p))
@@ -337,7 +335,9 @@ func publicIP(ctx context.Context) (string, error) {
 
 // --- images ---
 
-// ImagePlatform is the platform of the instances.
+// ImagePlatform is the platform of instances of a size whose architecture
+// is unknown here: amd64. The fleet knows the architecture of its sizes
+// (fleet.size arch) and uses that instead.
 func (e *EC2) ImagePlatform(string) image.Platform { return image.LinuxAMD64 }
 
 // ImageRegistry is the ECR repository of the stack.
@@ -363,38 +363,47 @@ func machineImage(repo string, spec provider.MachineSpec) string {
 	if strings.HasPrefix(spec.Image, repo+":") {
 		return spec.Image
 	}
-	return image.RemoteTag(repo, spec.Image, image.LinuxAMD64)
+	return image.RemoteTag(repo, spec.Image, image.Platform("linux/"+archOf(spec.Arch)))
 }
 
-// ensureBinary uploads the server binary (content addressed) once.
-func (e *EC2) ensureBinary(ctx context.Context, bucket string) (string, error) {
+// ensureBinary uploads the server binary of arch (content addressed) once.
+func (e *EC2) ensureBinary(ctx context.Context, bucket, arch string) (string, error) {
 	e.binMu.Lock()
 	defer e.binMu.Unlock()
-	if e.binKey != "" {
-		return e.binKey, nil
+	if k := e.binKeys[arch]; k != "" {
+		return k, nil
 	}
-	data, err := os.ReadFile(e.binary)
+	path := e.binaries[arch]
+	if err := checkBinary(path, arch); err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(data)
-	key := "bin/cloudsourced-" + hex.EncodeToString(sum[:])[:16]
+	key := binaryKey(arch, data)
 	if _, err := e.s3.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)}); err != nil {
 		if _, err := e.s3.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Body: bytes.NewReader(data)}); err != nil {
 			return "", fmt.Errorf("aws-ec2: upload server binary: %w", err)
 		}
 	}
-	e.binKey = key
+	e.binKeys[arch] = key
 	return key, nil
 }
 
-func (e *EC2) amiID(ctx context.Context) (string, error) {
-	if e.ami != "" {
-		return e.ami, nil
+// binaryKey is the content addressed S3 key of a server binary.
+func binaryKey(arch string, data []byte) string {
+	sum := sha256.Sum256(data)
+	return "bin/cloudsourced-linux-" + arch + "-" + hex.EncodeToString(sum[:])[:16]
+}
+
+func (e *EC2) amiID(ctx context.Context, arch string) (string, error) {
+	if a := e.amis[arch]; a != "" {
+		return a, nil
 	}
-	out, err := e.ssm.GetParameter(ctx, &ssm.GetParameterInput{Name: aws.String("/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64")})
+	out, err := e.ssm.GetParameter(ctx, &ssm.GetParameterInput{Name: aws.String(amiParameter(arch))})
 	if err != nil {
-		return "", fmt.Errorf("aws-ec2: resolve Amazon Linux 2023 AMI: %w", err)
+		return "", fmt.Errorf("aws-ec2: resolve Amazon Linux 2023 %s AMI: %w", arch, err)
 	}
 	return aws.ToString(out.Parameter.Value), nil
 }
@@ -408,11 +417,12 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	if err != nil {
 		return provider.Machine{}, err
 	}
-	key, err := e.ensureBinary(ctx, in.bucket)
+	arch := archOf(spec.Arch)
+	key, err := e.ensureBinary(ctx, in.bucket, arch)
 	if err != nil {
 		return provider.Machine{}, err
 	}
-	ami, err := e.amiID(ctx)
+	ami, err := e.amiID(ctx, arch)
 	if err != nil {
 		return provider.Machine{}, err
 	}
@@ -436,13 +446,15 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 		{Key: aws.String(provider.LabelMemory), Value: aws.String(strconv.FormatInt(spec.Memory, 10))},
 		{Key: aws.String(provider.LabelFinger), Value: aws.String(spec.Finger)},
 		{Key: aws.String(provider.LabelSize), Value: aws.String(spec.Size)},
+		{Key: aws.String(provider.LabelArch), Value: aws.String(arch)},
 	}
 	input := &ec2.RunInstancesInput{
-		ImageId:      aws.String(ami),
-		InstanceType: ec2types.InstanceType(spec.Size),
-		MinCount:     aws.Int32(1), MaxCount: aws.Int32(1),
-		UserData:                          aws.String(base64.StdEncoding.EncodeToString([]byte(ud))),
-		IamInstanceProfile:                &ec2types.IamInstanceProfileSpecification{Arn: aws.String(in.profile)},
+		ImageId:  aws.String(ami),
+		MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
+		UserData:           aws.String(base64.StdEncoding.EncodeToString([]byte(ud))),
+		IamInstanceProfile: &ec2types.IamInstanceProfileSpecification{Arn: aws.String(in.profile)},
+		// Shutting down at expiry terminates an on-demand instance (spot:
+		// see applyAttempt).
 		InstanceInitiatedShutdownBehavior: ec2types.ShutdownBehaviorTerminate,
 		MetadataOptions: &ec2types.InstanceMetadataOptionsRequest{
 			HttpTokens: ec2types.HttpTokensStateRequired,
@@ -473,14 +485,20 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	if err := e.putSecrets(ctx, spec); err != nil {
 		return provider.Machine{}, err
 	}
-	out, err := e.ec2.RunInstances(ctx, input)
+	out, how, failed, err := launch(ctx, e.ec2.RunInstances, input, spec, e.spotMax, time.Now())
 	if err != nil {
 		e.deleteSecrets(context.Background(), spec.ID)
-		return provider.Machine{}, fmt.Errorf("aws-ec2: run instance %s: %w", spec.Size, err)
+		return provider.Machine{}, err
+	}
+	if len(failed) > 0 && how.spot {
+		slog.Info("aws-ec2: launched on a later spot instance type", "machine", spec.ID, "size", spec.Size, "instance_type", how.instanceType, "failed", strings.Join(failed, "; "))
+	}
+	if spec.Spot && !how.spot {
+		slog.Warn("aws-ec2: no spot capacity, launched on-demand", "machine", spec.ID, "size", spec.Size, "instance_type", how.instanceType, "spot_attempts", strings.Join(failed, "; "))
 	}
 	id := aws.ToString(out.Instances[0].InstanceId)
 	if err := e.waitRunning(ctx, id); err != nil {
-		e.ec2.TerminateInstances(context.Background(), &ec2.TerminateInstancesInput{InstanceIds: []string{id}})
+		e.terminate(context.Background(), out.Instances)
 		e.deleteSecrets(context.Background(), spec.ID)
 		return provider.Machine{}, err
 	}
@@ -554,6 +572,10 @@ func toMachine(i ec2types.Instance) provider.Machine {
 	}
 	m := provider.Machine{ID: l[provider.LabelMachine], EnvHash: l[provider.LabelEnvHash], Labels: l, Fingerprint: l[provider.LabelFinger]}
 	l["instance-id"] = aws.ToString(i.InstanceId)
+	l["instance-type"] = string(i.InstanceType)
+	if i.InstanceLifecycle == ec2types.InstanceLifecycleTypeSpot {
+		l[provider.LabelMarket], l[provider.LabelSpot] = provider.MarketSpot, "true"
+	}
 	m.CPU, _ = strconv.ParseFloat(l[provider.LabelCPU], 64)
 	m.Memory, _ = strconv.ParseInt(l[provider.LabelMemory], 10, 64)
 	if n, err := strconv.ParseInt(l[provider.LabelCreatedAt], 10, 64); err == nil {
@@ -569,6 +591,12 @@ func toMachine(i ec2types.Instance) provider.Machine {
 		m.State = provider.Starting
 	case ec2types.InstanceStateNameStopping, ec2types.InstanceStateNameStopped:
 		m.State = provider.Stopped
+		if spotInterrupted(i) {
+			// Only EC2 can restart it: the orchestrator destroys it and
+			// places the work elsewhere.
+			m.State = provider.Failed
+			l["interrupted"] = "spot"
+		}
 	default:
 		m.State = provider.Failed
 	}
@@ -635,17 +663,40 @@ func (e *EC2) Destroy(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	var ids []string
-	for _, i := range is {
-		ids = append(ids, aws.ToString(i.InstanceId))
+	if err := e.terminate(ctx, is); err != nil {
+		return err
+	}
+	// Normally the agent has deleted it already.
+	return e.deleteSecrets(ctx, id)
+}
+
+// terminate cancels the spot requests of instances, so that persistent
+// requests do not launch replacements, and terminates the instances.
+func (e *EC2) terminate(ctx context.Context, is []ec2types.Instance) error {
+	ids, reqs := instanceIDs(is)
+	if len(reqs) > 0 {
+		_, err := e.ec2.CancelSpotInstanceRequests(ctx, &ec2.CancelSpotInstanceRequestsInput{SpotInstanceRequestIds: reqs})
+		if err != nil && !strings.Contains(err.Error(), "InvalidSpotInstanceRequestID.NotFound") {
+			return fmt.Errorf("aws-ec2: cancel spot request: %w", err)
+		}
 	}
 	if len(ids) > 0 {
 		if _, err := e.ec2.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: ids}); err != nil {
 			return err
 		}
 	}
-	// Normally the agent has deleted it already.
-	return e.deleteSecrets(ctx, id)
+	return nil
+}
+
+// instanceIDs returns the instance and spot request IDs of instances.
+func instanceIDs(is []ec2types.Instance) (ids, spotRequests []string) {
+	for _, i := range is {
+		ids = append(ids, aws.ToString(i.InstanceId))
+		if r := aws.ToString(i.SpotInstanceRequestId); r != "" {
+			spotRequests = append(spotRequests, r)
+		}
+	}
+	return ids, spotRequests
 }
 
 // List returns the machines of owner.
