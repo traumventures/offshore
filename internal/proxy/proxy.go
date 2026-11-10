@@ -264,6 +264,12 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 		Grant: prep.Grant, MemoryOvercommit: prep.MemoryOvercommit,
 		Build: repo.Cache.Build.Paths, BuildTTL: prep.BuildTTL, Deps: repo.Cache.Deps.Paths,
 		Eager: profile.Eager, Lease: prep.Lease,
+		Linker: repo.Environment.Linker,
+	}
+	if cc := repo.Cache.Compiler; cc.Tool != "" {
+		req.CompilerCache = &proto.CompilerCache{
+			Tool: cc.Tool, TTLSeconds: int64(repo.CompilerCacheTTL().Seconds()), Incremental: cc.Incremental,
+		}
 	}
 	if useTTY {
 		cols, rows, err := term.GetSize(int(os.Stdout.Fd()))
@@ -338,8 +344,28 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	}
 	if verbose {
 		warn("exit %d (run %s, write back and outputs %s)", code, t2.Sub(t1).Round(time.Millisecond), time.Since(t2).Round(time.Millisecond))
+		if line := FormatCompilerCache(exit.Cache); line != "" {
+			warn("%s", line)
+		}
 	}
 	return code, nil
+}
+
+// FormatCompilerCache renders the sccache counters of Exit.Cache for
+// humans, e.g. "sccache: 3 hits / 1 misses (5 requests, 1 not cacheable)".
+// It returns "" when the run did not use sccache.
+func FormatCompilerCache(c map[string]int64) string {
+	if _, ok := c["sccache_requests"]; !ok {
+		return ""
+	}
+	s := fmt.Sprintf("sccache: %d hits / %d misses (%d requests", c["sccache_hits"], c["sccache_misses"], c["sccache_requests"])
+	if n := c["sccache_not_cacheable"]; n > 0 {
+		s += fmt.Sprintf(", %d not cacheable", n)
+	}
+	if n := c["sccache_errors"]; n > 0 {
+		s += fmt.Sprintf(", %d errors", n)
+	}
+	return s + ")"
 }
 
 // stream forwards stdio, terminal and signals until the remote exits.

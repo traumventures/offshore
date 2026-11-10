@@ -20,6 +20,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/creack/pty"
 	"github.com/quic-go/quic-go"
+	"github.com/traumventures/cloudsourced/internal/auth"
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/sandbox"
@@ -62,7 +63,7 @@ type frame struct {
 
 // serveExec runs one remote process with full stream, signal and exit code
 // forwarding, followed by write back and output transfer.
-func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream) error {
+func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream, claims auth.Claims) error {
 	begin := time.Now()
 	var req proto.Exec
 	if err := pc.Expect(proto.TExec, &req); err != nil {
@@ -70,6 +71,15 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream)
 	}
 	prepErr := func(err error) error {
 		pc.SendError("prepare", err)
+		return err
+	}
+	// A session token runs sessions of its own lease only.
+	if req.Lease == "" && claims.Scope == auth.ScopeSession {
+		req.Lease = claims.Lease
+	}
+	if !claims.AllowsLease(req.Lease) {
+		err := fmt.Errorf("%w: token is not valid for lease %q", auth.ErrInvalidToken, req.Lease)
+		pc.SendError("auth", err)
 		return err
 	}
 	if len(req.Argv) == 0 {
@@ -153,6 +163,13 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream)
 	data := filepath.Join(slot, "data")
 
 	env := s.sessionEnv(req, se.id)
+	sccache := req.CompilerCache != nil && s.ccEndpoint != ""
+	if sccache {
+		if err := os.MkdirAll(sccacheDir(se.id), 0o700); err != nil {
+			return prepErr(fmt.Errorf("compiler cache: %w", err))
+		}
+		defer os.RemoveAll(sccacheDir(se.id))
+	}
 	var binds []sandbox.Bind
 	for _, b := range req.Build {
 		b = filepath.Clean(b)
@@ -275,10 +292,18 @@ loop:
 		<-outDone
 		ptmx.Close()
 	}
+	exit := proto.Exit{}
+	if sccache {
+		// Before the kill: the session's sccache server runs in its cgroup.
+		if clientGone {
+			stopSccache(env, se.id)
+		} else {
+			exit.Cache = s.sccacheStats(env, se.id)
+		}
+	}
 	// Nothing of the session may outlive it, forwarded ports included.
 	se.end()
 	se.kill()
-	exit := proto.Exit{}
 	if cmd.ProcessState != nil {
 		ws := cmd.ProcessState.Sys().(syscall.WaitStatus)
 		switch {
@@ -343,6 +368,9 @@ func (s *Server) sessionEnv(req proto.Exec, id string) []string {
 		if _, ok := req.Env["CARGO_BUILD_JOBS"]; !ok {
 			set("CARGO_BUILD_JOBS", strconv.Itoa(j))
 		}
+	}
+	for _, kv := range s.compilerCacheEnv(req, id, func(k string) bool { _, ok := m[k]; return ok }) {
+		set(kv[0], kv[1])
 	}
 	set("PWD", req.Cwd)
 	set("CLOUDSOURCED_ACTIVE", "1")

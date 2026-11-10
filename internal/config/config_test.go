@@ -100,3 +100,48 @@ func TestOutputsAndEditorModes(t *testing.T) {
 		t.Fatalf("validation: %v", err)
 	}
 }
+
+func TestCompilerCacheAndLinker(t *testing.T) {
+	dir := writeRepo(t, `
+version = 1
+[environment]
+image = "rust:1"
+linker = "mold"
+[cache.compiler]
+tool = "sccache"
+ttl = "12h"
+incremental = false
+`)
+	r, err := LoadRepo(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Cache.Compiler.Tool != CompilerCacheSccache || r.CompilerCacheTTL() != 12*time.Hour || r.Environment.Linker != LinkerMold {
+		t.Fatalf("unexpected: %+v %+v", r.Cache.Compiler, r.Environment)
+	}
+	if r.Cache.Compiler.Incremental == nil || *r.Cache.Compiler.Incremental {
+		t.Fatal("incremental = false not parsed")
+	}
+	for name, tc := range map[string]struct{ body, want string }{
+		"unknown tool":        {"[cache.compiler]\ntool = \"ccache\"\n", "cache.compiler.tool"},
+		"ttl too long":        {"[cache.compiler]\ntool = \"sccache\"\nttl = \"2d\"\n", "cache.compiler.ttl"},
+		"ttl invalid":         {"[cache.compiler]\ntool = \"sccache\"\nttl = \"soon\"\n", "cache.compiler.ttl"},
+		"ttl without tool":    {"[cache.compiler]\nttl = \"1h\"\n", "require tool"},
+		"incremental only":    {"[cache.compiler]\nincremental = true\n", "require tool"},
+		"unknown linker":      {"[environment]\nimage = \"x\"\nlinker = \"gold\"\n", "environment.linker"},
+		"unknown cache field": {"[cache.compiler]\ntool = \"sccache\"\nsize = 1\n", "size"},
+	} {
+		body := "version = 1\n" + tc.body
+		if !strings.Contains(tc.body, "[environment]") {
+			body += "[environment]\nimage = \"x\"\n"
+		}
+		_, err := LoadRepo(writeRepo(t, body))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want error mentioning %q, got %v", name, tc.want, err)
+		}
+	}
+	// lld and the defaults are accepted.
+	if _, err := LoadRepo(writeRepo(t, "version = 1\n[environment]\nimage = \"x\"\nlinker = \"lld\"\n[cache.compiler]\ntool = \"sccache\"\n")); err != nil {
+		t.Fatal(err)
+	}
+}

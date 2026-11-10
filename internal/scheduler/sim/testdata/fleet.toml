@@ -1,0 +1,38 @@
+# Fleet configuration for the sample simulations (cloudsourced sim -config).
+# Sizes and on-demand prices of AWS c7a instances (us-east-1).
+[fleet]
+owner = "sim"
+max_machines = 16
+min_machines = 0
+idle_stop = "20m"
+max_lifetime = "24h"
+cpu_overcommit = 2
+memory_overcommit = 1
+estimator = "static"
+
+[[fleet.size]]
+name = "c7a.large"
+cpu = 2
+memory = "4G"
+price_per_hour = 0.1027
+
+[[fleet.size]]
+name = "c7a.xlarge"
+cpu = 4
+memory = "8G"
+price_per_hour = 0.2053
+
+[[fleet.size]]
+name = "c7a.2xlarge"
+cpu = 8
+memory = "16G"
+price_per_hour = 0.4106
+
+[[fleet.size]]
+name = "c7a.4xlarge"
+cpu = 16
+memory = "32G"
+price_per_hour = 0.8211
+
+[providers.aws]
+backend = "aws-ec2"

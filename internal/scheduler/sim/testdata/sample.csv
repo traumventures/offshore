@@ -1,0 +1,9 @@
+# start=2026-11-09T08:00:00Z
+at,repo,env,duration,cpu,memory,peak_memory
+0,api,rust,180,4,4G,2.5G
+30,api,rust,170,4,4G,2.4G
+45,cli,rust,60,2,2G,1G
+60,web,node,100,2,3G,2G
+400,api,rust,175,4,4G,2.6G
+2026-11-09T08:10:00Z,web,node,90,2,3G,2.1G
+2026-11-09T08:11:00Z,cli,rust,55,2,2G,1.1G

@@ -98,6 +98,19 @@ func TestAllowedEnv(t *testing.T) {
 	}
 }
 
+func TestFormatCompilerCache(t *testing.T) {
+	got := FormatCompilerCache(map[string]int64{"sccache_requests": 5, "sccache_hits": 3, "sccache_misses": 1, "sccache_not_cacheable": 1})
+	if got != "sccache: 3 hits / 1 misses (5 requests, 1 not cacheable)" {
+		t.Fatal(got)
+	}
+	if got := FormatCompilerCache(map[string]int64{"sccache_requests": 0, "sccache_errors": 2}); got != "sccache: 0 hits / 0 misses (0 requests, 2 errors)" {
+		t.Fatal(got)
+	}
+	if got := FormatCompilerCache(nil); got != "" {
+		t.Fatal(got)
+	}
+}
+
 func TestPortsFromEnvAndConfig(t *testing.T) {
 	prof := config.Tool{Ports: []any{int64(8080)}}
 	t.Setenv("CLOUDSOURCED_PORTS", "")
