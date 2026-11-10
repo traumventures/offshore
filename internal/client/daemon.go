@@ -23,6 +23,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/fleet"
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
+	"github.com/traumventures/cloudsourced/internal/runlog"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
 )
 
@@ -170,6 +171,8 @@ type Request struct {
 	// Usage reports what a finished session consumed (op "release").
 	UsageKey string           `json:"usage_key,omitempty"`
 	Usage    *scheduler.Usage `json:"usage,omitempty"`
+	// Run is recorded in the run log (op "release" and "record").
+	Run *runlog.Run `json:"run,omitempty"`
 }
 
 // Prepared is the result of a prepare request.
@@ -187,6 +190,12 @@ type Prepared struct {
 	UsageKey    string            `json:"usage_key"`
 	// MemoryOvercommit is passed to the server as admission safety net.
 	MemoryOvercommit float64 `json:"memory_overcommit"`
+	// Placement and preparation details for the run log.
+	Provider     string         `json:"provider,omitempty"`
+	Size         string         `json:"size,omitempty"`
+	PricePerHour float64        `json:"price_per_hour,omitempty"`
+	Reason       string         `json:"reason,omitempty"`
+	Timings      runlog.Timings `json:"timings"`
 }
 
 // Response is one line of a daemon RPC response.
@@ -243,7 +252,14 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 	case "prepare":
 		return d.prepare(ctx, req, progress)
 	case "release":
+		d.record(req.Run)
+		if req.Lease == "" {
+			return nil, nil
+		}
 		return nil, d.fleet.Release(ctx, req.Lease, req.UsageKey, req.Usage)
+	case "record":
+		d.record(req.Run)
+		return nil, nil
 	case "sync":
 		r := d.rootByPath(req.Root)
 		if r == nil {
@@ -273,6 +289,16 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 		return nil, nil
 	}
 	return nil, fmt.Errorf("unknown op %q", req.Op)
+}
+
+// record appends a run to the run log of `cloudsourced why`.
+func (d *Daemon) record(r *runlog.Run) {
+	if r == nil {
+		return
+	}
+	if err := runlog.Append(StateDir(), *r); err != nil {
+		d.log.Warn("run log", "err", err)
+	}
 }
 
 func (d *Daemon) rootByPath(p string) *root {
@@ -325,10 +351,19 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	if err != nil {
 		return nil, err
 	}
+	var tm runlog.Timings
+	mark := time.Now()
+	lap := func() int64 {
+		now := time.Now()
+		ms := runlog.Ms(now.Sub(mark))
+		mark = now
+		return ms
+	}
 	env := fleet.Env{Hash: plan.Hash, Tag: plan.Tag, Context: plan.Context}
 	if err := d.fleet.EnsureEnv(ctx, env, progress); err != nil {
 		return nil, err
 	}
+	tm.Env = lap()
 	// Track all roots and bring their manifests up to date.
 	paths := append([]string{repo.Root}, repo.ExtraRootPaths()...)
 	roots := map[string]*root{}
@@ -344,6 +379,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		}
 		roots[p], versions[p] = r, v
 	}
+	tm.Sync = lap()
 	repoID := RepoID(u.Fleet.Owner, repo.Root)
 	key := UsageKey(repoID, req.Tool, req.Args)
 	need, err := d.fleet.Estimate(ctx, key, scheduler.Resources{CPU: repo.Resources.CPU, Memory: repo.MemoryBytes()})
@@ -362,7 +398,9 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		if err != nil {
 			return nil, err
 		}
+		tm.Queue += lap()
 		err = d.attachAll(ctx, lease, repo, roots)
+		tm.Attach += lap()
 		if err == nil {
 			break
 		}
@@ -378,6 +416,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		Machine: lease.MachineID, Addr: lease.Addr, Fingerprint: lease.Fingerprint, Token: lease.Token,
 		Lease: lease.ID, RepoID: repoID, EnvHash: plan.Hash, Roots: versions, BuildTTL: ttl.String(),
 		Grant: lease.Grant, UsageKey: key, MemoryOvercommit: lease.MemoryOvercommit,
+		Provider: lease.Provider, Size: lease.Size, PricePerHour: lease.PricePerHour, Reason: lease.Reason, Timings: tm,
 	}, nil
 }
 
