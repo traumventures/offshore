@@ -81,6 +81,15 @@ func TestRescanMatchesScan(t *testing.T) {
 				rel = dir + "/" + name
 			}
 			abs := filepath.Join(root, filepath.FromSlash(rel))
+			// os.RemoveAll below may delete a subtree only partially (for
+			// example below a chmod 0600 directory). A watcher reports events
+			// in every directory it removed entries from, so do the same.
+			var below []string
+			for _, d := range dirs {
+				if d == rel || strings.HasPrefix(d, rel+"/") {
+					below = append(below, d)
+				}
+			}
 			var touched []string
 			switch rapid.IntRange(0, 4).Draw(t, "op") {
 			case 0: // write file
@@ -108,6 +117,7 @@ func TestRescanMatchesScan(t *testing.T) {
 				os.Chmod(abs, 0o600)
 				touched = []string{dir}
 			}
+			touched = append(touched, below...)
 			// Drop directories that no longer exist from the candidates.
 			live := dirs[:0]
 			for _, d := range dirs {
