@@ -298,7 +298,7 @@ func serveControlplane(o *cpOptions) error {
 		os.WriteFile(filepath.Join(dir, cpStateFile), append(b, '\n'), 0o644)
 	}
 
-	go local.Run(ctx, 15*time.Second)
+	go local.Run(ctx, fleet.ReconcileInterval(15*time.Second))
 	go watchFleetConfig(ctx, reloader, 15*time.Second)
 
 	fmt.Fprintf(os.Stderr, "cloudsourced control plane %s\n  listen:      %s\n  config:      %s (fleet %s)\n  state:       %s\n  providers:   %s\n",

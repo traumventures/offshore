@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/traumventures/cloudsourced/internal/clock"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -555,8 +556,12 @@ func hostCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	clk, err := clock.FromEnv()
+	if err != nil {
+		return err
+	}
 	a := &hostagent.Agent{
-		Spec: spec, Platform: plat, StateDir: *stateDir, Docker: hostagent.DockerCLI("docker"), Log: log,
+		Spec: spec, Platform: plat, StateDir: *stateDir, Docker: hostagent.DockerCLI("docker"), Log: log, Clock: clk,
 		Shutdown: func() error { return exec.Command("shutdown", "-h", "now").Run() },
 	}
 	return a.Run(ctx)

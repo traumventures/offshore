@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/traumventures/cloudsourced/internal/clock"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
@@ -130,7 +131,7 @@ const gib = int64(1) << 30
 
 func testConfig(prov string) Config {
 	return Config{
-		Owner: "test", MaxLifetime: 24 * time.Hour, QueueTimeout: 3 * time.Second,
+		Owner: "test", MaxLifetime: 24 * time.Hour, QueueTimeout: 30 * time.Second,
 		Sizes:  []scheduler.Size{{Provider: prov, Name: "m4", Capacity: scheduler.Resources{CPU: 4, Memory: 4 * gib}}},
 		Policy: scheduler.Config{CPUOvercommit: 2, MemoryOvercommit: 1, MinMachines: 0, MaxMachines: 3, IdleStop: time.Minute},
 	}
@@ -253,6 +254,8 @@ func TestWarmCacheAffinity(t *testing.T) {
 func TestReconcileIdleExpiryAndWarmPool(t *testing.T) {
 	f := newFake()
 	o := newTestOrch(t, f, func(c *Config) { c.Policy.MinMachines = 1; c.Policy.IdleStop = time.Second })
+	clk := clock.NewFake(time.Now())
+	o.Clock = clk
 	ctx := context.Background()
 	var ids []string
 	for i := 0; i < 3; i++ {
@@ -263,50 +266,48 @@ func TestReconcileIdleExpiryAndWarmPool(t *testing.T) {
 		f.startSession(l.MachineID, l.ID, 2, 2*gib)
 		ids = append(ids, l.MachineID)
 	}
-	// All sessions end; machines become idle long ago.
+	// All sessions end; an hour later the machines are long idle and the
+	// pending leases have lapsed.
 	f.mu.Lock()
 	for _, st := range f.status {
 		st.Sessions, st.UsedCPU, st.UsedMemory = nil, 0, 0
-		st.IdleSince = time.Now().Add(-time.Hour).Unix()
+		st.IdleSince = clk.Now().Unix()
 	}
 	f.mu.Unlock()
-	o.mu.Lock()
-	for _, m := range o.machines {
-		m.pending = map[string]pendingLease{}
-	}
-	o.mu.Unlock()
+	clk.Advance(time.Hour)
 	if err := o.Reconcile(ctx); err != nil {
 		t.Fatal(err)
 	}
 	running := 0
+	f.mu.Lock()
 	for _, m := range f.machines {
 		if m.State == provider.Running {
 			running++
 		}
 	}
-	if running != 1 || len(f.stopped) != 1 {
+	stopped := len(f.stopped)
+	f.mu.Unlock()
+	if running != 1 || stopped != 1 {
 		t.Fatalf("warm pool of 1 expected: running=%d stopped=%v", running, f.stopped)
 	}
-	// Expire everything: machines are destroyed together with their volumes.
+	// The lifetime ends: machines are destroyed together with their volumes.
+	clk.Advance(24 * time.Hour)
 	f.mu.Lock()
-	for _, m := range f.machines {
-		m.ExpiresAt = time.Now().Add(-time.Second)
-	}
 	f.volumes["orphan"] = provider.Volume{Name: "orphan", Kind: "cache"}
-	f.volumes["deps-old"] = provider.Volume{Name: "deps-old", Kind: "deps", ExpiresAt: time.Now().Add(-time.Second)}
-	f.volumes["deps-new"] = provider.Volume{Name: "deps-new", Kind: "deps", ExpiresAt: time.Now().Add(time.Hour)}
+	f.volumes["deps-old"] = provider.Volume{Name: "deps-old", Kind: "deps", ExpiresAt: clk.Now().Add(-time.Second)}
+	f.volumes["deps-new"] = provider.Volume{Name: "deps-new", Kind: "deps", ExpiresAt: clk.Now().Add(time.Hour)}
 	f.mu.Unlock()
 	if err := o.Reconcile(ctx); err != nil {
 		t.Fatal(err)
 	}
 	// Warm pool refill may create a fresh machine; none of the old ones survive.
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, id := range ids {
 		if _, ok := f.machines[id]; ok {
 			t.Fatalf("expired machine %s survived", id)
 		}
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	if _, ok := f.volumes["orphan"]; ok {
 		t.Fatal("orphaned cache volume survived")
 	}
@@ -476,6 +477,8 @@ func TestPollBackoff(t *testing.T) {
 func TestLeaseDetailsAndCostHistory(t *testing.T) {
 	f := newFake()
 	o := newTestOrch(t, f, func(c *Config) { c.Sizes[0].PricePerHour = 0.5 })
+	clk := clock.NewFake(time.Now())
+	o.Clock = clk
 	l, err := o.Acquire(context.Background(), req("r1"), io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -487,7 +490,7 @@ func TestLeaseDetailsAndCostHistory(t *testing.T) {
 	if len(ms) != 1 || ms[0].PricePerHour != 0.5 || len(ms[0].Uptime) != 1 || !ms[0].Removed.IsZero() {
 		t.Fatalf("snapshot %+v", ms)
 	}
-	time.Sleep(10 * time.Millisecond)
+	clk.Advance(10 * time.Minute)
 	if err := o.DestroyAll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +498,7 @@ func TestLeaseDetailsAndCostHistory(t *testing.T) {
 	if len(ms) != 1 || ms[0].Removed.IsZero() || ms[0].Uptime[0].End.IsZero() {
 		t.Fatalf("removed machine not kept for cost accounting: %+v", ms)
 	}
-	r := Costs(ms, StartOfDay(time.Now()).Add(-time.Hour), time.Now())
+	r := Costs(ms, StartOfDay(clk.Now()).Add(-time.Hour), clk.Now())
 	if len(r.Sizes) != 1 || r.Sizes[0].Running != 0 || r.Total <= 0 {
 		t.Fatalf("costs %+v", r)
 	}

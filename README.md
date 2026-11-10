@@ -411,7 +411,6 @@ time; restarts and removals that happened while the daemon or control plane
 was not running are not visible, and provider billing granularity is
 ignored.
 
-<<<<<<< HEAD
 ### Output FUSE
 
 By default only `eager` outputs come back after a run; `cloudsourced fetch`
@@ -443,7 +442,7 @@ cloudsourced outputs unmount
   back to the local directory, and the daemon log says which machine was
   unreachable. The machine is not asked again for 20 s.
 - The mount survives daemon restarts (state in `$STATE/outputs/state.json`).
-=======
+
 ### Compiler cache and linker
 
 `[cache.compiler] tool = "sccache"` adds the pinned static sccache release
@@ -482,7 +481,6 @@ rustc's own `-fuse-ld=lld` for its bundled rust-lld),
 which sessions use as `CARGO_TARGET_<host triple>_LINKER` unless set. This
 leaves `RUSTFLAGS` and `rustflags` from `.cargo/config.toml` untouched; a
 `target.<triple>.linker` in `.cargo/config.toml` is overridden by it.
->>>>>>> main
 
 ### rust-analyzer
 
@@ -670,8 +668,19 @@ protected). See [docs/SCHEDULER.md](docs/SCHEDULER.md#calibrating-the-simulator-
 
 ```sh
 make test                                   # unit and property tests
-E2E_DOCKER="sudo -n docker" make e2e        # full end-to-end run (~5 min)
+E2E_DOCKER="sudo -n docker" make e2e        # full end-to-end run
+E2E_PARALLEL=1 E2E_DOCKER="sudo -n docker" ./test/e2e/run.sh   # parts concurrently
+E2E_REMOTE=1 E2E_DOCKER="sudo -n docker" ./test/e2e/run.sh     # against a control plane
 ```
+
+The test is split into parts (`test/e2e/parts`: `core` without compiling,
+`rust`, `lifecycle`), selectable with `E2E_PARTS`; each part has its own
+owner, daemon, ports and test clock. Idle stop and lifetime expiry use the
+test clock (`CLOUDSOURCED_TEST_CLOCK=offset:FILE`, moved with the hidden
+`cloudsourced debug clock advance DURATION`) and a fast reconcile loop
+(`CLOUDSOURCED_RECONCILE_INTERVAL`), so they take seconds. In remote mode
+only `core` runs unless `E2E_FULL=1`. The environment image is reused
+across runs (`E2E_CLEAN_IMAGES=1` removes the images a run built).
 
 The end-to-end test builds a Rust project remotely and verifies outputs,
 write back, exit codes, signals, stdin, environment allowlist, secrets,

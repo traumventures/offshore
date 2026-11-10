@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/traumventures/cloudsourced/internal/clock"
 	"io"
 	"log/slog"
 	"os"
@@ -162,6 +163,20 @@ type Machine struct {
 	Removed  time.Time
 	observed bool
 	pending  map[string]pendingLease
+	// listed is when the provider view in Machine was taken (the start of
+	// the listing) or last changed locally. Older listings are stale: a
+	// slow readiness poll must not overwrite a newer state or expiry.
+	listed time.Time
+}
+
+// update applies a provider listing started at listedAt unless the machine
+// has a newer view; it reports whether pm was applied.
+func (m *Machine) update(pm provider.Machine, listedAt time.Time) bool {
+	if listedAt.Before(m.listed) {
+		return false
+	}
+	m.Machine, m.listed = pm, listedAt
+	return true
 }
 
 // Span is a period of machine uptime. End is zero while the period lasts.
@@ -259,6 +274,12 @@ type Orchestrator struct {
 	// ProbeFunc fetches a server status; replaceable in tests.
 	ProbeFunc func(ctx context.Context, addr, fingerprint, token string) (proto.Status, error)
 
+	// Clock is the time of fleet decisions: idle stop, lifetime expiry,
+	// pending lease and volume TTLs, warm pool windows, uptime. Waits,
+	// probe recency and latency metrics use real time. Set before use;
+	// New takes it from $CLOUDSOURCED_TEST_CLOCK (default: real time).
+	Clock clock.Clock
+
 	// PrepareImage makes the environment image available on a provider
 	// right before a machine of the given size is created there and returns
 	// the reference the machine runs (nil, or an empty reference: the image
@@ -285,13 +306,17 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		return nil, fmt.Errorf("orchestrator: fleet master key: %w", err)
 	}
 	fixConfig(&cfg)
+	clk, err := clock.FromEnv()
+	if err != nil {
+		return nil, err
+	}
 	o := &Orchestrator{
 		cfg: cfg, provs: provs, stateDir: stateDir, log: log, master: master, signer: master.Signer(),
 		policy:   scheduler.Default{Cfg: cfg.Policy},
 		machines: map[string]*Machine{}, creating: map[string]creation{}, queue: map[string]scheduler.Task{},
 		queued: map[string]repoParams{}, envParams: map[string]repoParams{},
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
-		ProbeFunc: Probe,
+		ProbeFunc: Probe, Clock: clk,
 	}
 	o.metrics = newOrchMetrics(o)
 	o.obs = newObserver(stateDir, cfg.EventRetention)
@@ -338,6 +363,9 @@ func fixConfig(cfg *Config) {
 		cfg.Policy.MaxMachines = 1
 	}
 }
+
+// now is the decision time (see Clock).
+func (o *Orchestrator) now() time.Time { return o.Clock.Now() }
 
 func (o *Orchestrator) notify() {
 	close(o.changed)
@@ -431,6 +459,7 @@ func newID(n int) string {
 
 // Refresh reloads machines from the provider and probes running servers.
 func (o *Orchestrator) Refresh(ctx context.Context) error {
+	listedAt := time.Now()
 	list, err := o.listAll(ctx)
 	if err != nil {
 		return err
@@ -452,10 +481,13 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 			m = &Machine{Provider: tm.prov, pending: map[string]pendingLease{}}
 			o.machines[pm.ID] = m
 		}
+		if listedAt.Before(m.listed) {
+			continue // changed since the listing started
+		}
 		if m.State == provider.Running && pm.State != provider.Running {
 			down = append(down, pm.ID)
 		}
-		expired := !pm.ExpiresAt.IsZero() && !time.Now().Before(pm.ExpiresAt)
+		expired := !pm.ExpiresAt.IsZero() && !o.now().Before(pm.ExpiresAt)
 		if _, inFlight := o.creating[pm.ID]; inFlight && pm.State == provider.Stopped && !expired {
 			// A start is in progress but the provider does not show it yet
 			// (e.g. the container or instance is still stopped): keep the
@@ -467,8 +499,8 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		if !ok || m.State != pm.State {
 			o.stateEventLocked(pm.ID, pm.State)
 		}
-		m.Machine = pm
-		m.observe(time.Now())
+		m.update(pm, listedAt)
+		m.observe(o.now())
 		if pm.State != provider.Running {
 			m.Status = nil
 		}
@@ -476,7 +508,9 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 			wg.Add(1)
 			go func(id, addr, fp, token string) {
 				defer wg.Done()
-				st, err := o.ProbeFunc(ctx, addr, fp, token)
+				pctx, cancel := context.WithTimeout(ctx, ProbeTimeout)
+				st, err := o.ProbeFunc(pctx, addr, fp, token)
+				cancel()
 				if err != nil {
 					results <- probe{id, nil}
 					return
@@ -485,8 +519,10 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 			}(pm.ID, pm.Addr, pm.Fingerprint, o.probeToken(pm.ID))
 		}
 	}
-	for id := range o.machines {
-		if !seen[id] && o.machines[id].State != provider.Starting {
+	for id, m := range o.machines {
+		// A machine created or changed after the listing started is not
+		// missing from it.
+		if !seen[id] && m.State != provider.Starting && !listedAt.Before(m.listed) {
 			o.stateEventLocked(id, "gone")
 			o.removeLocked(id)
 			down = append(down, id)
@@ -503,16 +539,26 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 	close(results)
 	o.mu.Lock()
 	for r := range results {
-		if m, ok := o.machines[r.id]; ok {
-			if st := r.status; st != nil && st.InterruptAt > 0 && (m.Status == nil || m.Status.InterruptAt == 0) {
-				o.log.Warn("machine interruption notice", "id", r.id, "reason", st.DrainReason,
-					"deadline", time.Unix(st.InterruptAt, 0).UTC().Format(time.RFC3339), "sessions", len(st.Sessions))
-			}
-			m.Status = r.status
-			m.StatusAt = time.Now()
+		m, ok := o.machines[r.id]
+		if !ok {
+			continue
 		}
+		if st := r.status; st != nil && st.InterruptAt > 0 && (m.Status == nil || m.Status.InterruptAt == 0) {
+			o.log.Warn("machine interruption notice", "id", r.id, "reason", st.DrainReason,
+				"deadline", time.Unix(st.InterruptAt, 0).UTC().Format(time.RFC3339), "sessions", len(st.Sessions))
+		}
+		if r.status == nil && m.Status != nil && m.State == provider.Running && time.Since(m.StatusAt) < statusGrace {
+			// A single failed probe (e.g. a timeout on a loaded host) does
+			// not make a running machine unschedulable: keep the last
+			// status for a short while.
+			continue
+		}
+		m.Status = r.status
+		m.StatusAt = time.Now()
 	}
-	o.refreshed = time.Now()
+	// The data is as old as the listing, not as the end of the probes:
+	// a session that ended while a slow refresh ran is not in it.
+	o.refreshed = listedAt
 	o.notify()
 	o.mu.Unlock()
 	return nil
@@ -557,10 +603,22 @@ func (o *Orchestrator) provOf(id string) (provider.Provider, error) {
 	return p, nil
 }
 
+// ProbeTimeout bounds a status probe (Probe applies it when the context has
+// no deadline; the orchestrator's own probes always use it). It is
+// generous: on a loaded host the QUIC handshake alone may take seconds.
+const ProbeTimeout = 10 * time.Second
+
+// statusGrace is how long the last status of a running machine survives
+// failed probes.
+const statusGrace = 30 * time.Second
+
 // Probe fetches a server's status.
 func Probe(ctx context.Context, addr, fingerprint, token string) (proto.Status, error) {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, ProbeTimeout)
+		defer cancel()
+	}
 	conn, err := transport.Dial(ctx, addr, fingerprint)
 	if err != nil {
 		return proto.Status{}, err
@@ -696,7 +754,7 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 }
 
 func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) (Lease, error) {
-	now := time.Now()
+	now := o.now()
 	task := scheduler.Task{ID: newID(8), EnvHash: req.EnvHash, RepoID: req.RepoID, Key: req.Key, Request: req.Need, Limit: req.Limit, Since: now}
 	o.mu.Lock()
 	o.recentEnvs[req.EnvHash] = now
@@ -723,7 +781,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 	refreshed := false
 	for {
 		o.mu.Lock()
-		f := o.fleetLocked(time.Now())
+		f := o.fleetLocked(o.now())
 		pl := o.policy.Place(f, task)
 		switch pl.Kind {
 		case scheduler.Assign:
@@ -735,7 +793,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 				Provider: m.Provider, Size: size, PricePerHour: o.priceLocked(m.Provider, size, m.Labels[provider.LabelMarket]), Reason: pl.Reason,
 				BuildTTL: req.buildTTL(o.cfg.MaxLifetime),
 			}
-			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: time.Now().Add(2 * time.Minute)}
+			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: o.now().Add(2 * time.Minute)}
 			o.mu.Unlock()
 			return lease, nil
 		case scheduler.Reject:
@@ -755,7 +813,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			o.metrics.placements.Inc("queue")
 		}
 		o.queue[task.ID] = task
-		f = o.fleetLocked(time.Now())
+		f = o.fleetLocked(o.now())
 		acts := o.policy.Plan(f)
 		o.markLocked(acts)
 		ch := o.changed
@@ -803,13 +861,14 @@ func (o *Orchestrator) markLocked(acts []scheduler.Action) {
 		case scheduler.Create:
 			id := newID(6)
 			acts[i].Machine = id
-			o.creating[id] = creation{prov: a.Size.Provider, env: a.EnvHash, size: a.Size, at: time.Now()}
+			o.creating[id] = creation{prov: a.Size.Provider, env: a.EnvHash, size: a.Size, at: o.now()}
 		case scheduler.Start:
 			if m, ok := o.machines[a.Machine]; ok {
 				m.State = provider.Starting
-				m.observe(time.Now())
+				m.listed = time.Now()
+				m.observe(o.now())
 				m.Status = nil
-				o.creating[a.Machine] = creation{prov: m.Provider, env: m.EnvHash, at: time.Now()}
+				o.creating[a.Machine] = creation{prov: m.Provider, env: m.EnvHash, at: o.now()}
 			}
 		case scheduler.Stop, scheduler.Destroy:
 			if m, ok := o.machines[a.Machine]; ok {
@@ -901,7 +960,8 @@ func (o *Orchestrator) setState(id string, st provider.State) {
 	o.mu.Lock()
 	if m, ok := o.machines[id]; ok {
 		m.State = st
-		m.observe(time.Now())
+		m.listed = time.Now()
+		m.observe(o.now())
 		m.Status = nil
 		m.Addr = ""
 	}
@@ -976,7 +1036,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	o.mu.Unlock()
 	// Whole seconds: the expiry travels as Unix seconds and is an input of
 	// the derived certificate.
-	expires := time.Unix(time.Now().Add(cfg.MaxLifetime).Unix(), 0)
+	expires := time.Unix(o.now().Add(cfg.MaxLifetime).Unix(), 0)
 	seed := o.master.MachineSeed(id)
 	ident, err := auth.MachineIdentity(seed, id, expires)
 	if err != nil {
@@ -1037,8 +1097,8 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	}
 	m.Fingerprint = ident.Fingerprint
 	o.mu.Lock()
-	nm := &Machine{Machine: m, Provider: size.Provider, pending: map[string]pendingLease{}}
-	nm.observe(time.Now())
+	nm := &Machine{Machine: m, Provider: size.Provider, pending: map[string]pendingLease{}, listed: time.Now()}
+	nm.observe(o.now())
 	o.machines[id] = nm
 	o.mu.Unlock()
 	return o.waitReady(ctx, id)
@@ -1057,6 +1117,7 @@ func (o *Orchestrator) startMachine(ctx context.Context, id string) {
 		o.log.Error("start machine", "id", id, "err", err)
 		return
 	}
+	startedAt := time.Now()
 	m, err := p.Start(ctx, id)
 	if err != nil {
 		o.provErr(o.provName(p), "start", err)
@@ -1065,8 +1126,8 @@ func (o *Orchestrator) startMachine(ctx context.Context, id string) {
 	}
 	o.mu.Lock()
 	if mm, ok := o.machines[id]; ok {
-		mm.Machine = m
-		mm.observe(time.Now())
+		mm.update(m, startedAt)
+		mm.observe(o.now())
 		mm.Status = nil
 		mm.Draining = false
 	}
@@ -1105,6 +1166,7 @@ func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 	}
 	interval, maxInterval := pollIntervals(p.Caps())
 	for time.Now().Before(deadline) {
+		listedAt := time.Now()
 		list, err := p.List(ctx, o.cfg.Owner)
 		o.provErr(o.provName(p), "list", err)
 		if err == nil {
@@ -1117,15 +1179,18 @@ func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 				}
 				pm.Fingerprint = o.fingerprint(pm)
 				o.mu.Lock()
+				fresh := false
 				if m := o.machines[id]; m != nil {
-					m.Machine = pm
-					m.observe(time.Now())
+					fresh = m.update(pm, listedAt)
+					m.observe(o.now())
 				}
 				o.mu.Unlock()
-				if pm.Addr == "" {
+				if !fresh || pm.Addr == "" {
 					continue
 				}
-				st, err := o.ProbeFunc(ctx, pm.Addr, pm.Fingerprint, o.probeToken(id))
+				pctx, cancel := context.WithTimeout(ctx, ProbeTimeout)
+				st, err := o.ProbeFunc(pctx, pm.Addr, pm.Fingerprint, o.probeToken(id))
+				cancel()
 				if err == nil {
 					o.mu.Lock()
 					if m := o.machines[id]; m != nil {
@@ -1156,7 +1221,7 @@ func (o *Orchestrator) Snapshot() []Machine {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	var out []Machine
-	now := time.Now()
+	now := o.now()
 	for _, m := range o.machines {
 		m.observe(now)
 		c := *m
@@ -1204,7 +1269,7 @@ func (o *Orchestrator) removeLocked(id string) {
 		return
 	}
 	delete(o.machines, id)
-	now := time.Now()
+	now := o.now()
 	m.State = provider.Failed
 	m.observe(now)
 	m.Removed = now
@@ -1234,7 +1299,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	if err := o.Refresh(ctx); err != nil {
 		return err
 	}
-	now := time.Now()
+	now := o.now()
 	o.mu.Lock()
 	var invariant []scheduler.Action
 	for _, m := range o.machines {
@@ -1259,7 +1324,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	o.execute(ctx, invariant, true)
 
 	o.mu.Lock()
-	acts := o.policy.Plan(o.fleetLocked(time.Now()))
+	acts := o.policy.Plan(o.fleetLocked(o.now()))
 	o.markLocked(acts)
 	o.mu.Unlock()
 	o.execute(context.WithoutCancel(ctx), acts, true)
@@ -1290,7 +1355,7 @@ func (o *Orchestrator) reapProvider(ctx context.Context, p provider.Provider) er
 	for _, m := range list {
 		alive["cs-cache-"+m.ID] = true
 	}
-	now := time.Now()
+	now := o.now()
 	for _, v := range vols {
 		expired := !v.ExpiresAt.IsZero() && !now.Before(v.ExpiresAt)
 		orphan := v.Kind == "cache" && !alive[v.Name]

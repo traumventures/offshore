@@ -125,7 +125,7 @@ func (o *Orchestrator) readyEvent(ctx context.Context, id string) {
 	o.mu.Lock()
 	ev := o.machineEventLocked(events.MachineReady, id)
 	if c, ok := o.creating[id]; ok {
-		ev.LatencyMs = time.Since(c.at).Milliseconds()
+		ev.LatencyMs = o.now().Sub(c.at).Milliseconds()
 	}
 	o.mu.Unlock()
 	ev.TraceID = telemetry.TraceID(ctx)

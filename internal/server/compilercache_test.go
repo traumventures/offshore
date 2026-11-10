@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -90,6 +91,26 @@ func TestParseSccacheStats(t *testing.T) {
 	want := map[string]int64{"sccache_requests": 5, "sccache_hits": 3, "sccache_misses": 1, "sccache_not_cacheable": 1, "sccache_errors": 2}
 	if !maps.Equal(st, want) {
 		t.Fatalf("got %v, want %v", st, want)
+	}
+}
+
+func TestSccachePendingWrites(t *testing.T) {
+	stats := func(misses, writes, writeErrors int) string {
+		return fmt.Sprintf(`{"stats":{"cache_misses":{"counts":{"Rust":%d}},"cache_writes":%d,"cache_write_errors":%d}}`, misses, writes, writeErrors)
+	}
+	for _, c := range []struct {
+		raw  string
+		want int64
+	}{
+		{stats(3, 0, 0), 3}, // compiled, nothing stored yet
+		{stats(3, 2, 0), 1}, // one upload in flight
+		{stats(3, 2, 1), 0}, // a failed write is finished too
+		{`{"stats":{}}`, 0}, // no compilation at all
+	} {
+		_, pending, err := parseSccacheJSON([]byte(c.raw))
+		if err != nil || pending != c.want {
+			t.Errorf("%s: pending %d, %v; want %d", c.raw, pending, err, c.want)
+		}
 	}
 }
 
