@@ -505,7 +505,7 @@ func (s *Server) sendNeeded(pc *proto.Conn, frames chan frame, blobs map[string]
 		if err != nil {
 			return err
 		}
-		s.metrics.bytes.Add(float64(fi.Size()), direction)
+		s.countBytes(float64(fi.Size()), direction)
 	}
 	return nil
 }

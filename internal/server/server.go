@@ -512,7 +512,7 @@ func (s *Server) doFetch(ctx context.Context, root, rel, hash string) error {
 	go func() { pw.CloseWithError(pc.ReadData(pw)) }()
 	_, err = s.store.Put(hash, cr)
 	pr.CloseWithError(err)
-	s.metrics.bytes.Add(float64(cr.n), transferFetch)
+	s.countBytes(float64(cr.n), transferFetch)
 	return err
 }
 

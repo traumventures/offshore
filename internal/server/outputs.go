@@ -155,7 +155,7 @@ func (s *Server) outputsRead(pc *proto.Conn, req proto.OutRead) error {
 	if err := pc.SendData(io.LimitReader(f, req.Size)); err != nil {
 		return err
 	}
-	s.metrics.bytes.Add(float64(req.Size), transferOutput)
+	s.countBytes(float64(req.Size), transferOutput)
 	if !same() {
 		return pc.SendError("stale", errStale)
 	}

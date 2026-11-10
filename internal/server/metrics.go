@@ -90,3 +90,10 @@ func validCounter(k string) bool {
 	}
 	return strings.Trim(k, "abcdefghijklmnopqrstuvwxyz0123456789_") == ""
 }
+
+// countBytes records a transfer (servers built without New have no metrics).
+func (s *Server) countBytes(n float64, direction string) {
+	if s.metrics != nil {
+		s.metrics.bytes.Add(n, direction)
+	}
+}

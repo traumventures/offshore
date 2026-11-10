@@ -19,7 +19,7 @@ func TestStatusCarriesMetrics(t *testing.T) {
 	}
 	s.metrics.sessionEnded(0, 3, false, map[string]int64{"sccache_hits": 5, "sccache_misses": 2, "Bad Key": 1})
 	s.metrics.sessionEnded(137, 30, true, nil)
-	s.metrics.bytes.Add(1024, transferFetch)
+	s.countBytes(1024, transferFetch)
 	s.metrics.rejected.Inc("draining")
 	// The snapshot survives the JSON status stream.
 	b, err := json.Marshal(s.Status())
