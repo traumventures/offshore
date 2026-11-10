@@ -67,6 +67,7 @@ func (r *Remote) call(ctx context.Context, path string, body io.Reader, contentT
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+r.apiKey)
+	req.Header.Set(headerRequestID, newRequestID()) // correlates control plane logs
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}

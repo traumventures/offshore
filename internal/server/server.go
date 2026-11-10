@@ -141,6 +141,8 @@ type Server struct {
 
 	fetchMu  sync.Mutex
 	inflight map[string]*fetchCall
+
+	metrics *serverMetrics
 }
 
 type fetchCall struct {
@@ -168,11 +170,13 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 			env = append(env, kv)
 		}
 	}
-	return &Server{
+	s := &Server{
 		cfg: cfg, log: log, store: store, slots: sl, self: self, env: env,
 		mounts: map[string]*fusefs.Projection{}, sources: map[string]*quic.Conn{},
 		sessions: map[string]*session{}, idleSince: time.Now(), lastProbe: time.Now(), inflight: map[string]*fetchCall{},
-	}, nil
+	}
+	s.metrics = newServerMetrics(s)
+	return s, nil
 }
 
 // Run provisions the machine and serves until ctx ends or the machine expires.
@@ -397,8 +401,15 @@ func authorize(kind string, c auth.Claims) error {
 	return nil
 }
 
-// Status reports machine state.
+// Status reports machine state including the server's metrics.
 func (s *Server) Status() proto.Status {
+	st := s.statusOnly()
+	st.Metrics = s.metrics.reg.Gather()
+	return st
+}
+
+// statusOnly reports machine state without metrics.
+func (s *Server) statusOnly() proto.Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := proto.Status{
@@ -542,8 +553,21 @@ func (s *Server) doFetch(ctx context.Context, root, rel, hash string) error {
 		return errors.New(resp.Err)
 	}
 	pr, pw := io.Pipe()
+	cr := &countingReader{r: pr}
 	go func() { pw.CloseWithError(pc.ReadData(pw)) }()
-	_, err = s.store.Put(hash, pr)
+	_, err = s.store.Put(hash, cr)
 	pr.CloseWithError(err)
+	s.countBytes(float64(cr.n), transferFetch)
 	return err
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }

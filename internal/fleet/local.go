@@ -206,7 +206,9 @@ func (l *Local) ensureImage(ctx context.Context, p provider.Provider, env Env, p
 		})
 		return logf.Write(b)
 	})
-	if err := p.EnsureImage(ctx, spec, w); err != nil {
+	err = p.EnsureImage(ctx, spec, w)
+	l.imageBuilt(p, start, err)
+	if err != nil {
 		return fmt.Errorf("environment image on %s: %w (see %s)", p.Name(), err, logf.Name())
 	}
 	l.log.Info("environment image ready", "provider", p.Name(), "tag", env.Tag, "duration", time.Since(start).Round(time.Millisecond))

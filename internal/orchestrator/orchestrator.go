@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/traumventures/cloudsourced/internal/auth"
+	"github.com/traumventures/cloudsourced/internal/logs"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
@@ -240,6 +241,8 @@ type Orchestrator struct {
 	// EnsureImage makes the environment image available on a provider
 	// before a machine is created there (nil: images are assumed present).
 	EnsureImage func(ctx context.Context, prov provider.Provider, envHash string) error
+
+	metrics *orchMetrics
 }
 
 // New creates an orchestrator.
@@ -266,6 +269,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
 		ProbeFunc: Probe,
 	}
+	o.metrics = newOrchMetrics(o)
 	o.loadRecent()
 	return o, nil
 }
@@ -492,6 +496,7 @@ func (o *Orchestrator) listAll(ctx context.Context) ([]taggedMachine, error) {
 	for name, p := range o.provs {
 		ms, err := p.List(ctx, o.cfg.Owner)
 		if err != nil {
+			o.provErr(name, "list", err)
 			return nil, fmt.Errorf("provider %s: %w", name, err)
 		}
 		for _, m := range ms {
@@ -610,10 +615,35 @@ func (o *Orchestrator) fleetLocked(now time.Time) scheduler.Fleet {
 // ErrQueueTimeout means no capacity became available in time.
 var ErrQueueTimeout = errors.New("no machine capacity available")
 
+// ErrUnschedulable means the policy rejected a request outright.
+var ErrUnschedulable = errors.New("cannot schedule")
+
 // Acquire reserves capacity for a session. The policy decides placement;
 // while the task waits, the policy's fleet plan is executed (start, create,
 // stop, destroy, drain). log receives progress messages for the user.
 func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) (Lease, error) {
+	start := time.Now()
+	lease, err := o.acquire(ctx, req, log)
+	result := "assigned"
+	switch {
+	case err == nil:
+		o.metrics.placements.Inc("assign")
+	case errors.Is(err, ErrUnschedulable):
+		result = "rejected"
+		o.metrics.placements.Inc("reject")
+	case errors.Is(err, ErrQueueTimeout):
+		result = "timeout"
+		o.metrics.placements.Inc("timeout")
+	case ctx.Err() != nil:
+		result = "canceled"
+	default:
+		result = "error"
+	}
+	o.metrics.acquire.Observe(time.Since(start).Seconds(), result)
+	return lease, err
+}
+
+func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) (Lease, error) {
 	now := time.Now()
 	task := scheduler.Task{ID: newID(8), EnvHash: req.EnvHash, RepoID: req.RepoID, Key: req.Key, Request: req.Need, Limit: req.Limit, Since: now}
 	o.mu.Lock()
@@ -658,7 +688,7 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 			return lease, nil
 		case scheduler.Reject:
 			o.mu.Unlock()
-			return Lease{}, fmt.Errorf("cannot schedule: %s (needs %.1f CPU, %d bytes memory)", pl.Reason, req.Need.CPU, req.Need.Memory)
+			return Lease{}, fmt.Errorf("%w: %s (needs %.1f CPU, %d bytes memory)", ErrUnschedulable, pl.Reason, req.Need.CPU, req.Need.Memory)
 		}
 		if !refreshed {
 			// Placement failed on cached state: retry once with fresh state.
@@ -668,6 +698,9 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 				return Lease{}, err
 			}
 			continue
+		}
+		if _, queued := o.queue[task.ID]; !queued {
+			o.metrics.placements.Inc("queue")
 		}
 		o.queue[task.ID] = task
 		f = o.fleetLocked(time.Now())
@@ -712,6 +745,7 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 // concurrent decisions see them (capacity on its way, machines going down).
 func (o *Orchestrator) markLocked(acts []scheduler.Action) {
 	for i, a := range acts {
+		o.metrics.actions.Inc(actionName(a.Kind))
 		switch a.Kind {
 		case scheduler.Create:
 			id := newID(6)
@@ -781,7 +815,7 @@ func (o *Orchestrator) stopMachine(ctx context.Context, id, reason string) {
 		return
 	}
 	o.setState(id, provider.Stopped)
-	if err := p.Stop(ctx, id); err != nil {
+	if err := o.provErr(o.provName(p), "stop", p.Stop(ctx, id)); err != nil {
 		o.log.Error("stop", "id", id, "err", err)
 	}
 	o.mu.Lock()
@@ -799,7 +833,7 @@ func (o *Orchestrator) destroyMachine(ctx context.Context, id, reason string) {
 		return
 	}
 	o.setState(id, provider.Failed)
-	if err := p.Destroy(ctx, id); err != nil {
+	if err := o.provErr(o.provName(p), "destroy", p.Destroy(ctx, id)); err != nil {
 		o.log.Error("destroy", "id", id, "err", err)
 		return
 	}
@@ -918,6 +952,9 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	if cfg.MaxLifetime > 0 {
 		spec.Env["CLOUDSOURCED_BUILD_TTL"] = cfg.MaxLifetime.String()
 	}
+	for k, v := range logs.Forward() { // machines log like the fleet
+		spec.Env[k] = v
+	}
 	prov, ok := o.provs[size.Provider]
 	if !ok {
 		return fmt.Errorf("size %s: unknown provider %q", size.Name, size.Provider)
@@ -930,7 +967,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	o.log.Info("creating machine", "id", id, "provider", size.Provider, "size", size.Name, "env", envHash[:min(12, len(envHash))], "image", image)
 	m, err := prov.Create(ctx, spec)
 	if err != nil {
-		return err
+		return o.provErr(size.Provider, "create", err)
 	}
 	m.Fingerprint = ident.Fingerprint
 	o.mu.Lock()
@@ -956,6 +993,7 @@ func (o *Orchestrator) startMachine(ctx context.Context, id string) {
 	}
 	m, err := p.Start(ctx, id)
 	if err != nil {
+		o.provErr(o.provName(p), "start", err)
 		o.log.Error("start machine", "id", id, "err", err)
 		return
 	}
@@ -1002,6 +1040,7 @@ func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 	interval, maxInterval := pollIntervals(p.Caps())
 	for time.Now().Before(deadline) {
 		list, err := p.List(ctx, o.cfg.Owner)
+		o.provErr(o.provName(p), "list", err)
 		if err == nil {
 			for _, pm := range list {
 				if pm.ID != id {
@@ -1107,6 +1146,17 @@ func (o *Orchestrator) removeLocked(id string) {
 // destroyed, expiring busy machines drain, orphaned volumes are deleted)
 // and executes the policy's fleet plan.
 func (o *Orchestrator) Reconcile(ctx context.Context) error {
+	start := time.Now()
+	err := o.reconcile(ctx)
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	o.metrics.reconcile.Observe(time.Since(start).Seconds(), result)
+	return err
+}
+
+func (o *Orchestrator) reconcile(ctx context.Context) error {
 	if err := o.Refresh(ctx); err != nil {
 		return err
 	}
@@ -1156,11 +1206,11 @@ func (o *Orchestrator) reapVolumes(ctx context.Context) error {
 func (o *Orchestrator) reapProvider(ctx context.Context, p provider.Provider) error {
 	vols, err := p.Volumes(ctx, o.cfg.Owner)
 	if err != nil {
-		return err
+		return o.provErr(o.provName(p), "volumes", err)
 	}
 	list, err := p.List(ctx, o.cfg.Owner)
 	if err != nil {
-		return err
+		return o.provErr(o.provName(p), "list", err)
 	}
 	alive := map[string]bool{}
 	for _, m := range list {
@@ -1171,7 +1221,7 @@ func (o *Orchestrator) reapProvider(ctx context.Context, p provider.Provider) er
 		expired := !v.ExpiresAt.IsZero() && !now.Before(v.ExpiresAt)
 		orphan := v.Kind == "cache" && !alive[v.Name]
 		if expired || orphan {
-			if err := p.DeleteVolume(ctx, v.Name); err == nil {
+			if err := o.provErr(o.provName(p), "delete_volume", p.DeleteVolume(ctx, v.Name)); err == nil {
 				o.log.Info("deleted volume", "provider", p.Name(), "name", v.Name, "expired", expired, "orphan", orphan)
 			}
 		}

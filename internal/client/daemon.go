@@ -59,6 +59,8 @@ type Daemon struct {
 	roots map[string]*root
 	conns map[string]*machineConn
 	stop  context.CancelFunc
+
+	metrics *daemonMetrics
 }
 
 // NewDaemon creates the daemon from the client configuration and, in
@@ -72,6 +74,7 @@ func NewDaemon(log *slog.Logger) (*Daemon, error) {
 		log.Warn("client configuration", "warning", w)
 	}
 	d := &Daemon{log: log, roots: map[string]*root{}, conns: map[string]*machineConn{}}
+	d.metrics = newDaemonMetrics(d)
 	if d.outputs, err = newOutputsMgr(d); err != nil {
 		return nil, err
 	}
@@ -202,7 +205,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 
 // Request is a daemon RPC request.
 type Request struct {
-	Op    string   `json:"op"` // prepare | release | sync | status | down | reconcile | shutdown | ping | outputs-mount | outputs-unmount | outputs-status | outputs-hint
+	Op    string   `json:"op"` // prepare | release | sync | status | metrics | down | reconcile | shutdown | ping | outputs-mount | outputs-unmount | outputs-status | outputs-hint
 	Root  string   `json:"root,omitempty"`
 	Cwd   string   `json:"cwd,omitempty"`
 	Tool  string   `json:"tool,omitempty"`
@@ -276,7 +279,9 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 		io.Copy(io.Discard, c)
 		cancel()
 	}()
+	start := time.Now()
 	result, err := d.dispatch(rctx, req, progress)
+	d.metrics.request(req.Op, start, err)
 	mu.Lock()
 	defer mu.Unlock()
 	resp := Response{Done: true}
@@ -346,6 +351,8 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 	case "shutdown":
 		d.stop()
 		return nil, nil
+	case "metrics":
+		return d.metricsText(ctx)
 	}
 	return nil, fmt.Errorf("unknown op %q", req.Op)
 }
@@ -355,6 +362,7 @@ func (d *Daemon) record(r *runlog.Run) {
 	if r == nil {
 		return
 	}
+	d.metrics.run(r)
 	if err := runlog.Append(StateDir(), *r); err != nil {
 		d.log.Warn("run log", "err", err)
 	}

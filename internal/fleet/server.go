@@ -12,10 +12,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/traumventures/cloudsourced/internal/metrics"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 )
 
@@ -64,26 +66,62 @@ func NewServer(f *Local, apiKey, stateDir string, log *slog.Logger) (*Server, er
 
 func (s *Server) envDir() string { return filepath.Join(s.stateDir, "envs") }
 
+// ServeHTTP tags every request with an id (X-Request-Id, taken from the
+// client when well formed), logs it and counts it.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == pathHealth {
 		w.Write([]byte("ok\n"))
 		return
 	}
+	start := time.Now()
+	id := requestID(r)
+	w.Header().Set(headerRequestID, id)
+	rec := &statusRecorder{ResponseWriter: w}
+	log := s.log.With("request_id", id)
+	failed := s.serve(rec, r, log)
+	path, code := knownPath(r.URL.Path), rec.code
+	if code == 0 {
+		code = http.StatusOK
+	}
+	result := strconv.Itoa(code)
+	if failed {
+		result = "error"
+	}
+	reg := s.fleet.Registry()
+	reg.Counter("cloudsourced_http_requests_total", "Control plane API requests by path and result (HTTP status, or error for failed calls).", "path", "result").Inc(path, result)
+	reg.Histogram("cloudsourced_http_request_duration_seconds", "Control plane API request duration (acquire includes queueing).", metrics.DurationBuckets, "path").Observe(time.Since(start).Seconds(), path)
+	if path != pathMetrics {
+		log.Info("request", "method", r.Method, "path", r.URL.Path, "code", code, "failed", failed, "duration", time.Since(start).Round(time.Millisecond))
+	}
+}
+
+// serve handles one request; it reports whether a streamed call failed.
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, log *slog.Logger) bool {
 	key, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || subtle.ConstantTimeCompare([]byte(key), []byte(s.apiKey)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+		return false
+	}
+	if r.URL.Path == pathMetrics {
+		s.serveMetrics(w, r)
+		return false
 	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
+		return false
 	}
 	var h func(ctx context.Context, r *http.Request, progress io.Writer) (any, error)
 	switch r.URL.Path {
 	case pathEnv:
 		h = s.env
 	case pathAcquire:
-		h = s.acquire
+		h = func(ctx context.Context, r *http.Request, progress io.Writer) (any, error) {
+			lease, err := s.acquire(ctx, r, progress)
+			if err == nil {
+				log.Info("lease", "lease", lease.ID, "machine", lease.MachineID, "provider", lease.Provider, "size", lease.Size, "reason", lease.Reason)
+			}
+			return lease, err
+		}
 	case pathRelease:
 		h = func(ctx context.Context, r *http.Request, _ io.Writer) (any, error) {
 			var req releaseReq
@@ -128,9 +166,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		http.NotFound(w, r)
-		return
+		return false
 	}
-	s.stream(w, r, h)
+	return s.stream(w, r, h, log)
 }
 
 func decode(r *http.Request, v any) error {
@@ -138,7 +176,7 @@ func decode(r *http.Request, v any) error {
 }
 
 // stream runs h and writes its progress and result as frames.
-func (s *Server) stream(w http.ResponseWriter, r *http.Request, h func(context.Context, *http.Request, io.Writer) (any, error)) {
+func (s *Server) stream(w http.ResponseWriter, r *http.Request, h func(context.Context, *http.Request, io.Writer) (any, error), log *slog.Logger) bool {
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("X-Accel-Buffering", "no") // reverse proxies: do not buffer
 	flusher, _ := w.(http.Flusher)
@@ -162,18 +200,19 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, h func(context.C
 	f := Frame{Done: true}
 	if err != nil {
 		f.Error = err.Error()
-		s.log.Warn("request failed", "path", r.URL.Path, "err", err, "duration", time.Since(start).Round(time.Millisecond))
+		log.Warn("request failed", "path", r.URL.Path, "err", err, "duration", time.Since(start).Round(time.Millisecond))
 	} else if result != nil {
 		f.Result, _ = json.Marshal(result)
 	}
 	enc.Encode(f)
 	flush()
+	return err != nil
 }
 
-func (s *Server) acquire(ctx context.Context, r *http.Request, progress io.Writer) (any, error) {
+func (s *Server) acquire(ctx context.Context, r *http.Request, progress io.Writer) (orchestrator.Lease, error) {
 	var req orchestrator.Request
 	if err := decode(r, &req); err != nil {
-		return nil, err
+		return orchestrator.Lease{}, err
 	}
 	if s.Reloader != nil {
 		s.Reloader.Check()
