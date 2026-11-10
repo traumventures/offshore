@@ -52,6 +52,10 @@ cargo build ──► proxy ──► daemon ── QUIC ────► server
   build slots. A session leases a slot exclusively, so parallel builds of one
   repository never block each other; slots are reused warm and never older
   than the build TTL (24 h). Machines themselves live at most `max_lifetime`.
+* **Compiler cache.** With `[cache.compiler] tool = "sccache"` sessions run
+  cargo with `RUSTC_WRAPPER=sccache` against a WebDAV cache (see below), so a
+  fresh machine reuses compiled dependencies. Entries are never served after
+  24 h.
 * **Placement** prefers machines that already hold a warm slot for the
   repository, then rendezvous hashing; memory is never overcommitted, CPU is
   (`cpu_overcommit`). Several sessions share one machine; more machines are
@@ -182,6 +186,7 @@ memory = "8G"
 
 [environment]               # built into a content addressed image
 image = "rust:1-slim-bookworm"     # or: dockerfile = "ci/Dockerfile"
+linker = "mold"             # optional: mold | lld (installed into the image)
 
 [environment.packages]
 apt = ["pkg-config", "libssl-dev", "clang"]
@@ -203,6 +208,11 @@ ttl   = "24h"
 [cache.deps]
 paths = ["$CARGO_HOME/registry", "$CARGO_HOME/git"]
 ttl   = "7d"
+
+[cache.compiler]            # optional shared compiler cache
+tool = "sccache"            # installs a pinned sccache into the image
+ttl  = "12h"                # optional, at most 24h
+# incremental = false       # CARGO_INCREMENTAL=0: workspace crates cacheable too
 
 [services.postgres]         # sidecar, reachable on localhost in sessions
 image = "postgres:17"
@@ -233,6 +243,42 @@ Escape hatches: `CLOUDSOURCED_DISABLE=1` (always local),
 `CLOUDSOURCED_STDIN=always|never`, `CLOUDSOURCED_VERBOSE=1`.
 When no machine can be provisioned the proxy falls back to the local tool.
 
+### Compiler cache and linker
+
+`[cache.compiler] tool = "sccache"` adds the pinned static sccache release
+(checksum verified, downloaded once on the client into the user cache
+directory, `CLOUDSOURCED_TOOL_CACHE` overrides) to the environment image.
+Each session gets its own sccache server on a unix socket inside the session
+sandbox (`SCCACHE_SERVER_UDS`, `SCCACHE_DIR` in a private temporary
+directory); it ends with the session. The cache backend is WebDAV
+(`SCCACHE_WEBDAV_ENDPOINT`), served by `internal/blobcache`:
+
+* By default the machine server serves it on `127.0.0.1` from a directory
+  store under `<deps dir>/sccache` (`CLOUDSOURCED_SCCACHE_DIR`). The
+  dependency volume is shared by the owner's machines, so a new machine gets
+  hits for everything an earlier one compiled. Keys are prefixed with the
+  environment hash, so toolchains never mix.
+* A host agent may serve the cache itself (for example from S3 with the
+  instance role: `blobcache.S3StoreFromEnv`, `CLOUDSOURCED_SCCACHE_S3=bucket/cache/sccache`,
+  optional `CLOUDSOURCED_SCCACHE_TTL`) and pass `CLOUDSOURCED_SCCACHE_ENDPOINT`
+  to the machine server; the server appends the environment hash to that URL
+  (`blobcache.Handler` without a fixed namespace).
+
+sccache cannot cache incremental compilations, which cargo uses for
+workspace crates in dev profiles; dependencies are cached regardless.
+`incremental = false` sets `CARGO_INCREMENTAL=0` unless the run sets it.
+User settings of `RUSTC_WRAPPER` win. With `CLOUDSOURCED_VERBOSE=1` the proxy
+prints the run's statistics (`sccache: 3 hits / 1 misses (...)`); they are
+also part of the session's exit message (`proto.Exit.CompilerCache`).
+
+`[environment] linker = "mold"` installs the pinned static mold release
+(`lld` installs the distribution's `lld` package, Debian based images) and a
+driver `/usr/local/bin/cloudsourced-cc-<linker>` (`cc ... -fuse-ld=<linker>`, last so it beats
+rustc's own `-fuse-ld=lld` for its bundled rust-lld),
+which sessions use as `CARGO_TARGET_<host triple>_LINKER` unless set. This
+leaves `RUSTFLAGS` and `rustflags` from `.cargo/config.toml` untouched; a
+`target.<triple>.linker` in `.cargo/config.toml` is overridden by it.
+
 ### rust-analyzer
 
 `cloudsourced editor vscode` (or `zed`, `neovim`) prints settings that run
@@ -251,7 +297,8 @@ E2E_DOCKER="sudo -n docker" make e2e        # full end-to-end run (~5 min)
 The end-to-end test builds a Rust project remotely and verifies outputs,
 write back, exit codes, signals, stdin, environment allowlist, secrets,
 services, projection consistency under rapid changes, shims, lazy outputs,
-dependency caching, parallel sessions, scale out, idle stop, warm restart,
+dependency caching, compiler cache hits on a fresh machine, the mold
+linker, parallel sessions, scale out, idle stop, warm restart,
 lifetime expiry, fail-open and cleanup.
 
 Design notes and roadmap: [docs/PLAN.md](docs/PLAN.md).

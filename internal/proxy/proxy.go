@@ -19,7 +19,6 @@ import (
 	"github.com/traumventures/cloudsourced/internal/client"
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
 	"github.com/traumventures/cloudsourced/internal/transport"
 	"golang.org/x/term"
 )
@@ -202,6 +201,12 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 		Grant: prep.Grant, MemoryOvercommit: prep.MemoryOvercommit,
 		Build: repo.Cache.Build.Paths, BuildTTL: prep.BuildTTL, Deps: repo.Cache.Deps.Paths,
 		Eager: profile.Eager, Lease: prep.Lease,
+		Linker: repo.Environment.Linker,
+	}
+	if cc := repo.Cache.Compiler; cc.Tool != "" {
+		req.CompilerCache = &proto.CompilerCache{
+			Tool: cc.Tool, TTLSeconds: int64(repo.CompilerCacheTTL().Seconds()), Incremental: cc.Incremental,
+		}
 	}
 	if useTTY {
 		cols, rows, err := term.GetSize(int(os.Stdout.Fd()))
@@ -234,9 +239,9 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	if verbose {
 		warn("running on %s (slot %s, prepare %s, server wait %dms)", started.Machine, started.Slot, t1.Sub(t0).Round(time.Millisecond), started.WaitMs)
 	}
-	code, usage, err := stream(pc, useTTY)
+	code, exit, err := stream(pc, useTTY)
 	if err == nil {
-		release.Usage = &usage
+		release.Usage = &exit.Usage
 	}
 	t2 := time.Now()
 	if err != nil {
@@ -260,12 +265,28 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	}
 	if verbose {
 		warn("exit %d (run %s, write back and outputs %s)", code, t2.Sub(t1).Round(time.Millisecond), time.Since(t2).Round(time.Millisecond))
+		if cc := exit.CompilerCache; cc != nil {
+			warn("%s", FormatCompilerCache(cc))
+		}
 	}
 	return code, nil
 }
 
+// FormatCompilerCache renders compiler cache statistics for humans, e.g.
+// "sccache: 3 hits / 1 misses (5 requests, 1 not cacheable)".
+func FormatCompilerCache(cc *proto.CompilerCacheStats) string {
+	s := fmt.Sprintf("%s: %d hits / %d misses (%d requests", cc.Tool, cc.Hits, cc.Misses, cc.Requests)
+	if cc.NotCacheable > 0 {
+		s += fmt.Sprintf(", %d not cacheable", cc.NotCacheable)
+	}
+	if cc.Errors > 0 {
+		s += fmt.Sprintf(", %d errors", cc.Errors)
+	}
+	return s + ")"
+}
+
 // stream forwards stdio, terminal and signals until the remote exits.
-func stream(pc *proto.Conn, useTTY bool) (int, scheduler.Usage, error) {
+func stream(pc *proto.Conn, useTTY bool) (int, proto.Exit, error) {
 	if useTTY {
 		if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
 			defer term.Restore(int(os.Stdin.Fd()), old)
@@ -294,7 +315,7 @@ func stream(pc *proto.Conn, useTTY bool) (int, scheduler.Usage, error) {
 	for {
 		t, p, err := pc.Read()
 		if err != nil {
-			return 255, scheduler.Usage{}, err
+			return 255, proto.Exit{}, err
 		}
 		switch t {
 		case proto.TStdout:
@@ -304,11 +325,11 @@ func stream(pc *proto.Conn, useTTY bool) (int, scheduler.Usage, error) {
 		case proto.TExit:
 			var ex proto.Exit
 			if err := json.Unmarshal(p, &ex); err != nil {
-				return 255, scheduler.Usage{}, err
+				return 255, proto.Exit{}, err
 			}
-			return ex.Code, ex.Usage, nil
+			return ex.Code, ex, nil
 		case proto.TError:
-			return 255, scheduler.Usage{}, proto.Decode(t, p, proto.TExit, nil)
+			return 255, proto.Exit{}, proto.Decode(t, p, proto.TExit, nil)
 		}
 	}
 }

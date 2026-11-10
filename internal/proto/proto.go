@@ -128,6 +128,30 @@ type Exec struct {
 	Deps             []string `json:"deps"`      // shared dependency cache paths
 	Eager            []string `json:"eager"`     // output globs relative to Repo
 	Lease            string   `json:"lease,omitempty"`
+	// CompilerCache enables a compiler cache in the session (repository
+	// [cache.compiler]); nil means off.
+	CompilerCache *CompilerCache `json:"compiler_cache,omitempty"`
+	// Linker is the repository's environment.linker ("", "mold", "lld").
+	Linker string `json:"linker,omitempty"`
+}
+
+// CompilerCache is the session's compiler cache configuration.
+type CompilerCache struct {
+	Tool string `json:"tool"` // "sccache"
+	// TTLSeconds lowers the maximum age of reused entries (0 = cache limit).
+	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
+	// Incremental false sets CARGO_INCREMENTAL=0; nil keeps cargo's default.
+	Incremental *bool `json:"incremental,omitempty"`
+}
+
+// CompilerCacheStats are the compiler cache counters of one session.
+type CompilerCacheStats struct {
+	Tool         string `json:"tool"`
+	Requests     int64  `json:"requests"`      // compile requests seen by the cache
+	Hits         int64  `json:"hits"`          // served from the cache
+	Misses       int64  `json:"misses"`        // compiled and stored
+	NotCacheable int64  `json:"not_cacheable"` // e.g. incremental or binary crates
+	Errors       int64  `json:"errors"`        // cache read/write errors
 }
 
 // Started confirms the remote process runs.
@@ -154,6 +178,9 @@ type Exit struct {
 	Code   int             `json:"code"`
 	Signal int             `json:"signal,omitempty"`
 	Usage  scheduler.Usage `json:"usage"`
+	// CompilerCache holds the session's compiler cache statistics when a
+	// compiler cache was enabled and used.
+	CompilerCache *CompilerCacheStats `json:"compiler_cache,omitempty"`
 }
 
 // Change is a file written remotely into a projected root.

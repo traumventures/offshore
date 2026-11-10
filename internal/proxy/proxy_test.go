@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/cloudsourced/internal/proto"
 )
 
 func TestRemoteAllowed(t *testing.T) {
@@ -89,5 +90,15 @@ func TestAllowedEnv(t *testing.T) {
 	}
 	if _, ok := env["PATH"]; ok {
 		t.Fatal("PATH must come from the remote environment")
+	}
+}
+
+func TestFormatCompilerCache(t *testing.T) {
+	got := FormatCompilerCache(&proto.CompilerCacheStats{Tool: "sccache", Requests: 5, Hits: 3, Misses: 1, NotCacheable: 1})
+	if got != "sccache: 3 hits / 1 misses (5 requests, 1 not cacheable)" {
+		t.Fatal(got)
+	}
+	if got := FormatCompilerCache(&proto.CompilerCacheStats{Tool: "sccache", Errors: 2}); got != "sccache: 0 hits / 0 misses (0 requests, 2 errors)" {
+		t.Fatal(got)
 	}
 }

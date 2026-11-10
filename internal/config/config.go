@@ -58,7 +58,22 @@ type Environment struct {
 	Toolchains Toolchains        `toml:"toolchains"`
 	Setup      []SetupStep       `toml:"setup"`
 	Env        map[string]string `toml:"env"`
+	// Linker selects the linker for Rust builds: "" (toolchain default),
+	// "mold" or "lld". The JSON tag keeps the environment hash of
+	// repositories without a linker setting unchanged.
+	Linker string `toml:"linker" json:"Linker,omitempty"`
 }
+
+// Linkers supported by environment.linker.
+const (
+	LinkerMold = "mold"
+	LinkerLLD  = "lld"
+)
+
+// LinkerDriver is the path of the C compiler driver wrapper that the
+// environment image installs for a linker (cc -fuse-ld=<linker>). Sessions
+// use it as cargo's target linker.
+func LinkerDriver(linker string) string { return "/usr/local/bin/cloudsourced-cc-" + linker }
 
 // Packages lists system packages installed into the environment image.
 type Packages struct {
@@ -99,9 +114,28 @@ type ExtraRoot struct {
 
 // Cache configures worker side caches.
 type Cache struct {
-	Build CacheClass `toml:"build"`
-	Deps  CacheClass `toml:"deps"`
+	Build    CacheClass    `toml:"build"`
+	Deps     CacheClass    `toml:"deps"`
+	Compiler CompilerCache `toml:"compiler"`
 }
+
+// CompilerCache configures a shared compiler cache ([cache.compiler]).
+type CompilerCache struct {
+	Tool string `toml:"tool"` // "" (off) or "sccache"
+	// TTL lowers the maximum age of reused cache entries (at most 24h, the
+	// cache's own limit).
+	TTL string `toml:"ttl"`
+	// Incremental = false sets CARGO_INCREMENTAL=0 in sessions, so that
+	// workspace crates are cacheable too (sccache cannot cache incremental
+	// compilations). Unset leaves cargo's default.
+	Incremental *bool `toml:"incremental"`
+}
+
+// CompilerCacheSccache is the only supported compiler cache tool.
+const CompilerCacheSccache = "sccache"
+
+// MaxCompilerCacheTTL bounds cache.compiler.ttl.
+const MaxCompilerCacheTTL = 24 * time.Hour
 
 // CacheClass is a class of cached paths with a time to live.
 type CacheClass struct {
@@ -312,6 +346,28 @@ func (r *Repo) Validate() error {
 	if _, err := ParseDuration(r.Cache.Deps.TTL); err != nil {
 		errs = append(errs, "cache.deps.ttl: "+err.Error())
 	}
+	switch r.Environment.Linker {
+	case "", LinkerMold, LinkerLLD:
+	default:
+		errs = append(errs, fmt.Sprintf("environment.linker: unsupported %q (mold, lld)", r.Environment.Linker))
+	}
+	cc := r.Cache.Compiler
+	switch cc.Tool {
+	case "":
+		if cc.TTL != "" || cc.Incremental != nil {
+			errs = append(errs, "cache.compiler: ttl and incremental require tool = \"sccache\"")
+		}
+	case CompilerCacheSccache:
+	default:
+		errs = append(errs, fmt.Sprintf("cache.compiler.tool: unsupported %q (sccache)", cc.Tool))
+	}
+	if cc.TTL != "" {
+		if d, err := ParseDuration(cc.TTL); err != nil {
+			errs = append(errs, "cache.compiler.ttl: "+err.Error())
+		} else if d < time.Second || d > MaxCompilerCacheTTL {
+			errs = append(errs, fmt.Sprintf("cache.compiler.ttl: %q must be between 1s and 24h", cc.TTL))
+		}
+	}
 	for name, svc := range r.Services {
 		if !validName(name) {
 			errs = append(errs, fmt.Sprintf("services.%s: name must match [a-z0-9-]+", name))
@@ -355,6 +411,15 @@ func (r *Repo) ExtraRootPaths() []string {
 		out = append(out, filepath.Clean(p))
 	}
 	return out
+}
+
+// CompilerCacheTTL returns cache.compiler.ttl (0 = not set).
+func (r *Repo) CompilerCacheTTL() time.Duration {
+	if r.Cache.Compiler.TTL == "" {
+		return 0
+	}
+	d, _ := ParseDuration(r.Cache.Compiler.TTL)
+	return d
 }
 
 // MemoryBytes returns the requested session memory in bytes.

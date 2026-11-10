@@ -6,6 +6,7 @@ memory = "2G"
 
 [environment]
 image = "rust:1-slim-bookworm"
+linker = "mold"
 
 [environment.packages]
 apt = ["jq"]
@@ -29,6 +30,9 @@ mode = "immutable"
 
 [cache.build]
 paths = ["target"]
+
+[cache.compiler]
+tool = "sccache"
 
 [cache.deps]
 paths = ["$CARGO_HOME/registry", "$CARGO_HOME/git"]

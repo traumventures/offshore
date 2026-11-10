@@ -1,0 +1,217 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/traumventures/cloudsourced/internal/blobcache"
+	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/cloudsourced/internal/proto"
+)
+
+// Compiler cache (sccache) support.
+//
+// By default the machine server serves a blobcache WebDAV endpoint on
+// 127.0.0.1 (sessions share the machine's network namespace) backed by a
+// directory store with a 24 h TTL. Its namespace is fixed to the machine's
+// environment hash, so toolchains never mix and sessions cannot reach
+// other environments. CLOUDSOURCED_SCCACHE_ENDPOINT (set by a host agent)
+// replaces it with an external blobcache in namespace-from-path mode; the
+// environment hash is appended to its URL.
+//
+// Every session runs its own sccache server on a unix socket in a private
+// directory, so concurrent sessions do not share (or kill) each other's
+// server and the server's statistics are exactly the session's.
+
+// startCompilerCache determines the endpoint sessions use.
+func (s *Server) startCompilerCache(ctx context.Context) {
+	ns := s.cfg.EnvHash
+	if ns == "" {
+		ns = "default"
+	}
+	if ep := s.cfg.SccacheEndpoint; ep != "" {
+		s.ccEndpoint = strings.TrimSuffix(ep, "/") + "/" + ns + "/"
+		s.log.Info("compiler cache", "endpoint", s.ccEndpoint)
+		return
+	}
+	store, err := blobcache.NewDirStore(s.cfg.SccacheDir, blobcache.MaxTTL)
+	if err != nil {
+		s.log.Warn("compiler cache disabled", "err", err)
+		return
+	}
+	if n := store.Sweep(); n > 0 {
+		s.log.Info("removed expired compiler cache entries", "count", n)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		s.log.Warn("compiler cache disabled", "err", err)
+		return
+	}
+	srv := &http.Server{
+		Handler:           &blobcache.Handler{Store: store, Namespace: ns, Log: s.log},
+		ReadHeaderTimeout: 30 * time.Second,
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.log.Warn("compiler cache server", "err", err)
+		}
+	}()
+	go store.SweepEvery(ctx, 30*time.Minute)
+	go func() {
+		<-ctx.Done()
+		srv.Close()
+	}()
+	s.ccEndpoint = "http://" + ln.Addr().String() + "/"
+	s.log.Info("compiler cache", "endpoint", s.ccEndpoint, "dir", s.cfg.SccacheDir)
+}
+
+// sccacheDir is the private directory of a session's sccache server.
+func sccacheDir(session string) string {
+	return filepath.Join(os.TempDir(), "cloudsourced-sccache-"+session)
+}
+
+// compilerCacheEnv returns the session variables for the compiler cache
+// and the linker. has reports whether a variable is already set (by the
+// image or the request) and must not be overridden.
+func (s *Server) compilerCacheEnv(req proto.Exec, session string, has func(string) bool) [][2]string {
+	var out [][2]string
+	if cc := req.CompilerCache; cc != nil && cc.Tool == config.CompilerCacheSccache && s.ccEndpoint != "" {
+		dir := sccacheDir(session)
+		if !has("RUSTC_WRAPPER") {
+			out = append(out, [2]string{"RUSTC_WRAPPER", "sccache"})
+		}
+		out = append(out,
+			[2]string{"SCCACHE_WEBDAV_ENDPOINT", s.ccEndpoint},
+			[2]string{"SCCACHE_DIR", dir},
+			[2]string{"SCCACHE_SERVER_UDS", filepath.Join(dir, "server.sock")},
+			[2]string{"SCCACHE_IDLE_TIMEOUT", "0"}, // lives as long as the session
+		)
+		if cc.TTLSeconds > 0 {
+			out = append(out, [2]string{"SCCACHE_WEBDAV_KEY_PREFIX", fmt.Sprintf("_ttl/%d", cc.TTLSeconds)})
+		}
+		// sccache cannot cache incremental compilations (cargo's default
+		// for workspace crates in dev profiles); dependencies are cached
+		// either way. Only an explicit incremental = false turns it off.
+		if cc.Incremental != nil && !*cc.Incremental && !has("CARGO_INCREMENTAL") {
+			out = append(out, [2]string{"CARGO_INCREMENTAL", "0"})
+		}
+	}
+	if l := req.Linker; l != "" {
+		// A linker driver instead of RUSTFLAGS: it leaves RUSTFLAGS and
+		// rustflags from .cargo/config.toml untouched.
+		key := "CARGO_TARGET_" + hostTriple() + "_LINKER"
+		if !has(key) {
+			out = append(out, [2]string{key, config.LinkerDriver(l)})
+		}
+	}
+	return out
+}
+
+func hostTriple() string {
+	if runtime.GOARCH == "arm64" {
+		return "AARCH64_UNKNOWN_LINUX_GNU"
+	}
+	return "X86_64_UNKNOWN_LINUX_GNU"
+}
+
+// sccacheJSON is the subset of `sccache --show-stats --stats-format=json`.
+type sccacheJSON struct {
+	Stats struct {
+		CompileRequests       int64        `json:"compile_requests"`
+		RequestsNotCacheable  int64        `json:"requests_not_cacheable"`
+		CacheHits             sccacheCount `json:"cache_hits"`
+		CacheMisses           sccacheCount `json:"cache_misses"`
+		CacheErrors           sccacheCount `json:"cache_errors"`
+		CacheReadErrors       int64        `json:"cache_read_errors"`
+		CacheWriteErrors      int64        `json:"cache_write_errors"`
+		NonCacheableCompiling int64        `json:"non_cacheable_compilations"`
+	} `json:"stats"`
+}
+
+type sccacheCount struct {
+	Counts map[string]int64 `json:"counts"`
+}
+
+func (c sccacheCount) total() (n int64) {
+	for _, v := range c.Counts {
+		n += v
+	}
+	return n
+}
+
+func parseSccacheStats(b []byte) (*proto.CompilerCacheStats, error) {
+	var j sccacheJSON
+	if err := json.Unmarshal(b, &j); err != nil {
+		return nil, err
+	}
+	st := j.Stats
+	return &proto.CompilerCacheStats{
+		Tool:         config.CompilerCacheSccache,
+		Requests:     st.CompileRequests,
+		Hits:         st.CacheHits.total(),
+		Misses:       st.CacheMisses.total(),
+		NotCacheable: st.RequestsNotCacheable + st.NonCacheableCompiling,
+		Errors:       st.CacheErrors.total() + st.CacheReadErrors + st.CacheWriteErrors,
+	}, nil
+}
+
+// sccacheStats reads the statistics of the session's sccache server and
+// stops it. It returns nil if the session never started one.
+func (s *Server) sccacheStats(env []string, session string) *proto.CompilerCacheStats {
+	if !sccacheStarted(session) {
+		return nil
+	}
+	out, err := runSccache(env, "--show-stats", "--stats-format=json")
+	var st *proto.CompilerCacheStats
+	if err == nil {
+		st, err = parseSccacheStats(out)
+	}
+	if err != nil {
+		s.log.Warn("compiler cache statistics", "session", session, "err", err)
+	}
+	stopSccache(env, session)
+	return st
+}
+
+func sccacheStarted(session string) bool {
+	_, err := os.Stat(filepath.Join(sccacheDir(session), "server.sock"))
+	return err == nil
+}
+
+// stopSccache stops the session's sccache server (if any). Without
+// cgroups it might otherwise outlive the session.
+func stopSccache(env []string, session string) {
+	if sccacheStarted(session) {
+		runSccache(env, "--stop-server")
+	}
+}
+
+func runSccache(env []string, args ...string) ([]byte, error) {
+	bin := "sccache"
+	for _, kv := range env {
+		if p, ok := strings.CutPrefix(kv, "PATH="); ok {
+			for _, d := range filepath.SplitList(p) {
+				if fi, err := os.Stat(filepath.Join(d, "sccache")); err == nil && fi.Mode().IsRegular() {
+					bin = filepath.Join(d, "sccache")
+					break
+				}
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = env
+	cmd.Dir = "/"
+	return cmd.Output()
+}

@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -31,6 +32,7 @@ type Plan struct {
 	Dockerfile string
 	Services   []provider.Service
 	files      map[string]string // context path -> source file
+	tools      map[string]tool   // context path -> pinned release binary
 	baseDir    string
 	baseFile   string
 	baseTag    string
@@ -39,7 +41,7 @@ type Plan struct {
 // Resolve computes the environment hash and Dockerfile for a repository.
 func Resolve(r *config.Repo) (*Plan, error) {
 	env := r.Environment
-	p := &Plan{files: map[string]string{}}
+	p := &Plan{files: map[string]string{}, tools: map[string]tool{}}
 	var hashParts []string
 	add := func(s string) { hashParts = append(hashParts, s) }
 	add("generator=" + generatorVersion)
@@ -64,10 +66,16 @@ func Resolve(r *config.Repo) (*Plan, error) {
 	}
 	fmt.Fprintf(&df, "FROM %s\n", from)
 	df.WriteString("SHELL [\"/bin/sh\", \"-ec\"]\n")
-	if len(env.Packages.Apt) > 0 {
-		pk := append([]string{}, env.Packages.Apt...)
+	pk := append([]string{}, env.Packages.Apt...)
+	if env.Linker == config.LinkerLLD && !slices.Contains(pk, "lld") {
+		pk = append(pk, "lld")
+	}
+	if len(pk) > 0 {
 		sort.Strings(pk)
 		fmt.Fprintf(&df, "RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends %s && rm -rf /var/lib/apt/lists/*\n", strings.Join(pk, " "))
+	}
+	if err := p.addTools(r, add, &df); err != nil {
+		return nil, err
 	}
 	if env.Toolchains.Rust != "" {
 		src := filepath.Join(r.Root, env.Toolchains.Rust)
@@ -137,6 +145,42 @@ func Resolve(r *config.Repo) (*Plan, error) {
 	return p, nil
 }
 
+// addTools installs the compiler cache and linker selected by the
+// repository. Repositories without these settings get no extra lines, so
+// their Dockerfile and hash are unchanged.
+func (p *Plan) addTools(r *config.Repo, add func(string), df *strings.Builder) error {
+	install := func(name string) error {
+		t, err := releaseFor(name, r.Resources.Arch)
+		if err != nil {
+			return err
+		}
+		add(fmt.Sprintf("tool=%s@%s:%s", t.Name, t.Version, t.SHA256))
+		p.tools["tools/"+name] = t
+		fmt.Fprintf(df, "COPY tools/%s /usr/local/bin/%s\n", name, name)
+		return nil
+	}
+	if r.Cache.Compiler.Tool == config.CompilerCacheSccache {
+		if err := install("sccache"); err != nil {
+			return fmt.Errorf("cache.compiler: %w", err)
+		}
+	}
+	switch l := r.Environment.Linker; l {
+	case config.LinkerMold:
+		if err := install("mold"); err != nil {
+			return fmt.Errorf("environment.linker: %w", err)
+		}
+		df.WriteString("RUN ln -sf mold /usr/local/bin/ld.mold\n")
+		fallthrough
+	case config.LinkerLLD:
+		// The linker driver keeps rustc's default C compiler driver and
+		// only selects the linker, so RUSTFLAGS stay untouched. The flag
+		// comes last: rustc itself passes -fuse-ld=lld for its bundled
+		// rust-lld on x86_64 Linux, and the last -fuse-ld wins.
+		fmt.Fprintf(df, "RUN printf '#!/bin/sh\\nexec cc \"$@\" -fuse-ld=%s\\n' > %s && chmod 755 %s\n", l, config.LinkerDriver(l), config.LinkerDriver(l))
+	}
+	return nil
+}
+
 // Context writes the build context to a temporary directory and returns the
 // image spec. The caller removes the directory.
 func (p *Plan) Context() (provider.ImageSpec, string, error) {
@@ -146,6 +190,12 @@ func (p *Plan) Context() (provider.ImageSpec, string, error) {
 	}
 	for dst, src := range p.files {
 		if err := copyTree(src, filepath.Join(dir, filepath.FromSlash(dst))); err != nil {
+			os.RemoveAll(dir)
+			return provider.ImageSpec{}, "", err
+		}
+	}
+	for dst, t := range p.tools {
+		if err := t.extract(filepath.Join(dir, filepath.FromSlash(dst))); err != nil {
 			os.RemoveAll(dir)
 			return provider.ImageSpec{}, "", err
 		}
