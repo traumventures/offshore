@@ -105,6 +105,14 @@ type Interrupter interface {
 	Interruption(ctx context.Context) (*machine.DrainNotice, error)
 }
 
+// SelfTerminator is implemented by platforms on which powering the host
+// off does not end the instance (on OCI a shutdown only stops it): at
+// expiry the supervisor terminates the instance through the provider API
+// instead of calling Shutdown.
+type SelfTerminator interface {
+	TerminateSelf(ctx context.Context) error
+}
+
 // PlatformFactory creates a platform for a spec.
 type PlatformFactory func(ctx context.Context, spec Spec) (Platform, error)
 
@@ -449,7 +457,16 @@ func (a *Supervisor) Check(ctx context.Context) machine.Decision {
 	d := machine.Decide(a.now(), a.Spec.Expires(), a.Spec.IdleStopAfter(), a.status())
 	switch d {
 	case machine.Terminate:
-		a.Log.Info("machine lifetime over, shutting down (the instance terminates)")
+		if t, ok := a.Platform.(SelfTerminator); ok {
+			a.Log.Info("machine lifetime over, terminating the instance")
+			if err := t.TerminateSelf(ctx); err == nil {
+				break
+			} else {
+				a.Log.Error("terminating the instance, shutting down instead", "err", err)
+			}
+		} else {
+			a.Log.Info("machine lifetime over, shutting down (the instance terminates)")
+		}
 		if err := a.Shutdown(); err != nil {
 			a.Log.Error("shutdown", "err", err)
 		}

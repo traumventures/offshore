@@ -22,7 +22,8 @@ type PoolConfig struct {
 	Path string `toml:"-"`
 	Pool Pool   `toml:"pool"`
 	// Providers are named provider instances, e.g. [providers.local] with
-	// type = "local-docker" and [providers.aws] with type = "aws-ec2".
+	// type = "local-docker", [providers.aws] with type = "aws-ec2" and
+	// [providers.oci] with type = "oci".
 	// Every other key of the table is passed to the provider as an option.
 	Providers map[string]map[string]any `toml:"providers"`
 	// Telemetry configures tracing of the orchestrator (control plane or
@@ -33,7 +34,11 @@ type PoolConfig struct {
 }
 
 // Backends known to the configuration.
-var Backends = []string{"local-docker", "aws-ec2"}
+var Backends = []string{"local-docker", "aws-ec2", "oci"}
+
+// cloudBackend reports whether a provider type launches cloud instances
+// with instance types (shapes) and spot (preemptible) capacity.
+func cloudBackend(t string) bool { return t == "aws-ec2" || t == "oci" }
 
 // Pool configures machine provisioning and scaling.
 type Pool struct {
@@ -150,9 +155,11 @@ type Size struct {
 	// architecture are created for it.
 	Arch string `toml:"arch"`
 	// InstanceTypes are the provider machine types that provide this size,
-	// tried in order (aws-ec2; default: the size name).
+	// tried in order (aws-ec2 instance types, oci shapes; default: the
+	// size name on aws-ec2, a flexible shape of the architecture on oci).
 	InstanceTypes []string `toml:"instance_types"`
-	// Spot launches machines of this size as spot instances (aws-ec2).
+	// Spot launches machines of this size as spot instances (aws-ec2) or
+	// preemptible instances (oci).
 	// Spot machines can be interrupted with two minutes' notice: they
 	// drain and running sessions get until the deadline.
 	Spot bool `toml:"spot"`
@@ -234,7 +241,7 @@ func PoolConfigPath() string {
 //	[scheduler]             policy, estimator, overcommit, pressure, consolidation
 //	[[scheduler.warm_pool]] scheduled warm machines
 //	[[machine.setup]]       run = "..." once per machine
-//	[providers.NAME]        type = "local-docker" | "aws-ec2", options
+//	[providers.NAME]        type = "local-docker" | "aws-ec2" | "oci", options
 //	[[providers.NAME.size]] machine types of that provider
 //	[telemetry]
 func LoadPool(path string) (*PoolConfig, error) {
@@ -448,9 +455,9 @@ func (u *PoolConfig) Validate() error {
 		if d := sz.SpotDiscount; d != nil && (*d < 0 || *d >= 1) {
 			errs = append(errs, fmt.Sprintf("pool.size[%d].spot_discount: must be in [0, 1)", i))
 		}
-		if b := u.ProviderType(sz.Provider); b != "" && b != "aws-ec2" {
+		if b := u.ProviderType(sz.Provider); b != "" && !cloudBackend(b) {
 			if sz.Spot || len(sz.InstanceTypes) > 0 || sz.SpotDiscount != nil || sz.SpotFallback != nil {
-				errs = append(errs, fmt.Sprintf("pool.size[%d]: spot, spot_discount, spot_fallback and instance_types need an aws-ec2 provider (%s is %s)", i, sz.Provider, b))
+				errs = append(errs, fmt.Sprintf("pool.size[%d]: spot, spot_discount, spot_fallback and instance_types need an aws-ec2 or oci provider (%s is %s)", i, sz.Provider, b))
 			}
 			if a := MachineArch(sz.Arch); b == "local-docker" && a != MachineArch(runtime.GOARCH) {
 				errs = append(errs, fmt.Sprintf("pool.size[%d].arch: local-docker machines run on this host (%s), not %s", i, runtime.GOARCH, a))
