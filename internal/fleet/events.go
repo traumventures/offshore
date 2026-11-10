@@ -16,7 +16,7 @@ import (
 const pathEvents = "/v1/events"
 
 // maxEvents bounds one events response.
-const maxEvents = 500000
+const maxEvents = 100000
 
 // EventSource is implemented by fleets that keep the analysis event log.
 type EventSource interface {
