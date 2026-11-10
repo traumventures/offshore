@@ -65,12 +65,18 @@ func (s *Store) PutFile(src string) (string, error) {
 		return "", err
 	}
 	defer in.Close()
+	return s.Ingest(in)
+}
+
+// Ingest stores the content of r, whose hash is not known in advance, and
+// returns its hash.
+func (s *Store) Ingest(r io.Reader) (string, error) {
 	tmp, err := os.CreateTemp(filepath.Join(s.Dir, "tmp"), "blob-*")
 	if err != nil {
 		return "", err
 	}
 	defer os.Remove(tmp.Name())
-	hash, _, err := manifest.HashReader(io.TeeReader(in, tmp))
+	hash, _, err := manifest.HashReader(io.TeeReader(r, tmp))
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}

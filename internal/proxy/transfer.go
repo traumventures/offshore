@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -8,9 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/traumventures/cloudsourced/internal/cas"
 	"github.com/traumventures/cloudsourced/internal/client"
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/manifest"
+	"github.com/traumventures/cloudsourced/internal/outputs"
 	"github.com/traumventures/cloudsourced/internal/proto"
 )
 
@@ -234,7 +237,9 @@ func receiveOutputs(pc *proto.Conn, repoRoot string) error {
 }
 
 // ReceiveFiles requests the files whose local content differs and installs
-// them below root.
+// them below root. Files inside a mounted output directory (output FUSE)
+// cannot be written there; they go into the outputs content cache and the
+// daemon is told, so the mount serves them without the machine.
 func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry) error {
 	type planned struct {
 		e   manifest.Entry
@@ -243,9 +248,25 @@ func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry) error {
 	var todo []planned
 	needSet := map[string]bool{}
 	var need []string
+	mounts := outputs.Mounts()
+	var store *cas.Store
+	var cached []manifest.Entry
 	for _, e := range files {
 		dst, err := safeJoin(root, e.Path)
 		if err != nil {
+			continue
+		}
+		if outputs.Covering(mounts, dst) != "" {
+			if store == nil {
+				if store, err = cas.New(client.OutputsCASDir()); err != nil {
+					return err
+				}
+			}
+			cached = append(cached, e)
+			if !store.Has(e.Hash) && !needSet[e.Hash] {
+				needSet[e.Hash] = true
+				need = append(need, e.Hash)
+			}
 			continue
 		}
 		if fi, err := os.Stat(dst); err == nil && fi.Mode().IsRegular() && fi.Size() == e.Size {
@@ -267,6 +288,18 @@ func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry) error {
 	for _, p := range todo {
 		if err := install(staged[p.e.Hash], p.dst, os.FileMode(p.e.Mode&0o7777), time.Unix(0, p.e.MtimeNs)); err != nil {
 			return err
+		}
+	}
+	if len(cached) > 0 {
+		for _, e := range cached {
+			if src, ok := staged[e.Hash]; ok && !store.Has(e.Hash) {
+				if _, err := store.PutFile(src); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := client.Call(context.Background(), client.Request{Op: "outputs-hint", Root: root, Files: cached}, nil); err != nil {
+			return fmt.Errorf("outputs: %w", err)
 		}
 	}
 	return nil

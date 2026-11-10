@@ -49,6 +49,8 @@ type Daemon struct {
 	fleet fleet.Fleet
 	local *fleet.Local // nil when the control plane is remote
 
+	outputs *outputsMgr
+
 	mu    sync.Mutex
 	roots map[string]*root
 	conns map[string]*machineConn
@@ -62,6 +64,9 @@ func NewDaemon(log *slog.Logger) (*Daemon, error) {
 		return nil, err
 	}
 	d := &Daemon{log: log, roots: map[string]*root{}, conns: map[string]*machineConn{}}
+	if d.outputs, err = newOutputsMgr(d); err != nil {
+		return nil, err
+	}
 	if o := u.Orchestrator; o.Mode == "remote" {
 		key, err := config.ResolveRef(o.APIKey, filepath.Dir(config.UserConfigPath()))
 		if err != nil {
@@ -137,6 +142,9 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		go d.local.Run(ctx, 15*time.Second)
 	}
 	d.log.Info("daemon started", "socket", sock, "pid", os.Getpid())
+	// Before serving requests, so no proxy writes eager outputs below a
+	// mount point that is about to be mounted.
+	d.outputs.remountSaved()
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -147,6 +155,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		}
 		go d.handle(ctx, c)
 	}
+	d.outputs.unmountAll()
 	d.mu.Lock()
 	for _, mc := range d.conns {
 		mc.close()
@@ -161,7 +170,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 
 // Request is a daemon RPC request.
 type Request struct {
-	Op    string   `json:"op"` // prepare | release | sync | status | down | reconcile | shutdown | ping
+	Op    string   `json:"op"` // prepare | release | sync | status | down | reconcile | shutdown | ping | outputs-mount | outputs-unmount | outputs-status | outputs-hint
 	Root  string   `json:"root,omitempty"`
 	Cwd   string   `json:"cwd,omitempty"`
 	Tool  string   `json:"tool,omitempty"`
@@ -170,6 +179,9 @@ type Request struct {
 	// Usage reports what a finished session consumed (op "release").
 	UsageKey string           `json:"usage_key,omitempty"`
 	Usage    *scheduler.Usage `json:"usage,omitempty"`
+	// Files are output entries already stored in the outputs content
+	// cache (op "outputs-hint").
+	Files []manifest.Entry `json:"files,omitempty"`
 }
 
 // Prepared is the result of a prepare request.
@@ -243,7 +255,22 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 	case "prepare":
 		return d.prepare(ctx, req, progress)
 	case "release":
+		// A finished remote run replaced the build slot's content.
+		d.outputs.released(req.Lease, req.Usage != nil)
 		return nil, d.fleet.Release(ctx, req.Lease, req.UsageKey, req.Usage)
+	case "outputs-mount":
+		repo, err := config.LoadRepo(req.Root)
+		if err != nil {
+			return nil, err
+		}
+		return d.outputs.mount(repo.Root, repo)
+	case "outputs-unmount":
+		return nil, d.outputs.unmount(req.Root, false)
+	case "outputs-status":
+		return d.outputs.status(), nil
+	case "outputs-hint":
+		d.outputs.hint(req.Root, req.Files)
+		return nil, nil
 	case "sync":
 		r := d.rootByPath(req.Root)
 		if r == nil {
@@ -372,6 +399,13 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 			return nil, err
 		}
 		d.log.Warn("machine unreachable, retrying placement", "machine", lease.MachineID, "err", err)
+	}
+	d.outputs.prepared(repo.Root, lease.ID, outputsState{RepoID: repoID, Machine: lease.MachineID,
+		Addr: lease.Addr, Fingerprint: lease.Fingerprint, Token: lease.Token})
+	if repo.Outputs.Mode == config.OutputsFuse {
+		if _, err := d.outputs.mount(repo.Root, repo); err != nil {
+			fmt.Fprintf(progress, "cloudsourced: outputs mount failed, using eager outputs only: %v\n", err)
+		}
 	}
 	ttl := fleet.Config(u, repo).BuildTTL
 	return &Prepared{

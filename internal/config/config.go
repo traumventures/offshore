@@ -34,6 +34,8 @@ type Repo struct {
 	Tools       map[string]Tool    `toml:"tool"`
 	Secrets     map[string]string  `toml:"secrets"`
 	Services    map[string]Service `toml:"services"`
+	Outputs     Outputs            `toml:"outputs"`
+	Editor      Editor             `toml:"editor"`
 
 	// Root is the absolute directory containing the configuration file.
 	Root string `toml:"-"`
@@ -126,6 +128,36 @@ type Service struct {
 	Port    int               `toml:"port"`
 	Command []string          `toml:"command"`
 }
+
+// Outputs configures how remote build outputs appear locally.
+type Outputs struct {
+	// Mode "eager" (default) copies only the tools' eager outputs back
+	// after every run. "fuse" additionally mounts the build directories
+	// ([cache.build] paths) read-only at their local path, with content
+	// fetched from the machine of the latest build on first access.
+	Mode string `toml:"mode"`
+}
+
+// Output modes.
+const (
+	OutputsEager = "eager"
+	OutputsFuse  = "fuse"
+)
+
+// Editor configures editor integration.
+type Editor struct {
+	// RustAnalyzer is "local" (default: rust-analyzer runs locally, checks
+	// remotely, proc macros from eager outputs) or "lsp-remote" (checks and
+	// build scripts remotely, proc macros and build script outputs from
+	// the output FUSE).
+	RustAnalyzer string `toml:"rust_analyzer"`
+}
+
+// rust-analyzer modes.
+const (
+	RustAnalyzerLocal     = "local"
+	RustAnalyzerLSPRemote = "lsp-remote"
+)
 
 // Valid projection modes.
 const (
@@ -234,6 +266,12 @@ func (r *Repo) applyDefaults() {
 	if r.Tools == nil {
 		r.Tools = map[string]Tool{}
 	}
+	if r.Outputs.Mode == "" {
+		r.Outputs.Mode = OutputsEager
+	}
+	if r.Editor.RustAnalyzer == "" {
+		r.Editor.RustAnalyzer = RustAnalyzerLocal
+	}
 }
 
 // Validate checks the configuration for semantic errors.
@@ -311,6 +349,15 @@ func (r *Repo) Validate() error {
 	}
 	if _, err := ParseDuration(r.Cache.Deps.TTL); err != nil {
 		errs = append(errs, "cache.deps.ttl: "+err.Error())
+	}
+	if r.Outputs.Mode != OutputsEager && r.Outputs.Mode != OutputsFuse {
+		errs = append(errs, fmt.Sprintf("outputs.mode: unsupported %q (eager, fuse)", r.Outputs.Mode))
+	}
+	if r.Outputs.Mode == OutputsFuse && len(r.Cache.Build.Paths) == 0 {
+		errs = append(errs, "outputs.mode: \"fuse\" needs [cache.build] paths")
+	}
+	if r.Editor.RustAnalyzer != RustAnalyzerLocal && r.Editor.RustAnalyzer != RustAnalyzerLSPRemote {
+		errs = append(errs, fmt.Sprintf("editor.rust_analyzer: unsupported %q (local, lsp-remote)", r.Editor.RustAnalyzer))
 	}
 	for name, svc := range r.Services {
 		if !validName(name) {

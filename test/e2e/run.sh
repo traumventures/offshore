@@ -216,6 +216,56 @@ rm -f "$PROJ/target/debug/hello.d"
 out="$(cd "$PROJ" && cs fetch 'target/debug/*.d' 2>&1)"
 check "fetch copies outputs from the latest build" test -f "$PROJ/target/debug/hello.d"
 
+step "output FUSE (remote target/ mounted read-only, content on demand)"
+out="$(cd "$PROJ" && cs outputs mount 2>&1)"
+check "outputs mounted at the local build directory" contains "$out" "mounted $PROJ/target"
+check "mount is a read-only FUSE file system" contains "$(grep " $PROJ/target " /proc/self/mountinfo)" "ro,"
+remote_ls="$(run sh -c 'ls target/debug/deps | sort')"
+check "remote directory listing visible locally" eq "$(ls "$PROJ/target/debug/deps" | sort)" "$remote_ls"
+bin="$(cd "$PROJ" && ls target/debug/deps/hello-* | grep -v '\.d$' | head -1)"
+check "non-eager file is read on demand" eq "$(sha256sum < "$PROJ/$bin")" "$(run sh -c "sha256sum < $bin")"
+check "local files below the mount stay visible" test -f "$PROJ/target/debug/hello.d"
+check "writes into the mount are rejected (local cargo cannot write)" sh -c "! touch '$PROJ/target/debug/x' 2>/dev/null"
+sed -i 's/greeting=changed/greeting=fuse/' "$PROJ/src/main.rs"
+run cargo build -q >/dev/null 2>&1
+check "new run invalidates the mount (eager output from the content cache)" contains "$("$PROJ/target/debug/hello")" "greeting=fuse"
+check "outputs status shows the mount" contains "$(cs outputs status)" "mounted at $PROJ/target"
+json="$(run cargo check --workspace --message-format=json 2>/dev/null)"
+check "cargo check artifact paths exist and are readable through the mount" eq "$(echo "$json" | python3 -c '
+import json, sys
+n = bad = 0
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get("reason") != "compiler-artifact":
+        continue
+    for f in m["filenames"]:
+        n += 1
+        try:
+            open(f, "rb").read(1)
+        except OSError as e:
+            bad += 1
+            print(f, e, file=sys.stderr)
+print("ok" if n and not bad else "%d of %d unreadable" % (bad, n))')" ok
+so="$(echo "$json" | python3 -c '
+import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get("reason") == "compiler-artifact" and "proc-macro" in m["target"]["kind"]:
+        print(m["filenames"][0])')"
+check "proc-macro library is an ELF shared object below the mount" contains "$(file -L "$so")" "ELF 64-bit LSB shared object"
+check "proc-macro library loads locally (dlopen)" python3 -c 'import ctypes, sys; ctypes.CDLL(sys.argv[1])' "$so"
+out="$(cd "$PROJ" && cs editor --mode lsp-remote vscode 2>&1)"
+check "editor lsp-remote routes checks through the proxy" contains "$out" '"rust-analyzer.cargo.buildScripts.overrideCommand": ["'
+if RA="$(cd "$PROJ" && rustup which rust-analyzer 2>/dev/null)" && [ -x "$RA" ]; then
+  # rust-analyzer runs locally; every cargo call goes through the proxy, the
+  # proc macro built remotely is loaded from the mount.
+  out="$(cd "$PROJ" && CARGO="$CLOUDSOURCED_SHIM_DIR/cargo" PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" timeout 300 "$RA" analysis-stats . 2>&1)"
+  # Greeter::NAME only has a type if the derive was expanded.
+  check "rust-analyzer expands the remote proc macro (all expression types known)" contains "$(echo "$out" | grep 'exprs:' | tail -1)" "??ty: 0 "
+else
+  echo "     (rust-analyzer for the remote toolchain not installed locally: skipped)"
+fi
+
 step "dependencies (shared registry cache)"
 cat >> "$PROJ/Cargo.toml" <<'EOF'
 itoa = "1"
@@ -242,11 +292,17 @@ step "lifecycle: idle stop, warm restart, lifetime expiry, cleanup"
 cs down >/dev/null
 write_config 75s 10s 0 2; restart_daemon
 run cargo build -q >/dev/null 2>&1
+check "output mount restored after the daemon restart" grep -q " $PROJ/target .*fuse.cloudsourced-outputs" /proc/self/mountinfo
+cached="$(cd "$PROJ" && ls target/debug/deps/hello-*.d | head -1)"; cached_sum="$(sha256sum < "$PROJ/$cached")"
 M="$(docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" --filter label=cloudsourced.kind=machine | head -1)"
 NAME="$(docker_ inspect -f '{{.Name}}' "$M" | tr -d /)"
 for _ in $(seq 60); do [ "$(docker_ inspect -f '{{.State.Status}}' "$NAME")" = exited ] && break; sleep 1; done
 check "idle machine stopped after idle_stop" eq "$(docker_ inspect -f '{{.State.Status}}' "$NAME")" exited
 check "stopped machine keeps its cache volume" test -n "$(docker_ volume ls -q --filter "name=cs-cache-${NAME#cs-}")"
+check "output FUSE serves cached content after the machine stopped" eq "$(sha256sum < "$PROJ/$cached")" "$cached_sum"
+t0=$SECONDS
+check "uncached outputs of a stopped machine fail (EIO), they do not hang" sh -c "! timeout 60 cat '$PROJ/${cached%.d}' >/dev/null 2>&1"
+check "  ... and fail fast" test $((SECONDS - t0)) -lt 30
 out="$(CLOUDSOURCED_VERBOSE=1 run cargo build 2>&1)"
 check "stopped machine restarted on demand" contains "$out" "starting machine ${NAME#cs-}"
 check "restarted machine still has a warm build cache" eq "$(echo "$out" | grep -c Compiling)" 0
@@ -255,6 +311,10 @@ for _ in $(seq 120); do [ -z "$(docker_ ps -aq --filter "name=^$NAME\$")" ] && b
 check "machine destroyed after max_lifetime" test -z "$(docker_ ps -aq --filter "name=^$NAME\$")"
 for _ in $(seq 30); do [ -z "$(docker_ volume ls -q --filter "name=cs-cache-${NAME#cs-}")" ] && break; sleep 1; done
 check "its build cache volume is gone" test -z "$(docker_ volume ls -q --filter "name=cs-cache-${NAME#cs-}")"
+
+out="$(cd "$PROJ" && cs outputs unmount 2>&1)"
+check "outputs unmount" test -z "$(grep " $PROJ/target " /proc/self/mountinfo)"
+check "local build directory intact after unmount" test -x "$PROJ/target/debug/hello"
 
 step "fail open when no machine can be provisioned"
 write_config 24h 10m 0 2
