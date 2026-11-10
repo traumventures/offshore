@@ -86,7 +86,7 @@ func TestSpotRequest(t *testing.T) {
 	var kinds []ec2types.ResourceType
 	for _, ts := range in.TagSpecifications {
 		kinds = append(kinds, ts.ResourceType)
-		if tagValue(ts.Tags, provider.LabelMarket) != provider.MarketSpot || tagValue(ts.Tags, "project") != "cloudsourced" {
+		if tagValue(ts.Tags, provider.LabelMarket) != provider.MarketSpot || tagValue(ts.Tags, provider.LabelSpot) != "true" || tagValue(ts.Tags, "project") != "cloudsourced" {
 			t.Errorf("%s tags %v", ts.ResourceType, ts.Tags)
 		}
 	}

@@ -27,6 +27,7 @@ const (
 	LabelSize      = "cloudsourced.size"
 	LabelArch      = "cloudsourced.arch"   // machine architecture (amd64, arm64)
 	LabelMarket    = "cloudsourced.market" // capacity market: spot or on-demand
+	LabelSpot      = "cloudsourced.spot"   // "true" on spot machines
 )
 
 // MachineSpec describes a machine to create. Providers treat the server

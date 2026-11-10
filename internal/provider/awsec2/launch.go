@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -111,6 +112,7 @@ func applyAttempt(in *ec2.RunInstancesInput, a attempt, spec provider.MachineSpe
 			continue
 		}
 		tags := withTag(ts.Tags, provider.LabelMarket, a.market())
+		tags = withTag(tags, provider.LabelSpot, strconv.FormatBool(a.spot))
 		specs = append(specs, ec2types.TagSpecification{ResourceType: ts.ResourceType, Tags: tags})
 	}
 	if a.spot && len(specs) > 0 {

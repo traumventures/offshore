@@ -573,8 +573,8 @@ func toMachine(i ec2types.Instance) provider.Machine {
 	m := provider.Machine{ID: l[provider.LabelMachine], EnvHash: l[provider.LabelEnvHash], Labels: l, Fingerprint: l[provider.LabelFinger]}
 	l["instance-id"] = aws.ToString(i.InstanceId)
 	l["instance-type"] = string(i.InstanceType)
-	if i.InstanceLifecycle == ec2types.InstanceLifecycleTypeSpot && l[provider.LabelMarket] == "" {
-		l[provider.LabelMarket] = provider.MarketSpot
+	if i.InstanceLifecycle == ec2types.InstanceLifecycleTypeSpot {
+		l[provider.LabelMarket], l[provider.LabelSpot] = provider.MarketSpot, "true"
 	}
 	m.CPU, _ = strconv.ParseFloat(l[provider.LabelCPU], 64)
 	m.Memory, _ = strconv.ParseInt(l[provider.LabelMemory], 10, 64)
