@@ -37,6 +37,11 @@ type Orchestrator struct {
 	Fingerprint string `toml:"fingerprint"`
 	// APIKey is a reference (env:VAR, file:PATH, cmd:COMMAND) to the API key.
 	APIKey string `toml:"api_key"`
+	// ClientCert and ClientKey are PEM files of a client certificate for
+	// control planes that require mutual TLS (--client-ca). Relative paths
+	// are relative to the configuration file.
+	ClientCert string `toml:"client_cert"`
+	ClientKey  string `toml:"client_key"`
 }
 
 // Fleet configures machine provisioning and scaling.
@@ -55,7 +60,7 @@ type Fleet struct {
 
 	// Scheduling. Overcommitting CPU only slows tasks down; overcommitting
 	// memory needs soft limits and swap, otherwise tasks may be OOM killed.
-	Policy            string  `toml:"policy"`    // "default"
+	Policy            string  `toml:"policy"`    // "default" (= "binpack") | "classic"
 	Estimator         string  `toml:"estimator"` // "history" (learn from runs) | "static" (repo config)
 	CPUOvercommit     float64 `toml:"cpu_overcommit"`
 	MemoryOvercommit  float64 `toml:"memory_overcommit"`
@@ -64,6 +69,70 @@ type Fleet struct {
 	SoftLimit         float64 `toml:"soft_limit"`          // memory.high = need * soft_limit; 0 = off
 	Swap              bool    `toml:"swap"`
 	LimitJobs         bool    `toml:"limit_jobs"` // pass reserved CPU as build parallelism
+	// ConsolidateBelow drains the least loaded machine of an environment
+	// when its machines are reserved below this fraction (default 0.5,
+	// 0 = off). ConsolidateTarget caps the share the others may reach.
+	ConsolidateBelow  *float64 `toml:"consolidate_below"`
+	ConsolidateTarget float64  `toml:"consolidate_target"` // default 0.75
+	// WarmPool keeps machines running at scheduled times, in addition to
+	// min_machines: [[fleet.warm_pool]] days = ["mon", "tue"], from = "08:00",
+	// to = "19:00", machines = 1, timezone = "Europe/Berlin".
+	WarmPool []WarmPool `toml:"warm_pool"`
+}
+
+// WarmPool is a scheduled warm pool window.
+type WarmPool struct {
+	Days     []string `toml:"days"` // "mon".."sun"; empty = every day
+	From     string   `toml:"from"` // "HH:MM"
+	To       string   `toml:"to"`   // "HH:MM"; earlier than from spans midnight
+	Machines int      `toml:"machines"`
+	Timezone string   `toml:"timezone"` // IANA name; default local time
+}
+
+// Parse returns the weekdays, start and end offsets since midnight and the
+// location of the window.
+func (w WarmPool) Parse() (days []time.Weekday, from, to time.Duration, loc *time.Location, err error) {
+	for _, d := range w.Days {
+		wd, err := parseWeekday(d)
+		if err != nil {
+			return nil, 0, 0, nil, err
+		}
+		days = append(days, wd)
+	}
+	if from, err = parseClock(w.From); err != nil {
+		return
+	}
+	if to, err = parseClock(w.To); err != nil {
+		return
+	}
+	if from == to {
+		err = fmt.Errorf("from and to are equal (%s)", w.From)
+		return
+	}
+	loc = time.Local
+	if w.Timezone != "" {
+		loc, err = time.LoadLocation(w.Timezone)
+	}
+	return
+}
+
+func parseWeekday(s string) (time.Weekday, error) {
+	l := strings.ToLower(strings.TrimSpace(s))
+	for d := time.Sunday; d <= time.Saturday; d++ {
+		name := strings.ToLower(d.String())
+		if l == name || l == name[:3] {
+			return d, nil
+		}
+	}
+	return 0, fmt.Errorf("unknown weekday %q", s)
+}
+
+func parseClock(s string) (time.Duration, error) {
+	var h, m int
+	if n, err := fmt.Sscanf(strings.TrimSpace(s), "%d:%d", &h, &m); err != nil || n != 2 || h < 0 || h > 24 || m < 0 || m > 59 || (h == 24 && m != 0) {
+		return 0, fmt.Errorf("invalid time of day %q (want HH:MM)", s)
+	}
+	return time.Duration(h)*time.Hour + time.Duration(m)*time.Minute, nil
 }
 
 // Size is a machine type a provider may create.
@@ -166,6 +235,10 @@ func (u *User) applyDefaults() {
 	if f.Policy == "" {
 		f.Policy = "default"
 	}
+	if f.ConsolidateBelow == nil {
+		v := 0.5
+		f.ConsolidateBelow = &v
+	}
 	if f.Estimator == "" {
 		f.Estimator = "history"
 	}
@@ -233,6 +306,12 @@ func (u *User) Validate() error {
 		if o.Fingerprint != "" && !strings.HasPrefix(o.URL, "https://") {
 			errs = append(errs, "orchestrator.fingerprint: requires an https URL")
 		}
+		if (o.ClientCert == "") != (o.ClientKey == "") {
+			errs = append(errs, "orchestrator.client_cert and client_key must be set together")
+		}
+		if o.ClientCert != "" && !strings.HasPrefix(o.URL, "https://") {
+			errs = append(errs, "orchestrator.client_cert: requires an https URL")
+		}
 	default:
 		errs = append(errs, fmt.Sprintf("orchestrator.mode: unsupported %q (embedded, remote)", o.Mode))
 	}
@@ -251,8 +330,22 @@ func (u *User) Validate() error {
 			errs = append(errs, "fleet."+name+": "+err.Error())
 		}
 	}
-	if f.Policy != "default" {
-		errs = append(errs, fmt.Sprintf("fleet.policy: unsupported %q (default)", f.Policy))
+	if f.Policy != "default" && f.Policy != "binpack" && f.Policy != "classic" {
+		errs = append(errs, fmt.Sprintf("fleet.policy: unsupported %q (default, binpack, classic)", f.Policy))
+	}
+	if f.ConsolidateBelow != nil && (*f.ConsolidateBelow < 0 || *f.ConsolidateBelow > 1) {
+		errs = append(errs, "fleet.consolidate_below: must be between 0 (off) and 1")
+	}
+	if f.ConsolidateTarget < 0 || f.ConsolidateTarget > 1 {
+		errs = append(errs, "fleet.consolidate_target: must be between 0 and 1")
+	}
+	for i, w := range f.WarmPool {
+		if _, _, _, _, err := w.Parse(); err != nil {
+			errs = append(errs, fmt.Sprintf("fleet.warm_pool[%d]: %v", i, err))
+		}
+		if w.Machines < 0 || w.Machines > f.MaxMachines {
+			errs = append(errs, fmt.Sprintf("fleet.warm_pool[%d].machines: need 0 <= machines <= max_machines", i))
+		}
 	}
 	if f.Estimator != "history" && f.Estimator != "static" {
 		errs = append(errs, fmt.Sprintf("fleet.estimator: unsupported %q (history, static)", f.Estimator))

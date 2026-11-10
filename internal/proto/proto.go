@@ -133,6 +133,20 @@ type Exec struct {
 	Deps             []string `json:"deps"`      // shared dependency cache paths
 	Eager            []string `json:"eager"`     // output globs relative to Repo
 	Lease            string   `json:"lease,omitempty"`
+	// CompilerCache enables a compiler cache in the session (repository
+	// [cache.compiler]); nil means off.
+	CompilerCache *CompilerCache `json:"compiler_cache,omitempty"`
+	// Linker is the repository's environment.linker ("", "mold", "lld").
+	Linker string `json:"linker,omitempty"`
+}
+
+// CompilerCache is the session's compiler cache configuration.
+type CompilerCache struct {
+	Tool string `json:"tool"` // "sccache"
+	// TTLSeconds lowers the maximum age of reused entries (0 = cache limit).
+	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
+	// Incremental false sets CARGO_INCREMENTAL=0; nil keeps cargo's default.
+	Incremental *bool `json:"incremental,omitempty"`
 }
 
 // Started confirms the remote process runs.

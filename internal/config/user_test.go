@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func loadUserFrom(t *testing.T, content string) (*User, error) {
@@ -73,5 +74,48 @@ func TestUserLegacyMapsToLocal(t *testing.T) {
 func TestUserMemoryOvercommitNeedsSafety(t *testing.T) {
 	if _, err := loadUserFrom(t, "[fleet]\nmemory_overcommit = 1.5\n"); err == nil {
 		t.Fatal("memory overcommit without swap or soft_limit must be rejected")
+	}
+}
+
+func TestUserSchedulingKeys(t *testing.T) {
+	u, err := loadUserFrom(t, `
+[fleet]
+policy = "binpack"
+max_machines = 4
+consolidate_target = 0.6
+
+[[fleet.warm_pool]]
+days = ["mon", "Tuesday", "fri"]
+from = "08:00"
+to = "19:30"
+machines = 2
+timezone = "Europe/Berlin"
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Fleet.ConsolidateBelow == nil || *u.Fleet.ConsolidateBelow != 0.5 || u.Fleet.ConsolidateTarget != 0.6 {
+		t.Fatalf("consolidation defaults: %+v", u.Fleet)
+	}
+	days, from, to, loc, err := u.Fleet.WarmPool[0].Parse()
+	if err != nil || len(days) != 3 || days[1] != time.Tuesday || from != 8*time.Hour || to != 19*time.Hour+30*time.Minute || loc.String() != "Europe/Berlin" {
+		t.Fatalf("warm pool: %v %v %v %v %v", days, from, to, loc, err)
+	}
+	off, err := loadUserFrom(t, "[fleet]\nconsolidate_below = 0\npolicy = \"classic\"\n")
+	if err != nil || *off.Fleet.ConsolidateBelow != 0 {
+		t.Fatalf("consolidate_below = 0 must turn consolidation off: %v", err)
+	}
+	for _, bad := range []string{
+		"[fleet]\npolicy = \"fifo\"\n",
+		"[fleet]\nconsolidate_below = 1.5\n",
+		"[[fleet.warm_pool]]\ndays = [\"funday\"]\nfrom = \"08:00\"\nto = \"10:00\"\nmachines = 1\n",
+		"[[fleet.warm_pool]]\nfrom = \"8am\"\nto = \"10:00\"\nmachines = 1\n",
+		"[[fleet.warm_pool]]\nfrom = \"08:00\"\nto = \"08:00\"\nmachines = 1\n",
+		"[[fleet.warm_pool]]\nfrom = \"08:00\"\nto = \"10:00\"\nmachines = 9\n",
+		"[[fleet.warm_pool]]\nfrom = \"08:00\"\nto = \"10:00\"\nmachines = 1\ntimezone = \"Mars/Olympus\"\n",
+	} {
+		if _, err := loadUserFrom(t, bad); err == nil {
+			t.Errorf("accepted invalid config:\n%s", bad)
+		}
 	}
 }

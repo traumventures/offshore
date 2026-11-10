@@ -5,6 +5,7 @@ package client
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,7 +69,22 @@ func NewDaemon(log *slog.Logger) (*Daemon, error) {
 		if err != nil {
 			return nil, fmt.Errorf("orchestrator.api_key: %w", err)
 		}
-		r, err := fleet.NewRemote(o.URL, o.Fingerprint, key)
+		var certs []tls.Certificate
+		if o.ClientCert != "" {
+			dir := filepath.Dir(config.UserConfigPath())
+			abs := func(p string) string {
+				if filepath.IsAbs(p) {
+					return p
+				}
+				return filepath.Join(dir, p)
+			}
+			c, err := tls.LoadX509KeyPair(abs(o.ClientCert), abs(o.ClientKey))
+			if err != nil {
+				return nil, fmt.Errorf("orchestrator.client_cert: %w", err)
+			}
+			certs = append(certs, c)
+		}
+		r, err := fleet.NewRemote(o.URL, o.Fingerprint, key, certs...)
 		if err != nil {
 			return nil, err
 		}

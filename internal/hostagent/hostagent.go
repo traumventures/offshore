@@ -14,13 +14,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/traumventures/cloudsourced/internal/blobcache"
 	"github.com/traumventures/cloudsourced/internal/machine"
 )
 
@@ -38,6 +42,17 @@ type Spec struct {
 	ExpiresAt int64             `json:"expires_at"`                  // unix seconds (0: never)
 	IdleStop  int64             `json:"idle_stop_seconds,omitempty"` // 0: never stop itself
 	Params    map[string]string `json:"params,omitempty"`            // provider specific (region, secret name, ...)
+	// CompilerCache, if set, makes the agent serve the compiler cache
+	// (blobcache WebDAV over the platform's store) on the Docker bridge
+	// gateway; the machine server gets its endpoint in
+	// CLOUDSOURCED_SCCACHE_ENDPOINT.
+	CompilerCache *CompilerCache `json:"compiler_cache,omitempty"`
+}
+
+// CompilerCache configures the host's compiler cache endpoint.
+type CompilerCache struct {
+	Port    int    `json:"port"`
+	Network string `json:"network,omitempty"` // Docker network whose gateway to listen on (default "bridge")
 }
 
 // Expires returns the expiry time (zero: none).
@@ -77,6 +92,9 @@ type Platform interface {
 	Prepare(ctx context.Context, docker Runner) error
 	// StopSelf stops this machine, keeping its disk.
 	StopSelf(ctx context.Context) error
+	// CompilerCacheStore returns the store of the host's compiler cache
+	// (nil: none).
+	CompilerCacheStore(ctx context.Context) (blobcache.Store, error)
 }
 
 // PlatformFactory creates a platform for a spec.
@@ -300,6 +318,64 @@ func (a *Agent) EnsureContainers(ctx context.Context) error {
 	return nil
 }
 
+// SccacheEndpointEnv is the server variable naming an external compiler
+// cache endpoint.
+const SccacheEndpointEnv = "CLOUDSOURCED_SCCACHE_ENDPOINT"
+
+// StartCompilerCache serves the compiler cache on the Docker network
+// gateway, reachable from sessions but not from outside the host, and
+// adds its endpoint to the machine environment. Without it the server
+// falls back to its built-in cache.
+func (a *Agent) StartCompilerCache(ctx context.Context) {
+	cc := a.Spec.CompilerCache
+	if cc == nil {
+		return
+	}
+	store, err := a.Platform.CompilerCacheStore(ctx)
+	if err != nil || store == nil {
+		a.Log.Warn("compiler cache disabled", "err", err)
+		return
+	}
+	network := cc.Network
+	if network == "" {
+		network = "bridge"
+	}
+	out, err := a.Docker(ctx, nil, nil, "network", "inspect", "--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}", network)
+	gw := ""
+	if f := strings.Fields(string(out)); err == nil && len(f) > 0 {
+		gw = f[0]
+	}
+	if gw == "" {
+		a.Log.Warn("compiler cache disabled: no gateway of docker network", "network", network, "err", err)
+		return
+	}
+	addr := net.JoinHostPort(gw, strconv.Itoa(cc.Port))
+	var ln net.Listener
+	for i := 0; ; i++ {
+		if ln, err = net.Listen("tcp", addr); err == nil {
+			break
+		}
+		if i == 10 || ctx.Err() != nil {
+			a.Log.Warn("compiler cache disabled", "addr", addr, "err", err)
+			return
+		}
+		a.sleep(ctx, time.Second)
+	}
+	srv := &http.Server{Handler: &blobcache.Handler{Store: store, Log: a.Log}, ReadHeaderTimeout: 30 * time.Second}
+	go srv.Serve(ln)
+	go func() {
+		<-ctx.Done()
+		srv.Close()
+	}()
+	env := map[string]string{}
+	for k, v := range a.Spec.Layout.Env {
+		env[k] = v
+	}
+	env[SccacheEndpointEnv] = "http://" + ln.Addr().String() + "/"
+	a.Spec.Layout.Env = env
+	a.Log.Info("compiler cache", "endpoint", env[SccacheEndpointEnv])
+}
+
 // status reads the server's published status (nil when unavailable).
 func (a *Agent) status() *machine.HostStatus {
 	if a.Spec.Layout.StatusDir == "" {
@@ -343,6 +419,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.waitDocker(ctx); err != nil {
 		return err
 	}
+	a.StartCompilerCache(ctx)
 	for i := 0; ; i++ {
 		err := a.EnsureContainers(ctx)
 		if err == nil {

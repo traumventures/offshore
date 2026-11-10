@@ -74,6 +74,20 @@ Resources:
               - Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub "${ArtifactBucket.Arn}/bin/*"
+              - Sid: CompilerCacheObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "${ArtifactBucket.Arn}/cache/*"
+              - Sid: CompilerCacheList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt ArtifactBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix: cache/*
               - Sid: MachineSecrets
                 Effect: Allow
                 Action:
@@ -274,7 +288,7 @@ Resources:
 
 Outputs:
   TemplateVersion:
-    Value: "2"
+    Value: "3"
   SecurityGroupId:
     Value: !Ref MachineSecurityGroup
   InstanceProfileArn:

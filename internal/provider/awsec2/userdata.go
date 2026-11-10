@@ -17,9 +17,25 @@ func shq(s string) string { return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "
 
 const hostBinary = "/opt/cloudsourced/bin/cloudsourced"
 
+// pathSegment makes s safe as one S3 key segment.
+func pathSegment(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	if b.Len() == 0 {
+		return "default"
+	}
+	return b.String()
+}
+
 // hostSpec is the public machine description handed to the host agent.
 // It names the secret parameter but never contains secret values.
-func hostSpec(spec provider.MachineSpec, region, stack, registry, image string) hostagent.Spec {
+func hostSpec(spec provider.MachineSpec, region, stack, bucket, registry, image string) hostagent.Spec {
 	return hostagent.Spec{
 		Provider: "aws-ec2",
 		Layout: machine.Layout{
@@ -36,7 +52,10 @@ func hostSpec(spec provider.MachineSpec, region, stack, registry, image string) 
 			paramRegion:   region,
 			paramSecret:   secretParameter(stack, spec.ID),
 			paramRegistry: registry,
+			// Compiler cache objects of the fleet, shared by its machines.
+			paramSccache: bucket + "/cache/" + pathSegment(spec.Owner) + "/sccache",
 		},
+		CompilerCache: &hostagent.CompilerCache{Port: sccachePort},
 	}
 }
 
@@ -46,7 +65,7 @@ func hostSpec(spec provider.MachineSpec, region, stack, registry, image string) 
 // the EC2 API); the agent fetches them from SSM.
 func userData(spec provider.MachineSpec, region, stack string, in *infra, binKey, image string) (string, error) {
 	registry := in.repo[:strings.Index(in.repo, "/")]
-	hs, err := json.Marshal(hostSpec(spec, region, stack, registry, image))
+	hs, err := json.Marshal(hostSpec(spec, region, stack, in.bucket, registry, image))
 	if err != nil {
 		return "", err
 	}

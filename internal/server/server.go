@@ -4,7 +4,7 @@ package server
 
 import (
 	"context"
-	"crypto/subtle"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/traumventures/cloudsourced/internal/auth"
 	"github.com/traumventures/cloudsourced/internal/cas"
 	"github.com/traumventures/cloudsourced/internal/fusefs"
 	"github.com/traumventures/cloudsourced/internal/machine"
@@ -31,8 +32,8 @@ import (
 // provider at machine creation.
 type Config struct {
 	MachineID string
-	Token     string
-	Identity  transport.Identity
+	Identity  transport.Identity // derived from the TLS seed
+	Verifier  auth.Verifier      // checks control plane tokens
 	Listen    string
 	CPU       float64
 	Memory    int64
@@ -45,13 +46,19 @@ type Config struct {
 	// HostStatus is a file the server publishes machine.HostStatus to for
 	// the host agent (CLOUDSOURCED_HOST_STATUS; empty: none).
 	HostStatus string
+	// SccacheEndpoint replaces the built-in compiler cache endpoint with an
+	// external blobcache (CLOUDSOURCED_SCCACHE_ENDPOINT, set by a host
+	// agent). SccacheDir is the built-in cache's directory
+	// (CLOUDSOURCED_SCCACHE_DIR, default <deps dir>/sccache: the dependency
+	// volume is shared by the owner's machines, the cache volume is not).
+	SccacheEndpoint string
+	SccacheDir      string
 }
 
 // ConfigFromEnv reads the server configuration.
 func ConfigFromEnv() (Config, error) {
 	c := Config{
 		MachineID:  os.Getenv("CLOUDSOURCED_MACHINE_ID"),
-		Token:      os.Getenv("CLOUDSOURCED_TOKEN"),
 		Listen:     envOr("CLOUDSOURCED_LISTEN", ":7443"),
 		EnvHash:    os.Getenv("CLOUDSOURCED_ENV_HASH"),
 		CacheDir:   envOr("CLOUDSOURCED_CACHE_DIR", "/cache"),
@@ -59,20 +66,36 @@ func ConfigFromEnv() (Config, error) {
 		BuildTTL:   24 * time.Hour,
 		HostStatus: os.Getenv(machine.HostStatusEnv),
 	}
-	c.Identity.CertPEM = os.Getenv("CLOUDSOURCED_CERT")
-	c.Identity.KeyPEM = os.Getenv("CLOUDSOURCED_KEY")
-	if c.MachineID == "" || c.Token == "" || c.Identity.CertPEM == "" || c.Identity.KeyPEM == "" {
-		return c, errors.New("server: CLOUDSOURCED_MACHINE_ID, _TOKEN, _CERT and _KEY are required")
+	c.SccacheEndpoint = os.Getenv("CLOUDSOURCED_SCCACHE_ENDPOINT")
+	c.SccacheDir = envOr("CLOUDSOURCED_SCCACHE_DIR", filepath.Join(c.DepsDir, "sccache"))
+	if c.MachineID == "" || os.Getenv(auth.EnvTLSSeed) == "" || os.Getenv(auth.EnvSignerPub) == "" || os.Getenv("CLOUDSOURCED_EXPIRES_AT") == "" {
+		return c, errors.New("server: CLOUDSOURCED_MACHINE_ID, _TLS_SEED, _SIGNER_PUB and _EXPIRES_AT are required")
 	}
 	c.CPU, _ = strconv.ParseFloat(os.Getenv("CLOUDSOURCED_CPU"), 64)
 	c.Memory, _ = strconv.ParseInt(os.Getenv("CLOUDSOURCED_MEMORY"), 10, 64)
-	if s := os.Getenv("CLOUDSOURCED_EXPIRES_AT"); s != "" {
-		n, err := strconv.ParseInt(s, 10, 64)
-		if err != nil {
-			return c, fmt.Errorf("server: CLOUDSOURCED_EXPIRES_AT: %w", err)
-		}
-		c.ExpiresAt = time.Unix(n, 0)
+	n, err := strconv.ParseInt(os.Getenv("CLOUDSOURCED_EXPIRES_AT"), 10, 64)
+	if err != nil {
+		return c, fmt.Errorf("server: CLOUDSOURCED_EXPIRES_AT: %w", err)
 	}
+	c.ExpiresAt = time.Unix(n, 0)
+	seed, err := auth.DecodeKey(os.Getenv(auth.EnvTLSSeed), ed25519.SeedSize)
+	if err != nil {
+		return c, fmt.Errorf("server: %s: %w", auth.EnvTLSSeed, err)
+	}
+	os.Unsetenv(auth.EnvTLSSeed)
+	id, err := auth.MachineIdentity(seed, c.MachineID, c.ExpiresAt)
+	if err != nil {
+		return c, fmt.Errorf("server: %w", err)
+	}
+	if want := os.Getenv(auth.EnvFingerprint); want != "" && want != id.Fingerprint {
+		return c, fmt.Errorf("server: derived certificate fingerprint %s does not match %s", id.Fingerprint, want)
+	}
+	c.Identity = *id
+	pub, err := auth.DecodeKey(os.Getenv(auth.EnvSignerPub), ed25519.PublicKeySize)
+	if err != nil {
+		return c, fmt.Errorf("server: %s: %w", auth.EnvSignerPub, err)
+	}
+	c.Verifier = auth.Verifier{Pub: ed25519.PublicKey(pub), Machine: c.MachineID}
 	if s := os.Getenv("CLOUDSOURCED_BUILD_TTL"); s != "" {
 		d, err := time.ParseDuration(s)
 		if err != nil {
@@ -104,6 +127,8 @@ type Server struct {
 	cg    *cgroups
 	self  string
 	env   []string // base environment for sessions
+
+	ccEndpoint string // compiler cache WebDAV endpoint for sessions ("" = off)
 
 	mu        sync.Mutex
 	mounts    map[string]*fusefs.Projection
@@ -155,6 +180,7 @@ func (s *Server) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.cg = setupCgroups(s.log)
+	s.startCompilerCache(ctx)
 	if n := s.slots.gc(s.cfg.BuildTTL); n > 0 {
 		s.log.Info("removed expired build slots", "count", n)
 	}
@@ -288,17 +314,21 @@ func (s *Server) serveStream(ctx context.Context, conn *quic.Conn, st *quic.Stre
 		st.CancelRead(1)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(hello.Token), []byte(s.cfg.Token)) != 1 {
-		pc.SendError("auth", errors.New("invalid token"))
+	claims, err := s.cfg.Verifier.Verify(hello.Token)
+	if err == nil {
+		err = authorize(hello.Kind, claims)
+	}
+	if err != nil {
+		s.log.Warn("rejected stream", "kind", hello.Kind, "err", err)
+		pc.SendError("auth", err)
 		st.CancelRead(1)
 		return
 	}
-	var err error
 	switch hello.Kind {
 	case proto.KindSync:
 		err = s.serveSync(ctx, conn, pc)
 	case proto.KindExec:
-		err = s.serveExec(ctx, pc, st)
+		err = s.serveExec(ctx, pc, st, claims)
 	case proto.KindStatus:
 		s.mu.Lock()
 		s.lastProbe = time.Now()
@@ -307,9 +337,7 @@ func (s *Server) serveStream(ctx context.Context, conn *quic.Conn, st *quic.Stre
 	case proto.KindFetch:
 		err = s.serveFetch(ctx, pc)
 	case proto.KindForward:
-		err = s.serveForward(ctx, pc, st)
-	default:
-		err = pc.SendError("protocol", fmt.Errorf("unknown stream kind %q", hello.Kind))
+		err = s.serveForward(ctx, pc, st, claims)
 	}
 	if err != nil && !errors.Is(err, io.EOF) && ctx.Err() == nil {
 		s.log.Debug("stream ended", "kind", hello.Kind, "err", err)
@@ -347,6 +375,24 @@ func (s *Server) publishHostStatus(ctx context.Context) {
 		case <-t.C:
 		}
 	}
+}
+
+// authorize checks that a token's scope allows a stream kind. Lease
+// binding of exec streams is checked once the request is known.
+func authorize(kind string, c auth.Claims) error {
+	var need auth.Scope
+	switch kind {
+	case proto.KindSync, proto.KindExec, proto.KindFetch, proto.KindForward:
+		need = auth.ScopeSession
+	case proto.KindStatus:
+		need = auth.ScopeProbe
+	default:
+		return fmt.Errorf("unknown stream kind %q", kind)
+	}
+	if !c.Allows(need) {
+		return fmt.Errorf("%w: scope %q does not allow %s streams", auth.ErrInvalidToken, c.Scope, kind)
+	}
+	return nil
 }
 
 // Status reports machine state.

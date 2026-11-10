@@ -44,6 +44,9 @@ func TestUserDataHasNoSecrets(t *testing.T) {
 		hs.IdleStop != 120 || hs.ExpiresAt != 2000 || len(hs.Layout.SecretKeys) != 2 || hs.Layout.StatusDir == "" {
 		t.Fatalf("spec %+v", hs)
 	}
+	if hs.Params[paramSccache] != "bkt/cache/default/sccache" || hs.CompilerCache == nil || hs.CompilerCache.Port != sccachePort {
+		t.Fatalf("compiler cache %+v %v", hs.Params, hs.CompilerCache)
+	}
 	if !strings.Contains(ud, "systemctl enable --now cloudsourced-host.service") {
 		t.Fatal("agent unit not started")
 	}

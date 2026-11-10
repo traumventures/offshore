@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"io"
 	"log/slog"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/traumventures/cloudsourced/internal/auth"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/transport"
 )
@@ -34,12 +36,19 @@ func TestForward(t *testing.T) {
 	}()
 	port := echo.Addr().(*net.TCPAddr).Port
 
-	id, err := transport.NewIdentity("cs-test", time.Hour)
+	m, err := auth.LoadMaster(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{cfg: Config{Token: "tok", Identity: *id}, log: slog.New(slog.NewTextHandler(io.Discard, nil)), sessions: map[string]*session{}}
-	se := &session{id: "s1", done: make(chan struct{})}
+	id, err := auth.MachineIdentity(m.MachineSeed("m1"), "m1", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := auth.Verifier{Pub: m.Signer().Public().(ed25519.PublicKey), Machine: "m1"}
+	s := &Server{cfg: Config{MachineID: "m1", Identity: *id, Verifier: verifier}, log: slog.New(slog.NewTextHandler(io.Discard, nil)), sessions: map[string]*session{}}
+	se := &session{id: "s1", req: proto.Exec{Lease: "l1"}, done: make(chan struct{})}
+	tok := auth.NewToken(m.Signer(), auth.ScopeSession, "m1", "l1", time.Now().Add(time.Hour))
+	other := auth.NewToken(m.Signer(), auth.ScopeSession, "m1", "l2", time.Now().Add(time.Hour))
 	s.sessions[se.id] = se
 	ln, err := transport.Listen("127.0.0.1:0", &s.cfg.Identity)
 	if err != nil {
@@ -63,8 +72,8 @@ func TestForward(t *testing.T) {
 	}
 	defer conn.CloseWithError(0, "")
 
-	open := func(session string, port int) (*proto.Conn, io.ReadWriteCloser, error) {
-		st, pc, err := transport.OpenStream(ctx, conn, "tok", proto.KindForward)
+	openAs := func(token, session string, port int) (*proto.Conn, io.ReadWriteCloser, error) {
+		st, pc, err := transport.OpenStream(ctx, conn, token, proto.KindForward)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -72,6 +81,15 @@ func TestForward(t *testing.T) {
 			return nil, nil, err
 		}
 		return pc, st, pc.Expect(proto.TAck, nil)
+	}
+	open := func(session string, port int) (*proto.Conn, io.ReadWriteCloser, error) {
+		return openAs(tok, session, port)
+	}
+	if _, _, err := openAs(other, "s1", port); err == nil || !strings.Contains(err.Error(), "not valid for session") {
+		t.Fatalf("token of another lease: %v", err)
+	}
+	if _, _, err := openAs(auth.NewToken(m.Signer(), auth.ScopeProbe, "m1", "", time.Now().Add(time.Hour)), "s1", port); err == nil || !strings.Contains(err.Error(), "does not allow") {
+		t.Fatalf("probe token: %v", err)
 	}
 	if _, _, err := open("nope", port); err == nil || !strings.Contains(err.Error(), "not running") {
 		t.Fatalf("unknown session: %v", err)
