@@ -31,6 +31,7 @@ CPSTATE="$WORK/cp-state"
 CPPID=""
 export CLOUDSOURCED_SHIM_DIR="$WORK/shims"
 export CLOUDSOURCED_REQUIRE_REMOTE=1
+export CLOUDSOURCED_LOG_FORMAT=json   # daemon, control plane and (forwarded) machines
 unset CLOUDSOURCED_DISABLE CLOUDSOURCED_ACTIVE
 
 PASS=0
@@ -110,7 +111,7 @@ EOF
 }
 stop_cp() { if [ -n "$CPPID" ]; then kill "$CPPID" 2>/dev/null; wait "$CPPID" 2>/dev/null; CPPID=""; fi; }
 start_cp() {
-  CLOUDSOURCED_CONFIG=/nonexistent CLOUDSOURCED_STATE_DIR="$CPSTATE" "$BIN" controlplane --config "$FLEETCFG" --listen "127.0.0.1:$CPPORT" >>"$WORK/cp.log" 2>&1 &
+  CLOUDSOURCED_CONFIG=/nonexistent CLOUDSOURCED_STATE_DIR="$CPSTATE" "$BIN" controlplane --config "$FLEETCFG" --listen "127.0.0.1:$CPPORT" --metrics-listen "127.0.0.1:$MPORT" >>"$WORK/cp.log" 2>&1 &
   CPPID=$!
   for _ in $(seq 100); do curl -skf "https://127.0.0.1:$CPPORT/healthz" >/dev/null && return 0; sleep 0.1; done
   echo "control plane did not start:"; cat "$WORK/cp.log"; return 1
@@ -121,6 +122,7 @@ restart_daemon() { cs daemon stop >/dev/null; if [ -n "$REMOTE" ]; then stop_cp;
 if [ -n "$REMOTE" ]; then
   FLEETCFG="$WORK/cp-config.toml"
   CPPORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  MPORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
   write_config 24h 10m 0 2
   start_cp || exit 1
   FP="$(sed -n 's/.*"Fingerprint":"\([0-9a-f]*\)".*/\1/p' "$CPSTATE/tls.json")"
@@ -361,6 +363,31 @@ check "cleaned dependency recompiled" contains "$out" "Compiling itoa"
 check "recompiled dependency served from the compiler cache" test "$(sccache_hits "$out")" -ge 1
 check "why shows the run's sccache counters" contains "$(cs why)" "sccache_hits="
 check "compiler cache entries on the shared dependency volume" test "$(docker_ exec "$MACHINE" sh -c 'find /deps/sccache -type f | wc -l')" -ge 1
+
+step "operations: metrics and structured logs"
+# metric TEXT NAME LABELSUBSTR: value of the first sample of NAME whose labels contain LABELSUBSTR.
+metric() { local v; v="$(echo "$1" | awk -v n="$2" -v l="$3" 'index($0, n"{")==1 && index($0, l) {print $NF; exit}')"; echo "${v:-0}"; }
+MLABEL="$(docker_ inspect -f '{{index .Config.Labels "cloudsourced.machine"}}' "$MACHINE")"
+m="$(cs metrics)"
+check "metrics: daemon counts prepares" test "$(metric "$m" cloudsourced_daemon_requests_total 'op="prepare",result="ok"')" -ge 1
+check "metrics: fleet machines by provider, size and state" contains "$m" 'cloudsourced_machines{provider="local",size="default",state="running"} 1'
+check "metrics: machine session exits with machine label" contains "$m" "cloudsourced_server_session_exits_total{machine=\"$MLABEL\",provider=\"local\",size=\"default\",code=\"101\"}"
+check "metrics: sccache hits republished from the machine" test "$(metric "$m" cloudsourced_server_compiler_cache_total 'counter="sccache_hits"')" -ge 1
+check "metrics: output bytes transferred" test "$(metric "$m" cloudsourced_server_transfer_bytes_total 'direction="output"' | cut -d. -f1)" -gt 0
+check "metrics: acquire wait histogram" test "$(metric "$m" cloudsourced_acquire_wait_seconds_count 'result="assigned"')" -ge 1
+check "metrics: cost per hour of running machines" contains "$m" 'cloudsourced_cost_per_hour{provider="local"} 0.5'
+check "machine server logs JSON (format forwarded by the orchestrator)" contains "$(docker_ logs "$MACHINE" 2>&1 | grep '"msg":"session finished"' | tail -1)" '"level":"INFO"'
+if [ -n "$REMOTE" ]; then
+  KEY="$(cat "$CPSTATE/api-key")"
+  check "control plane /metrics needs the API key" eq "$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$CPPORT/metrics")" 401
+  cm="$(curl -sk -H "Authorization: Bearer $KEY" "https://127.0.0.1:$CPPORT/metrics")"
+  check "control plane /metrics has machine and session metrics" contains "$cm" "cloudsourced_server_session_duration_seconds_count{machine=\"$MLABEL\""
+  check "control plane /metrics counts API requests" test "$(metric "$cm" cloudsourced_http_requests_total 'path="/v1/acquire",result="200"')" -ge 1
+  check "--metrics-listen serves /metrics without authentication" contains "$(curl -s "http://127.0.0.1:$MPORT/metrics")" "cloudsourced_queue_length"
+  check "control plane logs requests as JSON with request ids" contains "$(grep '"msg":"lease"' "$WORK/cp.log" | tail -1)" '"request_id":"'
+else
+  check "daemon logs JSON" contains "$(grep '"msg":"daemon started"' "$CLOUDSOURCED_STATE_DIR/daemon.log" | tail -1)" '"level":"INFO"'
+fi
 
 step "machine authentication (derived identity, signed scoped tokens)"
 MDIR="$CLOUDSOURCED_STATE_DIR"; [ -n "$REMOTE" ] && MDIR="$CPSTATE"

@@ -1,0 +1,24 @@
+# HELP cs_queue_length Waiting tasks.
+# TYPE cs_queue_length gauge
+cs_queue_length 0
+# HELP cs_server_exits_total Exits by code.
+# TYPE cs_server_exits_total counter
+cs_server_exits_total{machine="m1",provider="local",code="0"} 2
+cs_server_exits_total{machine="m1",provider="local",code="101"} 1
+cs_server_exits_total{machine="m2",provider="local",code="0"} 1
+# HELP cs_server_session_seconds Session duration.
+# TYPE cs_server_session_seconds histogram
+cs_server_session_seconds_bucket{machine="m1",provider="local",le="1"} 0
+cs_server_session_seconds_bucket{machine="m1",provider="local",le="10"} 1
+cs_server_session_seconds_bucket{machine="m1",provider="local",le="+Inf"} 1
+cs_server_session_seconds_sum{machine="m1",provider="local"} 4
+cs_server_session_seconds_count{machine="m1",provider="local"} 1
+cs_server_session_seconds_bucket{machine="m2",provider="local",le="1"} 0
+cs_server_session_seconds_bucket{machine="m2",provider="local",le="10"} 1
+cs_server_session_seconds_bucket{machine="m2",provider="local",le="+Inf"} 1
+cs_server_session_seconds_sum{machine="m2",provider="local"} 4
+cs_server_session_seconds_count{machine="m2",provider="local"} 1
+# HELP cs_server_sessions_running Running sessions.
+# TYPE cs_server_sessions_running gauge
+cs_server_sessions_running{machine="m1",provider="local"} 1
+cs_server_sessions_running{machine="m2",provider="local"} 0

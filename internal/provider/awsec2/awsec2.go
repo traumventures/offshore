@@ -45,7 +45,7 @@ import (
 var stackTemplate string
 
 // templateVersion must match the TemplateVersion output of stack.yaml.
-const templateVersion = "1"
+const templateVersion = "4"
 
 const (
 	serverPort = 7443

@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/traumventures/cloudsourced/internal/manifest"
+	"github.com/traumventures/cloudsourced/internal/metrics"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
 )
 
@@ -248,6 +249,9 @@ type Status struct {
 	Mounts    []string            `json:"mounts"`
 	Draining  bool                `json:"draining"`
 	WarmRepos []string            `json:"warm_repos,omitempty"` // repo IDs with unexpired build slots
+	// Metrics is the server's metrics snapshot; the orchestrator republishes
+	// it with machine labels (no extra port or scope on the machine).
+	Metrics []metrics.Family `json:"metrics,omitempty"`
 }
 
 // Session is a running remote process.
