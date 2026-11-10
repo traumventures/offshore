@@ -324,6 +324,8 @@ func (s *Server) serveStream(ctx context.Context, conn *quic.Conn, st *quic.Stre
 		err = pc.Send(proto.TStatus, s.Status())
 	case proto.KindFetch:
 		err = s.serveFetch(ctx, pc)
+	case proto.KindOutputs:
+		err = s.serveOutputs(ctx, pc)
 	case proto.KindForward:
 		err = s.serveForward(ctx, pc, st, claims)
 	}
@@ -337,7 +339,7 @@ func (s *Server) serveStream(ctx context.Context, conn *quic.Conn, st *quic.Stre
 func authorize(kind string, c auth.Claims) error {
 	var need auth.Scope
 	switch kind {
-	case proto.KindSync, proto.KindExec, proto.KindFetch, proto.KindForward:
+	case proto.KindSync, proto.KindExec, proto.KindFetch, proto.KindForward, proto.KindOutputs:
 		need = auth.ScopeSession
 	case proto.KindStatus:
 		need = auth.ScopeProbe
