@@ -104,15 +104,19 @@ type Machine struct {
 	// rebalance notice): they drain and are never undrained, started or
 	// counted as capacity again.
 	Interrupted bool
-	Capacity    Resources // physical capacity
-	Reserved    Resources // sum of reservations of sessions and pending leases
-	Used        Resources // measured usage (best effort)
-	Pressure    Pressure
-	Sessions    int
-	WarmRepos   []string  // repositories with an unexpired build cache
-	IdleSince   time.Time // zero while sessions run
-	CreatedAt   time.Time
-	ExpiresAt   time.Time
+	// AtRisk machines got a rebalance recommendation (spot): an
+	// interruption is more likely, so new sessions go elsewhere when
+	// another machine fits equally.
+	AtRisk    bool
+	Capacity  Resources // physical capacity
+	Reserved  Resources // sum of reservations of sessions and pending leases
+	Used      Resources // measured usage (best effort)
+	Pressure  Pressure
+	Sessions  int
+	WarmRepos []string  // repositories with an unexpired build cache
+	IdleSince time.Time // zero while sessions run
+	CreatedAt time.Time
+	ExpiresAt time.Time
 }
 
 // Warm reports whether the machine holds a build cache for repo.

@@ -142,6 +142,7 @@ type Server struct {
 	// its own (expiry, host drain notice).
 	drainReason string
 	interruptAt time.Time
+	atRisk      bool // rebalance recommendation: keep serving
 
 	fetchMu  sync.Mutex
 	inflight map[string]*fetchCall
@@ -401,12 +402,21 @@ func (s *Server) checkDrainNotice() {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if n.Reason == machine.DrainSpotRebalance {
+		// Only a higher risk: keep serving, the orchestrator prefers
+		// other machines for new work.
+		if !s.atRisk {
+			s.log.Warn("machine at risk of interruption (rebalance recommendation)", "noticed", time.Unix(n.Noticed, 0).UTC().Format(time.RFC3339))
+		}
+		s.atRisk = true
+		return
+	}
 	if s.drainReason == n.Reason {
 		return
 	}
 	at := time.Unix(n.Deadline, 0)
 	if n.Deadline == 0 {
-		at = time.Unix(n.Noticed, 0) // no deadline: the machine is at risk now
+		at = time.Unix(n.Noticed, 0)
 	}
 	s.draining, s.drainReason, s.interruptAt = true, n.Reason, at
 	s.log.Warn("machine drains: host notice", "reason", n.Reason, "deadline", at.UTC().Format(time.RFC3339), "sessions", len(s.sessions))
@@ -443,7 +453,7 @@ func (s *Server) statusOnly() proto.Status {
 	defer s.mu.Unlock()
 	st := proto.Status{
 		Machine: s.cfg.MachineID, EnvHash: s.cfg.EnvHash, Ready: s.ready,
-		CPU: s.cfg.CPU, Memory: s.cfg.Memory, Draining: s.draining, DrainReason: s.drainReason,
+		CPU: s.cfg.CPU, Memory: s.cfg.Memory, Draining: s.draining, DrainReason: s.drainReason, AtRisk: s.atRisk,
 	}
 	if !s.interruptAt.IsZero() {
 		st.InterruptAt = s.interruptAt.Unix()

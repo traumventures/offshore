@@ -67,10 +67,11 @@ func capacityError(err error) bool {
 		"InsufficientReservedInstanceCapacity", "SpotMaxPriceTooLow", "MaxSpotInstanceCountExceeded",
 		"Unsupported", "VcpuLimitExceeded", "InstanceLimitExceeded":
 		return true
-	case "InvalidParameterValue", "InvalidParameterCombination":
-		// e.g. an instance type not offered in the region or zone.
+	case "InvalidParameterValue":
+		// An instance type not offered in the region or zone (other
+		// invalid parameters are configuration errors).
 		m := strings.ToLower(ae.ErrorMessage())
-		return strings.Contains(m, "not supported") || strings.Contains(m, "not available")
+		return strings.Contains(m, "instance type") && (strings.Contains(m, "not supported") || strings.Contains(m, "not available"))
 	}
 	return false
 }
@@ -85,7 +86,13 @@ func capacityError(err error) bool {
 func applyAttempt(in *ec2.RunInstancesInput, a attempt, spec provider.MachineSpec, maxPrice string, now time.Time) {
 	in.InstanceType = ec2types.InstanceType(a.instanceType)
 	in.InstanceMarketOptions = nil
+	in.InstanceInitiatedShutdownBehavior = ec2types.ShutdownBehaviorTerminate
 	if a.spot {
+		// EC2 rejects shutdown behaviour terminate with interruption
+		// behaviour stop: a spot machine that shuts itself down at expiry
+		// stops, and the orchestrator (or the reaper) terminates it as
+		// expired.
+		in.InstanceInitiatedShutdownBehavior = ec2types.ShutdownBehaviorStop
 		so := &ec2types.SpotMarketOptions{
 			SpotInstanceType:             ec2types.SpotInstanceTypePersistent,
 			InstanceInterruptionBehavior: ec2types.InstanceInterruptionBehaviorStop,
@@ -125,28 +132,32 @@ func withTag(tags []ec2types.Tag, key, value string) []ec2types.Tag {
 type runFunc func(ctx context.Context, in *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error)
 
 // launch runs the attempts of a machine in order until one gets capacity.
-// Errors other than capacity errors end the launch at once.
-func launch(ctx context.Context, run runFunc, base *ec2.RunInstancesInput, spec provider.MachineSpec, maxPrice string, now time.Time) (*ec2.RunInstancesOutput, attempt, error) {
-	var tried []string
+// Errors other than capacity errors end the launch at once. failed lists
+// the capacity errors of earlier attempts.
+func launch(ctx context.Context, run runFunc, base *ec2.RunInstancesInput, spec provider.MachineSpec, maxPrice string, now time.Time) (out *ec2.RunInstancesOutput, a attempt, failed []string, err error) {
 	for _, a := range launchPlan(spec) {
 		in := *base
 		applyAttempt(&in, a, spec, maxPrice, now)
 		out, err := run(ctx, &in)
 		if err == nil {
-			return out, a, nil
+			return out, a, failed, nil
 		}
 		if !capacityError(err) {
-			return nil, a, fmt.Errorf("aws-ec2: run instance %s: %w", a, err)
+			return nil, a, failed, fmt.Errorf("aws-ec2: run instance %s: %w", a, err)
 		}
-		tried = append(tried, fmt.Sprintf("%s: %s", a, apiCode(err)))
+		failed = append(failed, fmt.Sprintf("%s: %s", a, apiError(err)))
 	}
-	return nil, attempt{}, fmt.Errorf("aws-ec2: no capacity for size %s (%s)", spec.Size, strings.Join(tried, "; "))
+	return nil, attempt{}, failed, fmt.Errorf("aws-ec2: no capacity for size %s (%s)", spec.Size, strings.Join(failed, "; "))
 }
 
-func apiCode(err error) string {
+func apiError(err error) string {
 	var ae smithy.APIError
 	if errors.As(err, &ae) {
-		return ae.ErrorCode()
+		m := ae.ErrorMessage()
+		if len(m) > 160 {
+			m = m[:160]
+		}
+		return ae.ErrorCode() + " " + m
 	}
 	return err.Error()
 }

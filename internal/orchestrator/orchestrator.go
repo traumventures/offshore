@@ -492,6 +492,10 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 	o.mu.Lock()
 	for r := range results {
 		if m, ok := o.machines[r.id]; ok {
+			if st := r.status; st != nil && st.InterruptAt > 0 && (m.Status == nil || m.Status.InterruptAt == 0) {
+				o.log.Warn("machine interruption notice", "id", r.id, "reason", st.DrainReason,
+					"deadline", time.Unix(st.InterruptAt, 0).UTC().Format(time.RFC3339), "sessions", len(st.Sessions))
+			}
 			m.Status = r.status
 			m.StatusAt = time.Now()
 		}
@@ -607,6 +611,7 @@ func (o *Orchestrator) fleetLocked(now time.Time) scheduler.Fleet {
 			if st.InterruptAt > 0 {
 				sm.Interrupted, sm.Draining = true, true
 			}
+			sm.AtRisk = st.AtRisk
 		}
 		for lid, p := range m.pending {
 			if now.After(p.expires) {

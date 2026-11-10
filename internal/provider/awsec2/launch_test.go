@@ -77,6 +77,9 @@ func TestSpotRequest(t *testing.T) {
 	if so.ValidUntil == nil || !so.ValidUntil.Equal(spec.ExpiresAt) {
 		t.Errorf("request must end at the machine expiry, got %v", so.ValidUntil)
 	}
+	if in.InstanceInitiatedShutdownBehavior != ec2types.ShutdownBehaviorStop {
+		t.Errorf("EC2 rejects shutdown behaviour terminate with interruption behaviour stop, got %s", in.InstanceInitiatedShutdownBehavior)
+	}
 	if aws.ToString(so.MaxPrice) != "0.05" {
 		t.Errorf("max price %v", so.MaxPrice)
 	}
@@ -93,7 +96,7 @@ func TestSpotRequest(t *testing.T) {
 
 	// The same input reused for an on-demand attempt drops all spot settings.
 	applyAttempt(in, attempt{instanceType: "c7a.xlarge"}, spec, "0.05", time.Unix(1_900_000_000, 0))
-	if in.InstanceMarketOptions != nil || len(in.TagSpecifications) != 2 || tagValue(in.TagSpecifications[0].Tags, provider.LabelMarket) != provider.MarketOnDemand {
+	if in.InstanceMarketOptions != nil || in.InstanceInitiatedShutdownBehavior != ec2types.ShutdownBehaviorTerminate || len(in.TagSpecifications) != 2 || tagValue(in.TagSpecifications[0].Tags, provider.LabelMarket) != provider.MarketOnDemand {
 		t.Errorf("on-demand attempt: %+v %v", in.InstanceMarketOptions, in.TagSpecifications)
 	}
 	// No ValidUntil for an expiry in the past (EC2 would reject it).
@@ -131,7 +134,7 @@ func TestLaunchFallsBackOnCapacityErrors(t *testing.T) {
 		"c7a.xlarge/spot": apiErr("InsufficientInstanceCapacity"),
 		"c6a.xlarge/spot": apiErr("SpotMaxPriceTooLow"),
 	}}
-	_, a, err := launch(context.Background(), f.run, baseInput(), spotSpec(), "", time.Now())
+	_, a, _, err := launch(context.Background(), f.run, baseInput(), spotSpec(), "", time.Now())
 	if err != nil || a.String() != "m7a.xlarge (spot)" {
 		t.Fatalf("want the third type on spot, got %v %v (tried %v)", a, err, f.tried)
 	}
@@ -143,9 +146,12 @@ func TestLaunchFallsBackOnCapacityErrors(t *testing.T) {
 		"m7a.xlarge/spot":      apiErr("InsufficientInstanceCapacity"),
 		"c7a.xlarge/on-demand": apiErr("InsufficientInstanceCapacity"),
 	}}
-	out, a, err := launch(context.Background(), f.run, baseInput(), spotSpec(), "", time.Now())
+	out, a, failed, err := launch(context.Background(), f.run, baseInput(), spotSpec(), "", time.Now())
 	if err != nil || a.String() != "c6a.xlarge (on-demand)" || aws.ToString(out.Instances[0].InstanceId) != "i-c6a.xlarge/on-demand" {
 		t.Fatalf("want the on-demand fallback, got %v %v (tried %v)", a, err, f.tried)
+	}
+	if len(failed) != 4 || !strings.HasPrefix(failed[1], "c6a.xlarge (spot): MaxSpotInstanceCountExceeded") {
+		t.Fatalf("failed attempts %q", failed)
 	}
 
 	// Without fallback the launch fails, naming every attempt.
@@ -156,7 +162,7 @@ func TestLaunchFallsBackOnCapacityErrors(t *testing.T) {
 		"c6a.xlarge/spot": apiErr("InsufficientInstanceCapacity"),
 		"m7a.xlarge/spot": apiErr("InsufficientInstanceCapacity"),
 	}}
-	_, _, err = launch(context.Background(), f.run, baseInput(), spec, "", time.Now())
+	_, _, _, err = launch(context.Background(), f.run, baseInput(), spec, "", time.Now())
 	if err == nil || !strings.Contains(err.Error(), "no capacity for size x4") || len(f.tried) != 3 {
 		t.Fatalf("want a capacity error after 3 attempts, got %v (tried %v)", err, f.tried)
 	}
@@ -164,9 +170,12 @@ func TestLaunchFallsBackOnCapacityErrors(t *testing.T) {
 
 func TestLaunchStopsOnOtherErrors(t *testing.T) {
 	f := &fakeRun{errs: map[string]error{"c7a.xlarge/spot": apiErr("UnauthorizedOperation")}}
-	_, _, err := launch(context.Background(), f.run, baseInput(), spotSpec(), "", time.Now())
+	_, _, _, err := launch(context.Background(), f.run, baseInput(), spotSpec(), "", time.Now())
 	if err == nil || len(f.tried) != 1 || !strings.Contains(err.Error(), "UnauthorizedOperation") {
 		t.Fatalf("a permission error must not be retried: %v (tried %v)", err, f.tried)
+	}
+	if capacityError(&smithy.GenericAPIError{Code: "InvalidParameterCombination", Message: "The request with instanceInitiatedShutdownBehavior 'terminate' is not supported when instanceInterruptionBehavior is set to 'stop'."}) {
+		t.Error("an invalid request is not a capacity error")
 	}
 	if capacityError(errors.New("network down")) {
 		t.Error("plain errors are not capacity errors")

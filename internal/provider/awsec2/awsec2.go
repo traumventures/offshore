@@ -497,8 +497,8 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 		MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
 		UserData:           aws.String(base64.StdEncoding.EncodeToString([]byte(ud))),
 		IamInstanceProfile: &ec2types.IamInstanceProfileSpecification{Arn: aws.String(in.profile)},
-		// Shutting down at expiry terminates the instance; its spot
-		// request (if any) has expired by then and does not relaunch it.
+		// Shutting down at expiry terminates an on-demand instance (spot:
+		// see applyAttempt).
 		InstanceInitiatedShutdownBehavior: ec2types.ShutdownBehaviorTerminate,
 		MetadataOptions: &ec2types.InstanceMetadataOptionsRequest{
 			HttpTokens: ec2types.HttpTokensStateRequired,
@@ -529,13 +529,16 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	if err := e.putSecrets(ctx, spec); err != nil {
 		return provider.Machine{}, err
 	}
-	out, how, err := launch(ctx, e.ec2.RunInstances, input, spec, e.spotMax, time.Now())
+	out, how, failed, err := launch(ctx, e.ec2.RunInstances, input, spec, e.spotMax, time.Now())
 	if err != nil {
 		e.deleteSecrets(context.Background(), spec.ID)
 		return provider.Machine{}, err
 	}
+	if len(failed) > 0 && how.spot {
+		slog.Info("aws-ec2: launched on a later spot instance type", "machine", spec.ID, "size", spec.Size, "instance_type", how.instanceType, "failed", strings.Join(failed, "; "))
+	}
 	if spec.Spot && !how.spot {
-		slog.Warn("aws-ec2: no spot capacity, launched on-demand", "machine", spec.ID, "size", spec.Size, "instance_type", how.instanceType)
+		slog.Warn("aws-ec2: no spot capacity, launched on-demand", "machine", spec.ID, "size", spec.Size, "instance_type", how.instanceType, "spot_attempts", strings.Join(failed, "; "))
 	}
 	id := aws.ToString(out.Instances[0].InstanceId)
 	if err := e.waitRunning(ctx, id); err != nil {

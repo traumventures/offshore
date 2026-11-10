@@ -267,7 +267,9 @@ accounted at the on-demand price.
 
 The risk: AWS can take a spot machine back with two minutes' notice. The host
 agent polls the metadata service (`spot/instance-action` and the rebalance
-recommendation) and tells the server, which drains: no new sessions, running
+recommendation). A rebalance recommendation only marks the machine at risk
+(new work prefers other machines). On an interruption notice the server
+drains: no new sessions, running
 sessions continue until the deadline and fail if they are still running
 then. The orchestrator places new
 work elsewhere and stops the machine as soon as it is empty (then it stays a
@@ -282,8 +284,10 @@ puts next to `bin/cloudsourced` (provider options `binary_amd64`,
 a repository pins `resources.arch = "aarch64"` (default `"x86_64"`, because
 build outputs must run on the client) and only sizes of that architecture
 are created for it; its environment image is built for `linux/arm64`, which
-needs Docker with BuildKit and QEMU binfmt handlers when the control plane is
-not arm64 (`docker run --privileged --rm tonistiigi/binfmt --install arm64`).
+needs either a native arm64 builder or, on an amd64 control plane, Docker with
+BuildKit and QEMU binfmt handlers (`docker run --privileged --rm
+tonistiigi/binfmt:qemu-v9.2.2 --install arm64`; emulated builds are several
+times slower).
 
 Do not use root or admin credentials. `deploy/aws/iam.yaml` creates the managed
 policies `cloudsourced-operator` (machines, images, artifacts, machine secrets)

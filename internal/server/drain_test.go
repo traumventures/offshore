@@ -24,8 +24,8 @@ func TestHostDrainNotice(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.checkDrainNotice()
-	if st := s.statusOnly(); !st.Draining || st.DrainReason != machine.DrainSpotRebalance || st.InterruptAt != 1000 {
-		t.Fatalf("rebalance: %+v", st)
+	if st := s.statusOnly(); st.Draining || !st.AtRisk || st.InterruptAt != 0 {
+		t.Fatalf("a rebalance recommendation only marks the machine at risk: %+v", st)
 	}
 	if err := machine.WriteDrainNotice(dir, machine.DrainNotice{Reason: machine.DrainSpotInterruption, Deadline: 1120, Noticed: 1001}); err != nil {
 		t.Fatal(err)

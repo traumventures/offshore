@@ -83,3 +83,17 @@ func TestEmptyInterruptedMachineStops(t *testing.T) {
 		t.Fatalf("want the interrupted machine stopped and replaced in the warm pool, got %+v", acts)
 	}
 }
+
+func TestAtRiskMachineComesLast(t *testing.T) {
+	risky := machine("risky", res(8, 16), res(4, 8))
+	risky.AtRisk = true
+	safe := machine("safe", res(8, 16), Resources{})
+	pl := Default{}.Place(Fleet{Now: now, Machines: []Machine{risky, safe}}, task(1, 1))
+	if pl.Machine != "safe" {
+		t.Fatalf("want the machine without rebalance recommendation, got %+v", pl)
+	}
+	// Alone it still serves.
+	if pl := (Default{}).Place(Fleet{Now: now, Machines: []Machine{risky}}, task(1, 1)); pl.Kind != Assign {
+		t.Fatalf("at-risk machine must still accept work, got %+v", pl)
+	}
+}

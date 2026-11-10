@@ -169,6 +169,9 @@ func (p Default) rank(ms []Machine, t Task) {
 		if pi, pj := physical[ms[i].ID], physical[ms[j].ID]; pi != pj {
 			return pi // overcommit only when no machine has physical room
 		}
+		if ri, rj := ms[i].AtRisk, ms[j].AtRisk; ri != rj {
+			return rj // a machine at risk of interruption comes last
+		}
 		if fi, fj := fit[ms[i].ID], fit[ms[j].ID]; math.Abs(fi-fj) > 1e-9 {
 			return fi < fj
 		}
