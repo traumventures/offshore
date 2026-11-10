@@ -241,7 +241,7 @@ memory         = "7G"
 price_per_hour = 0.21                 # on-demand price
 spot           = true
 instance_types = ["c7a.xlarge", "c6a.xlarge", "m7a.xlarge"]   # tried in order
-spot_discount  = 0.6                  # expected discount (default 0.6) for sizing and costs
+spot_discount  = 0.5                  # expected discount (default 0.5) for sizing and costs
 spot_fallback  = true                 # on-demand when no type has spot capacity (default)
 
 [[fleet.size]]

@@ -40,7 +40,7 @@ price_per_hour = 0.2
 		t.Fatal(err)
 	}
 	s := u.Fleet.Sizes
-	if s[0].Arch != ArchAMD64 || !s[0].Spot || !s[0].Fallback() || math.Abs(s[0].EffectivePrice()-0.08) > 1e-9 || len(s[0].InstanceTypes) != 3 {
+	if s[0].Arch != ArchAMD64 || !s[0].Spot || !s[0].Fallback() || math.Abs(s[0].EffectivePrice()-0.1) > 1e-9 || len(s[0].InstanceTypes) != 3 {
 		t.Errorf("spot size: %+v (price %v)", s[0], s[0].EffectivePrice())
 	}
 	if s[1].Arch != ArchARM64 || s[1].Fallback() || math.Abs(s[1].EffectivePrice()-0.085) > 1e-9 {

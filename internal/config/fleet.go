@@ -147,7 +147,7 @@ type Size struct {
 	// drain and running sessions get until the deadline.
 	Spot bool `toml:"spot"`
 	// SpotDiscount is the expected spot discount on price_per_hour used for
-	// sizing and cost estimates (0..1, default 0.6 for spot sizes).
+	// sizing and cost estimates (0..1, default 0.5 for spot sizes).
 	SpotDiscount *float64 `toml:"spot_discount"`
 	// SpotFallback launches on-demand when no spot capacity is available
 	// for any instance type (default true).
@@ -161,7 +161,7 @@ const (
 )
 
 // DefaultSpotDiscount is the assumed spot discount when none is configured.
-const DefaultSpotDiscount = 0.6
+const DefaultSpotDiscount = 0.5
 
 // MachineArch maps a repository architecture (resources.arch: "x86_64",
 // "aarch64") or a size architecture to the size naming ("amd64",
