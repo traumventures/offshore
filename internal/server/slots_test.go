@@ -69,6 +69,41 @@ func TestSlotsExpire(t *testing.T) {
 	}
 }
 
+// Repositories with different build TTLs share a machine: each slot expires
+// under its own repository's TTL, bounded by the machine TTL.
+func TestSlotsPerRepositoryTTL(t *testing.T) {
+	s, err := newSlots(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine := 24 * time.Hour
+	short, _, _ := s.lease("short", time.Hour)
+	long, _, _ := s.lease("long", 12*time.Hour)
+	s.release(short)
+	s.release(long)
+	for _, p := range []string{short, long} {
+		m, _ := readMeta(p)
+		m.Created = time.Now().Add(-2 * time.Hour).Unix()
+		writeMeta(p, m)
+	}
+	if got := s.warmRepos(machine); len(got) != 1 || got[0] != "long" {
+		t.Fatalf("warm repos %v, want [long]", got)
+	}
+	if _, err := s.latest("short", machine); err == nil {
+		t.Fatal("slot past its repository TTL still served")
+	}
+	if n := s.gc(machine); n != 1 {
+		t.Fatalf("gc removed %d slots, want 1", n)
+	}
+	if _, err := os.Stat(long); err != nil {
+		t.Fatal("slot within its TTL was collected")
+	}
+	// The machine TTL stays an upper bound.
+	if n := s.gc(time.Hour); n != 1 {
+		t.Fatalf("gc under a lower machine TTL removed %d, want 1", n)
+	}
+}
+
 func TestExpandPath(t *testing.T) {
 	env := []string{"HOME=/root", "CARGO_HOME=/usr/local/cargo"}
 	if got := expandPath("$CARGO_HOME/registry", env); got != "/usr/local/cargo/registry" {

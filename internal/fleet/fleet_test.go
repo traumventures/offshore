@@ -77,7 +77,7 @@ func testEnv(t *testing.T) Env {
 }
 
 func TestControlPlaneRoundTrip(t *testing.T) {
-	u := &config.User{Fleet: config.Fleet{Owner: "t", Estimator: "static", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s", MaxMachines: 1, CPUOvercommit: 1, MemoryOvercommit: 1},
+	u := &config.FleetConfig{Fleet: config.Fleet{ID: "t", Estimator: "static", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s", MaxMachines: 1, CPUOvercommit: 1, MemoryOvercommit: 1},
 		Providers: map[string]map[string]any{"img": {"backend": "test-img"}}}
 	state := t.TempDir()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -163,9 +163,9 @@ func TestUnpackRejectsTraversal(t *testing.T) {
 
 func TestConfigMapsSchedulingKeys(t *testing.T) {
 	below := 0.4
-	u := &config.User{Fleet: config.Fleet{Policy: "classic", ConsolidateBelow: &below, ConsolidateTarget: 0.7, MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s",
+	u := &config.FleetConfig{Fleet: config.Fleet{Policy: "classic", ConsolidateBelow: &below, ConsolidateTarget: 0.7, MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s",
 		WarmPool: []config.WarmPool{{Days: []string{"mon"}, From: "08:00", To: "18:00", Machines: 1, Timezone: "UTC"}}}}
-	p := Config(u, nil).Policy
+	p := Config(u).Policy
 	if p.Variant != "classic" || p.ConsolidateBelow != 0.4 || p.ConsolidateTarget != 0.7 || len(p.WarmPool) != 1 ||
 		p.WarmPool[0].From != 8*time.Hour || p.WarmPool[0].To != 18*time.Hour || p.WarmPool[0].Days[0] != time.Monday || p.WarmPool[0].Machines != 1 {
 		t.Fatalf("%+v", p)

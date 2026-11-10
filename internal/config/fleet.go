@@ -3,51 +3,42 @@ package config
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 )
 
-// User is the per-user configuration: where and how machines run.
-type User struct {
-	// Orchestrator selects where fleet decisions are made: in the local
-	// daemon ("embedded") or in a shared control plane ("remote").
-	Orchestrator Orchestrator `toml:"orchestrator"`
-	Fleet        Fleet        `toml:"fleet"`
-	Docker       Docker       `toml:"docker"` // shorthand for a single local-docker provider
+// FleetConfig is the fleet configuration: how machines are sized,
+// scheduled and provisioned, and by which providers. It is read by the
+// orchestrator, i.e. by the control plane or, in embedded mode, by the local
+// daemon. It never contains client settings ([orchestrator], user).
+type FleetConfig struct {
+	// Path is the file the configuration was read from ("" = defaults only).
+	Path  string `toml:"-"`
+	Fleet Fleet  `toml:"fleet"`
+	// Docker is the deprecated shorthand for a single local-docker provider.
+	Docker Docker `toml:"docker"`
 	// Providers are named provider instances, e.g. [providers.local] with
 	// backend = "local-docker" and [providers.aws] with backend = "aws-ec2".
 	// Every other key of the table is passed to the backend as an option.
 	Providers map[string]map[string]any `toml:"providers"`
+	// Warnings are deprecations and ignored sections found while loading.
+	Warnings []string `toml:"-"`
 }
 
 // Backends known to the configuration.
 var Backends = []string{"local-docker", "aws-ec2"}
 
-// Orchestrator configures the control plane connection.
-type Orchestrator struct {
-	Mode string `toml:"mode"` // "embedded" | "remote"
-	// URL of a remote control plane, e.g. "https://cs.example.com" or
-	// "https://10.0.0.5:7443".
-	URL string `toml:"url"`
-	// Fingerprint pins a self-signed control plane certificate (hex SHA-256,
-	// printed by "cloudsourced controlplane"). Empty: verify against system CAs.
-	Fingerprint string `toml:"fingerprint"`
-	// APIKey is a reference (env:VAR, file:PATH, cmd:COMMAND) to the API key.
-	APIKey string `toml:"api_key"`
-	// ClientCert and ClientKey are PEM files of a client certificate for
-	// control planes that require mutual TLS (--client-ca). Relative paths
-	// are relative to the configuration file.
-	ClientCert string `toml:"client_cert"`
-	ClientKey  string `toml:"client_key"`
-}
-
 // Fleet configures machine provisioning and scaling.
 type Fleet struct {
-	Backend       string          `toml:"backend"` // default backend when no [providers] are given
+	// ID names the fleet: machines and volumes carry it in the
+	// cloudsourced.owner label, and an orchestrator only manages resources
+	// of its own fleet. Default: the deprecated owner key, else $USER.
+	ID string `toml:"id"`
+	// Owner is the deprecated name of ID.
 	Owner         string          `toml:"owner"`
+	Backend       string          `toml:"backend"` // deprecated: default backend when no [providers] are given
 	MachineCPU    float64         `toml:"machine_cpu"`
 	MachineMemory string          `toml:"machine_memory"`
 	MinMachines   int             `toml:"min_machines"` // warm pool per recently used environment
@@ -158,56 +149,65 @@ type Docker struct {
 	Host string `toml:"host"`
 }
 
-// UserConfigPath returns the path of the user configuration file.
-func UserConfigPath() string {
-	if p := os.Getenv("CLOUDSOURCED_CONFIG"); p != "" {
+// FleetConfigPath returns the fleet configuration file:
+// $CLOUDSOURCED_FLEET_CONFIG, else the client configuration file (embedded
+// mode and single-host control planes keep both in one file).
+func FleetConfigPath() string {
+	if p := os.Getenv("CLOUDSOURCED_FLEET_CONFIG"); p != "" {
 		return p
 	}
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		dir = filepath.Join(os.Getenv("HOME"), ".config")
-	}
-	return filepath.Join(dir, "cloudsourced", "config.toml")
+	return ClientConfigPath()
 }
 
-// LoadUser loads the user configuration, applying defaults when it is absent.
-func LoadUser() (*User, error) {
-	var u User
-	data, err := os.ReadFile(UserConfigPath())
+// LoadFleet loads the fleet configuration from path, applying defaults when
+// the file is absent. Client sections in the file are ignored (see Warnings).
+func LoadFleet(path string) (*FleetConfig, error) {
+	f := &FleetConfig{Path: path}
+	data, err := os.ReadFile(path)
 	if err == nil {
-		if err := decodeStrict(data, &u); err != nil {
-			return nil, fmt.Errorf("%s: %w", UserConfigPath(), err)
+		var raw rawFile
+		if err := decodeStrict(data, &raw); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		f.Fleet, f.Docker, f.Providers = raw.Fleet, raw.Docker, raw.Providers
+		top, _ := topLevel(data)
+		if clientSections(top) != nil {
+			f.Warnings = append(f.Warnings, fmt.Sprintf("%s: %s ignored by the fleet (client settings)", path, strings.Join(clientSections(top), ", ")))
+		}
+		if top["docker"] {
+			f.Warnings = append(f.Warnings, path+": [docker] is deprecated, use [providers.local] with backend = \"local-docker\"")
+		}
+		if raw.Fleet.Backend != "" {
+			f.Warnings = append(f.Warnings, path+": fleet.backend is deprecated, use [providers.<name>] backend = ...")
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
-	u.applyDefaults()
-	if err := u.Validate(); err != nil {
-		return nil, err
-	}
-	return &u, nil
-}
-
-func (u *User) applyDefaults() {
-	if u.Orchestrator.Mode == "" {
-		u.Orchestrator.Mode = "embedded"
-		if u.Orchestrator.URL != "" {
-			u.Orchestrator.Mode = "remote"
+	if fl := &f.Fleet; fl.Owner != "" {
+		switch {
+		case fl.ID == "":
+			fl.ID = fl.Owner
+			f.Warnings = append(f.Warnings, path+": fleet.owner is deprecated, use fleet.id")
+		case fl.ID != fl.Owner:
+			return nil, fmt.Errorf("invalid %s:\n  fleet.id %q and deprecated fleet.owner %q differ", path, fl.ID, fl.Owner)
 		}
 	}
-	if u.Orchestrator.Mode == "remote" && u.Orchestrator.APIKey == "" {
-		u.Orchestrator.APIKey = "env:CLOUDSOURCED_API_KEY"
+	f.applyDefaults()
+	if err := f.Validate(); err != nil {
+		return nil, err
 	}
+	return f, nil
+}
+
+func (u *FleetConfig) applyDefaults() {
 	f := &u.Fleet
 	if f.Backend == "" {
 		f.Backend = "local-docker"
 	}
-	if f.Owner == "" {
-		f.Owner = os.Getenv("USER")
-		if f.Owner == "" {
-			f.Owner = "default"
-		}
+	if f.ID == "" {
+		f.ID = sanitizeID(defaultUser())
 	}
+	f.Owner = ""
 	if f.MachineCPU == 0 {
 		f.MachineCPU = 8
 	}
@@ -242,18 +242,18 @@ func (u *User) applyDefaults() {
 	if f.Estimator == "" {
 		f.Estimator = "history"
 	}
-	if len(u.Docker.Command) == 0 {
-		if c := os.Getenv("CLOUDSOURCED_DOCKER"); c != "" {
-			u.Docker.Command = strings.Fields(c)
-		} else {
-			u.Docker.Command = []string{"docker"}
-		}
-	}
-	if u.Docker.Host == "" {
-		u.Docker.Host = "127.0.0.1"
-	}
 	if len(u.Providers) == 0 {
 		// Legacy single-provider form: fleet.backend + [docker].
+		if len(u.Docker.Command) == 0 {
+			if c := os.Getenv("CLOUDSOURCED_DOCKER"); c != "" {
+				u.Docker.Command = strings.Fields(c)
+			} else {
+				u.Docker.Command = []string{"docker"}
+			}
+		}
+		if u.Docker.Host == "" {
+			u.Docker.Host = "127.0.0.1"
+		}
 		opts := map[string]any{"backend": f.Backend}
 		if f.Backend == "local-docker" {
 			cmd := make([]any, len(u.Docker.Command))
@@ -279,7 +279,7 @@ func (u *User) applyDefaults() {
 }
 
 // ProviderNames returns the configured provider instances, sorted.
-func (u *User) ProviderNames() []string {
+func (u *FleetConfig) ProviderNames() []string {
 	var out []string
 	for n := range u.Providers {
 		out = append(out, n)
@@ -289,31 +289,16 @@ func (u *User) ProviderNames() []string {
 }
 
 // ProviderBackend returns the backend of a provider instance.
-func (u *User) ProviderBackend(name string) string {
+func (u *FleetConfig) ProviderBackend(name string) string {
 	b, _ := u.Providers[name]["backend"].(string)
 	return b
 }
 
-// Validate checks the user configuration.
-func (u *User) Validate() error {
+// Validate checks the fleet configuration.
+func (u *FleetConfig) Validate() error {
 	var errs []string
-	switch o := u.Orchestrator; o.Mode {
-	case "embedded":
-	case "remote":
-		if !strings.HasPrefix(o.URL, "https://") && !strings.HasPrefix(o.URL, "http://") {
-			errs = append(errs, "orchestrator.url: an http(s) URL is required in remote mode")
-		}
-		if o.Fingerprint != "" && !strings.HasPrefix(o.URL, "https://") {
-			errs = append(errs, "orchestrator.fingerprint: requires an https URL")
-		}
-		if (o.ClientCert == "") != (o.ClientKey == "") {
-			errs = append(errs, "orchestrator.client_cert and client_key must be set together")
-		}
-		if o.ClientCert != "" && !strings.HasPrefix(o.URL, "https://") {
-			errs = append(errs, "orchestrator.client_cert: requires an https URL")
-		}
-	default:
-		errs = append(errs, fmt.Sprintf("orchestrator.mode: unsupported %q (embedded, remote)", o.Mode))
+	if !validID(u.Fleet.ID) {
+		errs = append(errs, fmt.Sprintf("fleet.id: %q must be 1-63 characters of letters, digits, '.', '_' and '-'", u.Fleet.ID))
 	}
 	f := u.Fleet
 	for _, name := range u.ProviderNames() {
@@ -371,7 +356,7 @@ func (u *User) Validate() error {
 		errs = append(errs, "fleet: need 0 <= min_machines <= max_machines and max_machines >= 1")
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("invalid %s:\n  %s", UserConfigPath(), strings.Join(errs, "\n  "))
+		return fmt.Errorf("invalid %s:\n  %s", u.displayPath(), strings.Join(errs, "\n  "))
 	}
 	return nil
 }
@@ -382,4 +367,18 @@ func (f Fleet) Durations() (idle, lifetime, queue time.Duration) {
 	lifetime, _ = ParseDuration(f.MaxLifetime)
 	queue, _ = ParseDuration(f.QueueTimeout)
 	return
+}
+
+// sanitizeID turns a user name into a valid fleet id.
+func sanitizeID(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
+			b[i] = '-'
+		}
+	}
+	if len(b) > 63 {
+		b = b[:63]
+	}
+	return string(b)
 }

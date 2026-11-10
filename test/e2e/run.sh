@@ -70,10 +70,23 @@ echo file-secret > "$PROJ/.secret"
 RUSTV="$(docker_ run --rm rust:1-slim-bookworm rustc --version | awk '{print $2}')"
 printf '[toolchain]\nchannel = "%s"\nprofile = "minimal"\n' "$RUSTV" > "$PROJ/rust-toolchain.toml"
 
+# write_config writes the fleet configuration. The embedded run keeps the
+# legacy single-file format (fleet.owner, [docker]) to cover compatibility;
+# the remote run uses the split layout (fleet.id, [providers.local]) in the
+# control plane's own file.
 write_config() { # lifetime idle min max
+  local idkey=owner provider
+  provider="[docker]
+command = [$(printf '"%s",' $DOCKER | sed 's/,$//')]"
+  if [ -n "$REMOTE" ]; then
+    idkey=id
+    provider="[providers.local]
+backend = \"local-docker\"
+command = [$(printf '"%s",' $DOCKER | sed 's/,$//')]"
+  fi
   cat > "$FLEETCFG" <<EOF
 [fleet]
-owner = "$OWNER"
+$idkey = "$OWNER"
 machine_cpu = 4
 machine_memory = "4G"
 max_lifetime = "$1"
@@ -92,13 +105,12 @@ price_per_hour = 0.5
 [[fleet.provision]]
 run = "echo provisioned-by-fleet > /cache/fleet-provision"
 
-[docker]
-command = [$(printf '"%s",' $DOCKER | sed 's/,$//')]
+$provider
 EOF
 }
 stop_cp() { if [ -n "$CPPID" ]; then kill "$CPPID" 2>/dev/null; wait "$CPPID" 2>/dev/null; CPPID=""; fi; }
 start_cp() {
-  CLOUDSOURCED_CONFIG="$FLEETCFG" CLOUDSOURCED_STATE_DIR="$CPSTATE" "$BIN" controlplane --listen "127.0.0.1:$CPPORT" >>"$WORK/cp.log" 2>&1 &
+  CLOUDSOURCED_CONFIG=/nonexistent CLOUDSOURCED_STATE_DIR="$CPSTATE" "$BIN" controlplane --config "$FLEETCFG" --listen "127.0.0.1:$CPPORT" >>"$WORK/cp.log" 2>&1 &
   CPPID=$!
   for _ in $(seq 100); do curl -skf "https://127.0.0.1:$CPPORT/healthz" >/dev/null && return 0; sleep 0.1; done
   echo "control plane did not start:"; cat "$WORK/cp.log"; return 1
@@ -121,6 +133,21 @@ api_key = "file:$CPSTATE/api-key"
 EOF
 fi
 write_config 24h 10m 0 2
+
+step "configuration roles"
+out="$(cd "$WORK" && cs config check 2>&1)"; code=$?
+check "config check exits 0" eq "$code" 0
+check "client configuration has the client role" contains "$out" "client configuration ok: $CLOUDSOURCED_CONFIG"
+if [ -n "$REMOTE" ]; then
+  check "remote client does not use a fleet configuration" contains "$out" "fleet configuration: not used by this client"
+  out="$(cs config check --fleet "$FLEETCFG" 2>&1)"
+  check "control plane fleet file validates" contains "$out" "role: control plane"
+  check "control plane fleet file has no deprecated keys" eq "$(echo "$out" | grep -c deprecated)" 0
+else
+  check "embedded orchestrator reads the same file" contains "$out" "fleet configuration ok: $FLEETCFG"
+  check "legacy keys are reported as deprecated" contains "$out" "fleet.owner is deprecated"
+fi
+check "config show prints the effective configuration" contains "$(cd "$WORK" && cs config show 2>&1)" "[orchestrator]"
 
 step "first remote build (environment image, machine provisioning, FUSE, outputs)"
 out="$(run cargo build 2>&1)"; code=$?
@@ -323,7 +350,10 @@ check "parallel sessions succeed" eq "$(cat "$WORK"/par* | grep -c '^cs-')" 3
 
 step "lifecycle: idle stop, warm restart, lifetime expiry, cleanup"
 cs down >/dev/null
-write_config 75s 10s 0 2; restart_daemon
+write_config 75s 10s 0 2
+# Fleet settings change by explicit reload, without a restart.
+cs reconcile >/dev/null 2>&1; code=$?
+check "reconcile reloads the fleet configuration" eq "$code" 0
 run cargo build -q >/dev/null 2>&1
 M="$(docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" --filter label=cloudsourced.kind=machine | head -1)"
 NAME="$(docker_ inspect -f '{{.Name}}' "$M" | tr -d /)"

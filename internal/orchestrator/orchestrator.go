@@ -29,17 +29,23 @@ import (
 
 // Config is the fleet configuration. Placement and scaling decisions are
 // made by Policy; the orchestrator only gathers state and executes them.
+// It holds fleet settings only: repository settings travel in Request.
 type Config struct {
-	Owner        string
+	Owner        string           // fleet id, the cloudsourced.owner label of all resources
 	Sizes        []scheduler.Size // machine types; the first is the default
 	MaxLifetime  time.Duration
 	QueueTimeout time.Duration
 	Provision    []string
-	BuildTTL     time.Duration
-	DepsTTL      time.Duration
 	Swap         bool // machines allow sessions to swap
 	Policy       scheduler.Config
 }
+
+// Default repository cache lifetimes of requests that carry none (older
+// clients).
+const (
+	DefaultBuildTTL = 24 * time.Hour
+	DefaultDepsTTL  = 7 * 24 * time.Hour
+)
 
 // Request asks for capacity for one session.
 type Request struct {
@@ -50,6 +56,44 @@ type Request struct {
 	Key      string              // learning key (repo/tool/subcommand)
 	Need     scheduler.Resources // estimated need
 	Limit    scheduler.Resources // hard ceiling (0 = none)
+	// BuildTTL bounds the age of the session's build slot data
+	// (cache.build.ttl; 0 = DefaultBuildTTL). The effective value, capped
+	// by max_lifetime, is returned in Lease.BuildTTL and enforced per slot
+	// by the machine server, so repositories with different TTLs can share
+	// a machine.
+	BuildTTL time.Duration `json:",omitempty"`
+	// DepsTTL is the lifetime of the shared dependency cache volume a new
+	// machine created for this request starts (cache.deps.ttl; 0 =
+	// DefaultDepsTTL). Existing machines keep the volume they have.
+	DepsTTL time.Duration `json:",omitempty"`
+}
+
+// buildTTL returns the effective build TTL of a request.
+func (r Request) buildTTL(maxLifetime time.Duration) time.Duration {
+	ttl := r.BuildTTL
+	if ttl <= 0 {
+		ttl = DefaultBuildTTL
+	}
+	// The build cache never outlives a machine, and machines never outlive
+	// max_lifetime.
+	if maxLifetime > 0 && ttl > maxLifetime {
+		ttl = maxLifetime
+	}
+	return ttl
+}
+
+// repoParams are the machine parameters derived from a request's
+// repository, applied when a machine is created for it.
+type repoParams struct {
+	DepsTTL time.Duration `json:"deps_ttl,omitempty"`
+}
+
+func (r Request) params() repoParams {
+	p := repoParams{DepsTTL: r.DepsTTL}
+	if p.DepsTTL <= 0 {
+		p.DepsTTL = DefaultDepsTTL
+	}
+	return p
 }
 
 // Lease is a reservation on a machine.
@@ -71,6 +115,9 @@ type Lease struct {
 	Size         string
 	PricePerHour float64
 	Reason       string
+	// BuildTTL is the effective build slot TTL of the session (the
+	// request's, capped by max_lifetime).
+	BuildTTL time.Duration `json:",omitempty"`
 }
 
 // Machine is the orchestrator view of a machine.
@@ -175,6 +222,8 @@ type Orchestrator struct {
 	refreshed  time.Time
 	creating   map[string]creation       // machine id -> creation
 	queue      map[string]scheduler.Task // waiting tasks
+	queued     map[string]repoParams     // task id -> repository parameters
+	envParams  map[string]repoParams     // env hash -> parameters of its last request
 	recentEnvs map[string]time.Time      // env hash -> last use (warm pool)
 	images     map[string]string         // env hash -> image
 	removed    []*Machine                // destroyed machines (cost history)
@@ -213,6 +262,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		cfg: cfg, provs: provs, stateDir: stateDir, log: log, master: master, signer: master.Signer(),
 		policy:   scheduler.Default{Cfg: cfg.Policy},
 		machines: map[string]*Machine{}, creating: map[string]creation{}, queue: map[string]scheduler.Task{},
+		queued: map[string]repoParams{}, envParams: map[string]repoParams{},
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
 		ProbeFunc: Probe,
 	}
@@ -221,6 +271,8 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 }
 
 // SetConfig updates the fleet configuration and rebuilds the default policy.
+// It is meant for explicit reloads of the fleet configuration, never for
+// request specific settings (those travel in Request).
 func (o *Orchestrator) SetConfig(cfg Config) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -229,6 +281,13 @@ func (o *Orchestrator) SetConfig(cfg Config) {
 		o.policy = scheduler.Default{Cfg: cfg.Policy}
 	}
 	o.cfg = cfg
+}
+
+// Config returns the fleet configuration in effect.
+func (o *Orchestrator) Config() Config {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.cfg
 }
 
 // SetPolicy replaces the scheduling policy.
@@ -299,6 +358,7 @@ type recentEnv struct {
 	Image    string             `json:"image"`
 	Used     int64              `json:"used"`
 	Services []provider.Service `json:"services,omitempty"`
+	Params   *repoParams        `json:"params,omitempty"`
 }
 
 func (o *Orchestrator) loadRecent() {
@@ -314,13 +374,20 @@ func (o *Orchestrator) loadRecent() {
 		o.recentEnvs[h] = time.Unix(r.Used, 0)
 		o.images[h] = r.Image
 		o.services[h] = r.Services
+		if r.Params != nil {
+			o.envParams[h] = *r.Params
+		}
 	}
 }
 
 func (o *Orchestrator) saveRecentLocked() {
 	m := map[string]recentEnv{}
 	for h, t := range o.recentEnvs {
-		m[h] = recentEnv{Image: o.images[h], Used: t.Unix(), Services: o.services[h]}
+		re := recentEnv{Image: o.images[h], Used: t.Unix(), Services: o.services[h]}
+		if p, ok := o.envParams[h]; ok {
+			re.Params = &p
+		}
+		m[h] = re
 	}
 	b, _ := json.Marshal(m)
 	os.WriteFile(o.recentPath(), b, 0o600)
@@ -544,6 +611,8 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 	o.recentEnvs[req.EnvHash] = now
 	o.images[req.EnvHash] = req.Image
 	o.services[req.EnvHash] = req.Services
+	o.envParams[req.EnvHash] = req.params()
+	o.queued[task.ID] = req.params()
 	o.saveRecentLocked()
 	stale := time.Since(o.refreshed) > 30*time.Second
 	o.mu.Unlock()
@@ -555,6 +624,7 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 	defer func() {
 		o.mu.Lock()
 		delete(o.queue, task.ID)
+		delete(o.queued, task.ID)
 		o.mu.Unlock()
 	}()
 	deadline := now.Add(o.cfg.QueueTimeout)
@@ -572,6 +642,7 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 				ID: task.ID, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: o.sessionToken(m.Machine, task.ID),
 				Grant: pl.Grant, MemoryOvercommit: o.cfg.Policy.MemoryOvercommit,
 				Provider: m.Provider, Size: size, PricePerHour: o.priceLocked(m.Provider, size), Reason: pl.Reason,
+				BuildTTL: req.buildTTL(o.cfg.MaxLifetime),
 			}
 			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: time.Now().Add(2 * time.Minute)}
 			o.mu.Unlock()
@@ -778,11 +849,32 @@ func (o *Orchestrator) createMachine(ctx context.Context, id, envHash, image str
 	}
 }
 
+// paramsLocked returns the repository parameters for a new machine of an
+// environment: those of the longest waiting request for it, else of its last
+// request, else the defaults.
+func (o *Orchestrator) paramsLocked(envHash string) repoParams {
+	var best scheduler.Task
+	found := false
+	for id, t := range o.queue {
+		if _, ok := o.queued[id]; ok && t.EnvHash == envHash && (!found || t.Since.Before(best.Since)) {
+			best, found = t, true
+		}
+	}
+	if found {
+		return o.queued[best.ID]
+	}
+	if p, ok := o.envParams[envHash]; ok {
+		return p
+	}
+	return Request{}.params()
+}
+
 // CreateMachine provisions a new machine of size and waits until it is ready.
 func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image string, size scheduler.Size) error {
 	o.mu.Lock()
 	cfg := o.cfg
 	services := o.services[envHash]
+	params := o.paramsLocked(envHash)
 	o.mu.Unlock()
 	// Whole seconds: the expiry travels as Unix seconds and is an input of
 	// the derived certificate.
@@ -796,7 +888,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	spec := provider.MachineSpec{
 		ID: id, Owner: cfg.Owner, Image: image, EnvHash: envHash, Size: size.Name,
 		CPU: size.Capacity.CPU, Memory: size.Capacity.Memory, Swap: cfg.Swap,
-		ExpiresAt: expires, Finger: ident.Fingerprint, DepsTTL: cfg.DepsTTL,
+		ExpiresAt: expires, Finger: ident.Fingerprint, DepsTTL: params.DepsTTL,
 		IdleStop: cfg.Policy.IdleStop, Services: services,
 		Env: map[string]string{
 			"CLOUDSOURCED_MACHINE_ID": id,
@@ -812,8 +904,10 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 			auth.EnvTLSSeed: auth.EncodeKey(seed),
 		},
 	}
-	if cfg.BuildTTL > 0 {
-		spec.Env["CLOUDSOURCED_BUILD_TTL"] = cfg.BuildTTL.String()
+	// The machine-wide build TTL is only an upper bound: every session
+	// sends its repository's TTL, which the server records per build slot.
+	if cfg.MaxLifetime > 0 {
+		spec.Env["CLOUDSOURCED_BUILD_TTL"] = cfg.MaxLifetime.String()
 	}
 	prov, ok := o.provs[size.Provider]
 	if !ok {
