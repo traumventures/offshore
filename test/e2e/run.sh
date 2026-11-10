@@ -282,6 +282,7 @@ run cargo clean -q -p itoa >/dev/null 2>&1
 out="$(CLOUDSOURCED_VERBOSE=1 run cargo build 2>&1)"
 check "cleaned dependency recompiled" contains "$out" "Compiling itoa"
 check "recompiled dependency served from the compiler cache" test "$(sccache_hits "$out")" -ge 1
+check "why shows the run's sccache counters" contains "$(cs why)" "sccache_hits="
 check "compiler cache entries on the shared dependency volume" test "$(docker_ exec "$MACHINE" sh -c 'find /deps/sccache -type f | wc -l')" -ge 1
 
 step "parallel sessions: one machine runs several, scale out beyond capacity"
