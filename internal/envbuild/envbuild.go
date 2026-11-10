@@ -32,11 +32,11 @@ type Plan struct {
 	Tag        string
 	Dockerfile string
 	Services   []provider.Service
-	files    map[string]string // context path -> source file
-	tools    map[string]tool   // context path -> pinned release binary
-	baseDir  string
-	baseFile string
-	baseTag  string
+	files      map[string]string // context path -> source file
+	tools      map[string]tool   // context path -> pinned release binary
+	baseDir    string
+	baseFile   string
+	baseTag    string
 }
 
 // Resolve computes the environment hash and Dockerfile for a repository.
