@@ -38,6 +38,13 @@ Resources:
 
   MachineRole:
     Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Used by the host agent only (containers cannot reach the metadata
+          service). It reads and deletes the machine's secret parameter once,
+          pulls images and the server binary, and stops its own instance when
+          idle while no orchestrator observes it.
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -67,6 +74,19 @@ Resources:
               - Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub "${ArtifactBucket.Arn}/bin/*"
+              - Sid: MachineSecrets
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:DeleteParameter
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cloudsourced/${AWS::StackName}/machines/*"
+              - Sid: IdleSelfStop
+                Effect: Allow
+                Action: ec2:StopInstances
+                Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/cloudsourced.kind: machine
 
   MachineInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -254,7 +274,7 @@ Resources:
 
 Outputs:
   TemplateVersion:
-    Value: "1"
+    Value: "2"
   SecurityGroupId:
     Value: !Ref MachineSecurityGroup
   InstanceProfileArn:

@@ -18,10 +18,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/traumventures/cloudsourced/internal/machine"
 	"github.com/traumventures/cloudsourced/internal/provider"
 )
 
-const serverPort = "7443/udp"
+var serverPort = machine.ServerPortSpec()
 
 func init() {
 	provider.Register("local-docker", func(opts map[string]any) (provider.Provider, error) {
@@ -127,7 +128,6 @@ func unix(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
 // Create starts a new machine container.
 func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provider.Machine, error) {
 	now := time.Now()
-	name := "cs-" + spec.ID
 	common := map[string]string{
 		provider.LabelOwner:     spec.Owner,
 		provider.LabelMachine:   spec.ID,
@@ -157,72 +157,36 @@ func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provide
 	for k, v := range common {
 		mLabels[k] = v
 	}
-	args := []string{"run", "-d", "--name", name, "--hostname", name}
-	args = append(args, labels(mLabels)...)
-	args = append(args,
-		"--device", "/dev/fuse",
-		"--cap-add", "SYS_ADMIN",
-		"--security-opt", "apparmor=unconfined",
-		"--cgroupns", "private",
-		"-p", d.Host+"::"+serverPort,
-		"-v", d.Binary+":/opt/cloudsourced/bin/cloudsourced:ro",
-		"-v", cacheVol+":/cache",
-		"-v", depsVol+":/deps",
-		"--entrypoint", "/opt/cloudsourced/bin/cloudsourced",
-	)
+	svcLabels := map[string]string{provider.LabelKind: "service"}
+	for k, v := range common {
+		svcLabels[k] = v
+	}
+	l := machine.Layout{
+		ID: spec.ID, Image: spec.Image, Binary: d.Binary,
+		Publish:     d.Host + "::" + serverPort,
+		CacheVolume: cacheVol, DepsVolume: depsVol,
+		CPU: spec.CPU, Memory: spec.Memory, Swap: spec.Swap,
+		Labels: mLabels, SvcLabels: svcLabels,
+		Env: spec.Env, SecretKeys: provider.SortedKeys(spec.SecretEnv), Services: spec.Services,
+	}
 	// The machine is a local container: the secret environment never
-	// leaves this host.
-	for _, env := range []map[string]string{spec.Env, spec.SecretEnv} {
-		for _, k := range provider.SortedKeys(env) {
-			args = append(args, "-e", k+"="+env[k])
+	// leaves this host. The CLI may run through sudo, which drops its
+	// environment, so secrets are passed inline.
+	for i, c := range l.Containers(spec.SecretEnv, machine.SecretsInline) {
+		err := d.run(ctx, nil, c.Create...)
+		if err == nil {
+			err = d.run(ctx, nil, "start", c.Name)
 		}
-	}
-	if spec.CPU > 0 {
-		args = append(args, "--cpus", strconv.FormatFloat(spec.CPU, 'f', -1, 64))
-	}
-	if spec.Memory > 0 {
-		args = append(args, "--memory", strconv.FormatInt(spec.Memory, 10))
-		if spec.Swap {
-			args = append(args, "--memory-swap", "-1")
-		}
-	}
-	args = append(args, spec.Image, "server")
-	if err := d.run(ctx, nil, args...); err != nil {
-		d.run(context.Background(), nil, "rm", "-f", name)
-		d.run(context.Background(), nil, "volume", "rm", "-f", cacheVol)
-		return provider.Machine{}, err
-	}
-	for _, svc := range spec.Services {
-		if err := d.startService(ctx, spec, svc); err != nil {
+		if err != nil {
 			d.Destroy(context.Background(), spec.ID)
-			return provider.Machine{}, fmt.Errorf("service %s: %w", svc.Name, err)
+			if i == 0 {
+				d.run(context.Background(), nil, "volume", "rm", "-f", cacheVol)
+				return provider.Machine{}, err
+			}
+			return provider.Machine{}, fmt.Errorf("service %s: %w", c.Name, err)
 		}
 	}
 	return d.inspect(ctx, spec.ID)
-}
-
-// startService runs a service container in the machine's network
-// namespace, so sessions reach it on localhost.
-func (d *Docker) startService(ctx context.Context, spec provider.MachineSpec, svc provider.Service) error {
-	l := map[string]string{
-		provider.LabelOwner:     spec.Owner,
-		provider.LabelMachine:   spec.ID,
-		provider.LabelKind:      "service",
-		provider.LabelCreatedAt: unix(time.Now()),
-		provider.LabelExpiresAt: unix(spec.ExpiresAt),
-	}
-	args := append([]string{"run", "-d", "--name", "cs-" + spec.ID + "-svc-" + svc.Name, "--network", "container:cs-" + spec.ID}, labels(l)...)
-	keys := make([]string, 0, len(svc.Env))
-	for k := range svc.Env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		args = append(args, "-e", k+"="+svc.Env[k])
-	}
-	args = append(args, svc.Image)
-	args = append(args, svc.Command...)
-	return d.run(ctx, nil, args...)
 }
 
 // services lists the service containers of a machine.
@@ -360,10 +324,11 @@ func (d *Docker) inspectNames(ctx context.Context, names []string) ([]provider.M
 
 // Start restarts a stopped machine.
 func (d *Docker) Start(ctx context.Context, id string) (provider.Machine, error) {
-	if err := d.run(ctx, nil, "start", "cs-"+id); err != nil {
+	if err := d.run(ctx, nil, "start", machine.Name(id)); err != nil {
 		return provider.Machine{}, err
 	}
-	// Services join the machine's (new) network namespace.
+	// Services join the machine's (new) network namespace, so they start
+	// after it (the boot order of machine.Layout).
 	if svcs := d.services(ctx, id); len(svcs) > 0 {
 		if err := d.run(ctx, nil, append([]string{"start"}, svcs...)...); err != nil {
 			return provider.Machine{}, err

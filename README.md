@@ -167,9 +167,16 @@ On first use the provider creates the CloudFormation stack `cloudsourced`
 bucket for the server binary, ECR repository for environment images, a reaper
 Lambda (every 10 minutes it terminates machines past their expiry) and a
 resource group of everything tagged `project=cloudsourced`. Machines are
-Amazon Linux 2023 instances running the same container layout as local-docker;
-they terminate themselves at `max_lifetime`, and the metadata service is not
-reachable from sessions (IMDSv2, hop limit 1).
+Amazon Linux 2023 instances running the same container layout as local-docker
+(`internal/machine`), applied by the host agent `cloudsourced host` (a systemd
+unit). User data carries only the public machine spec; the machine's secrets
+(server key, token) travel in an SSM SecureString parameter
+`/cloudsourced/<stack>/machines/<id>` that the agent reads once with the
+instance role and deletes. Machines terminate themselves at `max_lifetime`,
+and stop themselves when idle for `idle_stop` while no orchestrator has probed
+them for `max(idle_stop, 10m)` (an offline control plane does not leave them
+running). The metadata service is not reachable from sessions (IMDSv2, hop
+limit 1). The caller's credentials need `ssm:PutParameter`/`DeleteParameter`.
 
 Add `.cloudsourced.toml` to a repository:
 

@@ -102,6 +102,11 @@ type Caps struct {
 	FUSE          bool
 	StopKeepsDisk bool
 	Spot          bool
+	// PollInterval is how often the orchestrator polls a starting machine
+	// for readiness (0: 500ms); with PollMax > PollInterval the interval
+	// backs off up to PollMax.
+	PollInterval time.Duration
+	PollMax      time.Duration
 }
 
 // Provider manages machines on one backend.

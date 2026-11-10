@@ -262,6 +262,12 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		if m.State == provider.Running && pm.State != provider.Running {
 			down = append(down, pm.ID)
 		}
+		if _, inFlight := o.creating[pm.ID]; inFlight && pm.State == provider.Stopped {
+			// A start is in progress but the provider does not show it yet
+			// (e.g. the container or instance is still stopped): keep the
+			// machine starting, or the policy would start it again.
+			pm.State = provider.Starting
+		}
 		m.Machine = pm
 		if pm.State != provider.Running {
 			m.Status = nil
@@ -375,10 +381,11 @@ func (o *Orchestrator) fleetLocked(now time.Time) scheduler.Fleet {
 			Capacity:  scheduler.Resources{CPU: m.CPU, Memory: m.Memory},
 			CreatedAt: m.CreatedAt, ExpiresAt: m.ExpiresAt,
 		}
+		_, inFlight := o.creating[id]
 		switch {
 		case m.State == provider.Running && m.Status != nil && m.Status.Ready && m.Addr != "" && m.Token != "":
 			sm.State = scheduler.Running
-		case m.State == provider.Running || m.State == provider.Starting:
+		case m.State == provider.Running || m.State == provider.Starting || inFlight:
 			sm.State = scheduler.Starting
 		case m.State == provider.Stopped:
 			sm.State = scheduler.Stopped
@@ -766,13 +773,34 @@ func (o *Orchestrator) startMachine(ctx context.Context, id string) {
 	}
 }
 
-// waitReady polls the machine until its server reports ready.
+// pollIntervals returns the readiness poll interval of a provider and its
+// backoff ceiling.
+func pollIntervals(c provider.Caps) (first, max time.Duration) {
+	first = c.PollInterval
+	if first <= 0 {
+		first = 500 * time.Millisecond
+	}
+	max = c.PollMax
+	if max < first {
+		max = first
+	}
+	return first, max
+}
+
+// nextPoll backs the poll interval off by half up to max.
+func nextPoll(cur, max time.Duration) time.Duration {
+	return min(cur+cur/2, max)
+}
+
+// waitReady polls the machine until its server reports ready, at the
+// provider's poll interval.
 func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 	deadline := time.Now().Add(10 * time.Minute)
 	p, perr := o.provOf(id)
 	if perr != nil {
 		return perr
 	}
+	interval, maxInterval := pollIntervals(p.Caps())
 	for time.Now().Before(deadline) {
 		list, err := p.List(ctx, o.cfg.Owner)
 		if err == nil {
@@ -814,8 +842,9 @@ func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(interval):
 		}
+		interval = nextPoll(interval, maxInterval)
 	}
 	return fmt.Errorf("machine %s not ready after 10m", id)
 }
