@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/traumventures/cloudsourced/internal/clock"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,8 +23,16 @@ import (
 // share a machine; the machine-wide TTL is an upper bound.
 type slots struct {
 	dir    string
+	clock  clock.Clock // slot ages (nil: real time)
 	mu     sync.Mutex
 	leased map[string]bool
+}
+
+func (s *slots) now() time.Time {
+	if s.clock == nil {
+		return time.Now()
+	}
+	return s.clock.Now()
 }
 
 type slotMeta struct {
@@ -77,7 +86,7 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		return "", false, err
 	}
-	now := time.Now()
+	now := s.now()
 	des, _ := os.ReadDir(repoDir)
 	type cand struct {
 		path string
@@ -162,7 +171,7 @@ func (s *slots) release(slot string) {
 	defer s.mu.Unlock()
 	delete(s.leased, slot)
 	if m, err := readMeta(slot); err == nil {
-		m.LastUsed = time.Now().Unix()
+		m.LastUsed = s.now().Unix()
 		writeMeta(slot, m)
 	}
 }
@@ -179,7 +188,7 @@ func (s *slots) latest(repoID string, ttl time.Duration) (string, error) {
 	for _, de := range des {
 		p := filepath.Join(repoDir, de.Name())
 		m, err := readMeta(p)
-		if err != nil || m.expired(time.Now(), ttl) {
+		if err != nil || m.expired(s.now(), ttl) {
 			continue
 		}
 		if m.LastUsed > bestUsed {
@@ -206,7 +215,7 @@ func (s *slots) gc(ttl time.Duration) (removed int) {
 				continue
 			}
 			m, err := readMeta(p)
-			if err != nil || m.expired(time.Now(), ttl) {
+			if err != nil || m.expired(s.now(), ttl) {
 				os.RemoveAll(p)
 				removed++
 			}

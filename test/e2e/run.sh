@@ -3,494 +3,87 @@
 #
 # Everything is real: environment image build, machine provisioning as
 # Docker containers, FUSE projection, sessions, write back, outputs,
-# scheduling, scale out, idle stop, lifetime expiry and cleanup. The test
-# uses its own owner, state directory and daemon, so it does not touch an
-# existing setup.
+# scheduling, scale out, idle stop, lifetime expiry and cleanup. Every part
+# (parts/*.sh) uses its own owner, state directory, daemon, test clock and
+# local ports, so it does not touch an existing setup or another part.
 #
 # Requirements: docker (set E2E_DOCKER="sudo -n docker" if your user is not
 # in the docker group), /dev/fuse, a static build at bin/cloudsourced.
 #
-# E2E_REMOTE=1 runs the same test against a shared control plane
-# ("cloudsourced controlplane", self-signed TLS, API key) instead of the
-# orchestrator embedded in the daemon.
+#   E2E_REMOTE=1    run against a shared control plane ("cloudsourced
+#                   controlplane", self-signed TLS, API key) instead of the
+#                   orchestrator embedded in the daemon. Only the core part
+#                   runs (it covers what differs: control plane API,
+#                   leases, metrics, request ids) unless E2E_FULL=1.
+#   E2E_FULL=1      every part in remote mode too
+#   E2E_PARTS="core rust lifecycle"   the parts to run (default: all;
+#                   remote: core)
+#   E2E_PARALLEL=1  run the parts concurrently; the first one builds the
+#                   environment image, the others start once it exists
+#   E2E_KEEP=1      keep the work directories (state, logs)
+#   E2E_CLEAN_IMAGES=1  remove environment images the run built (they are
+#                   reused across runs by default)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-REPO="$(cd "$HERE/../.." && pwd)"
-BIN="${E2E_BIN:-$REPO/bin/cloudsourced}"
 DOCKER="${E2E_DOCKER:-docker}"
-WORK="$(mktemp -d /tmp/cloudsourced-e2e.XXXXXX)"
-OWNER="e2e-$(basename "$WORK" | tr -dc 'a-zA-Z0-9' | tr 'A-Z' 'a-z')"
-PROJ="$WORK/hello"
+ALL="core rust lifecycle"
+if [ -n "${E2E_PARTS:-}" ]; then
+  PARTS="$E2E_PARTS"
+elif [ -n "${E2E_REMOTE:-}" ] && [ -z "${E2E_FULL:-}" ]; then
+  PARTS="core"
+else
+  PARTS="$ALL"
+fi
+for p in $PARTS; do [ -f "$HERE/parts/$p.sh" ] || { echo "unknown part $p (have: $ALL)"; exit 2; }; done
 
-export CLOUDSOURCED_STATE_DIR="$WORK/state"
-export CLOUDSOURCED_CONFIG="$WORK/config.toml"
-FLEETCFG="$CLOUDSOURCED_CONFIG"   # fleet and providers; the control plane's in remote mode
-REMOTE="${E2E_REMOTE:-}"
-CPSTATE="$WORK/cp-state"
-CPPID=""
-export CLOUDSOURCED_SHIM_DIR="$WORK/shims"
-export CLOUDSOURCED_REQUIRE_REMOTE=1
-export CLOUDSOURCED_LOG_FORMAT=json   # daemon, control plane and (forwarded) machines
-unset CLOUDSOURCED_DISABLE CLOUDSOURCED_ACTIVE
+images() { $DOCKER images --format '{{.Repository}}:{{.Tag}}' 'cloudsourced-env' 2>/dev/null | sort; }
+before="$(images)"
+# Resolved once for all parts (a container start each otherwise).
+E2E_RUSTV="$($DOCKER run --rm rust:1-slim-bookworm rustc --version | awk '{print $2}')" || exit 2
+export E2E_RUSTV
 
-PASS=0
-FAIL=0
-ok()   { PASS=$((PASS+1)); printf '  \033[32mok\033[0m   %s\n' "$*"; }
-bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
-step() { printf '\n== %s\n' "$*"; }
-check() { local name="$1"; shift; if "$@"; then ok "$name"; else bad "$name"; fi; }
-eq()   { [ "$1" = "$2" ] || { echo "     expected: $2"; echo "     got:      $1"; return 1; }; }
-contains() { case "$1" in *"$2"*) return 0;; esac; echo "     '$2' not in output:"; echo "$1" | sed 's/^/       /' | tail -20; return 1; }
-cs()   { "$BIN" "$@"; }
-# sccache_hits extracts N from the verbose line "cloudsourced: sccache: N hits / M misses ...".
-sccache_hits() { local n; n="$(echo "$1" | sed -n 's/.*sccache: \([0-9]*\) hits.*/\1/p' | tail -1)"; echo "${n:-0}"; [ -n "$n" ] || echo "$1" | tail -5 | sed 's/^/       /' >&2; }
-run()  { (cd "$PROJ" && "$BIN" run "$@"); }
-docker_() { $DOCKER "$@"; }
-# freeport prints a currently free local TCP port. Fixed ports collide with
-# concurrent e2e runs on the same host.
-freeport() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
-# poll SECONDS CMD...: retry CMD (quietly) until it succeeds or the time is
-# up, then run it once more with its output (the check's diagnostics).
-# no_sessions: no machine runs a session (sessions column of cs status).
-no_sessions() { cs status | awk '/^[0-9a-f]+ / && $(NF-2) > 0 {busy=1} END {exit busy}'; }
-poll() { local end=$((SECONDS + $1)); shift; while [ $SECONDS -lt $end ]; do "$@" >/dev/null 2>&1 && return 0; sleep 1; done; "$@"; }
+RES="$(mktemp -d /tmp/cloudsourced-e2e-run.XXXXXX)"
+start=$SECONDS
+mode=embedded; [ -n "${E2E_REMOTE:-}" ] && mode=remote
+echo "e2e ($mode): parts: $PARTS$([ -n "${E2E_PARALLEL:-}" ] && echo ' (parallel)')"
 
-cleanup() {
-  step "cleanup"
-  cs down >/dev/null 2>&1 || true
-  cs daemon stop >/dev/null 2>&1 || true
-  stop_cp
-  local left
-  left="$(docker_ ps -aq --filter "label=cloudsourced.owner=$OWNER" | wc -l)"
-  left=$((left + $(docker_ volume ls -q --filter "label=cloudsourced.owner=$OWNER" | wc -l)))
-  if [ "$left" = 0 ]; then ok "down removed all machines and volumes"; else bad "down left $left resources"; fi
-  if [ "${E2E_KEEP:-}" = "" ]; then chmod -R u+w "$WORK" 2>/dev/null; rm -r "$WORK"; fi
-  printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
-  [ "$FAIL" = 0 ]
-}
-trap 'cleanup; exit $?' EXIT
-
-[ -x "$BIN" ] || { echo "missing $BIN (run make build)"; exit 2; }
-docker_ info >/dev/null 2>&1 || { echo "docker not usable via: $DOCKER"; exit 2; }
-
-cp -r "$HERE/fixture/hello" "$PROJ"
-# Local ports of the forwarding checks, free on this host.
-FWD_ENV="$(freeport)"; FWD_SVC="$(freeport)"; FWD_BUSY="$(freeport)"
-sed -i "s/\"18092:18080\"/\"$FWD_SVC:18080\"/" "$PROJ/.cloudsourced.toml"
-echo file-secret > "$PROJ/.secret"
-RUSTV="$(docker_ run --rm rust:1-slim-bookworm rustc --version | awk '{print $2}')"
-printf '[toolchain]\nchannel = "%s"\nprofile = "minimal"\n' "$RUSTV" > "$PROJ/rust-toolchain.toml"
-
-# write_config writes the fleet configuration. The embedded run keeps the
-# legacy single-file format (fleet.owner, [docker]) to cover compatibility;
-# the remote run uses the split layout (fleet.id, [providers.local]) in the
-# control plane's own file.
-write_config() { # lifetime idle min max
-  local idkey=owner provider
-  provider="[docker]
-command = [$(printf '"%s",' $DOCKER | sed 's/,$//')]"
-  if [ -n "$REMOTE" ]; then
-    idkey=id
-    provider="[providers.local]
-backend = \"local-docker\"
-command = [$(printf '"%s",' $DOCKER | sed 's/,$//')]"
+runpart() { # part: runs it, output to $RES/part.log (parallel) or the terminal
+  local p="$1"
+  if [ -n "${E2E_PARALLEL:-}" ]; then
+    E2E_RESULT="$RES/$p.result" E2E_READY="$RES/ready" bash "$HERE/parts/$p.sh" > "$RES/$p.log" 2>&1
+  else
+    E2E_RESULT="$RES/$p.result" bash "$HERE/parts/$p.sh"
   fi
-  cat > "$FLEETCFG" <<EOF
-[fleet]
-$idkey = "$OWNER"
-machine_cpu = 4
-machine_memory = "4G"
-max_lifetime = "$1"
-idle_stop = "$2"
-min_machines = $3
-max_machines = $4
-queue_timeout = "3m"
-estimator = "static"
-
-[[fleet.size]]
-name = "default"
-cpu = 4
-memory = "4G"
-price_per_hour = 0.5
-
-[[fleet.provision]]
-run = "echo provisioned-by-fleet > /cache/fleet-provision"
-
-$provider
-EOF
 }
-stop_cp() { if [ -n "$CPPID" ]; then kill "$CPPID" 2>/dev/null; wait "$CPPID" 2>/dev/null; CPPID=""; fi; }
-start_cp() {
-  CLOUDSOURCED_CONFIG=/nonexistent CLOUDSOURCED_STATE_DIR="$CPSTATE" "$BIN" controlplane --config "$FLEETCFG" --listen "127.0.0.1:$CPPORT" --metrics-listen "127.0.0.1:$MPORT" >>"$WORK/cp.log" 2>&1 &
-  CPPID=$!
-  for _ in $(seq 100); do curl -skf "https://127.0.0.1:$CPPORT/healthz" >/dev/null && return 0; sleep 0.1; done
-  echo "control plane did not start:"; cat "$WORK/cp.log"; return 1
-}
-# restart_daemon applies a changed fleet configuration.
-restart_daemon() { cs daemon stop >/dev/null; if [ -n "$REMOTE" ]; then stop_cp; start_cp; fi; }
 
-if [ -n "$REMOTE" ]; then
-  FLEETCFG="$WORK/cp-config.toml"
-  CPPORT="$(freeport)"
-  MPORT="$(freeport)"
-  write_config 24h 10m 0 2
-  start_cp || exit 1
-  FP="$(sed -n 's/.*"Fingerprint":"\([0-9a-f]*\)".*/\1/p' "$CPSTATE/tls.json")"
-  cat > "$CLOUDSOURCED_CONFIG" <<EOF
-[orchestrator]
-mode = "remote"
-url = "https://127.0.0.1:$CPPORT"
-fingerprint = "$FP"
-api_key = "file:$CPSTATE/api-key"
-EOF
-fi
-write_config 24h 10m 0 2
-
-step "configuration roles"
-out="$(cd "$WORK" && cs config check 2>&1)"; code=$?
-check "config check exits 0" eq "$code" 0
-check "client configuration has the client role" contains "$out" "client configuration ok: $CLOUDSOURCED_CONFIG"
-if [ -n "$REMOTE" ]; then
-  check "remote client does not use a fleet configuration" contains "$out" "fleet configuration: not used by this client"
-  out="$(cs config check --fleet "$FLEETCFG" 2>&1)"
-  check "control plane fleet file validates" contains "$out" "role: control plane"
-  check "control plane fleet file has no deprecated keys" eq "$(echo "$out" | grep -c deprecated)" 0
+if [ -n "${E2E_PARALLEL:-}" ]; then
+  set -- $PARTS
+  runpart "$1" & pids="$!"; first=$!
+  # Further parts wait for the environment image (or the first part's end).
+  while [ ! -e "$RES/ready" ] && kill -0 "$first" 2>/dev/null; do sleep 1; done
+  shift
+  for p in "$@"; do runpart "$p" & pids="$pids $!"; done
+  wait $pids
+  for p in $PARTS; do printf '\n######## %s\n' "$p"; cat "$RES/$p.log"; done
 else
-  check "embedded orchestrator reads the same file" contains "$out" "fleet configuration ok: $FLEETCFG"
-  check "legacy keys are reported as deprecated" contains "$out" "fleet.owner is deprecated"
+  for p in $PARTS; do runpart "$p"; done
 fi
-check "config show prints the effective configuration" contains "$(cd "$WORK" && cs config show 2>&1)" "[orchestrator]"
 
-step "first remote build (environment image, machine provisioning, FUSE, outputs)"
-out="$(run cargo build 2>&1)"; code=$?
-check "cargo build exits 0" eq "$code" 0
-check "compiled at the local path" contains "$out" "Compiling hello v0.1.0 ($PROJ)"
-check "binary transferred (eager output)" test -x "$PROJ/target/debug/hello"
-check "binary runs locally" contains "$("$PROJ/target/debug/hello")" "greeting=hello ran=local"
-check "Cargo.lock written back" test -f "$PROJ/Cargo.lock"
-MACHINE="$(docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" --filter label=cloudsourced.kind=machine | head -1)"
-check "machine provisioning ran" eq "$(docker_ exec "$MACHINE" cat /cache/fleet-provision)" "provisioned-by-fleet"
-check "apt packages in environment" contains "$(run sh -c 'jq --version')" "jq-"
-check "setup step ran with its inputs" eq "$(run sh -c 'cat /opt/setup-tools.txt')" "jq"
-check "environment variables from config" eq "$(run sh -c 'echo $E2E_IMAGE_ENV')" "from-image"
-check "toolchain from rust-toolchain.toml" contains "$(run sh -c 'rustc --version')" "$RUSTV"
-check "secrets resolved locally and injected" eq "$(run sh -c 'echo "$CMD_SECRET $FILE_SECRET"')" "from-cmd file-secret"
-check "secrets never reach the machine's disk" test -z "$(docker_ exec "$MACHINE" grep -rl file-secret /cache /deps 2>/dev/null)"
-http_service() { run sh -c 'for i in $(seq 50); do bash -c "exec 3<>/dev/tcp/127.0.0.1/18080 && printf \"GET /hostname HTTP/1.0\r\n\r\n\" >&3 && cat <&3" 2>/dev/null && exit 0; sleep 0.2; done; exit 1'; }
-check "service container reachable on localhost" contains "$(http_service)" "200 OK"
-check "service runs as its own container next to the machine" eq "$(docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" --filter label=cloudsourced.kind=service | wc -l)" 1
-
-step "incremental build and cargo run"
-sed -i 's/greeting=hello/greeting=changed/' "$PROJ/src/main.rs"
-out="$(run cargo run 2>&1)"
-check "edit picked up immediately" contains "$out" "greeting=changed ran=remote"
-check "new binary transferred" contains "$("$PROJ/target/debug/hello")" "greeting=changed"
-out="$(run cargo build 2>&1)"
-check "no-op build is fresh (warm build cache)" eq "$(echo "$out" | grep -c Compiling)" 0
-
-step "exit codes, streams, stdin, environment, signals"
-printf 'pub fn f() { let _x: u32 = "a"; }\n' > "$PROJ/src/broken.rs"
-cp "$PROJ/src/main.rs" "$WORK/main.rs.bak"; echo 'mod broken;' >> "$PROJ/src/main.rs"
-out="$(run cargo build 2>&1)"; code=$?
-check "failing build returns cargo's exit code" eq "$code" 101
-check "compiler errors are streamed" contains "$out" "expected \`u32\`, found \`&str\`"
-cp "$WORK/main.rs.bak" "$PROJ/src/main.rs"; rm "$PROJ/src/broken.rs"
-out="$(run sh -c 'echo to-stdout; echo to-stderr >&2; exit 7' 2>"$WORK/err")"; code=$?
-check "exit code forwarded" eq "$code" 7
-check "stdout separated" eq "$out" "to-stdout"
-check "stderr separated" contains "$(cat "$WORK/err")" "to-stderr"
-check "stdin forwarded" eq "$(printf 'a\nb\n' | run sh -c 'wc -l')" "2"
-out="$(E2E_VISIBLE=yes HIDDEN_SECRET=no run sh -c 'echo "v=$E2E_VISIBLE s=$HIDDEN_SECRET t=$(env | grep -c -e CLOUDSOURCED_TLS_SEED -e CLOUDSOURCED_SIGNER_PUB)"')"
-check "environment allowlist" eq "$out" "v=yes s= t=0"
-(cd "$PROJ" && exec "$BIN" run sh -c 'trap "echo trapped; exit 42" INT; echo ready; sleep 30' > "$WORK/sig" 2>&1) & pid=$!
-for _ in $(seq 50); do grep -q ready "$WORK/sig" 2>/dev/null && break; sleep 0.2; done
-kill -INT $pid; wait $pid; code=$?
-check "SIGINT forwarded to remote process" eq "$code" 42
-check "remote trap ran" contains "$(cat "$WORK/sig")" "trapped"
-
-step "write back of remote changes to sources"
-mkdir -p "$PROJ/wb"; echo old > "$PROJ/wb/a"; echo keep > "$PROJ/wb/b"; echo gone > "$PROJ/wb/c"
-head -c 3000000 /dev/urandom > "$PROJ/wb/big"
-bigsum="$(sha256sum < "$PROJ/wb/big")"
-out="$(run sh -c 'cd wb && echo new >> a && rm c && mkdir -p d/e && echo deep > d/e/f && ln -s a link && mv b b2 && chmod +x b2 && printf x > t && mv t t2 && sha256sum < big')"
-check "large file readable remotely" eq "$out" "$bigsum"
-check "append written back" eq "$(cat "$PROJ/wb/a")" "$(printf 'old\nnew')"
-check "delete written back" test ! -e "$PROJ/wb/c"
-check "nested mkdir written back" eq "$(cat "$PROJ/wb/d/e/f")" "deep"
-check "symlink written back" eq "$(readlink "$PROJ/wb/link")" "a"
-check "rename written back" test -f "$PROJ/wb/b2" -a ! -e "$PROJ/wb/b"
-check "chmod written back" test -x "$PROJ/wb/b2"
-check "temp file + rename written back" eq "$(cat "$PROJ/wb/t2")" "x"
-check "remote sees its own changes next run" eq "$(run sh -c 'cat wb/d/e/f; test -e wb/c || echo c-gone')" "$(printf 'deep\nc-gone')"
-
-step "projection consistency under rapid local changes"
-mkdir -p "$PROJ/cons"
-consistent=1
-for i in $(seq 1 15); do
-  for j in $(seq 1 $((RANDOM % 8 + 1))); do
-    f="$PROJ/cons/f$((RANDOM % 12))"
-    case $((RANDOM % 4)) in
-      0) rm -f "$f" ;;
-      1) d="$PROJ/cons/d$((RANDOM % 3))"; mkdir -p "$d"; echo "$RANDOM" > "$d/x" ;;
-      *) echo "$i-$j-$RANDOM" > "$f" ;;
-    esac
-  done
-  want="$(cd "$PROJ" && find cons -type f | sort | xargs -r sha256sum)"
-  got="$(run sh -c 'find cons -type f | sort | xargs -r sha256sum')"
-  if [ "$want" != "$got" ]; then consistent=0; echo "     iteration $i differs"; diff <(echo "$want") <(echo "$got") | head -10; break; fi
+pass=0; fail=0
+echo
+for p in $PARTS; do
+  if [ -f "$RES/$p.result" ]; then
+    read -r a b t < "$RES/$p.result"
+  else
+    a=0; b=1; t="?"; echo "  $p: no result (aborted)"
+  fi
+  printf '  %-10s %3d passed, %d failed (%ss)\n' "$p" "$a" "$b" "$t"
+  pass=$((pass + a)); fail=$((fail + b))
 done
-check "remote view equals local tree immediately after each change" eq "$consistent" 1
-check "worker-local build directory is mounted remotely" eq "$(run sh -c 'ls target | grep -c debug')" "1"
-echo secret > "$PROJ/ignored.log"; echo '*.log' >> "$PROJ/.gitignore"
-check "gitignore rules hide files" eq "$(run sh -c 'test -e ignored.log && echo visible || echo hidden')" "hidden"
-
-step "shims (transparent proxy through PATH)"
-cs shim install cargo sh >/dev/null
-out="$(cd "$PROJ" && PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" cargo run -q 2>&1)"
-check "cargo via shim runs remotely" contains "$out" "ran=remote"
-out="$(cd "$PROJ" && PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" CLOUDSOURCED_DISABLE=1 sh -c 'echo ${CLOUDSOURCED_SESSION:-local}')"
-check "CLOUDSOURCED_DISABLE runs locally" eq "$out" "local"
-out="$(cd "$WORK" && PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" sh -c 'echo ${CLOUDSOURCED_SESSION:-local}')"
-check "outside a configured repo the real tool runs" eq "$out" "local"
-
-step "developer experience: port forwarding, cloudsourced why, cost in status"
-# curl_local PORT PATH: poll a forwarded local port for up to ~40s (session
-# start on a loaded host). The sessions below outlive that.
-curl_local() { for _ in $(seq 200); do curl -sf --max-time 2 "http://127.0.0.1:$1$2" && return 0; sleep 0.2; done; return 1; }
-(cd "$PROJ" && CLOUDSOURCED_PORTS=$FWD_ENV:18081 exec "$BIN" run sh -c 'busybox httpd -f -p 18081 -h /etc & sleep 20; echo dev-server-done' > "$WORK/fwd" 2>&1) & fpid=$!
-got="$(curl_local $FWD_ENV /hostname)"
-check "dev server in the session reachable on the local port (CLOUDSOURCED_PORTS)" contains "$got" "cs-"
-wait $fpid; code=$?
-check "forwarded session exits normally" eq "$code" 0
-check "forwarded session output intact" contains "$(cat "$WORK/fwd")" "dev-server-done"
-check "local port closed when the session ends" test -n "$(curl -s --max-time 2 http://127.0.0.1:$FWD_ENV/hostname >/dev/null || echo closed)"
-(cd "$PROJ" && exec "$BIN" run bash -c 'sleep 20' > "$WORK/fwd2" 2>&1) & fpid=$!
-got="$(curl_local $FWD_SVC /hostname)"
-check "service reachable through [tool.bash] ports (local:remote)" contains "$got" "cs-"
-wait $fpid
-python3 -c 'import socket,sys,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1",int(sys.argv[1]))); s.listen(); time.sleep(300)' "$FWD_BUSY" & busypid=$!
-poll 10 sh -c "ss -ltn | grep -q '127.0.0.1:$FWD_BUSY '"
-out="$(cd "$PROJ" && CLOUDSOURCED_PORTS=$FWD_BUSY "$BIN" run sh -c 'echo still-runs' 2>&1)"; code=$?
-kill $busypid 2>/dev/null; wait $busypid 2>/dev/null
-check "busy local port: clear error" contains "$out" "local port $FWD_BUSY is already in use"
-check "busy local port: run continues" eq "$code" 0
-check "busy local port: command output" contains "$out" "still-runs"
-run sh -c 'exit 3' >/dev/null 2>&1
-why_out="$(cs why)"
-check "why shows the last remote run" contains "$why_out" "ran        remote"
-check "why shows the command" contains "$(echo "$why_out" | head -1)" "sh -c exit 3"
-check "why shows the exit code" contains "$why_out" "exit       3"
-check "why shows machine, size and price" contains "$why_out" "(local/default, 0.500/h)"
-check "why shows the placement reason" contains "$why_out" "placement"
-check "why shows timings" contains "$why_out" "queue / machine start"
-wj="$(cs why --json)"
-check "why --json has exit, timings and usage" eq "$(echo "$wj" | jq -r '[.mode, .exit, (.timings.total_ms > 0), (.usage != null), .provider, .size] | join(" ")')" "remote 3 true true local default"
-(cd "$PROJ" && CLOUDSOURCED_DISABLE=1 "$BIN" run sh -c true)
-check "why records local decisions" contains "$(cs why last)" "local: CLOUDSOURCED_DISABLE is set"
-check "why N addresses older runs" contains "$(cs why 2)" "sh -c exit 3"
-check "why list shows recent runs" eq "$(cs why list | sed -n 2p | awk '{print $1, $5}')" "1 local"
-st="$(cs status)"
-check "status shows price per size and a total" contains "$st" "local/default  0.500"
-check "status total line" contains "$st" "  total"
-sj="$(cs status --json)"
-check "status --json reports cost from price_per_hour" eq "$(echo "$sj" | jq -r '[.cost.sizes[0].price_per_hour, (.cost.total > 0), (.cost.per_hour > 0), (.machines | length > 0)] | join(" ")')" "0.5 true true true"
-
-step "editor integration (rust-analyzer flycheck through the proxy)"
-out="$(cd "$PROJ" && "$BIN" run cargo check --workspace --message-format=json 2>/dev/null)"
-check "JSON diagnostics on stdout with local paths" contains "$(echo "$out" | head -1)" "\"reason\":\"compiler-artifact\""
-check "check reports the local manifest path" contains "$out" "\"manifest_path\":\"$PROJ/Cargo.toml\""
-
-step "lazy outputs"
-rm -f "$PROJ/target/debug/hello.d"
-out="$(cd "$PROJ" && cs fetch 'target/debug/*.d' 2>&1)"
-check "fetch copies outputs from the latest build" test -f "$PROJ/target/debug/hello.d"
-
-step "output FUSE (remote target/ mounted read-only, content on demand)"
-out="$(cd "$PROJ" && cs outputs mount 2>&1)"
-check "outputs mounted at the local build directory" contains "$out" "mounted $PROJ/target"
-check "mount is a read-only FUSE file system" contains "$(grep " $PROJ/target " /proc/self/mountinfo)" "ro,"
-remote_ls="$(run sh -c 'ls target/debug/deps | sort')"
-check "remote directory listing visible locally" eq "$(ls "$PROJ/target/debug/deps" | sort)" "$remote_ls"
-bin="$(cd "$PROJ" && ls target/debug/deps/hello-* | grep -v '\.d$' | head -1)"
-check "non-eager file is read on demand" eq "$(sha256sum < "$PROJ/$bin")" "$(run sh -c "sha256sum < $bin")"
-check "local files below the mount stay visible" test -f "$PROJ/target/debug/hello.d"
-check "writes into the mount are rejected (local cargo cannot write)" sh -c "! touch '$PROJ/target/debug/x' 2>/dev/null"
-sed -i 's/greeting=changed/greeting=fuse/' "$PROJ/src/main.rs"
-run cargo build -q >/dev/null 2>&1
-check "new run invalidates the mount (eager output from the content cache)" contains "$("$PROJ/target/debug/hello")" "greeting=fuse"
-check "outputs status shows the mount" contains "$(cs outputs status)" "mounted at $PROJ/target"
-json="$(run cargo check --workspace --message-format=json 2>/dev/null)"
-check "cargo check artifact paths exist and are readable through the mount" eq "$(echo "$json" | python3 -c '
-import json, sys
-n = bad = 0
-for line in sys.stdin:
-    m = json.loads(line)
-    if m.get("reason") != "compiler-artifact":
-        continue
-    for f in m["filenames"]:
-        n += 1
-        try:
-            open(f, "rb").read(1)
-        except OSError as e:
-            bad += 1
-            print(f, e, file=sys.stderr)
-print("ok" if n and not bad else "%d of %d unreadable" % (bad, n))')" ok
-so="$(echo "$json" | python3 -c '
-import json, sys
-for line in sys.stdin:
-    m = json.loads(line)
-    if m.get("reason") == "compiler-artifact" and "proc-macro" in m["target"]["kind"]:
-        print(m["filenames"][0])')"
-check "proc-macro library is an ELF shared object below the mount" contains "$(file -L "$so")" "ELF 64-bit LSB shared object"
-check "proc-macro library loads locally (dlopen)" python3 -c 'import ctypes, sys; ctypes.CDLL(sys.argv[1])' "$so"
-out="$(cd "$PROJ" && cs editor --mode lsp-remote vscode 2>&1)"
-check "editor lsp-remote routes checks through the proxy" contains "$out" '"rust-analyzer.cargo.buildScripts.overrideCommand": ["'
-if RA="$(cd "$PROJ" && rustup which rust-analyzer 2>/dev/null)" && [ -x "$RA" ]; then
-  # rust-analyzer runs locally with the lsp-remote settings: checks and build
-  # scripts go through the proxy, the proc macro built remotely is loaded
-  # from the mount. The type of Greeter::NAME.len() needs the expanded derive.
-  out="$(python3 "$HERE/ra_lsp.py" "$RA" "$PROJ" "[\"$BIN\",\"run\",\"cargo\",\"check\",\"--workspace\",\"--all-targets\",\"--message-format=json\"]" 2>&1)"
-  check "rust-analyzer (LSP, lsp-remote settings) expands the remote proc macro" contains "$out" "let _len: usize"
-  # Its remote checks end with it; later steps expect the repository's
-  # build slot to be free (a busy slot gives a session another one).
-  poll 60 no_sessions >/dev/null
-else
-  echo "     (rust-analyzer for the remote toolchain not installed locally: skipped)"
+if [ -n "${E2E_CLEAN_IMAGES:-}" ]; then
+  for img in $(comm -13 <(echo "$before") <(images)); do $DOCKER rmi "$img" >/dev/null && echo "removed $img"; done
 fi
-
-step "dependencies (shared registry cache)"
-cat >> "$PROJ/Cargo.toml" <<'EOF'
-itoa = "1"
-EOF
-sed -i 's/fn main() {/fn main() {\n    let mut b = itoa::Buffer::new(); println!("itoa={}", b.format(42));/' "$PROJ/src/main.rs"
-out="$(run cargo run -q 2>&1)"
-check "crate downloaded and used remotely" contains "$out" "itoa=42"
-check "Cargo.lock updated by remote cargo" contains "$(cat "$PROJ/Cargo.lock")" 'name = "itoa"'
-check "registry cache stored on the deps volume" contains "$(docker_ exec "$MACHINE" sh -c 'ls /deps/usr__local__cargo__registry/cache/*/')" "itoa-"
-
-step "compiler cache (sccache) and linker (mold)"
-check "sessions use sccache as rustc wrapper" eq "$(run sh -c 'echo $RUSTC_WRAPPER')" "sccache"
-check "binary linked with mold" contains "$(run sh -c 'readelf -p .comment target/debug/hello')" "mold"
-run cargo clean -q -p itoa >/dev/null 2>&1
-out="$(CLOUDSOURCED_VERBOSE=1 run cargo build 2>&1)"
-check "cleaned dependency recompiled" contains "$out" "Compiling itoa"
-check "recompiled dependency served from the compiler cache" test "$(sccache_hits "$out")" -ge 1
-check "why shows the run's sccache counters" contains "$(cs why)" "sccache_hits="
-check "compiler cache entries on the shared dependency volume" test "$(docker_ exec "$MACHINE" sh -c 'find /deps/sccache -type f | wc -l')" -ge 1
-
-step "operations: metrics and structured logs"
-# metric TEXT NAME LABELSUBSTR: value of the first sample of NAME whose labels contain LABELSUBSTR.
-metric() { local v; v="$(echo "$1" | awk -v n="$2" -v l="$3" 'index($0, n"{")==1 && index($0, l) {print $NF; exit}')"; echo "${v:-0}"; }
-# metric_ge NAME LABELSUBSTR MIN: the current value (cs metrics) is at least MIN.
-metric_ge() { local v; v="$(metric "$(cs metrics)" "$1" "$2")"; [ "${v%.*}" -ge "$3" ] || { echo "     $1{$2} = $v"; return 1; }; }
-MLABEL="$(docker_ inspect -f '{{index .Config.Labels "cloudsourced.machine"}}' "$MACHINE")"
-m="$(cs metrics)"
-check "metrics: daemon counts prepares" test "$(metric "$m" cloudsourced_daemon_requests_total 'op="prepare",result="ok"')" -ge 1
-check "metrics: fleet machines by provider, size and state" contains "$m" 'cloudsourced_machines{provider="local",size="default",state="running"} 1'
-check "metrics: machine session exits with machine label" contains "$m" "cloudsourced_server_session_exits_total{machine=\"$MLABEL\",provider=\"local\",size=\"default\",code=\"101\"}"
-# Machine metrics are those of the last probe: wait for one after the run.
-check "metrics: sccache hits republished from the machine" poll 30 metric_ge cloudsourced_server_compiler_cache_total 'counter="sccache_hits"' 1
-check "metrics: output bytes transferred" test "$(metric "$m" cloudsourced_server_transfer_bytes_total 'direction="output"' | cut -d. -f1)" -gt 0
-check "metrics: acquire wait histogram" test "$(metric "$m" cloudsourced_acquire_wait_seconds_count 'result="assigned"')" -ge 1
-check "metrics: cost per hour of running machines" contains "$m" 'cloudsourced_cost_per_hour{provider="local"} 0.5'
-check "machine server logs JSON (format forwarded by the orchestrator)" contains "$(docker_ logs "$MACHINE" 2>&1 | grep '"msg":"session finished"' | tail -1)" '"level":"INFO"'
-if [ -n "$REMOTE" ]; then
-  KEY="$(cat "$CPSTATE/api-key")"
-  check "control plane /metrics needs the API key" eq "$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$CPPORT/metrics")" 401
-  cm="$(curl -sk -H "Authorization: Bearer $KEY" "https://127.0.0.1:$CPPORT/metrics")"
-  check "control plane /metrics has machine and session metrics" contains "$cm" "cloudsourced_server_session_duration_seconds_count{machine=\"$MLABEL\""
-  check "control plane /metrics counts API requests" test "$(metric "$cm" cloudsourced_http_requests_total 'path="/v1/acquire",result="200"')" -ge 1
-  check "--metrics-listen serves /metrics without authentication" contains "$(curl -s "http://127.0.0.1:$MPORT/metrics")" "cloudsourced_queue_length"
-  check "control plane logs requests as JSON with request ids" contains "$(grep '"msg":"lease"' "$WORK/cp.log" | tail -1)" '"request_id":"'
-else
-  check "daemon logs JSON" contains "$(grep '"msg":"daemon started"' "$CLOUDSOURCED_STATE_DIR/daemon.log" | tail -1)" '"level":"INFO"'
-fi
-
-step "machine authentication (derived identity, signed scoped tokens)"
-MDIR="$CLOUDSOURCED_STATE_DIR"; [ -n "$REMOTE" ] && MDIR="$CPSTATE"
-label() { docker_ inspect -f "{{index .Config.Labels \"$1\"}}" "$MACHINE"; }
-MID="$(label cloudsourced.machine)"; MFP="$(label cloudsourced.fingerprint)"
-MADDR="$(docker_ port "$MACHINE" 7443/udp | head -1)"
-SEED="$(docker_ inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$MACHINE" | sed -n 's/^CLOUDSOURCED_TLS_SEED=//p')"
-probe() { cs debug probe "$MADDR" "$MFP" "$1" 2>&1; }
-token() { cs debug token --state-dir "$MDIR" --machine "$MID" "$@"; }
-check "fleet master key stored with mode 600" eq "$(stat -c %a "$MDIR/master.key")" 600
-check "no per-machine secret files" test -z "$(ls "$MDIR/machines" 2>/dev/null)"
-check "machine got only a TLS seed as secret" test -n "$SEED"
-check "probe token reads machine status" contains "$(probe "$(token --scope probe)")" "\"machine\": \"$MID\""
-check "token signed by another key rejected" contains "$(probe "$(CLOUDSOURCED_MASTER_KEY="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" cs debug token --machine "$MID" --scope admin)")" "invalid token: bad signature"
-check "token for another machine rejected" contains "$(probe "$(cs debug token --state-dir "$MDIR" --machine other --scope probe)")" "another machine"
-check "expired token rejected" contains "$(probe "$(token --scope probe --ttl -10m)")" "expired"
-check "session token cannot probe" contains "$(probe "$(token --scope session --lease l1)")" "does not allow status"
-check "garbage token rejected" contains "$(probe "not-a-token")" "invalid token"
-if [ -n "$REMOTE" ]; then
-  st="$(curl -sk -X POST -H "Authorization: Bearer $(cat "$CPSTATE/api-key")" "https://127.0.0.1:$CPPORT/v1/status")"
-else
-  st="$(cs status)"
-fi
-check "status carries no tokens or seeds" sh -c 'case "$1" in *Token*|*"$2"*) exit 1;; esac' _ "$st" "$SEED"
-
-step "parallel sessions: one machine runs several, scale out beyond capacity"
-# The sessions last long enough to overlap even when session start and the
-# second machine's creation are slow (a loaded host): otherwise the third
-# session would rightly wait for a free slot on the first machine. The
-# status is polled while they run; the most sessions seen on one machine
-# counts.
-pids=""
-for i in 1 2 3; do (run sh -c "sleep 40; hostname" > "$WORK/par$i" 2>&1) & pids="$pids $!"; done
-sessions_max=0
-for _ in $(seq 40); do
-  n="$(cs status 2>/dev/null | awk '/^[0-9a-f]+ /{print $(NF-2)}' | sort -n | tail -1)"
-  [ "${n:-0}" -gt "$sessions_max" ] && sessions_max="$n"
-  [ "$sessions_max" -ge 2 ] && break
-  sleep 1
-done
-wait $pids
-machines="$(cat "$WORK"/par* | grep '^cs-' | sort -u | wc -l)"
-check "two 2G sessions share one 4G machine" eq "$sessions_max" 2
-check "third session scaled out to a second machine" eq "$machines" 2
-check "parallel sessions succeed" eq "$(cat "$WORK"/par* | grep -c '^cs-')" 3
-
-step "lifecycle: idle stop, warm restart, lifetime expiry, cleanup"
-cs down >/dev/null
-write_config 75s 10s 0 2
-# Fleet settings change by explicit reload, without a restart.
-cs reconcile >/dev/null 2>&1; code=$?
-check "reconcile reloads the fleet configuration" eq "$code" 0
-run cargo build -q >/dev/null 2>&1
-check "output mount restored after the daemon restart" grep -q " $PROJ/target .*fuse.cloudsourced-outputs" /proc/self/mountinfo
-cached="$(cd "$PROJ" && ls target/debug/deps/hello-*.d | head -1)"; cached_sum="$(sha256sum < "$PROJ/$cached")"
-M="$(docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" --filter label=cloudsourced.kind=machine | head -1)"
-NAME="$(docker_ inspect -f '{{.Name}}' "$M" | tr -d /)"
-for _ in $(seq 60); do [ "$(docker_ inspect -f '{{.State.Status}}' "$NAME")" = exited ] && break; sleep 1; done
-check "idle machine stopped after idle_stop" eq "$(docker_ inspect -f '{{.State.Status}}' "$NAME")" exited
-check "stopped machine keeps its cache volume" test -n "$(docker_ volume ls -q --filter "name=cs-cache-${NAME#cs-}")"
-check "output FUSE serves cached content after the machine stopped" eq "$(sha256sum < "$PROJ/$cached")" "$cached_sum"
-t0=$SECONDS
-check "uncached outputs of a stopped machine fail (EIO), they do not hang" sh -c "! timeout 60 cat '$PROJ/${cached%.d}' >/dev/null 2>&1"
-check "  ... and fail fast" test $((SECONDS - t0)) -lt 30
-out="$(CLOUDSOURCED_VERBOSE=1 run cargo build 2>&1)"
-check "stopped machine restarted on demand" contains "$out" "starting machine ${NAME#cs-}"
-check "restarted machine still has a warm build cache" eq "$(echo "$out" | grep -c Compiling)" 0
-check "services restart with their machine" contains "$(http_service)" "200 OK"
-for _ in $(seq 120); do [ -z "$(docker_ ps -aq --filter "name=^$NAME\$")" ] && break; sleep 1; done
-check "machine destroyed after max_lifetime" test -z "$(docker_ ps -aq --filter "name=^$NAME\$")"
-for _ in $(seq 30); do [ -z "$(docker_ volume ls -q --filter "name=cs-cache-${NAME#cs-}")" ] && break; sleep 1; done
-check "its build cache volume is gone" test -z "$(docker_ volume ls -q --filter "name=cs-cache-${NAME#cs-}")"
-out="$(CLOUDSOURCED_VERBOSE=1 run cargo build 2>&1)"
-check "fresh machine builds with an empty build cache" contains "$out" "Compiling itoa"
-check "fresh machine gets compiler cache hits for dependencies" test "$(sccache_hits "$out")" -ge 1
-
-out="$(cd "$PROJ" && cs outputs unmount 2>&1)"
-check "outputs unmount" test -z "$(grep " $PROJ/target " /proc/self/mountinfo)"
-check "local build directory intact after unmount" test -x "$PROJ/target/debug/hello"
-
-step "fail open when no machine can be provisioned"
-write_config 24h 10m 0 2
-sed -i 's/^command = .*/command = ["false"]/' "$FLEETCFG"; restart_daemon
-out="$(cd "$PROJ" && CLOUDSOURCED_REQUIRE_REMOTE= "$BIN" run sh -c 'echo ${CLOUDSOURCED_SESSION:-local}' 2>&1)"
-check "falls back to local execution" contains "$out" "local"
-(cd "$PROJ" && "$BIN" run sh -c true >/dev/null 2>&1); code=$?
-check "CLOUDSOURCED_REQUIRE_REMOTE turns fallback into an error" eq "$code" 125
-write_config 24h 10m 0 2; restart_daemon
+python3 -c 'import shutil, sys; shutil.rmtree(sys.argv[1], True)' "$RES"
+printf '\n%d passed, %d failed (%s, %ds)\n' "$pass" "$fail" "$mode" $((SECONDS - start))
+[ "$fail" = 0 ]

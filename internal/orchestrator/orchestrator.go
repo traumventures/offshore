@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/traumventures/cloudsourced/internal/clock"
 	"io"
 	"log/slog"
 	"os"
@@ -252,6 +253,12 @@ type Orchestrator struct {
 	// ProbeFunc fetches a server status; replaceable in tests.
 	ProbeFunc func(ctx context.Context, addr, fingerprint, token string) (proto.Status, error)
 
+	// Clock is the time of fleet decisions: idle stop, lifetime expiry,
+	// pending lease and volume TTLs, warm pool windows, uptime. Waits,
+	// probe recency and latency metrics use real time. Set before use;
+	// New takes it from $CLOUDSOURCED_TEST_CLOCK (default: real time).
+	Clock clock.Clock
+
 	// EnsureImage makes the environment image available on a provider
 	// before a machine is created there (nil: images are assumed present).
 	EnsureImage func(ctx context.Context, prov provider.Provider, envHash string) error
@@ -275,13 +282,17 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		return nil, fmt.Errorf("orchestrator: fleet master key: %w", err)
 	}
 	fixConfig(&cfg)
+	clk, err := clock.FromEnv()
+	if err != nil {
+		return nil, err
+	}
 	o := &Orchestrator{
 		cfg: cfg, provs: provs, stateDir: stateDir, log: log, master: master, signer: master.Signer(),
 		policy:   scheduler.Default{Cfg: cfg.Policy},
 		machines: map[string]*Machine{}, creating: map[string]creation{}, queue: map[string]scheduler.Task{},
 		queued: map[string]repoParams{}, envParams: map[string]repoParams{},
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
-		ProbeFunc: Probe,
+		ProbeFunc: Probe, Clock: clk,
 	}
 	o.metrics = newOrchMetrics(o)
 	o.loadRecent()
@@ -326,6 +337,9 @@ func fixConfig(cfg *Config) {
 		cfg.Policy.MaxMachines = 1
 	}
 }
+
+// now is the decision time (see Clock).
+func (o *Orchestrator) now() time.Time { return o.Clock.Now() }
 
 func (o *Orchestrator) notify() {
 	close(o.changed)
@@ -447,7 +461,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		if m.State == provider.Running && pm.State != provider.Running {
 			down = append(down, pm.ID)
 		}
-		expired := !pm.ExpiresAt.IsZero() && !time.Now().Before(pm.ExpiresAt)
+		expired := !pm.ExpiresAt.IsZero() && !o.now().Before(pm.ExpiresAt)
 		if _, inFlight := o.creating[pm.ID]; inFlight && pm.State == provider.Stopped && !expired {
 			// A start is in progress but the provider does not show it yet
 			// (e.g. the container or instance is still stopped): keep the
@@ -457,7 +471,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		}
 		pm.Fingerprint = o.fingerprint(pm)
 		m.update(pm, listedAt)
-		m.observe(time.Now())
+		m.observe(o.now())
 		if pm.State != provider.Running {
 			m.Status = nil
 		}
@@ -688,7 +702,7 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 }
 
 func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) (Lease, error) {
-	now := time.Now()
+	now := o.now()
 	task := scheduler.Task{ID: newID(8), EnvHash: req.EnvHash, RepoID: req.RepoID, Key: req.Key, Request: req.Need, Limit: req.Limit, Since: now}
 	o.mu.Lock()
 	o.recentEnvs[req.EnvHash] = now
@@ -715,7 +729,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 	refreshed := false
 	for {
 		o.mu.Lock()
-		f := o.fleetLocked(time.Now())
+		f := o.fleetLocked(o.now())
 		pl := o.policy.Place(f, task)
 		switch pl.Kind {
 		case scheduler.Assign:
@@ -727,7 +741,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 				Provider: m.Provider, Size: size, PricePerHour: o.priceLocked(m.Provider, size), Reason: pl.Reason,
 				BuildTTL: req.buildTTL(o.cfg.MaxLifetime),
 			}
-			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: time.Now().Add(2 * time.Minute)}
+			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: o.now().Add(2 * time.Minute)}
 			o.mu.Unlock()
 			return lease, nil
 		case scheduler.Reject:
@@ -747,7 +761,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			o.metrics.placements.Inc("queue")
 		}
 		o.queue[task.ID] = task
-		f = o.fleetLocked(time.Now())
+		f = o.fleetLocked(o.now())
 		acts := o.policy.Plan(f)
 		o.markLocked(acts)
 		ch := o.changed
@@ -794,14 +808,14 @@ func (o *Orchestrator) markLocked(acts []scheduler.Action) {
 		case scheduler.Create:
 			id := newID(6)
 			acts[i].Machine = id
-			o.creating[id] = creation{prov: a.Size.Provider, env: a.EnvHash, size: a.Size, at: time.Now()}
+			o.creating[id] = creation{prov: a.Size.Provider, env: a.EnvHash, size: a.Size, at: o.now()}
 		case scheduler.Start:
 			if m, ok := o.machines[a.Machine]; ok {
 				m.State = provider.Starting
 				m.listed = time.Now()
-				m.observe(time.Now())
+				m.observe(o.now())
 				m.Status = nil
-				o.creating[a.Machine] = creation{prov: m.Provider, env: m.EnvHash, at: time.Now()}
+				o.creating[a.Machine] = creation{prov: m.Provider, env: m.EnvHash, at: o.now()}
 			}
 		case scheduler.Stop, scheduler.Destroy:
 			if m, ok := o.machines[a.Machine]; ok {
@@ -892,7 +906,7 @@ func (o *Orchestrator) setState(id string, st provider.State) {
 	if m, ok := o.machines[id]; ok {
 		m.State = st
 		m.listed = time.Now()
-		m.observe(time.Now())
+		m.observe(o.now())
 		m.Status = nil
 		m.Addr = ""
 	}
@@ -967,7 +981,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	o.mu.Unlock()
 	// Whole seconds: the expiry travels as Unix seconds and is an input of
 	// the derived certificate.
-	expires := time.Unix(time.Now().Add(cfg.MaxLifetime).Unix(), 0)
+	expires := time.Unix(o.now().Add(cfg.MaxLifetime).Unix(), 0)
 	seed := o.master.MachineSeed(id)
 	ident, err := auth.MachineIdentity(seed, id, expires)
 	if err != nil {
@@ -1018,7 +1032,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	m.Fingerprint = ident.Fingerprint
 	o.mu.Lock()
 	nm := &Machine{Machine: m, Provider: size.Provider, pending: map[string]pendingLease{}, listed: time.Now()}
-	nm.observe(time.Now())
+	nm.observe(o.now())
 	o.machines[id] = nm
 	o.mu.Unlock()
 	return o.waitReady(ctx, id)
@@ -1047,7 +1061,7 @@ func (o *Orchestrator) startMachine(ctx context.Context, id string) {
 	o.mu.Lock()
 	if mm, ok := o.machines[id]; ok {
 		mm.update(m, startedAt)
-		mm.observe(time.Now())
+		mm.observe(o.now())
 		mm.Status = nil
 		mm.Draining = false
 	}
@@ -1102,7 +1116,7 @@ func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 				fresh := false
 				if m := o.machines[id]; m != nil {
 					fresh = m.update(pm, listedAt)
-					m.observe(time.Now())
+					m.observe(o.now())
 				}
 				o.mu.Unlock()
 				if !fresh || pm.Addr == "" {
@@ -1140,7 +1154,7 @@ func (o *Orchestrator) Snapshot() []Machine {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	var out []Machine
-	now := time.Now()
+	now := o.now()
 	for _, m := range o.machines {
 		m.observe(now)
 		c := *m
@@ -1183,7 +1197,7 @@ func (o *Orchestrator) removeLocked(id string) {
 		return
 	}
 	delete(o.machines, id)
-	now := time.Now()
+	now := o.now()
 	m.State = provider.Failed
 	m.observe(now)
 	m.Removed = now
@@ -1211,7 +1225,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	if err := o.Refresh(ctx); err != nil {
 		return err
 	}
-	now := time.Now()
+	now := o.now()
 	o.mu.Lock()
 	var invariant []scheduler.Action
 	for _, m := range o.machines {
@@ -1236,7 +1250,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	o.execute(ctx, invariant, true)
 
 	o.mu.Lock()
-	acts := o.policy.Plan(o.fleetLocked(time.Now()))
+	acts := o.policy.Plan(o.fleetLocked(o.now()))
 	o.markLocked(acts)
 	o.mu.Unlock()
 	o.execute(context.WithoutCancel(ctx), acts, true)
@@ -1267,7 +1281,7 @@ func (o *Orchestrator) reapProvider(ctx context.Context, p provider.Provider) er
 	for _, m := range list {
 		alive["cs-cache-"+m.ID] = true
 	}
-	now := time.Now()
+	now := o.now()
 	for _, v := range vols {
 		expired := !v.ExpiresAt.IsZero() && !now.Before(v.ExpiresAt)
 		orphan := v.Kind == "cache" && !alive[v.Name]

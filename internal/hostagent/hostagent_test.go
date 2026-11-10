@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/traumventures/cloudsourced/internal/clock"
 	"io"
 	"log/slog"
 	"net/http"
@@ -171,8 +172,9 @@ func TestRebootStartsWithoutRecreating(t *testing.T) {
 
 func TestCheckActs(t *testing.T) {
 	a, p, _ := testAgent(t)
-	now := time.Now()
-	a.Now = func() time.Time { return now }
+	clk := clock.NewFake(time.Now())
+	a.Clock = clk
+	now := clk.Now()
 	shutdowns := 0
 	a.Shutdown = func() error { shutdowns++; return nil }
 	os.MkdirAll(a.Spec.Layout.StatusDir, 0o755)

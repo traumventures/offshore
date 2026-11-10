@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/traumventures/cloudsourced/internal/auth"
+	"github.com/traumventures/cloudsourced/internal/clock"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 )
 
@@ -18,14 +19,45 @@ import (
 //
 //	cloudsourced debug token --state-dir DIR --scope probe|session|admin --machine ID [--lease ID] [--ttl 5m]
 //	cloudsourced debug probe ADDR FINGERPRINT TOKEN
+//	cloudsourced debug clock [advance DURATION]
 //
 // "token" signs with the fleet master key of a state dir (or
-// $CLOUDSOURCED_MASTER_KEY); "probe" prints a machine's status.
+// $CLOUDSOURCED_MASTER_KEY); "probe" prints a machine's status. "clock"
+// shows or advances the test clock of $CLOUDSOURCED_TEST_CLOCK
+// (offset:FILE), which the orchestrator uses for idle stop and expiry:
+// tests move time instead of waiting for it.
 func debugCmd(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: cloudsourced debug token|probe ...")
+		return errors.New("usage: cloudsourced debug token|probe|clock ...")
 	}
 	switch args[0] {
+	case "clock":
+		path := clock.OffsetFile()
+		if path == "" {
+			return fmt.Errorf("no test clock: set %s=offset:FILE for the daemon or control plane and this command", clock.EnvVar)
+		}
+		var off time.Duration
+		var err error
+		switch {
+		case len(args) == 1:
+			off, err = clock.ReadOffset(path)
+		case len(args) == 3 && args[1] == "advance":
+			var d time.Duration
+			if d, err = time.ParseDuration(args[2]); err != nil {
+				return err
+			}
+			if d < 0 {
+				return errors.New("the test clock only moves forward")
+			}
+			off, err = clock.Advance(path, d)
+		default:
+			return errors.New("usage: cloudsourced debug clock [advance DURATION]")
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Printf("offset %s, now %s\n", off, time.Now().Add(off).UTC().Format(time.RFC3339))
+		return nil
 	case "token":
 		fs := flag.NewFlagSet("debug token", flag.ContinueOnError)
 		dir := fs.String("state-dir", "", "orchestrator state directory holding master.key")

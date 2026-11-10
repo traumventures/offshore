@@ -145,14 +145,23 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	s.sessions[se.id] = se
 	s.mu.Unlock()
 	defer se.end()
-	defer func() {
-		s.mu.Lock()
-		delete(s.sessions, se.id)
-		if len(s.sessions) == 0 {
-			s.idleSince = time.Now()
-		}
-		s.mu.Unlock()
-	}()
+	// unregister frees the session's reservation. It runs before the exit
+	// is sent: the client releases its lease once it has the exit, and
+	// the next session placed in that capacity must not find it still
+	// reserved here (a slow teardown on a loaded host rejected it as
+	// "machine full").
+	var unregisterOnce sync.Once
+	unregister := func() {
+		unregisterOnce.Do(func() {
+			s.mu.Lock()
+			delete(s.sessions, se.id)
+			if len(s.sessions) == 0 {
+				s.idleSince = s.cfg.now()
+			}
+			s.mu.Unlock()
+		})
+	}
+	defer unregister()
 
 	ttl := s.cfg.BuildTTL
 	if d, err := time.ParseDuration(req.BuildTTL); err == nil && d > 0 && d < ttl {
@@ -329,6 +338,7 @@ loop:
 	}
 	s.log.Info("session finished", "session", se.id, "code", exit.Code, "duration", time.Since(se.started).Round(time.Millisecond))
 	s.metrics.sessionEnded(exit.Code, exit.Usage.Wall.Seconds(), exit.Usage.OOM, exit.Cache)
+	unregister() // the session's processes are gone
 	if clientGone {
 		return nil
 	}

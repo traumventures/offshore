@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/traumventures/cloudsourced/internal/clock"
 	"io"
 	"log/slog"
 	"os"
@@ -53,6 +54,16 @@ type Config struct {
 	// volume is shared by the owner's machines, the cache volume is not).
 	SccacheEndpoint string
 	SccacheDir      string
+	// Clock is the time of idle, expiry and build slot decisions
+	// ($CLOUDSOURCED_TEST_CLOCK; nil: real time).
+	Clock clock.Clock
+}
+
+func (c Config) now() time.Time {
+	if c.Clock == nil {
+		return time.Now()
+	}
+	return c.Clock.Now()
 }
 
 // ConfigFromEnv reads the server configuration.
@@ -68,6 +79,11 @@ func ConfigFromEnv() (Config, error) {
 	}
 	c.SccacheEndpoint = os.Getenv("CLOUDSOURCED_SCCACHE_ENDPOINT")
 	c.SccacheDir = envOr("CLOUDSOURCED_SCCACHE_DIR", filepath.Join(c.DepsDir, "sccache"))
+	clk, err := clock.FromEnv()
+	if err != nil {
+		return c, err
+	}
+	c.Clock = clk
 	if c.MachineID == "" || os.Getenv(auth.EnvTLSSeed) == "" || os.Getenv(auth.EnvSignerPub) == "" || os.Getenv("CLOUDSOURCED_EXPIRES_AT") == "" {
 		return c, errors.New("server: CLOUDSOURCED_MACHINE_ID, _TLS_SEED, _SIGNER_PUB and _EXPIRES_AT are required")
 	}
@@ -164,6 +180,7 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	sl.clock = cfg.Clock
 	var env []string
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "CLOUDSOURCED_") {
@@ -173,7 +190,7 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 	s := &Server{
 		cfg: cfg, log: log, store: store, slots: sl, self: self, env: env,
 		mounts: map[string]*fusefs.Projection{}, sources: map[string]*quic.Conn{},
-		sessions: map[string]*session{}, idleSince: time.Now(), lastProbe: time.Now(), inflight: map[string]*fetchCall{},
+		sessions: map[string]*session{}, idleSince: cfg.now(), lastProbe: cfg.now(), inflight: map[string]*fetchCall{},
 	}
 	s.metrics = newServerMetrics(s)
 	return s, nil
@@ -266,7 +283,7 @@ func (s *Server) lifecycle(ctx context.Context, cancel func()) {
 			s.slots.gc(s.cfg.BuildTTL)
 			lastGC = time.Now()
 		}
-		if s.cfg.ExpiresAt.IsZero() || time.Now().Before(s.cfg.ExpiresAt) {
+		if s.cfg.ExpiresAt.IsZero() || s.cfg.now().Before(s.cfg.ExpiresAt) {
 			continue
 		}
 		s.mu.Lock()
@@ -276,7 +293,7 @@ func (s *Server) lifecycle(ctx context.Context, cancel func()) {
 		s.draining = true
 		n := len(s.sessions)
 		s.mu.Unlock()
-		if n == 0 || time.Now().After(s.cfg.ExpiresAt.Add(10*time.Minute)) {
+		if n == 0 || s.cfg.now().After(s.cfg.ExpiresAt.Add(10*time.Minute)) {
 			s.log.Info("machine expired, shutting down")
 			cancel()
 			return
@@ -335,7 +352,7 @@ func (s *Server) serveStream(ctx context.Context, conn *quic.Conn, st *quic.Stre
 		err = s.serveExec(ctx, pc, st, claims)
 	case proto.KindStatus:
 		s.mu.Lock()
-		s.lastProbe = time.Now()
+		s.lastProbe = s.cfg.now()
 		s.mu.Unlock()
 		err = pc.Send(proto.TStatus, s.Status())
 	case proto.KindFetch:
@@ -355,7 +372,7 @@ func (s *Server) HostStatus() machine.HostStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := machine.HostStatus{
-		UpdatedAt: time.Now().Unix(), LastProbe: s.lastProbe.Unix(),
+		UpdatedAt: s.cfg.now().Unix(), LastProbe: s.lastProbe.Unix(),
 		Sessions: len(s.sessions), Ready: s.ready,
 	}
 	if len(s.sessions) == 0 {

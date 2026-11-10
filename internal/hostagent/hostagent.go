@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/traumventures/cloudsourced/internal/clock"
 	"log/slog"
 	"net"
 	"net/http"
@@ -156,13 +157,13 @@ type Agent struct {
 	Log      *slog.Logger
 	Every    time.Duration       // lifecycle check interval
 	Shutdown func() error        // powers the host off (terminates the instance)
-	Now      func() time.Time    // for tests
+	Clock    clock.Clock         // idle and expiry decisions (nil: real time)
 	Sleep    func(time.Duration) // for tests
 }
 
 func (a *Agent) now() time.Time {
-	if a.Now != nil {
-		return a.Now()
+	if a.Clock != nil {
+		return a.Clock.Now()
 	}
 	return time.Now()
 }

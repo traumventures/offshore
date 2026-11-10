@@ -130,6 +130,17 @@ func (l *Local) Known(hash string) bool {
 	return ok
 }
 
+// ReconcileIntervalEnv overrides the reconcile interval (e.g. 1s in tests).
+const ReconcileIntervalEnv = "CLOUDSOURCED_RECONCILE_INTERVAL"
+
+// ReconcileInterval returns $CLOUDSOURCED_RECONCILE_INTERVAL, else def.
+func ReconcileInterval(def time.Duration) time.Duration {
+	if d, err := time.ParseDuration(os.Getenv(ReconcileIntervalEnv)); err == nil && d > 0 {
+		return d
+	}
+	return def
+}
+
 // Run reconciles the fleet periodically until ctx ends.
 func (l *Local) Run(ctx context.Context, every time.Duration) {
 	t := time.NewTicker(every)

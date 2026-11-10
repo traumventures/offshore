@@ -174,7 +174,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		ln.Close()
 	}()
 	if d.local != nil {
-		go d.local.Run(ctx, 15*time.Second)
+		go d.local.Run(ctx, fleet.ReconcileInterval(15*time.Second))
 	}
 	d.log.Info("daemon started", "socket", sock, "pid", os.Getpid())
 	// Before serving requests, so no proxy writes eager outputs below a
