@@ -26,7 +26,9 @@ const (
 	LabelSize      = "cloudsourced.size"
 )
 
-// MachineSpec describes a machine to create.
+// MachineSpec describes a machine to create. Providers treat the server
+// environment as opaque: Env is public, SecretEnv must be delivered
+// confidentially (never in plain instance metadata such as user data).
 type MachineSpec struct {
 	ID        string
 	Owner     string
@@ -37,14 +39,22 @@ type MachineSpec struct {
 	Memory    int64
 	Swap      bool // allow sessions to swap
 	ExpiresAt time.Time
-	Token     string
-	CertPEM   string
-	KeyPEM    string
-	Finger    string
-	Provision []string
-	BuildTTL  time.Duration
-	DepsTTL   time.Duration
+	Finger    string        // expected server certificate fingerprint (public)
+	DepsTTL   time.Duration // lifetime of shared dependency cache volumes
+	IdleStop  time.Duration // machine stops itself after this long idle and unobserved (0: never)
 	Services  []Service
+	Env       map[string]string // CLOUDSOURCED_* variables of the machine server
+	SecretEnv map[string]string // secret CLOUDSOURCED_* variables
+}
+
+// SortedKeys returns the keys of m in order.
+func SortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Service is an auxiliary container sharing the machine's network.

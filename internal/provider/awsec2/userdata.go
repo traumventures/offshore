@@ -2,7 +2,6 @@ package awsec2
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -26,13 +25,9 @@ func shjoin(args []string) string {
 // files; the instance metadata service (which serves this script) is not
 // reachable from containers (hop limit 1).
 func userData(spec provider.MachineSpec, region string, in *infra, binKey, image string) (string, error) {
-	provision, err := json.Marshal(spec.Provision)
-	if err != nil {
-		return "", err
-	}
-	files := map[string]string{
-		"token": spec.Token, "cert.pem": spec.CertPEM, "key.pem": spec.KeyPEM,
-		"provision.json": string(provision), "expires-at": unix(spec.ExpiresAt),
+	files := map[string]string{"expires-at": unix(spec.ExpiresAt)}
+	for k, v := range spec.SecretEnv {
+		files["secret-"+k] = v
 	}
 	name := "cs-" + spec.ID
 	registry := in.repo[:strings.Index(in.repo, "/")]
@@ -88,24 +83,18 @@ EOF`)
 		"-v", "/opt/cloudsourced/bin/cloudsourced:/opt/cloudsourced/bin/cloudsourced:ro",
 		"-v", "cs-cache:/cache", "-v", "cs-deps:/deps",
 		"--entrypoint", "/opt/cloudsourced/bin/cloudsourced",
-		"-e", "CLOUDSOURCED_MACHINE_ID=" + spec.ID,
-		"-e", "CLOUDSOURCED_ENV_HASH=" + spec.EnvHash,
-		"-e", "CLOUDSOURCED_CPU=" + strconv.FormatFloat(spec.CPU, 'f', -1, 64),
-		"-e", "CLOUDSOURCED_MEMORY=" + strconv.FormatInt(spec.Memory, 10),
 	}
-	if spec.BuildTTL > 0 {
-		run = append(run, "-e", "CLOUDSOURCED_BUILD_TTL="+spec.BuildTTL.String())
+	for _, k := range provider.SortedKeys(spec.Env) {
+		run = append(run, "-e", k+"="+spec.Env[k])
 	}
 	if spec.Swap {
 		run = append(run, "--memory-swap", "-1")
 	}
 	// Secrets come from the root-only files, not from this script's text.
 	w("docker %s \\", shjoin(run))
-	w(`  -e CLOUDSOURCED_TOKEN="$(cat /etc/cloudsourced/token)" \`)
-	w(`  -e CLOUDSOURCED_CERT="$(cat /etc/cloudsourced/cert.pem)" \`)
-	w(`  -e CLOUDSOURCED_KEY="$(cat /etc/cloudsourced/key.pem)" \`)
-	w(`  -e CLOUDSOURCED_PROVISION="$(cat /etc/cloudsourced/provision.json)" \`)
-	w(`  -e CLOUDSOURCED_EXPIRES_AT="$(cat /etc/cloudsourced/expires-at)" \`)
+	for _, k := range provider.SortedKeys(spec.SecretEnv) {
+		w(`  -e %s="$(cat /etc/cloudsourced/secret-%s)" \`, k, k)
+	}
 	w("  %s server", shq(image))
 	var svcNames []string
 	for _, svc := range spec.Services {

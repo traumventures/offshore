@@ -146,7 +146,6 @@ func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provide
 	if err != nil {
 		return provider.Machine{}, err
 	}
-	provision, _ := json.Marshal(spec.Provision)
 	mLabels := map[string]string{
 		provider.LabelKind:    "machine",
 		provider.LabelEnvHash: spec.EnvHash,
@@ -170,18 +169,13 @@ func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provide
 		"-v", cacheVol+":/cache",
 		"-v", depsVol+":/deps",
 		"--entrypoint", "/opt/cloudsourced/bin/cloudsourced",
-		"-e", "CLOUDSOURCED_MACHINE_ID="+spec.ID,
-		"-e", "CLOUDSOURCED_TOKEN="+spec.Token,
-		"-e", "CLOUDSOURCED_CERT="+spec.CertPEM,
-		"-e", "CLOUDSOURCED_KEY="+spec.KeyPEM,
-		"-e", "CLOUDSOURCED_ENV_HASH="+spec.EnvHash,
-		"-e", "CLOUDSOURCED_EXPIRES_AT="+unix(spec.ExpiresAt),
-		"-e", "CLOUDSOURCED_CPU="+strconv.FormatFloat(spec.CPU, 'f', -1, 64),
-		"-e", "CLOUDSOURCED_MEMORY="+strconv.FormatInt(spec.Memory, 10),
-		"-e", "CLOUDSOURCED_PROVISION="+string(provision),
 	)
-	if spec.BuildTTL > 0 {
-		args = append(args, "-e", "CLOUDSOURCED_BUILD_TTL="+spec.BuildTTL.String())
+	// The machine is a local container: the secret environment never
+	// leaves this host.
+	for _, env := range []map[string]string{spec.Env, spec.SecretEnv} {
+		for _, k := range provider.SortedKeys(env) {
+			args = append(args, "-e", k+"="+env[k])
+		}
 	}
 	if spec.CPU > 0 {
 		args = append(args, "--cpus", strconv.FormatFloat(spec.CPU, 'f', -1, 64))

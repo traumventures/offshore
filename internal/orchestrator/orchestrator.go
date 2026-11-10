@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -688,12 +689,29 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	if err := os.WriteFile(o.secretPath(id), b, 0o600); err != nil {
 		return err
 	}
+	expires := time.Now().Add(cfg.MaxLifetime)
+	provision, _ := json.Marshal(cfg.Provision)
 	spec := provider.MachineSpec{
 		ID: id, Owner: cfg.Owner, Image: image, EnvHash: envHash, Size: size.Name,
 		CPU: size.Capacity.CPU, Memory: size.Capacity.Memory, Swap: cfg.Swap,
-		ExpiresAt: time.Now().Add(cfg.MaxLifetime), Token: token, CertPEM: ident.CertPEM, KeyPEM: ident.KeyPEM,
-		Finger: ident.Fingerprint, Provision: cfg.Provision, BuildTTL: cfg.BuildTTL, DepsTTL: cfg.DepsTTL,
-		Services: services,
+		ExpiresAt: expires, Finger: ident.Fingerprint, DepsTTL: cfg.DepsTTL,
+		IdleStop: cfg.Policy.IdleStop, Services: services,
+		Env: map[string]string{
+			"CLOUDSOURCED_MACHINE_ID": id,
+			"CLOUDSOURCED_ENV_HASH":   envHash,
+			"CLOUDSOURCED_EXPIRES_AT": strconv.FormatInt(expires.Unix(), 10),
+			"CLOUDSOURCED_CPU":        strconv.FormatFloat(size.Capacity.CPU, 'f', -1, 64),
+			"CLOUDSOURCED_MEMORY":     strconv.FormatInt(size.Capacity.Memory, 10),
+			"CLOUDSOURCED_PROVISION":  string(provision),
+		},
+		SecretEnv: map[string]string{
+			"CLOUDSOURCED_TOKEN": token,
+			"CLOUDSOURCED_CERT":  ident.CertPEM,
+			"CLOUDSOURCED_KEY":   ident.KeyPEM,
+		},
+	}
+	if cfg.BuildTTL > 0 {
+		spec.Env["CLOUDSOURCED_BUILD_TTL"] = cfg.BuildTTL.String()
 	}
 	prov, ok := o.provs[size.Provider]
 	if !ok {
