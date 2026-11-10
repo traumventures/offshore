@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/cloudsourced/internal/events"
 	"github.com/traumventures/cloudsourced/internal/image"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 	"github.com/traumventures/cloudsourced/internal/provider"
@@ -136,8 +137,21 @@ func ReconcileInterval(def time.Duration) time.Duration {
 	return def
 }
 
-// Run reconciles the pool periodically until ctx ends.
+// Run reconciles the pool periodically until ctx ends, and samples the
+// running machines every events.SampleInterval in between.
 func (l *Local) Run(ctx context.Context, every time.Duration) {
+	go func() {
+		t := time.NewTicker(events.SampleInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				l.orch.Sample(ctx)
+			}
+		}
+	}()
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {

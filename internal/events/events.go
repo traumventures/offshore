@@ -43,13 +43,13 @@ const (
 	// machine stopped itself when idle, or disappeared).
 	MachineState = "machine_state"
 	// MachineSample: periodic utilisation of a running machine (every
-	// SampleInterval while it is probed): reservations, measured usage
+	// SampleInterval): reservations, measured usage
 	// (busy cores, session memory), pressure and session count.
 	MachineSample = "machine_sample"
 )
 
 // SampleInterval is how often a running machine is sampled.
-const SampleInterval = time.Minute
+const SampleInterval = 10 * time.Second
 
 // Event is one line of the log. Zero fields are omitted.
 type Event struct {

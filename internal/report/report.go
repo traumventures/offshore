@@ -37,7 +37,7 @@ type Report struct {
 	Cache        Cache       `json:"cache"`
 	Estimator    Accuracy    `json:"estimator"`
 	// Samples summarises machine_sample events per size: how busy machines
-	// really were, minute by minute.
+	// really were over time.
 	Samples []SizeSamples `json:"samples,omitempty"`
 	// Contention is the share of session wall time in which a session
 	// waited for CPU (or memory): the price of overcommit and neighbours.
@@ -49,7 +49,7 @@ type Report struct {
 // Busy and reserved are fractions of capacity; pressure is PSI some avg10.
 type SizeSamples struct {
 	Size        string  `json:"size"`
-	Samples     int     `json:"samples"` // machine-minutes
+	Samples     int     `json:"samples"` // one per machine and SampleInterval
 	BusyCPUMean float64 `json:"busy_cpu_mean"`
 	BusyCPUP95  float64 `json:"busy_cpu_p95"`
 	ReservedCPU float64 `json:"reserved_cpu_mean"`
@@ -522,9 +522,9 @@ func (r Report) Write(w io.Writer) {
 	fmt.Fprintf(w, "contention: sessions waited for CPU %.0f%%, for memory %.0f%% of their wall time\n",
 		100*r.CPUStallShare, 100*r.MemoryStallShare)
 	if len(r.Samples) > 0 {
-		fmt.Fprintln(w, "\nmachine samples (per minute, fraction of capacity)")
+		fmt.Fprintln(w, "\nmachine samples (every 10 s, fraction of capacity)")
 		tw := tabwriter.NewWriter(w, 2, 2, 2, ' ', 0)
-		fmt.Fprintln(tw, "  SIZE\tMIN\tBUSY CPU mean/p95\tRESERVED CPU\tMEMORY mean/p95\tIDLE\tMAX SESSIONS\tPSI CPU/MEM p95")
+		fmt.Fprintln(tw, "  SIZE\tSAMPLES\tBUSY CPU mean/p95\tRESERVED CPU\tMEMORY mean/p95\tIDLE\tMAX SESSIONS\tPSI CPU/MEM p95")
 		for _, s := range r.Samples {
 			fmt.Fprintf(tw, "  %s\t%d\t%.0f%% / %.0f%%\t%.0f%%\t%.0f%% / %.0f%%\t%.0f%%\t%d\t%.2f / %.2f\n", s.Size, s.Samples,
 				100*s.BusyCPUMean, 100*s.BusyCPUP95, 100*s.ReservedCPU, 100*s.MemoryMean, 100*s.MemoryP95, 100*s.IdleShare, s.SessionsMax, s.CPUPressP95, s.MemPressP95)
