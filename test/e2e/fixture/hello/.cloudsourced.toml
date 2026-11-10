@@ -9,7 +9,7 @@ image = "rust:1-slim-bookworm"
 linker = "mold"
 
 [environment.packages]
-apt = ["jq"]
+apt = ["jq", "busybox"]
 
 [environment.toolchains]
 rust = "rust-toolchain.toml"
@@ -44,6 +44,11 @@ env   = ["RUSTFLAGS", "CARGO_TERM_*", "RUST_LOG", "RUST_BACKTRACE"]
 
 [tool.sh]
 env = ["E2E_*"]
+
+# Dev server ports: the web service (18080 in the machine's network
+# namespace) is reachable locally on 18092 while a bash session runs.
+[tool.bash]
+ports = ["18092:18080"]
 
 [services.web]
 image = "busybox:1.37"

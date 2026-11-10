@@ -51,6 +51,7 @@ const (
 	TDone
 	TStatus
 	TFetch
+	TForward
 )
 
 // Stream kinds sent in Hello.
@@ -60,6 +61,10 @@ const (
 	KindExec   = "exec"
 	KindStatus = "status"
 	KindFetch  = "fetch"
+	// KindForward carries one forwarded TCP connection into a session's
+	// network namespace: TForward, then TAck (or TError), then raw bytes
+	// in both directions until either side closes.
+	KindForward = "forward"
 )
 
 // Hello opens every stream.
@@ -144,16 +149,6 @@ type CompilerCache struct {
 	Incremental *bool `json:"incremental,omitempty"`
 }
 
-// CompilerCacheStats are the compiler cache counters of one session.
-type CompilerCacheStats struct {
-	Tool         string `json:"tool"`
-	Requests     int64  `json:"requests"`      // compile requests seen by the cache
-	Hits         int64  `json:"hits"`          // served from the cache
-	Misses       int64  `json:"misses"`        // compiled and stored
-	NotCacheable int64  `json:"not_cacheable"` // e.g. incremental or binary crates
-	Errors       int64  `json:"errors"`        // cache read/write errors
-}
-
 // Started confirms the remote process runs.
 type Started struct {
 	Session string `json:"session"`
@@ -178,9 +173,16 @@ type Exit struct {
 	Code   int             `json:"code"`
 	Signal int             `json:"signal,omitempty"`
 	Usage  scheduler.Usage `json:"usage"`
-	// CompilerCache holds the session's compiler cache statistics when a
-	// compiler cache was enabled and used.
-	CompilerCache *CompilerCacheStats `json:"compiler_cache,omitempty"`
+	// Cache holds counters of cache integrations (e.g. "sccache_hits",
+	// "sccache_misses"); shown by `cloudsourced why`.
+	Cache map[string]int64 `json:"cache,omitempty"`
+}
+
+// Forward asks the server to connect to 127.0.0.1:Port in the network
+// namespace of a running session.
+type Forward struct {
+	Session string `json:"session"`
+	Port    int    `json:"port"`
 }
 
 // Change is a file written remotely into a projected root.

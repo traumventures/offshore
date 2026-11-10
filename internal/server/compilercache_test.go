@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -86,9 +87,9 @@ func TestParseSccacheStats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := proto.CompilerCacheStats{Tool: "sccache", Requests: 5, Hits: 3, Misses: 1, NotCacheable: 1, Errors: 2}
-	if *st != want {
-		t.Fatalf("got %+v, want %+v", *st, want)
+	want := map[string]int64{"sccache_requests": 5, "sccache_hits": 3, "sccache_misses": 1, "sccache_not_cacheable": 1, "sccache_errors": 2}
+	if !maps.Equal(st, want) {
+		t.Fatalf("got %v, want %v", st, want)
 	}
 }
 

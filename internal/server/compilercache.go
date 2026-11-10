@@ -149,30 +149,30 @@ func (c sccacheCount) total() (n int64) {
 	return n
 }
 
-func parseSccacheStats(b []byte) (*proto.CompilerCacheStats, error) {
+// parseSccacheStats maps the statistics to proto.Exit.Cache counters.
+func parseSccacheStats(b []byte) (map[string]int64, error) {
 	var j sccacheJSON
 	if err := json.Unmarshal(b, &j); err != nil {
 		return nil, err
 	}
 	st := j.Stats
-	return &proto.CompilerCacheStats{
-		Tool:         config.CompilerCacheSccache,
-		Requests:     st.CompileRequests,
-		Hits:         st.CacheHits.total(),
-		Misses:       st.CacheMisses.total(),
-		NotCacheable: st.RequestsNotCacheable + st.NonCacheableCompiling,
-		Errors:       st.CacheErrors.total() + st.CacheReadErrors + st.CacheWriteErrors,
+	return map[string]int64{
+		"sccache_requests":      st.CompileRequests,
+		"sccache_hits":          st.CacheHits.total(),
+		"sccache_misses":        st.CacheMisses.total(),
+		"sccache_not_cacheable": st.RequestsNotCacheable + st.NonCacheableCompiling,
+		"sccache_errors":        st.CacheErrors.total() + st.CacheReadErrors + st.CacheWriteErrors,
 	}, nil
 }
 
 // sccacheStats reads the statistics of the session's sccache server and
 // stops it. It returns nil if the session never started one.
-func (s *Server) sccacheStats(env []string, session string) *proto.CompilerCacheStats {
+func (s *Server) sccacheStats(env []string, session string) map[string]int64 {
 	if !sccacheStarted(session) {
 		return nil
 	}
 	out, err := runSccache(env, "--show-stats", "--stats-format=json")
-	var st *proto.CompilerCacheStats
+	var st map[string]int64
 	if err == nil {
 		st, err = parseSccacheStats(out)
 	}

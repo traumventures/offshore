@@ -19,6 +19,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/client"
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/cloudsourced/internal/runlog"
 	"github.com/traumventures/cloudsourced/internal/transport"
 	"golang.org/x/term"
 )
@@ -28,8 +29,8 @@ var defaultEnv = []string{"TERM", "COLORTERM", "NO_COLOR", "CLICOLOR", "CLICOLOR
 
 // Main runs tool with args and returns the exit code.
 func Main(tool string, args []string) int {
-	if os.Getenv("CLOUDSOURCED_ACTIVE") != "" || os.Getenv("CLOUDSOURCED_DISABLE") != "" {
-		return execLocal(tool, args)
+	if os.Getenv("CLOUDSOURCED_ACTIVE") != "" {
+		return execLocal(tool, args) // nested inside a remote session
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -39,25 +40,42 @@ func Main(tool string, args []string) int {
 	if err != nil {
 		return execLocal(tool, args)
 	}
+	rec := &runlog.Run{Time: time.Now(), Repo: rootDir, Cwd: cwd, Tool: tool, Args: args, Mode: runlog.Local}
+	local := func(why string) int {
+		rec.Why = why
+		recordLocal(rec)
+		return execLocal(tool, args)
+	}
+	if os.Getenv("CLOUDSOURCED_DISABLE") != "" {
+		return local("CLOUDSOURCED_DISABLE is set")
+	}
 	repo, err := config.LoadRepo(rootDir)
 	if err != nil {
 		warn("invalid configuration, running locally: %v", err)
-		return execLocal(tool, args)
+		return local("invalid configuration: " + err.Error())
 	}
+	rec.Repo = repo.Root
 	profile, ok := repo.Tools[tool]
-	if !ok || !remoteAllowed(profile, args) {
-		return execLocal(tool, args)
+	if !ok {
+		return local(fmt.Sprintf("no [tool.%s] section in %s", tool, config.RepoFileName))
 	}
-	code, err := runRemote(repo, profile, tool, args, cwd)
+	if why, ok := remoteAllowed(profile, tool, args); !ok {
+		return local(why)
+	}
+	rec.Mode, rec.Why = runlog.Remote, "[tool."+tool+"] allows remote execution"
+	code, err := runRemote(repo, profile, tool, args, cwd, rec)
 	if err != nil {
 		var fb *fallback
 		if errors.As(err, &fb) {
 			if os.Getenv("CLOUDSOURCED_REQUIRE_REMOTE") != "" {
 				warn("remote execution failed: %v", fb.err)
+				rec.Mode, rec.Why = runlog.Failed, "remote required but failed: "+fb.err.Error()
+				recordLocal(rec)
 				return 125
 			}
 			warn("running locally: %v", fb.err)
-			return execLocal(tool, args)
+			rec.Mode = runlog.Local
+			return local("fallback: " + fb.err.Error())
 		}
 		warn("%v", err)
 		if code == 0 {
@@ -65,6 +83,13 @@ func Main(tool string, args []string) int {
 		}
 	}
 	return code
+}
+
+// recordLocal appends a run that did not reach the daemon's release call
+// to the run log in the daemon's state directory.
+func recordLocal(rec *runlog.Run) {
+	rec.Timings.Total = runlog.Ms(time.Since(rec.Time))
+	runlog.Append(client.StateDir(), *rec)
 }
 
 func warn(format string, a ...any) {
@@ -87,22 +112,24 @@ func subcommand(args []string) string {
 	return ""
 }
 
-func remoteAllowed(p config.Tool, args []string) bool {
+// remoteAllowed decides whether a subcommand may run remotely; the reason
+// explains a local decision.
+func remoteAllowed(p config.Tool, tool string, args []string) (string, bool) {
 	sub := subcommand(args)
 	for _, l := range p.Local {
 		if l == sub {
-			return false
+			return fmt.Sprintf("subcommand %q is listed in [tool.%s] local", sub, tool), false
 		}
 	}
 	if len(p.Remote) == 0 {
-		return true
+		return "", true
 	}
 	for _, r := range p.Remote {
 		if r == sub || r == "*" {
-			return true
+			return "", true
 		}
 	}
-	return false
+	return fmt.Sprintf("subcommand %q is not listed in [tool.%s] remote", sub, tool), false
 }
 
 // RealBinary finds tool in PATH, skipping cloudsourced shims.
@@ -155,7 +182,7 @@ func allowedEnv(patterns []string) map[string]string {
 	return out
 }
 
-func runRemote(repo *config.Repo, profile config.Tool, tool string, args []string, cwd string) (int, error) {
+func runRemote(repo *config.Repo, profile config.Tool, tool string, args []string, cwd string, rec *runlog.Run) (code int, err error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// Ctrl+C during preparation aborts cleanly.
@@ -183,8 +210,30 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	if err := json.Unmarshal(raw, &prep); err != nil {
 		return 0, &fallback{err}
 	}
+	rec.Machine, rec.Provider, rec.Size, rec.Price, rec.Placement = prep.Machine, prep.Provider, prep.Size, prep.PricePerHour, prep.Reason
+	rec.Lease, rec.Timings = prep.Lease, prep.Timings
 	release := client.Request{Op: "release", Lease: prep.Lease, UsageKey: prep.UsageKey}
-	defer func() { client.Call(context.Background(), release, nil) }()
+	started := false
+	defer func() {
+		// Runs that fall back to local execution are recorded by Main.
+		if started {
+			if err != nil {
+				rec.Error = err.Error()
+			}
+			c := code
+			rec.Exit = &c
+			rec.Timings.Total = runlog.Ms(time.Since(t0))
+			release.Run = rec
+		}
+		client.Call(context.Background(), release, nil)
+	}()
+	fwdPorts, err := ports(profile)
+	if err != nil {
+		return 0, &fallback{err}
+	}
+	fwd := listenPorts(fwdPorts)
+	defer fwd.close()
+	rec.Ports = fwd.forwarded()
 
 	env := allowedEnv(profile.Env)
 	for name, ref := range repo.Secrets {
@@ -215,6 +264,7 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 		}
 		req.TTY = &proto.TTY{Rows: uint16(rows), Cols: uint16(cols), Term: os.Getenv("TERM")}
 	}
+	tc := time.Now()
 	dctx, dcancel := context.WithTimeout(ctx, 15*time.Second)
 	conn, err := transport.Dial(dctx, prep.Addr, prep.Fingerprint)
 	dcancel()
@@ -230,23 +280,35 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	if err := pc.Send(proto.TExec, req); err != nil {
 		return 0, &fallback{err}
 	}
-	var started proto.Started
-	if err := pc.Expect(proto.TStarted, &started); err != nil {
+	var sstarted proto.Started
+	if err := pc.Expect(proto.TStarted, &sstarted); err != nil {
 		return 0, &fallback{err}
 	}
+	started = true
 	verbose := os.Getenv("CLOUDSOURCED_VERBOSE") != ""
 	t1 := time.Now()
+	rec.Slot = sstarted.Slot
+	rec.Timings.Barrier = sstarted.WaitMs
+	rec.Timings.Connect = max(0, runlog.Ms(t1.Sub(tc))-sstarted.WaitMs)
+	fwd.serve(conn, prep.Token, sstarted.Session)
 	if verbose {
-		warn("running on %s (slot %s, prepare %s, server wait %dms)", started.Machine, started.Slot, t1.Sub(t0).Round(time.Millisecond), started.WaitMs)
+		warn("running on %s (slot %s, prepare %s, server wait %dms)", sstarted.Machine, sstarted.Slot, t1.Sub(t0).Round(time.Millisecond), sstarted.WaitMs)
+		if len(rec.Ports) > 0 {
+			warn("forwarding 127.0.0.1 ports %s", strings.Join(rec.Ports, ", "))
+		}
 	}
-	code, exit, err := stream(pc, useTTY)
-	if err == nil {
-		release.Usage = &exit.Usage
-	}
+	exit, err := stream(pc, useTTY)
+	code = exit.Code
+	// Forwarded connections end with the remote process.
+	fwd.close()
 	t2 := time.Now()
+	rec.Timings.Run = runlog.Ms(t2.Sub(t1))
 	if err != nil {
 		return code, fmt.Errorf("remote session: %w", err)
 	}
+	usage := exit.Usage
+	release.Usage = &usage
+	rec.Usage, rec.Cache, rec.Warm = &usage, exit.Cache, usage.Warm
 	touched, err := receiveWriteback(pc, repo)
 	if err != nil {
 		return code, fmt.Errorf("write back: %w", err)
@@ -254,9 +316,12 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	for _, r := range touched {
 		client.Call(context.Background(), client.Request{Op: "sync", Root: r}, nil)
 	}
+	t3 := time.Now()
+	rec.Timings.Writeback = runlog.Ms(t3.Sub(t2))
 	if err := receiveOutputs(pc, repo.Root); err != nil {
 		return code, fmt.Errorf("outputs: %w", err)
 	}
+	rec.Timings.Outputs = runlog.Ms(time.Since(t3))
 	if err := pc.Write(proto.TDone, nil); err != nil {
 		return code, err
 	}
@@ -265,28 +330,32 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	}
 	if verbose {
 		warn("exit %d (run %s, write back and outputs %s)", code, t2.Sub(t1).Round(time.Millisecond), time.Since(t2).Round(time.Millisecond))
-		if cc := exit.CompilerCache; cc != nil {
-			warn("%s", FormatCompilerCache(cc))
+		if line := FormatCompilerCache(exit.Cache); line != "" {
+			warn("%s", line)
 		}
 	}
 	return code, nil
 }
 
-// FormatCompilerCache renders compiler cache statistics for humans, e.g.
-// "sccache: 3 hits / 1 misses (5 requests, 1 not cacheable)".
-func FormatCompilerCache(cc *proto.CompilerCacheStats) string {
-	s := fmt.Sprintf("%s: %d hits / %d misses (%d requests", cc.Tool, cc.Hits, cc.Misses, cc.Requests)
-	if cc.NotCacheable > 0 {
-		s += fmt.Sprintf(", %d not cacheable", cc.NotCacheable)
+// FormatCompilerCache renders the sccache counters of Exit.Cache for
+// humans, e.g. "sccache: 3 hits / 1 misses (5 requests, 1 not cacheable)".
+// It returns "" when the run did not use sccache.
+func FormatCompilerCache(c map[string]int64) string {
+	if _, ok := c["sccache_requests"]; !ok {
+		return ""
 	}
-	if cc.Errors > 0 {
-		s += fmt.Sprintf(", %d errors", cc.Errors)
+	s := fmt.Sprintf("sccache: %d hits / %d misses (%d requests", c["sccache_hits"], c["sccache_misses"], c["sccache_requests"])
+	if n := c["sccache_not_cacheable"]; n > 0 {
+		s += fmt.Sprintf(", %d not cacheable", n)
+	}
+	if n := c["sccache_errors"]; n > 0 {
+		s += fmt.Sprintf(", %d errors", n)
 	}
 	return s + ")"
 }
 
 // stream forwards stdio, terminal and signals until the remote exits.
-func stream(pc *proto.Conn, useTTY bool) (int, proto.Exit, error) {
+func stream(pc *proto.Conn, useTTY bool) (proto.Exit, error) {
 	if useTTY {
 		if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
 			defer term.Restore(int(os.Stdin.Fd()), old)
@@ -315,7 +384,7 @@ func stream(pc *proto.Conn, useTTY bool) (int, proto.Exit, error) {
 	for {
 		t, p, err := pc.Read()
 		if err != nil {
-			return 255, proto.Exit{}, err
+			return proto.Exit{Code: 255}, err
 		}
 		switch t {
 		case proto.TStdout:
@@ -325,11 +394,11 @@ func stream(pc *proto.Conn, useTTY bool) (int, proto.Exit, error) {
 		case proto.TExit:
 			var ex proto.Exit
 			if err := json.Unmarshal(p, &ex); err != nil {
-				return 255, proto.Exit{}, err
+				return proto.Exit{Code: 255}, err
 			}
-			return ex.Code, ex, nil
+			return ex, nil
 		case proto.TError:
-			return 255, proto.Exit{}, proto.Decode(t, p, proto.TExit, nil)
+			return proto.Exit{Code: 255}, proto.Decode(t, p, proto.TExit, nil)
 		}
 	}
 }

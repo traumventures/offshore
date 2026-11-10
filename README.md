@@ -226,6 +226,9 @@ NPM_TOKEN = "cmd:agentpass get npm/token"   # or env:VAR, file:PATH
 local = ["publish", "login", "install", "new", "init", "add", "remove"]
 eager = ["target/debug/myapp"]              # copied back after every run
 env   = ["RUSTFLAGS", "CARGO_TERM_*", "RUST_LOG", "RUST_BACKTRACE"]
+
+[tool.npm]
+ports = [8080, "3000:3001"]  # forward 127.0.0.1:local -> session port while it runs
 ```
 
 Then just use the tool:
@@ -233,7 +236,9 @@ Then just use the tool:
 ```sh
 cargo build
 cargo test
-cloudsourced status                 # machines and sessions
+cloudsourced status                 # machines, sessions, cost today (--json)
+cloudsourced why                    # last run: local/remote and why, machine,
+                                    # placement, timings, usage (N, list, --json)
 cloudsourced fetch 'target/debug/deps/*.so'   # lazy outputs
 cloudsourced down                   # destroy machines and caches
 ```
@@ -242,6 +247,23 @@ Escape hatches: `CLOUDSOURCED_DISABLE=1` (always local),
 `CLOUDSOURCED_REQUIRE_REMOTE=1` (fail instead of falling back),
 `CLOUDSOURCED_STDIN=always|never`, `CLOUDSOURCED_VERBOSE=1`.
 When no machine can be provisioned the proxy falls back to the local tool.
+
+Port forwarding: while a remote session runs, the proxy listens on
+`127.0.0.1:<local>` for every port of `[tool.X] ports` (or
+`CLOUDSOURCED_PORTS=8080,3000:3001`, which replaces the configured list)
+and carries each connection over its own QUIC stream to
+`127.0.0.1:<remote>` in the machine's network namespace, which sessions and
+service containers share. Connections end with the session. A busy local
+port is reported and skipped; the command still runs.
+
+`cloudsourced why` reads the last 50 runs from `<state>/runs.jsonl`. The
+`cache` field carries counters of cache integrations (e.g. sccache hits).
+`cloudsourced status` estimates today's cost (since local midnight) per
+machine size as `price_per_hour` times the uptime the orchestrator observed
+(starting or running). Machines first seen up count from their creation
+time; restarts and removals that happened while the daemon or control plane
+was not running are not visible, and provider billing granularity is
+ignored.
 
 ### Compiler cache and linker
 
@@ -269,7 +291,7 @@ workspace crates in dev profiles; dependencies are cached regardless.
 `incremental = false` sets `CARGO_INCREMENTAL=0` unless the run sets it.
 User settings of `RUSTC_WRAPPER` win. With `CLOUDSOURCED_VERBOSE=1` the proxy
 prints the run's statistics (`sccache: 3 hits / 1 misses (...)`); they are
-also part of the session's exit message (`proto.Exit.CompilerCache`).
+also part of the session's exit message (`proto.Exit.Cache`: `sccache_requests`, `_hits`, `_misses`, `_not_cacheable`, `_errors`; shown by `cloudsourced why`).
 
 `[environment] linker = "mold"` installs the pinned static mold release
 (`lld` installs the distribution's `lld` package, Debian based images) and a

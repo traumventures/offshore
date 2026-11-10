@@ -149,6 +149,9 @@ type Tool struct {
 	Local  []string `toml:"local"`  // subcommands always executed locally
 	Eager  []string `toml:"eager"`  // output globs copied back after every run
 	Env    []string `toml:"env"`    // environment variable allowlist (supports trailing *)
+	// Ports are forwarded from 127.0.0.1 locally into the session while
+	// it runs: 8080 or "local:remote" (e.g. "3000:3001").
+	Ports []any `toml:"ports"`
 }
 
 // Service is an auxiliary container started next to every machine of the
@@ -366,6 +369,11 @@ func (r *Repo) Validate() error {
 			errs = append(errs, "cache.compiler.ttl: "+err.Error())
 		} else if d < time.Second || d > MaxCompilerCacheTTL {
 			errs = append(errs, fmt.Sprintf("cache.compiler.ttl: %q must be between 1s and 24h", cc.TTL))
+		}
+	}
+	for name, t := range r.Tools {
+		if _, err := ParsePorts(t.Ports); err != nil {
+			errs = append(errs, fmt.Sprintf("tool.%s.ports: %v", name, err))
 		}
 	}
 	for name, svc := range r.Services {

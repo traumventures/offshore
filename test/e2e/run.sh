@@ -83,6 +83,12 @@ max_machines = $4
 queue_timeout = "3m"
 estimator = "static"
 
+[[fleet.size]]
+name = "default"
+cpu = 4
+memory = "4G"
+price_per_hour = 0.5
+
 [[fleet.provision]]
 run = "echo provisioned-by-fleet > /cache/fleet-provision"
 
@@ -207,6 +213,47 @@ out="$(cd "$PROJ" && PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" CLOUDSOURCED_DISABLE=1 
 check "CLOUDSOURCED_DISABLE runs locally" eq "$out" "local"
 out="$(cd "$WORK" && PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" sh -c 'echo ${CLOUDSOURCED_SESSION:-local}')"
 check "outside a configured repo the real tool runs" eq "$out" "local"
+
+step "developer experience: port forwarding, cloudsourced why, cost in status"
+# curl_local PORT PATH: poll a forwarded local port for up to ~10s.
+curl_local() { for _ in $(seq 50); do curl -sf --max-time 2 "http://127.0.0.1:$1$2" && return 0; sleep 0.2; done; return 1; }
+(cd "$PROJ" && CLOUDSOURCED_PORTS=18091:18081 exec "$BIN" run sh -c 'busybox httpd -f -p 18081 -h /etc & sleep 8; echo dev-server-done' > "$WORK/fwd" 2>&1) & fpid=$!
+got="$(curl_local 18091 /hostname)"
+check "dev server in the session reachable on the local port (CLOUDSOURCED_PORTS)" contains "$got" "cs-"
+wait $fpid; code=$?
+check "forwarded session exits normally" eq "$code" 0
+check "forwarded session output intact" contains "$(cat "$WORK/fwd")" "dev-server-done"
+check "local port closed when the session ends" test -n "$(curl -s --max-time 2 http://127.0.0.1:18091/hostname >/dev/null || echo closed)"
+(cd "$PROJ" && exec "$BIN" run bash -c 'sleep 6' > "$WORK/fwd2" 2>&1) & fpid=$!
+got="$(curl_local 18092 /hostname)"
+check "service reachable through [tool.bash] ports (local:remote)" contains "$got" "cs-"
+wait $fpid
+python3 -c 'import socket,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1",18093)); s.listen(); time.sleep(30)' & busypid=$!
+sleep 0.5
+out="$(cd "$PROJ" && CLOUDSOURCED_PORTS=18093 "$BIN" run sh -c 'echo still-runs' 2>&1)"; code=$?
+kill $busypid 2>/dev/null; wait $busypid 2>/dev/null
+check "busy local port: clear error" contains "$out" "local port 18093 is already in use"
+check "busy local port: run continues" eq "$code" 0
+check "busy local port: command output" contains "$out" "still-runs"
+run sh -c 'exit 3' >/dev/null 2>&1
+why_out="$(cs why)"
+check "why shows the last remote run" contains "$why_out" "ran        remote"
+check "why shows the command" contains "$(echo "$why_out" | head -1)" "sh -c exit 3"
+check "why shows the exit code" contains "$why_out" "exit       3"
+check "why shows machine, size and price" contains "$why_out" "(local/default, 0.500/h)"
+check "why shows the placement reason" contains "$why_out" "placement"
+check "why shows timings" contains "$why_out" "queue / machine start"
+wj="$(cs why --json)"
+check "why --json has exit, timings and usage" eq "$(echo "$wj" | jq -r '[.mode, .exit, (.timings.total_ms > 0), (.usage != null), .provider, .size] | join(" ")')" "remote 3 true true local default"
+(cd "$PROJ" && CLOUDSOURCED_DISABLE=1 "$BIN" run sh -c true)
+check "why records local decisions" contains "$(cs why last)" "local: CLOUDSOURCED_DISABLE is set"
+check "why N addresses older runs" contains "$(cs why 2)" "sh -c exit 3"
+check "why list shows recent runs" eq "$(cs why list | sed -n 2p | awk '{print $1, $5}')" "1 local"
+st="$(cs status)"
+check "status shows price per size and a total" contains "$st" "local/default  0.500"
+check "status total line" contains "$st" "  total"
+sj="$(cs status --json)"
+check "status --json reports cost from price_per_hour" eq "$(echo "$sj" | jq -r '[.cost.sizes[0].price_per_hour, (.cost.total > 0), (.cost.per_hour > 0), (.machines | length > 0)] | join(" ")')" "0.5 true true true"
 
 step "editor integration (rust-analyzer flycheck through the proxy)"
 out="$(cd "$PROJ" && "$BIN" run cargo check --workspace --message-format=json 2>/dev/null)"
