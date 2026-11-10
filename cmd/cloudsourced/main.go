@@ -38,7 +38,8 @@ Usage:
   cloudsourced run [--] <tool> [args...]   run a command through the proxy
   cloudsourced shim install [tools...]     install proxies into ~/.cloudsourced/bin
   cloudsourced shim uninstall              remove proxies
-  cloudsourced status                      show machines and sessions
+  cloudsourced status [--json]             show machines, sessions and cost today
+  cloudsourced why [N|last|list] [--json]  explain a recent run (placement, timings)
   cloudsourced fetch <glob>...             copy outputs from the latest remote build
   cloudsourced down                        destroy all machines and caches
   cloudsourced reconcile                   apply the fleet policy now
@@ -59,6 +60,7 @@ Environment:
   CLOUDSOURCED_REQUIRE_REMOTE=1   fail instead of falling back to local execution
   CLOUDSOURCED_STDIN=always|never stdin forwarding policy
   CLOUDSOURCED_VERBOSE=1          print the machine used for each run
+  CLOUDSOURCED_PORTS=8080,3000:3001  forward local ports into the session
 `
 
 func init() {
@@ -140,7 +142,9 @@ func run(cmd string, args []string) error {
 	case "daemon":
 		return daemonCmd(args)
 	case "status":
-		return status()
+		return status(args)
+	case "why":
+		return why(args)
 	case "down":
 		if err := client.EnsureDaemon(context.Background()); err != nil {
 			return err
@@ -235,7 +239,22 @@ func daemonCmd(args []string) error {
 	return errors.New("usage: cloudsourced daemon run|start|stop|status")
 }
 
-func status() error {
+// statusJSON is the output of `cloudsourced status --json`.
+type statusJSON struct {
+	Machines []orchestrator.Machine  `json:"machines"` // includes machines removed today (Removed set)
+	Cost     orchestrator.CostReport `json:"cost"`
+}
+
+func status(args []string) error {
+	asJSON := false
+	for _, a := range args {
+		switch a {
+		case "--json":
+			asJSON = true
+		default:
+			return errors.New("usage: cloudsourced status [--json]")
+		}
+	}
 	ctx := context.Background()
 	if err := client.EnsureDaemon(ctx); err != nil {
 		return err
@@ -244,10 +263,27 @@ func status() error {
 	if err != nil {
 		return err
 	}
-	var ms []orchestrator.Machine
-	if err := json.Unmarshal(raw, &ms); err != nil {
+	var all []orchestrator.Machine
+	if err := json.Unmarshal(raw, &all); err != nil {
 		return err
 	}
+	now := time.Now()
+	cost := orchestrator.Costs(all, orchestrator.StartOfDay(now), now)
+	if asJSON {
+		if all == nil {
+			all = []orchestrator.Machine{}
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(statusJSON{Machines: all, Cost: cost})
+	}
+	var ms []orchestrator.Machine
+	for _, m := range all {
+		if m.Removed.IsZero() {
+			ms = append(ms, m)
+		}
+	}
+	defer printCost(cost)
 	if len(ms) == 0 {
 		fmt.Println("no machines")
 		return nil
@@ -293,6 +329,31 @@ func status() error {
 		}
 	}
 	return nil
+}
+
+// printCost prints the estimated cost per machine size since the start of
+// the day and a total line.
+func printCost(r orchestrator.CostReport) {
+	if len(r.Sizes) == 0 {
+		return
+	}
+	fmt.Printf("\ncost since %s (estimated from observed uptime):\n", r.Since.Format("15:04 MST"))
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "  SIZE\tPRICE/H\tMACHINES\tUP NOW\tUPTIME\tCOST")
+	unpriced := false
+	for _, sc := range r.Sizes {
+		price := fmt.Sprintf("%.3f", sc.PricePerHour)
+		if sc.Unpriced {
+			price, unpriced = "-", true
+		}
+		fmt.Fprintf(tw, "  %s/%s\t%s\t%d\t%d\t%s\t%.2f\n", sc.Provider, sc.Size, price, sc.Machines, sc.Running,
+			(time.Duration(sc.UptimeSec) * time.Second).Round(time.Second), sc.Cost)
+	}
+	fmt.Fprintf(tw, "  total\t%.3f\t\t\t\t%.2f\n", r.PerHour, r.Total)
+	tw.Flush()
+	if unpriced {
+		fmt.Println("  (\"-\": no price_per_hour configured for the size)")
+	}
 }
 
 func human(b int64) string {
