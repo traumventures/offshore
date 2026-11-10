@@ -21,7 +21,10 @@ import (
 	"github.com/traumventures/cloudsourced/internal/outputs"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/runlog"
+	"github.com/traumventures/cloudsourced/internal/telemetry"
 	"github.com/traumventures/cloudsourced/internal/transport"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/term"
 )
 
@@ -33,6 +36,13 @@ func Main(tool string, args []string) int {
 	if os.Getenv("CLOUDSOURCED_ACTIVE") != "" {
 		return execLocal(tool, args) // nested inside a remote session
 	}
+	tr := startTrace(tool, args)
+	code := mainRun(tr, tool, args)
+	tr.finish(code)
+	return code
+}
+
+func mainRun(tr *runTrace, tool string, args []string) int {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return execLocal(tool, args)
@@ -42,6 +52,7 @@ func Main(tool string, args []string) int {
 		return execLocal(tool, args)
 	}
 	rec := &runlog.Run{Time: time.Now(), Repo: rootDir, Cwd: cwd, Tool: tool, Args: args, Mode: runlog.Local}
+	tr.rec = rec
 	local := func(why string) int {
 		rec.Why = why
 		recordLocal(rec)
@@ -67,7 +78,7 @@ func Main(tool string, args []string) int {
 		return local(why)
 	}
 	rec.Mode, rec.Why = runlog.Remote, "[tool."+tool+"] allows remote execution"
-	code, err := runRemote(repo, profile, tool, args, cwd, rec)
+	code, err := runRemote(tr.ctx, repo, profile, tool, args, cwd, rec)
 	if err != nil {
 		var fb *fallback
 		if errors.As(err, &fb) {
@@ -173,6 +184,7 @@ func execLocal(tool string, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 127
 	}
+	active.finish(-1) // the process is replaced: export spans now
 	err = syscall.Exec(bin, append([]string{tool}, args...), os.Environ())
 	fmt.Fprintf(os.Stderr, "cloudsourced: exec %s: %v\n", bin, err)
 	return 126
@@ -196,8 +208,8 @@ func allowedEnv(patterns []string) map[string]string {
 	return out
 }
 
-func runRemote(repo *config.Repo, profile config.Tool, tool string, args []string, cwd string, rec *runlog.Run) (code int, err error) {
-	ctx, cancel := context.WithCancel(context.Background())
+func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, tool string, args []string, cwd string, rec *runlog.Run) (code int, err error) {
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	// Ctrl+C during preparation aborts cleanly.
 	prepSig := make(chan os.Signal, 1)
@@ -208,10 +220,13 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 		}
 	}()
 	t0 := time.Now()
-	if err := client.EnsureDaemon(ctx); err != nil {
+	pctx, pspan := telemetry.Start(ctx, "proxy.prepare")
+	if err := client.EnsureDaemon(pctx); err != nil {
+		telemetry.End(pspan, err)
 		return 0, &fallback{err}
 	}
-	raw, err := client.Call(ctx, client.Request{Op: "prepare", Root: repo.Root, Cwd: cwd, Tool: tool, Args: args}, os.Stderr)
+	raw, err := client.Call(pctx, client.Request{Op: "prepare", Root: repo.Root, Cwd: cwd, Tool: tool, Args: args, TraceParent: telemetry.Inject(pctx)}, os.Stderr)
+	telemetry.End(pspan, err)
 	signal.Stop(prepSig)
 	close(prepSig)
 	if err != nil {
@@ -226,7 +241,7 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	}
 	rec.Machine, rec.Provider, rec.Size, rec.Price, rec.Placement = prep.Machine, prep.Provider, prep.Size, prep.PricePerHour, prep.Reason
 	rec.Lease, rec.Timings = prep.Lease, prep.Timings
-	release := client.Request{Op: "release", Lease: prep.Lease, UsageKey: prep.UsageKey}
+	release := client.Request{Op: "release", Lease: prep.Lease, UsageKey: prep.UsageKey, TraceParent: telemetry.Inject(ctx)}
 	started := false
 	defer func() {
 		// Runs that fall back to local execution are recorded by Main.
@@ -264,7 +279,7 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 		Grant: prep.Grant, MemoryOvercommit: prep.MemoryOvercommit,
 		Build: repo.Cache.Build.Paths, BuildTTL: prep.BuildTTL, Deps: repo.Cache.Deps.Paths,
 		Eager: profile.Eager, Lease: prep.Lease,
-		Linker: repo.Environment.Linker,
+		Linker: repo.Environment.Linker, TraceParent: telemetry.Inject(ctx),
 	}
 	if cc := repo.Cache.Compiler; cc.Tool != "" {
 		req.CompilerCache = &proto.CompilerCache{
@@ -279,25 +294,32 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 		req.TTY = &proto.TTY{Rows: uint16(rows), Cols: uint16(cols), Term: os.Getenv("TERM")}
 	}
 	tc := time.Now()
-	dctx, dcancel := context.WithTimeout(ctx, 15*time.Second)
+	cctx, cspan := telemetry.Start(ctx, "proxy.connect", trace.WithAttributes(attribute.String("cloudsourced.machine", prep.Machine)))
+	dctx, dcancel := context.WithTimeout(cctx, 15*time.Second)
 	conn, err := transport.Dial(dctx, prep.Addr, prep.Fingerprint)
 	dcancel()
 	if err != nil {
+		telemetry.End(cspan, err)
 		return 0, &fallback{fmt.Errorf("connect to machine %s: %w", prep.Machine, err)}
 	}
 	defer conn.CloseWithError(0, "")
-	st, pc, err := transport.OpenStream(ctx, conn, prep.Token, proto.KindExec)
+	st, pc, err := transport.OpenStream(cctx, conn, prep.Token, proto.KindExec)
 	if err != nil {
+		telemetry.End(cspan, err)
 		return 0, &fallback{err}
 	}
 	defer st.Close()
 	if err := pc.Send(proto.TExec, req); err != nil {
+		telemetry.End(cspan, err)
 		return 0, &fallback{err}
 	}
 	var sstarted proto.Started
 	if err := pc.Expect(proto.TStarted, &sstarted); err != nil {
+		telemetry.End(cspan, err)
 		return 0, &fallback{err}
 	}
+	cspan.SetAttributes(attribute.String("cloudsourced.session", sstarted.Session), attribute.Int64("cloudsourced.server_wait_ms", sstarted.WaitMs))
+	cspan.End()
 	started = true
 	verbose := os.Getenv("CLOUDSOURCED_VERBOSE") != ""
 	t1 := time.Now()
@@ -311,8 +333,11 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 			warn("forwarding 127.0.0.1 ports %s", strings.Join(rec.Ports, ", "))
 		}
 	}
+	_, xspan := telemetry.Start(ctx, "proxy.exec")
 	exit, err := stream(pc, useTTY)
 	code = exit.Code
+	execAttrs(xspan, exit)
+	telemetry.End(xspan, err)
 	// Forwarded connections end with the remote process.
 	fwd.close()
 	t2 := time.Now()
@@ -321,9 +346,13 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 		return code, fmt.Errorf("remote session: %w", err)
 	}
 	usage := exit.Usage
+	usage.Cache = exit.Cache
 	release.Usage = &usage
 	rec.Usage, rec.Cache, rec.Warm = &usage, exit.Cache, usage.Warm
+	_, wspan := telemetry.Start(ctx, "proxy.writeback")
 	touched, err := receiveWriteback(pc, repo)
+	wspan.SetAttributes(attribute.Int("cloudsourced.roots_touched", len(touched)))
+	telemetry.End(wspan, err)
 	if err != nil {
 		return code, fmt.Errorf("write back: %w", err)
 	}
@@ -332,7 +361,10 @@ func runRemote(repo *config.Repo, profile config.Tool, tool string, args []strin
 	}
 	t3 := time.Now()
 	rec.Timings.Writeback = runlog.Ms(t3.Sub(t2))
-	if err := receiveOutputs(pc, repo.Root); err != nil {
+	_, ospan := telemetry.Start(ctx, "proxy.outputs")
+	err = receiveOutputs(pc, repo.Root)
+	telemetry.End(ospan, err)
+	if err != nil {
 		return code, fmt.Errorf("outputs: %w", err)
 	}
 	rec.Timings.Outputs = runlog.Ms(time.Since(t3))

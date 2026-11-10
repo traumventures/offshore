@@ -25,6 +25,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/cloudsourced/internal/telemetry"
 	"github.com/traumventures/cloudsourced/internal/transport"
 )
 
@@ -39,6 +40,8 @@ type Config struct {
 	Provision    []string
 	Swap         bool // machines allow sessions to swap
 	Policy       scheduler.Config
+	// EventRetention bounds the analysis event log (0 = 30 days).
+	EventRetention time.Duration
 }
 
 // Default repository cache lifetimes of requests that carry none (older
@@ -245,6 +248,7 @@ type Orchestrator struct {
 	PrepareImage func(ctx context.Context, provName string, prov provider.Provider, envHash, size string) (string, error)
 
 	metrics *orchMetrics
+	obs     *observer
 }
 
 // New creates an orchestrator.
@@ -272,6 +276,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		ProbeFunc: Probe,
 	}
 	o.metrics = newOrchMetrics(o)
+	o.obs = newObserver(stateDir, cfg.EventRetention)
 	o.loadRecent()
 	return o, nil
 }
@@ -283,6 +288,7 @@ func (o *Orchestrator) SetConfig(cfg Config) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	fixConfig(&cfg)
+	o.obs.log.SetRetention(cfg.EventRetention)
 	if _, ok := o.policy.(scheduler.Default); ok {
 		o.policy = scheduler.Default{Cfg: cfg.Policy}
 	}
@@ -440,6 +446,9 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 			pm.State = provider.Starting
 		}
 		pm.Fingerprint = o.fingerprint(pm)
+		if !ok || m.State != pm.State {
+			o.stateEventLocked(pm.ID, pm.State)
+		}
 		m.Machine = pm
 		m.observe(time.Now())
 		if pm.State != provider.Running {
@@ -460,6 +469,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 	}
 	for id := range o.machines {
 		if !seen[id] && o.machines[id].State != provider.Starting {
+			o.stateEventLocked(id, "gone")
 			o.removeLocked(id)
 			down = append(down, id)
 		}
@@ -625,6 +635,7 @@ var ErrUnschedulable = errors.New("cannot schedule")
 // stop, destroy, drain). log receives progress messages for the user.
 func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) (Lease, error) {
 	start := time.Now()
+	ctx, span := startAcquire(ctx, req)
 	lease, err := o.acquire(ctx, req, log)
 	result := "assigned"
 	switch {
@@ -642,6 +653,7 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 		result = "error"
 	}
 	o.metrics.acquire.Observe(time.Since(start).Seconds(), result)
+	o.endAcquire(ctx, span, req, start, lease, result, err)
 	return lease, err
 }
 
@@ -748,6 +760,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 func (o *Orchestrator) markLocked(acts []scheduler.Action) {
 	for i, a := range acts {
 		o.metrics.actions.Inc(actionName(a.Kind))
+		o.markEventsLocked(a)
 		switch a.Kind {
 		case scheduler.Create:
 			id := newID(6)
@@ -787,16 +800,18 @@ func (o *Orchestrator) execute(ctx context.Context, acts []scheduler.Action, wai
 			o.mu.Lock()
 			image := o.images[a.EnvHash]
 			o.mu.Unlock()
-			go o.createMachine(ctx, a.Machine, a.EnvHash, image, a.Size)
+			go o.traced(ctx, a, func(ctx context.Context) { o.createMachine(ctx, a.Machine, a.EnvHash, image, a.Size) })
 		case scheduler.Start:
-			go o.startMachine(ctx, a.Machine)
+			go o.traced(ctx, a, func(ctx context.Context) { o.startMachine(ctx, a.Machine) })
 		case scheduler.Stop, scheduler.Destroy:
 			run := func() {
-				if a.Kind == scheduler.Stop {
-					o.stopMachine(ctx, a.Machine, a.Reason)
-				} else {
-					o.destroyMachine(ctx, a.Machine, a.Reason)
-				}
+				o.traced(ctx, a, func(ctx context.Context) {
+					if a.Kind == scheduler.Stop {
+						o.stopMachine(ctx, a.Machine, a.Reason)
+					} else {
+						o.destroyMachine(ctx, a.Machine, a.Reason)
+					}
+				})
 			}
 			if wait {
 				wg.Add(1)
@@ -957,6 +972,12 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	for k, v := range logs.Forward() { // machines log like the fleet
 		spec.Env[k] = v
 	}
+	for k, v := range telemetry.Forward() { // and trace to the same backend
+		spec.Env[k] = v
+	}
+	for k, v := range telemetry.ForwardSecret() {
+		spec.SecretEnv[k] = v
+	}
 	prov, ok := o.provs[size.Provider]
 	if !ok {
 		return fmt.Errorf("size %s: unknown provider %q", size.Name, size.Provider)
@@ -1074,6 +1095,7 @@ func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 					o.notify()
 					o.mu.Unlock()
 					if st.Ready {
+						o.readyEvent(ctx, id)
 						o.log.Info("machine ready", "id", id, "addr", pm.Addr)
 						return nil
 					}
@@ -1153,7 +1175,9 @@ func (o *Orchestrator) removeLocked(id string) {
 // and executes the policy's fleet plan.
 func (o *Orchestrator) Reconcile(ctx context.Context) error {
 	start := time.Now()
+	ctx, span := telemetry.Start(ctx, "orchestrator.reconcile")
 	err := o.reconcile(ctx)
+	telemetry.End(span, err)
 	result := "ok"
 	if err != nil {
 		result = "error"

@@ -25,6 +25,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/machine"
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/cloudsourced/internal/telemetry"
 	"github.com/traumventures/cloudsourced/internal/transport"
 )
 
@@ -166,7 +167,9 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 	}
 	var env []string
 	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "CLOUDSOURCED_") {
+		// Neither fleet secrets nor the server's tracing setup (whose
+		// headers may hold credentials) reach sessions.
+		if !strings.HasPrefix(kv, "CLOUDSOURCED_") && !strings.HasPrefix(kv, "OTEL_") {
 			env = append(env, kv)
 		}
 	}
@@ -328,6 +331,7 @@ func (s *Server) serveStream(ctx context.Context, conn *quic.Conn, st *quic.Stre
 		st.CancelRead(1)
 		return
 	}
+	ctx = telemetry.Extract(ctx, hello.TraceParent)
 	switch hello.Kind {
 	case proto.KindSync:
 		err = s.serveSync(ctx, conn, pc)

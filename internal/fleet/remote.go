@@ -20,6 +20,7 @@ import (
 
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/cloudsourced/internal/telemetry"
 )
 
 // Remote is a Fleet served by a shared control plane.
@@ -61,11 +62,13 @@ func NewRemote(baseURL, fingerprint, apiKey string, clientCerts ...tls.Certifica
 }
 
 // call posts body to path and streams progress until the result frame.
-func (r *Remote) call(ctx context.Context, path string, body io.Reader, contentType string, progress io.Writer, out any) error {
+func (r *Remote) call(ctx context.Context, path string, body io.Reader, contentType string, progress io.Writer, out any) (err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.base+path, body)
 	if err != nil {
 		return err
 	}
+	span := clientSpan(ctx, req, knownPath(strings.SplitN(path, "?", 2)[0]))
+	defer func() { telemetry.End(span, err) }()
 	req.Header.Set("Authorization", "Bearer "+r.apiKey)
 	req.Header.Set(headerRequestID, newRequestID()) // correlates control plane logs
 	if contentType != "" {

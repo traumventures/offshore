@@ -61,6 +61,7 @@ func (h *History) defaults() (window, min int, headroom float64, minMem int64, o
 // Observe implements Estimator.
 func (h *History) Observe(key string, u Usage) {
 	window, _, _, _, _ := h.defaults()
+	u.Cache = nil // not used for estimates; keeps the history small
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	rs := append(h.runs[key], u)

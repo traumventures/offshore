@@ -26,6 +26,9 @@ import (
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 	"github.com/traumventures/cloudsourced/internal/runlog"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/cloudsourced/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // StateDir returns the daemon state directory.
@@ -219,6 +222,11 @@ type Request struct {
 	Files []manifest.Entry `json:"files,omitempty"`
 	// Run is recorded in the run log (op "release" and "record").
 	Run *runlog.Run `json:"run,omitempty"`
+	// TraceParent continues the caller's trace (W3C traceparent).
+	TraceParent string `json:"traceparent,omitempty"`
+	// Since and Until bound the events of op "events" (zero: open).
+	Since time.Time `json:"since,omitzero"`
+	Until time.Time `json:"until,omitzero"`
 }
 
 // Prepared is the result of a prepare request.
@@ -273,7 +281,7 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 	var mu sync.Mutex
 	progress := progressWriter{enc: enc, mu: &mu}
 	// A disconnecting proxy cancels its request.
-	rctx, cancel := context.WithCancel(ctx)
+	rctx, cancel := context.WithCancel(telemetry.Extract(ctx, req.TraceParent))
 	defer cancel()
 	go func() {
 		io.Copy(io.Discard, c)
@@ -306,7 +314,17 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 		if req.Lease == "" {
 			return nil, nil
 		}
-		return nil, d.fleet.Release(ctx, req.Lease, req.UsageKey, req.Usage)
+		ctx, span := telemetry.Start(ctx, "daemon.release", trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(attribute.String("cloudsourced.lease", req.Lease)))
+		err := d.fleet.Release(ctx, req.Lease, req.UsageKey, req.Usage)
+		telemetry.End(span, err)
+		return nil, err
+	case "events":
+		src, ok := d.fleet.(fleet.EventSource)
+		if !ok {
+			return nil, errors.New("the fleet keeps no event log")
+		}
+		return src.Events(ctx, req.Since, req.Until)
 	case "record":
 		d.record(req.Run)
 		return nil, nil
@@ -403,7 +421,9 @@ func RepoID(user, root string) string {
 	return manifest.HashBytes([]byte(user + "\x00" + root))[:20]
 }
 
-func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (*Prepared, error) {
+func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (_ *Prepared, err error) {
+	ctx, span := telemetry.Start(ctx, "daemon.prepare", trace.WithSpanKind(trace.SpanKindServer))
+	defer func() { telemetry.End(span, err) }()
 	repo, err := config.LoadRepo(req.Root)
 	if err != nil {
 		return nil, err
@@ -415,10 +435,13 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	if d.reload != nil {
 		d.reload.Check() // the fleet configuration file changed: apply it
 	}
+	_, sp := telemetry.Start(ctx, "daemon.env_resolve")
 	plan, err := envbuild.Resolve(repo)
+	telemetry.End(sp, err)
 	if err != nil {
 		return nil, err
 	}
+	span.SetAttributes(attribute.String("cloudsourced.env_hash", plan.Hash))
 	var tm runlog.Timings
 	mark := time.Now()
 	lap := func() int64 {
@@ -428,7 +451,10 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		return ms
 	}
 	env := fleet.Env{Hash: plan.Hash, Tag: plan.Tag, Context: plan.Context}
-	if err := d.fleet.EnsureEnv(ctx, env, progress); err != nil {
+	ictx, sp := telemetry.Start(ctx, "daemon.image_ensure", trace.WithAttributes(attribute.String("cloudsourced.image", plan.Tag)))
+	err = d.fleet.EnsureEnv(ictx, env, progress)
+	telemetry.End(sp, err)
+	if err != nil {
 		return nil, err
 	}
 	tm.Env = lap()
@@ -436,6 +462,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	paths := append([]string{repo.Root}, repo.ExtraRootPaths()...)
 	roots := map[string]*root{}
 	versions := map[string]uint64{}
+	_, sp = telemetry.Start(ctx, "daemon.manifest_refresh", trace.WithAttributes(attribute.Int("cloudsourced.roots", len(paths))))
 	for _, p := range paths {
 		r, err := d.rootFor(p, rulesFor(repo, p))
 		if err != nil {
@@ -447,13 +474,18 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		}
 		roots[p], versions[p] = r, v
 	}
+	sp.End()
 	tm.Sync = lap()
 	repoID := RepoID(c.User, repo.Root)
 	key := UsageKey(repoID, req.Tool, req.Args)
-	need, err := d.fleet.Estimate(ctx, key, scheduler.Resources{CPU: repo.Resources.CPU, Memory: repo.MemoryBytes()})
+	span.SetAttributes(attribute.String("cloudsourced.repo_id", repoID), attribute.String("cloudsourced.usage_key", key))
+	ectx, sp := telemetry.Start(ctx, "daemon.estimate")
+	need, err := d.fleet.Estimate(ectx, key, scheduler.Resources{CPU: repo.Resources.CPU, Memory: repo.MemoryBytes()})
+	telemetry.End(sp, err)
 	if err != nil {
 		return nil, err
 	}
+	span.SetAttributes(attribute.Float64("cloudsourced.need.cpu", need.CPU), attribute.Int64("cloudsourced.need.memory", need.Memory))
 	if max := repo.MaxMemoryBytes(); max > 0 && need.Memory > max {
 		need.Memory = max
 	}
@@ -469,7 +501,10 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 			return nil, err
 		}
 		tm.Queue += lap()
-		err = d.attachAll(ctx, lease, repo, roots)
+		actx, sp := telemetry.Start(ctx, "daemon.attach", trace.WithAttributes(
+			attribute.String("cloudsourced.machine", lease.MachineID), attribute.Int("cloudsourced.attempt", attempt)))
+		err = d.attachAll(actx, lease, repo, roots)
+		telemetry.End(sp, err)
 		tm.Attach += lap()
 		if err == nil {
 			break
@@ -488,6 +523,8 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 			fmt.Fprintf(progress, "cloudsourced: outputs mount failed, using eager outputs only: %v\n", err)
 		}
 	}
+	span.SetAttributes(attribute.String("cloudsourced.lease", lease.ID), attribute.String("cloudsourced.machine", lease.MachineID),
+		attribute.String("cloudsourced.provider", lease.Provider), attribute.String("cloudsourced.size", lease.Size))
 	ttl := lease.BuildTTL
 	if ttl <= 0 {
 		ttl = buildTTL // control plane without request-scoped TTLs; the server caps it

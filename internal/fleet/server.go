@@ -17,6 +17,9 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/traumventures/cloudsourced/internal/metrics"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 )
@@ -78,11 +81,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(headerRequestID, id)
 	rec := &statusRecorder{ResponseWriter: w}
 	log := s.log.With("request_id", id)
+	r, span := serverSpan(r, knownPath(r.URL.Path))
 	failed := s.serve(rec, r, log)
 	path, code := knownPath(r.URL.Path), rec.code
 	if code == 0 {
 		code = http.StatusOK
 	}
+	span.SetAttributes(attribute.Int("http.response.status_code", code), attribute.Bool("cloudsourced.failed", failed))
+	if failed || code >= 400 {
+		span.SetStatus(codes.Error, strconv.Itoa(code))
+	}
+	span.End()
 	result := strconv.Itoa(code)
 	if failed {
 		result = "error"
@@ -164,6 +173,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, log *slog.Logger)
 		h = func(ctx context.Context, _ *http.Request, _ io.Writer) (any, error) {
 			return nil, s.fleet.DestroyAll(ctx)
 		}
+	case pathEvents:
+		h = func(ctx context.Context, r *http.Request, _ io.Writer) (any, error) { return s.serveEvents(ctx, r) }
 	default:
 		http.NotFound(w, r)
 		return false

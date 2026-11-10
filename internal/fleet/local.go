@@ -305,8 +305,9 @@ func (l *Local) Acquire(ctx context.Context, req orchestrator.Request, progress 
 	return l.orch.Acquire(ctx, req, pw)
 }
 
-func (l *Local) Release(_ context.Context, leaseID, usageKey string, usage *scheduler.Usage) error {
+func (l *Local) Release(ctx context.Context, leaseID, usageKey string, usage *scheduler.Usage) error {
 	l.orch.Release(leaseID)
+	l.orch.Finish(ctx, leaseID, usageKey, usage)
 	if usage != nil && usageKey != "" {
 		l.est.Observe(usageKey, *usage)
 	}

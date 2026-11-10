@@ -31,6 +31,7 @@ type rawFile struct {
 	Fleet        Fleet                     `toml:"fleet"`
 	Docker       Docker                    `toml:"docker"`
 	Providers    map[string]map[string]any `toml:"providers"`
+	Telemetry    Telemetry                 `toml:"telemetry"`
 }
 
 // Client is the client configuration.
@@ -43,6 +44,8 @@ type Client struct {
 	// Orchestrator selects where fleet decisions are made: in the local
 	// daemon ("embedded") or in a shared control plane ("remote").
 	Orchestrator Orchestrator `toml:"orchestrator"`
+	// Telemetry configures tracing of the proxy and the daemon.
+	Telemetry Telemetry `toml:"telemetry"`
 	// FleetSections lists fleet sections present in the client file. They
 	// configure the embedded orchestrator and have no effect in remote mode.
 	FleetSections []string `toml:"-"`
@@ -101,7 +104,7 @@ func LoadClientFrom(path string) (*Client, error) {
 		if err := decodeStrict(data, &raw); err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
-		c.User, c.Orchestrator = raw.User, raw.Orchestrator
+		c.User, c.Orchestrator, c.Telemetry = raw.User, raw.Orchestrator, raw.Telemetry
 		top, _ := topLevel(data)
 		c.FleetSections = fleetSections(top)
 		if raw.Fleet.ID == "" {
@@ -167,6 +170,7 @@ func (c *Client) Validate() error {
 	default:
 		errs = append(errs, fmt.Sprintf("orchestrator.mode: unsupported %q (embedded, remote)", o.Mode))
 	}
+	errs = append(errs, c.Telemetry.validate()...)
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid %s:\n  %s", c.Path, strings.Join(errs, "\n  "))
 	}

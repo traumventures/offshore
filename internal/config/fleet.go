@@ -23,6 +23,9 @@ type FleetConfig struct {
 	// backend = "local-docker" and [providers.aws] with backend = "aws-ec2".
 	// Every other key of the table is passed to the backend as an option.
 	Providers map[string]map[string]any `toml:"providers"`
+	// Telemetry configures tracing of the orchestrator (control plane or
+	// embedded) and, forwarded, of its machines; and the event log.
+	Telemetry Telemetry `toml:"telemetry"`
 	// Warnings are deprecations and ignored sections found while loading.
 	Warnings []string `toml:"-"`
 }
@@ -169,7 +172,7 @@ func LoadFleet(path string) (*FleetConfig, error) {
 		if err := decodeStrict(data, &raw); err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
-		f.Fleet, f.Docker, f.Providers = raw.Fleet, raw.Docker, raw.Providers
+		f.Fleet, f.Docker, f.Providers, f.Telemetry = raw.Fleet, raw.Docker, raw.Providers, raw.Telemetry
 		top, _ := topLevel(data)
 		if clientSections(top) != nil {
 			f.Warnings = append(f.Warnings, fmt.Sprintf("%s: %s ignored by the fleet (client settings)", path, strings.Join(clientSections(top), ", ")))
@@ -355,6 +358,7 @@ func (u *FleetConfig) Validate() error {
 	if f.MinMachines < 0 || f.MaxMachines < 1 || f.MinMachines > f.MaxMachines {
 		errs = append(errs, "fleet: need 0 <= min_machines <= max_machines and max_machines >= 1")
 	}
+	errs = append(errs, u.Telemetry.validate()...)
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid %s:\n  %s", u.displayPath(), strings.Join(errs, "\n  "))
 	}
