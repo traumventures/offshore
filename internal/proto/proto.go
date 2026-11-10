@@ -51,6 +51,9 @@ const (
 	TDone
 	TStatus
 	TFetch
+	TOutList
+	TOutDir
+	TOutRead
 	TForward
 )
 
@@ -61,6 +64,9 @@ const (
 	KindExec   = "exec"
 	KindStatus = "status"
 	KindFetch  = "fetch"
+	// KindOutputs serves the output FUSE on the laptop: one TOutList or
+	// TOutRead request per stream against the latest build slot of a repo.
+	KindOutputs = "outputs"
 	// KindForward carries one forwarded TCP connection into a session's
 	// network namespace: TForward, then TAck (or TError), then raw bytes
 	// in both directions until either side closes.
@@ -260,6 +266,45 @@ type Fetch struct {
 	RepoID string   `json:"repo_id"`
 	Repo   string   `json:"repo"`
 	Paths  []string `json:"paths"` // relative to repo, globs allowed
+}
+
+// OutList requests the entries of one directory inside the worker-local
+// build directories of the latest build slot. Dir is relative to the
+// repository ("target/debug"); "" lists the build directories themselves.
+// The answer is TOutDir.
+type OutList struct {
+	RepoID string `json:"repo_id"`
+	Dir    string `json:"dir"`
+}
+
+// OutEntry is one directory entry of the build slot. Content hashes are not
+// listed (hashing a target directory is expensive); the laptop identifies
+// content by path, size and mtime and hashes what it downloads.
+type OutEntry struct {
+	Name    string        `json:"n"`
+	Kind    manifest.Kind `json:"k"`
+	Mode    uint32        `json:"m,omitempty"`
+	Size    int64         `json:"s,omitempty"`
+	MtimeNs int64         `json:"t,omitempty"`
+	Target  string        `json:"l,omitempty"` // symlink target
+}
+
+// OutDir answers OutList.
+type OutDir struct {
+	Slot    string     `json:"slot"`
+	Entries []OutEntry `json:"entries"`
+}
+
+// OutRead requests a whole file of the latest build slot. Size and MtimeNs
+// are those of the listing the client saw; if the file changed since, the
+// server answers TError (stage "stale"). Otherwise it sends TBlobHeader
+// (hash empty, size), TData frames and TDataEnd. A change during transfer
+// replaces TDataEnd with TError.
+type OutRead struct {
+	RepoID  string `json:"repo_id"`
+	Path    string `json:"path"`
+	Size    int64  `json:"size"`
+	MtimeNs int64  `json:"mtime_ns"`
 }
 
 // Conn frames a bidirectional stream. Writes are safe for concurrent use.

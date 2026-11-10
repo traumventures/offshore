@@ -425,10 +425,12 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		if m.State == provider.Running && pm.State != provider.Running {
 			down = append(down, pm.ID)
 		}
-		if _, inFlight := o.creating[pm.ID]; inFlight && pm.State == provider.Stopped {
+		expired := !pm.ExpiresAt.IsZero() && !time.Now().Before(pm.ExpiresAt)
+		if _, inFlight := o.creating[pm.ID]; inFlight && pm.State == provider.Stopped && !expired {
 			// A start is in progress but the provider does not show it yet
 			// (e.g. the container or instance is still stopped): keep the
-			// machine starting, or the policy would start it again.
+			// machine starting, or the policy would start it again. Expired
+			// machines stay stopped, so that they are destroyed.
 			pm.State = provider.Starting
 		}
 		pm.Fingerprint = o.fingerprint(pm)
