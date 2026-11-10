@@ -17,7 +17,7 @@ PROJ="$WORK/hello"
 
 export CLOUDSOURCED_STATE_DIR="$WORK/state"
 export CLOUDSOURCED_CONFIG="$WORK/config.toml"
-FLEETCFG="$CLOUDSOURCED_CONFIG"   # fleet and providers; the control plane's in remote mode
+POOLCFG="$CLOUDSOURCED_CONFIG"   # pool and providers; the control plane's in remote mode
 REMOTE="${E2E_REMOTE:-}"
 CPSTATE="$WORK/cp-state"
 CPPID=""
@@ -56,7 +56,7 @@ poll() { local end=$((SECONDS + $1)); shift; while [ $SECONDS -lt $end ]; do "$@
 # no_sessions: no machine runs a session (sessions column of cs status).
 no_sessions() { cs status | awk '/^[0-9a-f]+ / && $(NF-2) > 0 {busy=1} END {exit busy}'; }
 # machines: ids of this part's machine containers.
-machines() { docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" --filter label=cloudsourced.kind=machine; }
+machines() { docker_ ps -q --filter "label=cloudsourced.pool=$OWNER" --filter label=cloudsourced.kind=machine; }
 # metric TEXT NAME LABELSUBSTR: value of the first sample of NAME whose labels contain LABELSUBSTR.
 metric() { local v; v="$(echo "$1" | awk -v n="$2" -v l="$3" 'index($0, n"{")==1 && index($0, l) {print $NF; exit}')"; echo "${v:-0}"; }
 # metric_ge NAME LABELSUBSTR MIN: the current value (cs metrics) is at least MIN.
@@ -71,7 +71,7 @@ ready() { [ -n "${E2E_READY:-}" ] && touch "$E2E_READY"; return 0; }
 # the machine's web service, which sessions reach on 127.0.0.1:18080.
 # Sessions so last exactly as long as a check needs them.
 wait_release() { printf 'for i in $(seq 1200); do (exec 3<>/dev/tcp/127.0.0.1/18080 && printf "GET /%s HTTP/1.0\\r\\n\\r\\n" >&3 && grep -q "200 OK" <&3) 2>/dev/null && break; sleep 0.1; done' "$1"; }
-services() { docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" --filter label=cloudsourced.kind=service --filter status=running; }
+services() { docker_ ps -q --filter "label=cloudsourced.pool=$OWNER" --filter label=cloudsourced.kind=service --filter status=running; }
 # services_up: every running machine has its (running) web service.
 services_up() { [ "$(services | wc -l)" -ge "$(machines | wc -l)" ]; }
 release() { local svc; poll 60 services_up >/dev/null; for svc in $(services); do docker_ exec "$svc" touch "/etc/$1"; done; }
@@ -86,8 +86,8 @@ cleanup() {
   timed cs daemon stop
   timed stop_cp
   local left
-  left="$(docker_ ps -aq --filter "label=cloudsourced.owner=$OWNER" | wc -l)"
-  left=$((left + $(docker_ volume ls -q --filter "label=cloudsourced.owner=$OWNER" | wc -l)))
+  left="$(docker_ ps -aq --filter "label=cloudsourced.pool=$OWNER" | wc -l)"
+  left=$((left + $(docker_ volume ls -q --filter "label=cloudsourced.pool=$OWNER" | wc -l)))
   if [ "$left" = 0 ]; then ok "down removed all machines and volumes"; else bad "down left $left resources"; fi
   local t=$SECONDS
   if [ "${E2E_KEEP:-}" = "" ]; then chmod -R u+w "$WORK" 2>/dev/null; rm -r "$WORK"; else echo "kept $WORK"; fi
@@ -117,64 +117,54 @@ printf '[toolchain]\nchannel = "%s"\nprofile = "minimal"\n' "$RUSTV" > "$PROJ/ru
 FWD_SVC="$(freeport)"
 sed -i "s/\"18092:18080\"/\"$FWD_SVC:18080\"/" "$PROJ/.cloudsourced.toml"
 
-# write_config writes the fleet configuration. The embedded run keeps the
-# legacy single-file format (fleet.owner, [docker]) to cover compatibility;
-# the remote run uses the split layout (fleet.id, [providers.local]) in the
-# control plane's own file.
+# write_config writes the pool configuration: the client file in embedded
+# mode, the control plane's own file in remote mode.
 write_config() { # lifetime idle min max
-  local idkey=owner provider
-  provider="[docker]
-command = [$(printf '"%s",' $DOCKER | sed 's/,$//')]"
-  if [ -n "$REMOTE" ]; then
-    idkey=id
-    provider="[providers.local]
-backend = \"local-docker\"
-command = [$(printf '"%s",' $DOCKER | sed 's/,$//')]"
-  fi
-  cat > "$FLEETCFG" <<EOF
-[fleet]
-$idkey = "$OWNER"
-machine_cpu = 4
-machine_memory = "4G"
+  cat > "$POOLCFG" <<EOF
+[pool]
+id = "$OWNER"
 max_lifetime = "$1"
 idle_stop = "$2"
 min_machines = $3
 max_machines = $4
 queue_timeout = "3m"
+
+[scheduler]
 estimator = "static"
 
-[[fleet.size]]
+[[machine.setup]]
+run = "echo provisioned-by-pool > /cache/pool-provision"
+
+[providers.local]
+type = "local-docker"
+command = [$(printf '"%s",' $DOCKER | sed 's/,$//')]
+
+[[providers.local.size]]
 name = "default"
 cpu = 4
 memory = "4G"
 price_per_hour = 0.5
-
-[[fleet.provision]]
-run = "echo provisioned-by-fleet > /cache/fleet-provision"
-
-$provider
 EOF
 }
 stop_cp() { if [ -n "$CPPID" ]; then kill "$CPPID" 2>/dev/null; wait "$CPPID" 2>/dev/null; CPPID=""; fi; }
 start_cp() {
-  CLOUDSOURCED_CONFIG=/nonexistent CLOUDSOURCED_STATE_DIR="$CPSTATE" "$BIN" controlplane --config "$FLEETCFG" --listen "127.0.0.1:$CPPORT" --metrics-listen "127.0.0.1:$MPORT" >>"$WORK/cp.log" 2>&1 &
+  CLOUDSOURCED_CONFIG=/nonexistent CLOUDSOURCED_STATE_DIR="$CPSTATE" "$BIN" controlplane --config "$POOLCFG" --listen "127.0.0.1:$CPPORT" --metrics-listen "127.0.0.1:$MPORT" >>"$WORK/cp.log" 2>&1 &
   CPPID=$!
   for _ in $(seq 300); do curl -skf "https://127.0.0.1:$CPPORT/healthz" >/dev/null && return 0; sleep 0.1; done
   echo "control plane did not start:"; cat "$WORK/cp.log"; return 1
 }
-# restart_daemon applies a changed fleet configuration.
+# restart_daemon applies a changed pool configuration.
 restart_daemon() { cs daemon stop >/dev/null; if [ -n "$REMOTE" ]; then stop_cp; start_cp; fi; }
 
 if [ -n "$REMOTE" ]; then
-  FLEETCFG="$WORK/cp-config.toml"
+  POOLCFG="$WORK/cp-config.toml"
   CPPORT="$(freeport)"
   MPORT="$(freeport)"
   write_config 24h 10m 0 2
   start_cp || exit 1
   FP="$(sed -n 's/.*"Fingerprint":"\([0-9a-f]*\)".*/\1/p' "$CPSTATE/tls.json")"
   cat > "$CLOUDSOURCED_CONFIG" <<EOF
-[orchestrator]
-mode = "remote"
+[control_plane]
 url = "https://127.0.0.1:$CPPORT"
 fingerprint = "$FP"
 api_key = "file:$CPSTATE/api-key"

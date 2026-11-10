@@ -32,9 +32,9 @@ cleanup() {
   CLOUDSOURCED_CONFIG="$WORK/client.toml" CLOUDSOURCED_STATE_DIR="$WORK/client" "$BIN" daemon stop >/dev/null 2>&1
   d logs "$NAME" > "$WORK/cp.log" 2>&1
   d stop -t 30 "$NAME" >/dev/null 2>&1; d rm -f "$NAME" >/dev/null 2>&1
-  for c in $(d ps -aq --filter "label=cloudsourced.owner=$OWNER"); do d rm -f -v "$c" >/dev/null; done
-  for v in $(d volume ls -q --filter "label=cloudsourced.owner=$OWNER"); do d volume rm -f "$v" >/dev/null; done
-  left=$(( $(d ps -aq --filter "label=cloudsourced.owner=$OWNER" | wc -l) + $(d volume ls -q --filter "label=cloudsourced.owner=$OWNER" | wc -l) ))
+  for c in $(d ps -aq --filter "label=cloudsourced.pool=$OWNER"); do d rm -f -v "$c" >/dev/null; done
+  for v in $(d volume ls -q --filter "label=cloudsourced.pool=$OWNER"); do d volume rm -f "$v" >/dev/null; done
+  left=$(( $(d ps -aq --filter "label=cloudsourced.pool=$OWNER" | wc -l) + $(d volume ls -q --filter "label=cloudsourced.pool=$OWNER" | wc -l) ))
   [ "$left" = 0 ] && ok "no machines or volumes left" || bad "$left resources left"
   # The state belongs to uid 10001 (the container user).
   d run --rm -v "$WORK:/w" busybox:1.37 rm -rf /w/cp-state >/dev/null 2>&1
@@ -52,20 +52,21 @@ printf '[toolchain]\nchannel = "%s"\nprofile = "minimal"\n' "$RUSTV" > "$WORK/he
 echo "== start $IMAGE as $NAME"
 mkdir -p "$HOSTSTATE"
 cat > "$HOSTSTATE/config.toml" <<CFG
-[fleet]
-owner = "$OWNER"
+[pool]
+id = "$OWNER"
 max_machines = 1
+
+[providers.local]
+type = "local-docker"
+command = ["docker"]
+
+[scheduler]
 estimator = "static"
 
-[[fleet.size]]
-provider = "local"
+[[providers.local.size]]
 name = "small"
 cpu = 4
 memory = "4G"
-
-[providers.local]
-backend = "local-docker"
-command = ["docker"]
 CFG
 d run --rm -v "$HOSTSTATE:/s" busybox:1.37 chown -R 10001:10001 /s
 SOCK_GID="$(d run --rm -v /var/run/docker.sock:/var/run/docker.sock busybox:1.37 stat -c %g /var/run/docker.sock)"
@@ -98,7 +99,7 @@ out="$(cd "$WORK/hello" && "$BIN" run cargo build 2>&1)"; code=$?
 case "$out" in *"Compiling hello v0.1.0 ($WORK/hello)"*) ok "compiled remotely at the local path";; *) bad "no compile line";; esac
 [ -x "$WORK/hello/target/debug/hello" ] && ok "binary transferred" || bad "binary missing"
 "$WORK/hello/target/debug/hello" | grep -q 'ran=local' && ok "binary runs locally" || bad "binary output"
-m="$(d ps -q --filter "label=cloudsourced.owner=$OWNER" --filter label=cloudsourced.kind=machine | head -1)"
+m="$(d ps -q --filter "label=cloudsourced.pool=$OWNER" --filter label=cloudsourced.kind=machine | head -1)"
 [ -n "$m" ] && ok "machine created by the containerised control plane" || bad "no machine"
 src="$(d inspect -f '{{range .Mounts}}{{if eq .Destination "/opt/cloudsourced/bin/cloudsourced"}}{{.Source}}{{end}}{{end}}' "$m" 2>/dev/null)"
 [ "$src" = "$HOSTSTATE/bin/cloudsourced" ] && ok "machine mounts the exported binary" || bad "machine binary source: $src"

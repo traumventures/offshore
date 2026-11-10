@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/client"
+	"github.com/traumventures/cloudsourced/internal/daemon"
 	"github.com/traumventures/cloudsourced/internal/events"
 	"github.com/traumventures/cloudsourced/internal/report"
 )
@@ -21,14 +21,14 @@ func flushTelemetry(shutdown func(context.Context) error) {
 	shutdown(ctx)
 }
 
-// fetchEvents reads the fleet's event log through the daemon (embedded:
+// fetchEvents reads the pool's event log through the daemon (embedded:
 // its state directory; remote: the control plane's /v1/events).
 func fetchEvents(since, until time.Time) ([]events.Event, error) {
 	ctx := context.Background()
-	if err := client.EnsureDaemon(ctx); err != nil {
+	if err := daemon.EnsureDaemon(ctx); err != nil {
 		return nil, err
 	}
-	raw, err := client.Call(ctx, client.Request{Op: "events", Since: since, Until: until}, os.Stderr)
+	raw, err := daemon.Call(ctx, daemon.Request{Op: "events", Since: since, Until: until}, os.Stderr)
 	if err != nil {
 		return nil, err
 	}

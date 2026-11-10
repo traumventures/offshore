@@ -1,6 +1,6 @@
 // Package metrics is a small Prometheus-compatible metrics registry:
 // counters, gauges and histograms with labels, snapshots that travel as
-// JSON (machine servers report theirs in the status stream) and the text
+// JSON (workers report theirs in the status stream) and the text
 // exposition format (version 0.0.4) for scraping.
 package metrics
 

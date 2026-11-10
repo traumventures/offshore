@@ -22,8 +22,8 @@ func TestMetricsAggregateMachines(t *testing.T) {
 	}
 	// The machine's server reports its own metrics in the status stream.
 	srv := metrics.NewRegistry()
-	srv.Gauge("cloudsourced_server_sessions_running", "Sessions running now.").Set(1)
-	srv.Counter("cloudsourced_server_session_exits_total", "Exits.", "code").Inc("0")
+	srv.Gauge("cloudsourced_worker_sessions_running", "Sessions running now.").Set(1)
+	srv.Counter("cloudsourced_worker_session_exits_total", "Exits.", "code").Inc("0")
 	f.mu.Lock()
 	f.status[l.MachineID].Metrics = srv.Gather()
 	f.mu.Unlock()
@@ -44,12 +44,12 @@ func TestMetricsAggregateMachines(t *testing.T) {
 		`cloudsourced_placements_total{kind="assign"} 1`,
 		`cloudsourced_placements_total{kind="queue"} 1`,
 		`cloudsourced_placements_total{kind="reject"} 1`,
-		`cloudsourced_fleet_actions_total{action="create"} 1`,
+		`cloudsourced_pool_actions_total{action="create"} 1`,
 		`cloudsourced_acquire_wait_seconds_count{result="assigned"} 1`,
 		`cloudsourced_acquire_wait_seconds_count{result="rejected"} 1`,
-		`cloudsourced_server_sessions_running{machine="` + l.MachineID + `",provider="fake",size="m4"} 1`,
-		`cloudsourced_server_session_exits_total{machine="` + l.MachineID + `",provider="fake",size="m4",code="0"} 1`,
-		"# TYPE cloudsourced_server_session_exits_total counter",
+		`cloudsourced_worker_sessions_running{machine="` + l.MachineID + `",provider="fake",size="m4"} 1`,
+		`cloudsourced_worker_session_exits_total{machine="` + l.MachineID + `",provider="fake",size="m4",code="0"} 1`,
+		"# TYPE cloudsourced_worker_session_exits_total counter",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in\n%s", want, text)

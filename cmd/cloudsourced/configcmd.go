@@ -16,13 +16,13 @@ import (
 )
 
 const configUsage = `usage:
-  cloudsourced config check [--fleet FILE]   validate the configuration files of this mode
-  cloudsourced config show  [--fleet FILE]   print the effective configuration (secrets redacted)
+  cloudsourced config check [--pool FILE]   validate the configuration files of this mode
+  cloudsourced config show  [--pool FILE]   print the effective configuration (secrets redacted)
 
-Without --fleet both commands work on the files this client uses: the client
-configuration, the fleet configuration when the orchestrator is embedded,
-and the repository configuration of the current directory. --fleet FILE
-checks or shows only a fleet configuration, as "cloudsourced controlplane
+Without --pool both commands work on the files this client uses: the client
+configuration, the pool configuration when the orchestrator is embedded,
+and the repository configuration of the current directory. --pool FILE
+checks or shows only a pool configuration, as "cloudsourced controlplane
 --config FILE" reads it.
 `
 
@@ -35,7 +35,7 @@ func configCmd(args []string, out io.Writer) error {
 	sub := args[0]
 	fs := flag.NewFlagSet("config "+sub, flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(fs.Output(), configUsage) }
-	fleetPath := fs.String("fleet", "", "only this fleet configuration (control plane role)")
+	poolPath := fs.String("pool", "", "only this pool configuration (control plane role)")
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -45,7 +45,7 @@ func configCmd(args []string, out io.Writer) error {
 	if fs.NArg() > 0 {
 		return fmt.Errorf("config %s: unexpected argument %q", sub, fs.Arg(0))
 	}
-	set, err := loadConfigSet(*fleetPath)
+	set, err := loadConfigSet(*poolPath)
 	if err != nil {
 		return err
 	}
@@ -62,20 +62,20 @@ func configCmd(args []string, out io.Writer) error {
 
 // configSet are the configuration files in effect, each with its role.
 type configSet struct {
-	client    *config.Client      // nil with --fleet
-	fleet     *config.FleetConfig // nil in remote mode
-	fleetRole string
-	repo      *config.Repo
+	client   *config.Client     // nil with --pool
+	pool     *config.PoolConfig // nil in remote mode
+	poolRole string
+	repo     *config.Repo
 }
 
-func loadConfigSet(fleetPath string) (*configSet, error) {
+func loadConfigSet(poolPath string) (*configSet, error) {
 	s := &configSet{}
-	if fleetPath != "" {
-		f, err := config.LoadFleet(fleetPath)
+	if poolPath != "" {
+		f, err := config.LoadPool(poolPath)
 		if err != nil {
 			return nil, err
 		}
-		s.fleet, s.fleetRole = f, "control plane (cloudsourced controlplane --config)"
+		s.pool, s.poolRole = f, "control plane (cloudsourced controlplane --config)"
 		return s, nil
 	}
 	c, err := config.LoadClient()
@@ -84,11 +84,11 @@ func loadConfigSet(fleetPath string) (*configSet, error) {
 	}
 	s.client = c
 	if c.Embedded() {
-		f, err := config.LoadFleet(config.FleetConfigPath())
+		f, err := config.LoadPool(config.PoolConfigPath())
 		if err != nil {
 			return nil, err
 		}
-		s.fleet, s.fleetRole = f, "embedded orchestrator (local daemon)"
+		s.pool, s.poolRole = f, "embedded orchestrator (local daemon)"
 	}
 	if root, err := config.FindRepo("."); err == nil {
 		r, err := config.LoadRepo(root)
@@ -116,23 +116,23 @@ func fileState(path string) string {
 
 func (s *configSet) check(out io.Writer) {
 	if c := s.client; c != nil {
-		fmt.Fprintf(out, "client configuration ok: %s%s\n  role: client (user %q, orchestrator %s", c.Path, fileState(c.Path), c.User, c.Orchestrator.Mode)
+		fmt.Fprintf(out, "client configuration ok: %s%s\n  role: client (user %q, orchestrator %s", c.Path, fileState(c.Path), c.User, c.ControlPlane.Mode)
 		if !c.Embedded() {
-			fmt.Fprintf(out, " at %s", c.Orchestrator.URL)
+			fmt.Fprintf(out, " at %s", c.ControlPlane.URL)
 		}
 		fmt.Fprintln(out, ")")
 		for _, w := range c.Warnings {
 			fmt.Fprintln(out, "  warning:", w)
 		}
 		if !c.Embedded() {
-			fmt.Fprintln(out, "fleet configuration: not used by this client (the control plane's applies)")
+			fmt.Fprintln(out, "pool configuration: not used by this client (the control plane's applies)")
 		}
 	}
-	if f := s.fleet; f != nil {
-		fmt.Fprintf(out, "fleet configuration ok: %s%s\n  role: %s, fleet %q, providers %s\n",
-			describe(f.Path), fileState(f.Path), s.fleetRole, f.Fleet.ID, strings.Join(f.ProviderNames(), ", "))
+	if f := s.pool; f != nil {
+		fmt.Fprintf(out, "pool configuration ok: %s%s\n  role: %s, pool %q, providers %s\n",
+			describe(f.Path), fileState(f.Path), s.poolRole, f.Pool.ID, strings.Join(f.ProviderNames(), ", "))
 		for _, w := range f.Warnings {
-			if s.client != nil && strings.Contains(w, "ignored by the fleet (client settings)") && f.Path == s.client.Path {
+			if s.client != nil && strings.Contains(w, "ignored by the pool (client settings)") && f.Path == s.client.Path {
 				continue // single-file embedded setup: the client part is expected
 			}
 			fmt.Fprintln(out, "  warning:", w)
@@ -145,9 +145,12 @@ func (s *configSet) check(out io.Writer) {
 
 func (s *configSet) show(out io.Writer) error {
 	section := func(title string, v any, drop ...string) error {
-		m, err := toMap(v)
-		if err != nil {
-			return err
+		m, ok := v.(map[string]any)
+		if !ok {
+			var err error
+			if m, err = toMap(v); err != nil {
+				return err
+			}
 		}
 		for _, k := range drop {
 			deletePath(m, k)
@@ -162,14 +165,20 @@ func (s *configSet) show(out io.Writer) error {
 		return nil
 	}
 	if c := s.client; c != nil {
-		if err := section("client configuration: "+c.Path, c); err != nil {
+		var drop []string
+		if c.Embedded() {
+			drop = append(drop, "control_plane")
+		}
+		if err := section("client configuration: "+c.Path, c, drop...); err != nil {
 			return err
 		}
 	}
-	if f := s.fleet; f != nil {
-		// Deprecated forms are shown resolved: fleet.owner as fleet.id,
-		// [docker] and fleet.backend as [providers.local].
-		if err := section("fleet configuration: "+describe(f.Path)+" ("+s.fleetRole+")", f, "docker", "fleet.owner", "fleet.backend"); err != nil {
+	if f := s.pool; f != nil {
+		doc, err := f.Document()
+		if err != nil {
+			return err
+		}
+		if err := section("pool configuration: "+describe(f.Path)+" ("+s.poolRole+")", doc); err != nil {
 			return err
 		}
 	}

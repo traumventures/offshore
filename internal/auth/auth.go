@@ -1,6 +1,6 @@
-// Package auth holds the fleet's key material: a master key from which the
+// Package auth holds the pool's key material: a master key from which the
 // control plane signing key and every machine's TLS identity are derived,
-// and signed, scoped tokens that machine servers verify with the control
+// and signed, scoped tokens that workers verify with the control
 // plane's public key.
 //
 // Everything secret is derived from the master key with HKDF-SHA256, so the
@@ -48,13 +48,13 @@ const (
 	infoMachineTLS = "machine-tls/"
 )
 
-// Master is the fleet master key.
+// Master is the pool master key.
 type Master [KeySize]byte
 
 // LoadMaster returns the master key: from $CLOUDSOURCED_MASTER_KEY, from the
 // file named by $CLOUDSOURCED_MASTER_KEY_FILE, or from <dir>/master.key,
 // which is created (0600) on first use. Several control plane replicas
-// share a fleet by importing the same key via the environment or a file.
+// share a pool by importing the same key via the environment or a file.
 func LoadMaster(dir string) (Master, error) {
 	if s := os.Getenv(EnvMasterKey); s != "" {
 		return ParseMaster(s)

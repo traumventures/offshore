@@ -32,10 +32,10 @@ import (
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 
-	"github.com/traumventures/cloudsourced/internal/client"
 	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/fleet"
-	"github.com/traumventures/cloudsourced/internal/telemetry"
+	"github.com/traumventures/cloudsourced/internal/daemon"
+	"github.com/traumventures/cloudsourced/internal/pool"
+	"github.com/traumventures/cloudsourced/internal/tracing"
 	"github.com/traumventures/cloudsourced/internal/transport"
 )
 
@@ -63,7 +63,7 @@ type cpOptions struct {
 	MachineBinary string // "" auto, "self", or a path on the Docker host
 	ClientCA      string // require client certificates signed by this CA (mutual TLS)
 	MetricsListen string // plain HTTP /metrics without authentication ("" = off)
-	Config        string // fleet configuration file
+	Config        string // pool configuration file
 }
 
 // cpState is what a running control plane publishes for "controlplane
@@ -82,9 +82,9 @@ type cpState struct {
 func controlplaneUsage(fs *flag.FlagSet) func() {
 	return func() {
 		fmt.Fprint(fs.Output(), `usage:
-  cloudsourced controlplane [flags]                  serve the fleet API
+  cloudsourced controlplane [flags]                  serve the pool API
   cloudsourced controlplane info [--show-key]        URLs, fingerprint, API key location
-  cloudsourced controlplane client-config [--url U]  print the client [orchestrator] block
+  cloudsourced controlplane client-config [--url U]  print the client [control_plane] block
   cloudsourced controlplane health                   check a running control plane (exit status)
 
 Without --hostname the control plane uses a persistent self-signed certificate
@@ -117,7 +117,7 @@ func parseControlplaneFlags(args []string) (*cpOptions, error) {
 	fs.StringVar(&o.APIKeyFile, "api-key-file", "", "file with the API key (default $CLOUDSOURCED_API_KEY or a generated <state>/api-key)")
 	fs.StringVar(&o.MachineBinary, "machine-binary", os.Getenv("CLOUDSOURCED_MACHINE_BINARY"), "server binary of local-docker machines as a path on the Docker host; \"self\" = this executable; default: this executable, or a copy in <state>/bin when running in a container ($CLOUDSOURCED_MACHINE_BINARY)")
 	fs.StringVar(&o.MetricsListen, "metrics-listen", os.Getenv("CLOUDSOURCED_METRICS_LISTEN"), "also serve GET /metrics over plain HTTP without authentication on this address, e.g. 127.0.0.1:9090 (/metrics on the API port needs the API key; $CLOUDSOURCED_METRICS_LISTEN)")
-	fs.StringVar(&o.Config, "config", "", "fleet configuration ([fleet], [providers.*]; default $CLOUDSOURCED_FLEET_CONFIG, else the client configuration file); reloaded when it changes or on SIGHUP")
+	fs.StringVar(&o.Config, "config", "", "pool configuration ([pool], [providers.*]; default $CLOUDSOURCED_POOL_CONFIG, else the client configuration file); reloaded when it changes or on SIGHUP")
 	fs.Usage = controlplaneUsage(fs)
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -126,7 +126,7 @@ func parseControlplaneFlags(args []string) (*cpOptions, error) {
 		return nil, fmt.Errorf("controlplane: unexpected argument %q", fs.Arg(0))
 	}
 	if o.Config == "" {
-		o.Config = config.FleetConfigPath()
+		o.Config = config.PoolConfigPath()
 	}
 	acmeSet := false
 	fs.Visit(func(f *flag.Flag) { acmeSet = acmeSet || f.Name == "acme" })
@@ -182,10 +182,10 @@ func cpStateDir(flagValue string) string {
 	if d := os.Getenv("CLOUDSOURCED_STATE_DIR"); d != "" {
 		return d
 	}
-	return filepath.Join(client.StateDir(), "controlplane")
+	return filepath.Join(daemon.StateDir(), "controlplane")
 }
 
-// controlplane serves the shared fleet API.
+// controlplane serves the shared pool API.
 func controlplane(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
@@ -219,14 +219,14 @@ func serveControlplane(o *cpOptions) error {
 	if err != nil {
 		return err
 	}
-	u, err := config.LoadFleet(o.Config)
+	u, err := config.LoadPool(o.Config)
 	if err != nil {
 		return err
 	}
 	for _, w := range u.Warnings {
-		log.Warn("fleet configuration", "warning", w)
+		log.Warn("pool configuration", "warning", w)
 	}
-	defer flushTelemetry(telemetry.SetupFromConfig(telemetry.ServiceControlPlane, u.Telemetry, filepath.Dir(o.Config), log))
+	defer flushTelemetry(tracing.SetupFromConfig(tracing.ServiceControlPlane, u.Telemetry, filepath.Dir(o.Config), log))
 	// Only local-docker mounts the binary from the Docker host; other
 	// providers upload it themselves.
 	bin := ""
@@ -236,8 +236,8 @@ func serveControlplane(o *cpOptions) error {
 		}
 	}
 	setMachineBinary(u, bin)
-	load := func(path string) (*config.FleetConfig, error) {
-		u, err := config.LoadFleet(path)
+	load := func(path string) (*config.PoolConfig, error) {
+		u, err := config.LoadPool(path)
 		if err == nil {
 			setMachineBinary(u, bin)
 		}
@@ -252,23 +252,23 @@ func serveControlplane(o *cpOptions) error {
 		if err != nil {
 			return err
 		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
+		certPool := x509.NewCertPool()
+		if !certPool.AppendCertsFromPEM(pem) {
 			return fmt.Errorf("--client-ca %s: no certificates found", o.ClientCA)
 		}
-		tc.ClientCAs = pool
+		tc.ClientCAs = certPool
 		tc.ClientAuth = tls.RequireAndVerifyClientCert
 		log.Info("client auth: mutual TLS", "ca", o.ClientCA)
 	}
-	local, err := fleet.NewLocal(u, dir, log)
+	local, err := pool.NewLocal(u, dir, log)
 	if err != nil {
 		return err
 	}
-	srv, err := fleet.NewServer(local, apiKey, dir, log)
+	srv, err := pool.NewServer(local, apiKey, dir, log)
 	if err != nil {
 		return err
 	}
-	reloader := fleet.NewReloader(o.Config, load, local, log)
+	reloader := pool.NewReloader(o.Config, load, local, log)
 	srv.Reloader = reloader
 	hs := &http.Server{Handler: srv, ReadHeaderTimeout: 30 * time.Second, TLSConfig: tc}
 	var metricsSrv *http.Server
@@ -298,11 +298,11 @@ func serveControlplane(o *cpOptions) error {
 		os.WriteFile(filepath.Join(dir, cpStateFile), append(b, '\n'), 0o644)
 	}
 
-	go local.Run(ctx, fleet.ReconcileInterval(15*time.Second))
-	go watchFleetConfig(ctx, reloader, 15*time.Second)
+	go local.Run(ctx, pool.ReconcileInterval(15*time.Second))
+	go watchPoolConfig(ctx, reloader, 15*time.Second)
 
-	fmt.Fprintf(os.Stderr, "cloudsourced control plane %s\n  listen:      %s\n  config:      %s (fleet %s)\n  state:       %s\n  providers:   %s\n",
-		version, st.Listen, o.Config, u.Fleet.ID, dir, strings.Join(u.ProviderNames(), ", "))
+	fmt.Fprintf(os.Stderr, "cloudsourced control plane %s\n  listen:      %s\n  config:      %s (pool %s)\n  state:       %s\n  providers:   %s\n",
+		version, st.Listen, o.Config, u.Pool.ID, dir, strings.Join(u.ProviderNames(), ", "))
 	if bin != "" {
 		fmt.Fprintf(os.Stderr, "  machine bin: %s (path on the Docker host)\n", bin)
 	}
@@ -560,12 +560,12 @@ func newSelfSigned(hostname string, lifetime time.Duration) (*transport.Identity
 
 // setMachineBinary points local-docker providers without an explicit
 // binary option at bin (a path on the Docker host).
-func setMachineBinary(u *config.FleetConfig, bin string) {
+func setMachineBinary(u *config.PoolConfig, bin string) {
 	if bin == "" {
 		return
 	}
 	for name, opts := range u.Providers {
-		if u.ProviderBackend(name) != "local-docker" {
+		if u.ProviderType(name) != "local-docker" {
 			continue
 		}
 		if s, _ := opts["binary"].(string); s == "" {
@@ -574,9 +574,9 @@ func setMachineBinary(u *config.FleetConfig, bin string) {
 	}
 }
 
-// watchFleetConfig applies changes of the fleet configuration file: when
+// watchPoolConfig applies changes of the pool configuration file: when
 // it changes (polled) and on SIGHUP.
-func watchFleetConfig(ctx context.Context, r *fleet.Reloader, every time.Duration) {
+func watchPoolConfig(ctx context.Context, r *pool.Reloader, every time.Duration) {
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
@@ -594,9 +594,9 @@ func watchFleetConfig(ctx context.Context, r *fleet.Reloader, every time.Duratio
 	}
 }
 
-func hasLocalDocker(u *config.FleetConfig) bool {
+func hasLocalDocker(u *config.PoolConfig) bool {
 	for _, name := range u.ProviderNames() {
-		if u.ProviderBackend(name) == "local-docker" {
+		if u.ProviderType(name) == "local-docker" {
 			return true
 		}
 	}
@@ -817,7 +817,7 @@ func controlplaneClientConfig(args []string) error {
 	return nil
 }
 
-// clientConfigBlock renders the client [orchestrator] section.
+// clientConfigBlock renders the client [control_plane] section.
 func clientConfigBlock(dir, url, fp, keyRef string, probe func(string) (string, bool, error)) (string, error) {
 	st, _ := readCPState(dir)
 	if url == "" && st != nil && len(st.URLs) > 0 {
@@ -843,7 +843,7 @@ func clientConfigBlock(dir, url, fp, keyRef string, probe func(string) (string, 
 		}
 	}
 	var b strings.Builder
-	b.WriteString("[orchestrator]\nmode = \"remote\"\n")
+	b.WriteString("[control_plane]\n")
 	fmt.Fprintf(&b, "url = %q\n", url)
 	if fp != "" {
 		b.WriteString(note)

@@ -13,7 +13,7 @@ import (
 const (
 	// VariantDefault packs tasks best fit (warm cache first), sizes new
 	// machines by cost per unit of queued demand and consolidates lightly
-	// loaded fleets. "" and "binpack" select it too.
+	// loaded pools. "" and "binpack" select it too.
 	VariantDefault = "default"
 	// VariantClassic is the policy before scheduler tuning: rendezvous
 	// placement, cheapest fitting size for the aggregate demand and no
@@ -44,7 +44,7 @@ type Config struct {
 
 	MinMachines  int            // warm pool per recently used environment
 	WarmPool     []WarmWindow   // scheduled warm pool (e.g. working hours), in addition to MinMachines
-	MaxMachines  int            // fleet size limit across all providers
+	MaxMachines  int            // pool size limit across all providers
 	ProviderMax  map[string]int // per-provider machine limit (0 / missing = no own limit)
 	IdleStop     time.Duration  // stop machines idle that long
 	ExpiryMargin time.Duration  // machines expiring sooner get no new sessions
@@ -199,7 +199,7 @@ func (p Default) Grant(t Task) Grant {
 }
 
 // Place implements Policy.
-func (p Default) Place(f Fleet, t Task) Placement {
+func (p Default) Place(f Pool, t Task) Placement {
 	if !p.fitsAnySize(f, t) {
 		return Placement{Kind: Reject, Reason: "task larger than every machine size"}
 	}
@@ -224,7 +224,7 @@ func (p Default) Place(f Fleet, t Task) Placement {
 	return Placement{Kind: Assign, Machine: m.ID, Grant: p.Grant(t), Reason: reason}
 }
 
-func (p Default) fitsAnySize(f Fleet, t Task) bool {
+func (p Default) fitsAnySize(f Pool, t Task) bool {
 	for _, s := range f.SizesFor(t.EnvHash) {
 		if p.sizeAdmissible(s).Fits(t.Request) {
 			return true
@@ -357,7 +357,7 @@ func (p Default) bestSize(sizes []Size, tasks []Task, perProvider map[string]int
 
 // planState is the bookkeeping shared by the steps of Plan.
 type planState struct {
-	f           Fleet
+	f           Pool
 	acts        []Action
 	active      int                  // machines that count against MaxMachines
 	perProvider map[string]int       // machines that count against ProviderMax
@@ -374,7 +374,7 @@ func (p Default) usable(m Machine, now time.Time) bool {
 }
 
 // Plan implements Policy.
-func (p Default) Plan(f Fleet) []Action {
+func (p Default) Plan(f Pool) []Action {
 	st := &planState{f: f, perProvider: map[string]int{}, stopped: map[string][]Machine{}, queued: map[string][]Task{}}
 	for _, m := range f.Machines {
 		if m.State == Running || m.State == Starting {
@@ -458,7 +458,7 @@ func (p Default) scaleOutClassic(st *planState, env string) {
 }
 
 // makeRoom destroys a stopped machine of another environment when the
-// fleet (classic) or a provider is at its limit.
+// pool (classic) or a provider is at its limit.
 func (p Default) makeRoom(st *planState, env string) {
 	envs := make([]string, 0, len(st.stopped))
 	for e := range st.stopped {
@@ -577,7 +577,7 @@ func (p Default) machinesNeeded(sizes []Size, tasks []Task, perProvider map[stri
 }
 
 // freeSlot stops an empty running machine to make room for a new one when
-// the fleet is at MaxMachines: first one of an environment without queued
+// the pool is at MaxMachines: first one of an environment without queued
 // work, then one of env that is too small for need. Machines kept by the
 // warm pool are spared.
 func (p Default) freeSlot(st *planState, env string, need Resources) bool {
@@ -611,7 +611,7 @@ func (p Default) freeSlot(st *planState, env string, need Resources) bool {
 }
 
 // warmTarget is the number of machines env keeps running.
-func (p Default) warmTarget(f Fleet, env string) int {
+func (p Default) warmTarget(f Pool, env string) int {
 	c := p.cfg()
 	used, ok := f.Recent[env]
 	if !ok {

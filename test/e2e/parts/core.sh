@@ -10,15 +10,15 @@ out="$(cd "$WORK" && cs config check 2>&1)"; code=$?
 check "config check exits 0" eq "$code" 0
 check "client configuration has the client role" contains "$out" "client configuration ok: $CLOUDSOURCED_CONFIG"
 if [ -n "$REMOTE" ]; then
-  check "remote client does not use a fleet configuration" contains "$out" "fleet configuration: not used by this client"
-  out="$(cs config check --fleet "$FLEETCFG" 2>&1)"
-  check "control plane fleet file validates" contains "$out" "role: control plane"
-  check "control plane fleet file has no deprecated keys" eq "$(echo "$out" | grep -c deprecated)" 0
+  check "remote client does not use a pool configuration" contains "$out" "pool configuration: not used by this client"
+  out="$(cs config check --pool "$POOLCFG" 2>&1)"
+  check "control plane pool file validates" contains "$out" "role: control plane"
+  check "control plane pool file has no deprecated keys" eq "$(echo "$out" | grep -c deprecated)" 0
 else
-  check "embedded orchestrator reads the same file" contains "$out" "fleet configuration ok: $FLEETCFG"
-  check "legacy keys are reported as deprecated" contains "$out" "fleet.owner is deprecated"
+  check "embedded orchestrator reads the same file" contains "$out" "pool configuration ok: $POOLCFG"
+  check "legacy keys are reported as deprecated" contains "$out" "pool.owner is deprecated"
 fi
-check "config show prints the effective configuration" contains "$(cd "$WORK" && cs config show 2>&1)" "[orchestrator]"
+check "config show prints the effective configuration" contains "$(cd "$WORK" && cs config show 2>&1)" "[pool]"
 
 step "first remote session (environment image, machine provisioning, services)"
 out="$(run sh -c 'echo first-session' 2>&1)"; code=$?
@@ -26,7 +26,7 @@ check "first session exits 0" eq "$code" 0
 check "first session output" contains "$out" "first-session"
 ready
 MACHINE="$(machines | head -1)"
-check "machine provisioning ran" eq "$(docker_ exec "$MACHINE" cat /cache/fleet-provision)" "provisioned-by-fleet"
+check "machine provisioning ran" eq "$(docker_ exec "$MACHINE" cat /cache/pool-provision)" "provisioned-by-pool"
 check "apt packages in environment" contains "$(run sh -c 'jq --version')" "jq-"
 check "setup step ran with its inputs" eq "$(run sh -c 'cat /opt/setup-tools.txt')" "jq"
 check "environment variables from config" eq "$(run sh -c 'echo $E2E_IMAGE_ENV')" "from-image"
@@ -34,7 +34,7 @@ check "toolchain from rust-toolchain.toml" contains "$(run sh -c 'rustc --versio
 check "secrets resolved locally and injected" eq "$(run sh -c 'echo "$CMD_SECRET $FILE_SECRET"')" "from-cmd file-secret"
 check "secrets never reach the machine's disk" test -z "$(docker_ exec "$MACHINE" grep -rl file-secret /cache /deps 2>/dev/null)"
 check "service container reachable on localhost" contains "$(http_service)" "200 OK"
-check "service runs as its own container next to the machine" eq "$(docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" --filter label=cloudsourced.kind=service | wc -l)" 1
+check "service runs as its own container next to the machine" eq "$(docker_ ps -q --filter "label=cloudsourced.pool=$OWNER" --filter label=cloudsourced.kind=service | wc -l)" 1
 
 step "exit codes, streams, stdin, environment, signals"
 out="$(run sh -c 'echo to-stdout; echo to-stderr >&2; exit 7' 2>"$WORK/err")"; code=$?
@@ -143,16 +143,16 @@ step "operations: metrics and structured logs"
 MLABEL="$(docker_ inspect -f '{{index .Config.Labels "cloudsourced.machine"}}' "$MACHINE")"
 m="$(cs metrics)"
 check "metrics: daemon counts prepares" test "$(metric "$m" cloudsourced_daemon_requests_total 'op="prepare",result="ok"')" -ge 1
-check "metrics: fleet machines by provider, size and state" contains "$m" 'cloudsourced_machines{provider="local",size="default",state="running"} 1'
-check "metrics: machine session exits with machine label" poll 30 sh -c 'case "$("$1" metrics)" in *"$2"*) ;; *) exit 1;; esac' _ "$BIN" "cloudsourced_server_session_exits_total{machine=\"$MLABEL\",provider=\"local\",size=\"default\",code=\"7\"}"
+check "metrics: pool machines by provider, size and state" contains "$m" 'cloudsourced_machines{provider="local",size="default",state="running"} 1'
+check "metrics: machine session exits with machine label" poll 30 sh -c 'case "$("$1" metrics)" in *"$2"*) ;; *) exit 1;; esac' _ "$BIN" "cloudsourced_worker_session_exits_total{machine=\"$MLABEL\",provider=\"local\",size=\"default\",code=\"7\"}"
 check "metrics: acquire wait histogram" test "$(metric "$m" cloudsourced_acquire_wait_seconds_count 'result="assigned"')" -ge 1
 check "metrics: cost per hour of running machines" contains "$m" 'cloudsourced_cost_per_hour{provider="local"} 0.5'
-check "machine server logs JSON (format forwarded by the orchestrator)" contains "$(docker_ logs "$MACHINE" 2>&1 | grep '"msg":"session finished"' | tail -1)" '"level":"INFO"'
+check "worker logs JSON (format forwarded by the orchestrator)" contains "$(docker_ logs "$MACHINE" 2>&1 | grep '"msg":"session finished"' | tail -1)" '"level":"INFO"'
 if [ -n "$REMOTE" ]; then
   KEY="$(cat "$CPSTATE/api-key")"
   check "control plane /metrics needs the API key" eq "$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$CPPORT/metrics")" 401
   cm="$(curl -sk -H "Authorization: Bearer $KEY" "https://127.0.0.1:$CPPORT/metrics")"
-  check "control plane /metrics has machine and session metrics" contains "$cm" "cloudsourced_server_session_duration_seconds_count{machine=\"$MLABEL\""
+  check "control plane /metrics has machine and session metrics" contains "$cm" "cloudsourced_worker_session_duration_seconds_count{machine=\"$MLABEL\""
   check "control plane /metrics counts API requests" test "$(metric "$cm" cloudsourced_http_requests_total 'path="/v1/acquire",result="200"')" -ge 1
   check "--metrics-listen serves /metrics without authentication" contains "$(curl -s "http://127.0.0.1:$MPORT/metrics")" "cloudsourced_queue_length"
   check "control plane logs requests as JSON with request ids" contains "$(grep '"msg":"lease"' "$WORK/cp.log" | tail -1)" '"request_id":"'
@@ -169,7 +169,7 @@ for _ in $(seq 30); do # batch exporters flush within 5 s
   [ -n "$trace" ] && break; sleep 1
 done
 check "one trace has proxy, daemon and server spans" test -n "$trace"
-check "  ... with run, prepare, acquire and session spans" sh -c 'case "$1" in *cloudsourced.run*daemon.prepare*fleet.acquire*server.exec*) exit 0;; esac; echo "     $1"; exit 1' _ "$trace"
+check "  ... with run, prepare, acquire and session spans" sh -c 'case "$1" in *cloudsourced.run*daemon.prepare*pool.acquire*worker.exec*) exit 0;; esac; echo "     $1"; exit 1' _ "$trace"
 [ -n "$REMOTE" ] && check "  ... and control plane spans" contains "$trace" "cloudsourced-controlplane"
 check "spans carry no secrets" sh -c '! grep -q -e from-cmd -e file-secret ${2:+-e "$2"} "$1"' _ "$OTLP_OUT" "$([ -n "$REMOTE" ] && cat "$CPSTATE/api-key")"
 rep="$(cs report --since 1d 2>&1)"
@@ -184,7 +184,7 @@ check "report has machine cost (price x machine-hours)" python3 -c 'import sys; 
 check "report has queue waits" test "$(echo "$repj" | json_get queue_wait.count)" -ge 5
 out="$(cs sim export --since 1d -o "$WORK/real.json" 2>&1)"
 check "sim export writes the real runs as a trace" contains "$out" "jobs to $WORK/real.json"
-out="$(cs sim -config "$FLEETCFG" -json "$WORK/real.json" 2>&1)"; code=$?
+out="$(cs sim -config "$POOLCFG" -json "$WORK/real.json" 2>&1)"; code=$?
 check "cloudsourced sim replays the exported trace" eq "$code" 0
 check "  ... and completes its jobs" test "$(echo "$out" | python3 -c 'import json,sys; print(min(r["completed"] for r in json.load(sys.stdin)))' 2>/dev/null || echo 0)" -ge 5
 
@@ -196,7 +196,7 @@ MADDR="$(docker_ port "$MACHINE" 7443/udp | head -1)"
 SEED="$(docker_ inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$MACHINE" | sed -n 's/^CLOUDSOURCED_TLS_SEED=//p')"
 probe() { cs debug probe "$MADDR" "$MFP" "$1" 2>&1; }
 token() { cs debug token --state-dir "$MDIR" --machine "$MID" "$@"; }
-check "fleet master key stored with mode 600" eq "$(stat -c %a "$MDIR/master.key")" 600
+check "pool master key stored with mode 600" eq "$(stat -c %a "$MDIR/master.key")" 600
 check "no per-machine secret files" test -z "$(ls "$MDIR/machines" 2>/dev/null)"
 check "machine got only a TLS seed as secret" test -n "$SEED"
 check "probe token reads machine status" contains "$(probe "$(token --scope probe)")" "\"machine\": \"$MID\""

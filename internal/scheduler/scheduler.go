@@ -1,6 +1,6 @@
 // Package scheduler contains the scheduling decisions of cloudsourced as
-// pure functions over a fleet snapshot: where a task runs (Place), how the
-// fleet changes (Plan) and how much a task needs (Estimator).
+// pure functions over a pool snapshot: where a task runs (Place), how the
+// pool changes (Plan) and how much a task needs (Estimator).
 //
 // The orchestrator gathers state, calls a Policy and executes its
 // decisions; it contains no placement or scaling logic itself. Policies can
@@ -129,8 +129,8 @@ func (m Machine) Warm(repo string) bool {
 	return false
 }
 
-// Fleet is a snapshot of everything the scheduler may decide on.
-type Fleet struct {
+// Pool is a snapshot of everything the scheduler may decide on.
+type Pool struct {
 	Now      time.Time
 	Machines []Machine
 	Queue    []Task               // tasks waiting for capacity
@@ -142,7 +142,7 @@ type Fleet struct {
 }
 
 // SizesFor returns the sizes whose architecture matches env's.
-func (f Fleet) SizesFor(env string) []Size {
+func (f Pool) SizesFor(env string) []Size {
 	arch := f.EnvArch[env]
 	if arch == "" {
 		arch = "amd64"
@@ -183,7 +183,7 @@ type Placement struct {
 	Reason  string
 }
 
-// ActionKind is a fleet change.
+// ActionKind is a pool change.
 type ActionKind int
 
 const (
@@ -199,7 +199,7 @@ func (k ActionKind) String() string {
 	return [...]string{"create", "start", "stop", "destroy", "drain", "undrain"}[k]
 }
 
-// Action is one fleet change decided by Plan.
+// Action is one pool change decided by Plan.
 type Action struct {
 	Kind    ActionKind
 	Machine string // for everything but Create
@@ -213,11 +213,11 @@ type Action struct {
 type Policy interface {
 	// Place decides where task runs. It is called with the task not part of
 	// f.Queue.
-	Place(f Fleet, t Task) Placement
-	// Plan returns fleet changes. It is called periodically and whenever
+	Place(f Pool, t Task) Placement
+	// Plan returns pool changes. It is called periodically and whenever
 	// tasks wait. Hard invariants (destroying expired machines, deleting
 	// orphaned volumes) are enforced by the orchestrator, not the policy.
-	Plan(f Fleet) []Action
+	Plan(f Pool) []Action
 }
 
 // Usage is what a finished session consumed.

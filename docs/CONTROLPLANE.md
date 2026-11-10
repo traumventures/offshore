@@ -1,8 +1,7 @@
 # Running the control plane
 
-`cloudsourced controlplane` serves the fleet API (leases, environments,
-status) over HTTPS with one global API key. Clients set `[orchestrator]
-mode = "remote"`; build traffic goes directly from clients to machines.
+`cloudsourced controlplane` serves the pool API (leases, environments,
+status) over HTTPS with one global API key. Clients set `[control_plane]
 
 The control plane works **without a domain**: it serves a persistent
 self-signed certificate that clients pin by fingerprint. A domain is **only a
@@ -15,7 +14,7 @@ drop the fingerprint.
 ```
 cloudsourced controlplane [flags]                  serve
 cloudsourced controlplane info [--show-key]        URLs, TLS mode, fingerprint, API key location
-cloudsourced controlplane client-config [--url U]  print the client [orchestrator] block
+cloudsourced controlplane client-config [--url U]  print the client [control_plane] block
 cloudsourced controlplane health                   liveness check (container HEALTHCHECK)
 ```
 
@@ -31,16 +30,16 @@ cloudsourced controlplane health                   liveness check (container HEA
 | `--insecure-http` | | plain HTTP behind a TLS terminating proxy |
 | `--api-key-file` | `$CLOUDSOURCED_API_KEY`, else generated `<state>/api-key` | the key is never logged; `info --show-key` prints it |
 | `--state-dir` | `$CLOUDSOURCED_STATE_DIR` or `~/.local/state/cloudsourced/controlplane` | |
-| `--machine-binary` | see below | server binary for local-docker machines, as a path on the Docker host |
-| `--config` | `$CLOUDSOURCED_FLEET_CONFIG`, else `$CLOUDSOURCED_CONFIG`/`~/.config/cloudsourced/config.toml` | fleet configuration (`[fleet]`, `[providers.*]`); `[orchestrator]` and `user` in it are ignored with a warning |
+| `--machine-binary` | see below | worker binary for local-docker machines, as a path on the Docker host |
+| `--config` | `$CLOUDSOURCED_POOL_CONFIG`, else `$CLOUDSOURCED_CONFIG`/`~/.config/cloudsourced/config.toml` | pool configuration (`[pool]`, `[providers.*]`); `[control_plane]` and `user` in it are ignored with a warning |
 
-The fleet configuration is reloaded when the file changes (checked before
+The pool configuration is reloaded when the file changes (checked before
 each lease and every 15 s), on `SIGHUP` and on `cloudsourced reconcile` from a
 client; an invalid file is logged and the previous configuration stays in
-effect. `fleet.id`, the providers and `fleet.estimator` apply only after a
+effect. `pool.id`, the providers and `pool.estimator` apply only after a
 restart. Repository settings (build and dependency cache TTLs) come with each
-request and never change the fleet configuration. `cloudsourced config check
---fleet FILE` validates a fleet file before deploying it.
+request and never change the pool configuration. `cloudsourced config check
+--pool FILE` validates a pool file before deploying it.
 
 The state directory holds `api-key`, `tls.json` (self-signed certificate,
 created once, so the fingerprint survives restarts; replaced only when a new
@@ -57,8 +56,7 @@ cloudsourced controlplane client-config --url https://1.2.3.4:7443   # anywhere:
 ```
 
 ```toml
-[orchestrator]
-mode = "remote"
+[control_plane]
 url = "https://10.0.0.5:7443"
 fingerprint = "0b91…"                # only with the self-signed certificate
 api_key = "env:CLOUDSOURCED_API_KEY" # or file:…, cmd:…
@@ -122,7 +120,7 @@ container is unprivileged otherwise. It needs the socket's group:
 
 ```sh
 sudo install -d -o 10001 -g 10001 -m 0700 /srv/cloudsourced
-sudo cp fleet-config.toml /srv/cloudsourced/config.toml   # [providers.x] backend = "local-docker", command = ["docker"]
+sudo cp pool-config.toml /srv/cloudsourced/config.toml   # [providers.x] type = "local-docker", command = ["docker"]
 sudo chown 10001:10001 /srv/cloudsourced/config.toml
 docker run -d --name cloudsourced-controlplane --restart unless-stopped \
   --network host \
@@ -139,7 +137,7 @@ host (`host` option, default 127.0.0.1); the control plane probes them there
 and hands that address to clients. With host networking 127.0.0.1 is the host.
 (With `aws-ec2` only, `-p 7443:7443` works as well.)
 
-Why the binary needs care: local-docker bind mounts the server binary into
+Why the binary needs care: local-docker bind mounts the worker binary into
 every machine, and the Docker daemon resolves that path **on the host**. In a
 container (detected by `/.dockerenv` or `CLOUDSOURCED_IN_CONTAINER=1`, set by
 the image) the control plane therefore copies its own executable to
@@ -172,10 +170,10 @@ networking, host Docker for environment image builds). Resources:
 - Optional Route 53 A record when `Hostname` and `HostedZoneId` are set.
 - Instance role: Session Manager (operator access, no SSH), pull of the
   image, and the **aws-ec2 operator permissions**: run/start/stop/terminate
-  instances tagged `project=cloudsourced`, ingress on the fleet security
+  instances tagged `project=cloudsourced`, ingress on the pool security
   group, the binary bucket and environment repository, the AMI parameter,
-  machine secrets under `/cloudsourced/<FleetStackName>/` (P1), and creating
-  and updating the fleet stack `FleetStackName` (CloudFormation acts with the
+  machine secrets under `/cloudsourced/<PoolStackName>/` (P1), and creating
+  and updating the pool stack `PoolStackName` (CloudFormation acts with the
   caller's permissions), limited to resources named after that stack. The
   policy is written here; the dedicated IAM template of workpack P4 may
   replace it.

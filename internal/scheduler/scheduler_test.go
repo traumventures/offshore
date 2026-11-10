@@ -22,7 +22,7 @@ func task(cpu float64, memG int64) Task {
 }
 
 func TestPlaceOvercommit(t *testing.T) {
-	f := Fleet{Now: now, Machines: []Machine{machine("m", res(4, 8), res(4, 6))}}
+	f := Pool{Now: now, Machines: []Machine{machine("m", res(4, 8), res(4, 6))}}
 	strict := Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1}}
 	if pl := strict.Place(f, task(2, 2)); pl.Kind != Wait {
 		t.Fatalf("CPU is full without overcommit, got %+v", pl)
@@ -45,7 +45,7 @@ func TestPlaceOvercommit(t *testing.T) {
 }
 
 func TestPlaceRejectsOversized(t *testing.T) {
-	f := Fleet{Now: now, Sizes: []Size{{Provider: "p", Name: "s", Capacity: res(8, 16)}}}
+	f := Pool{Now: now, Sizes: []Size{{Provider: "p", Name: "s", Capacity: res(8, 16)}}}
 	if pl := (Default{}).Place(f, task(2, 32)); pl.Kind != Reject {
 		t.Fatalf("want reject, got %+v", pl)
 	}
@@ -57,7 +57,7 @@ func TestPlaceSkipsDrainingPressuredExpiring(t *testing.T) {
 	d.Draining = true
 	p.Pressure.Memory = 0.5
 	e.ExpiresAt = now.Add(5 * time.Minute)
-	f := Fleet{Now: now, Machines: []Machine{d, p, e, ok}}
+	f := Pool{Now: now, Machines: []Machine{d, p, e, ok}}
 	if pl := (Default{Cfg: cfg}).Place(f, task(1, 1)); pl.Machine != "ok" {
 		t.Fatalf("got %+v", pl)
 	}
@@ -69,18 +69,18 @@ func TestPlanScaleOutPicksSmallestFittingSize(t *testing.T) {
 		{Provider: "p", Name: "small", Capacity: res(4, 8), PricePerHour: 0.2},
 	}
 	pol := Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1, MaxMachines: 10}}
-	one := pol.Plan(Fleet{Now: now, Sizes: sizes, Queue: []Task{task(2, 4)}})
+	one := pol.Plan(Pool{Now: now, Sizes: sizes, Queue: []Task{task(2, 4)}})
 	if len(one) != 1 || one[0].Kind != Create || one[0].Size.Name != "small" {
 		t.Fatalf("one small task: %+v", one)
 	}
-	big := pol.Plan(Fleet{Now: now, Sizes: sizes, Queue: []Task{task(2, 20)}})
+	big := pol.Plan(Pool{Now: now, Sizes: sizes, Queue: []Task{task(2, 20)}})
 	if len(big) != 1 || big[0].Size.Name != "large" {
 		t.Fatalf("task larger than small size: %+v", big)
 	}
 	// Capacity on its way is not created twice.
 	starting := machine("s", res(4, 8), Resources{})
 	starting.State = Starting
-	none := pol.Plan(Fleet{Now: now, Sizes: sizes, Machines: []Machine{starting}, Queue: []Task{task(2, 4)}})
+	none := pol.Plan(Pool{Now: now, Sizes: sizes, Machines: []Machine{starting}, Queue: []Task{task(2, 4)}})
 	if len(none) != 0 {
 		t.Fatalf("demand covered by a starting machine: %+v", none)
 	}
@@ -90,7 +90,7 @@ func TestPlanStartsStoppedBeforeCreating(t *testing.T) {
 	st := machine("st", res(4, 8), Resources{})
 	st.State = Stopped
 	pol := Default{Cfg: Config{MaxMachines: 3}}
-	acts := pol.Plan(Fleet{Now: now, Sizes: []Size{{Provider: "p", Name: "s", Capacity: res(4, 8)}}, Machines: []Machine{st}, Queue: []Task{task(2, 4)}})
+	acts := pol.Plan(Pool{Now: now, Sizes: []Size{{Provider: "p", Name: "s", Capacity: res(4, 8)}}, Machines: []Machine{st}, Queue: []Task{task(2, 4)}})
 	if len(acts) != 1 || acts[0].Kind != Start || acts[0].Machine != "st" {
 		t.Fatalf("%+v", acts)
 	}
@@ -104,7 +104,7 @@ func TestPlanProviderLimitBursts(t *testing.T) {
 		{Provider: "aws", Name: "c7a", Capacity: res(4, 4), PricePerHour: 0.2},
 	}
 	pol := Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1, MaxMachines: 5, ProviderMax: map[string]int{"local": 1}}}
-	acts := pol.Plan(Fleet{Now: now, Sizes: sizes, Machines: []Machine{local}, Queue: []Task{task(2, 2)}})
+	acts := pol.Plan(Pool{Now: now, Sizes: sizes, Machines: []Machine{local}, Queue: []Task{task(2, 2)}})
 	if len(acts) != 1 || acts[0].Size.Provider != "aws" {
 		t.Fatalf("local is at its limit, want burst to aws: %+v", acts)
 	}
@@ -114,7 +114,7 @@ func TestPlanIdleStopKeepsWarmPool(t *testing.T) {
 	a, b := machine("a", res(4, 8), Resources{}), machine("b", res(4, 8), Resources{})
 	a.IdleSince, b.IdleSince = now.Add(-time.Hour), now.Add(-time.Hour)
 	pol := Default{Cfg: Config{MinMachines: 1, MaxMachines: 3, IdleStop: time.Minute}}
-	acts := pol.Plan(Fleet{Now: now, Machines: []Machine{a, b}, Recent: map[string]time.Time{"e": now}})
+	acts := pol.Plan(Pool{Now: now, Machines: []Machine{a, b}, Recent: map[string]time.Time{"e": now}})
 	if len(acts) != 1 || acts[0].Kind != Stop {
 		t.Fatalf("want exactly one stop: %+v", acts)
 	}

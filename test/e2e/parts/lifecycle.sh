@@ -33,9 +33,9 @@ check "outputs mounted at the local build directory" contains "$out" "mounted $P
 step "lifecycle: idle stop, warm restart, lifetime expiry, cleanup"
 cs down >/dev/null
 write_config 24h 5m 0 2
-# Fleet settings change by explicit reload, without a restart.
+# Pool settings change by explicit reload, without a restart.
 cs reconcile >/dev/null 2>&1; code=$?
-check "reconcile reloads the fleet configuration" eq "$code" 0
+check "reconcile reloads the pool configuration" eq "$code" 0
 run cargo build -q >/dev/null 2>&1
 check "output mount restored after the daemon restart" grep -q " $PROJ/target .*fuse.cloudsourced-outputs" /proc/self/mountinfo
 cached="$(cd "$PROJ" && ls target/debug/deps/hello-*.d | head -1)"; cached_sum="$(sha256sum < "$PROJ/$cached")"
@@ -71,7 +71,7 @@ check "local build directory intact after unmount" test -x "$PROJ/target/debug/h
 
 step "fail open when no machine can be provisioned"
 write_config 24h 10m 0 2
-sed -i 's/^command = .*/command = ["false"]/' "$FLEETCFG"; restart_daemon
+sed -i 's/^command = .*/command = ["false"]/' "$POOLCFG"; restart_daemon
 out="$(cd "$PROJ" && CLOUDSOURCED_REQUIRE_REMOTE= "$BIN" run sh -c 'echo ${CLOUDSOURCED_SESSION:-local}' 2>&1)"
 check "falls back to local execution" contains "$out" "local"
 (cd "$PROJ" && "$BIN" run sh -c true >/dev/null 2>&1); code=$?

@@ -7,9 +7,9 @@
 // written, and never serves older objects.
 //
 // URL layout: [/<namespace>]/[_ttl/<seconds>/]<key>. A Handler with a fixed
-// Namespace (the machine server's built-in cache: the namespace is the
+// Namespace (the worker's built-in cache: the namespace is the
 // environment hash) takes no namespace segment from the URL, so sessions
-// cannot reach other environments. A Handler without one (a host agent
+// cannot reach other environments. A Handler without one (a supervisor
 // serving several machines) takes the first path segment as the namespace.
 // The optional _ttl segment lowers the maximum age for reads below the
 // store's TTL (repository setting cache.compiler.ttl).

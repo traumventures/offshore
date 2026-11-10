@@ -10,7 +10,7 @@ import (
 
 // Two concurrent requests of repositories with different cache TTLs must
 // each get their own TTLs: the TTLs travel in the request, not in shared
-// fleet configuration.
+// pool configuration.
 func TestConcurrentRequestsKeepTheirTTLs(t *testing.T) {
 	f := newFake()
 	o := newTestOrch(t, f, func(c *Config) { c.MaxLifetime = 6 * time.Hour })
@@ -57,7 +57,7 @@ func TestConcurrentRequestsKeepTheirTTLs(t *testing.T) {
 		}
 	}
 	if o.cfg.MaxLifetime != 6*time.Hour || len(o.queued) != 0 {
-		t.Errorf("requests leaked into fleet state: %+v queued=%v", o.cfg, o.queued)
+		t.Errorf("requests leaked into pool state: %+v queued=%v", o.cfg, o.queued)
 	}
 }
 

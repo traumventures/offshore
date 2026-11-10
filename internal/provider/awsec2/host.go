@@ -21,11 +21,11 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/traumventures/cloudsourced/internal/blobcache"
-	"github.com/traumventures/cloudsourced/internal/hostagent"
 	"github.com/traumventures/cloudsourced/internal/machine"
+	"github.com/traumventures/cloudsourced/internal/supervisor"
 )
 
-// Spec parameters of the host agent on EC2.
+// Spec parameters of the supervisor on EC2.
 const (
 	paramRegion   = "region"
 	paramSecret   = "secret_parameter" // SSM SecureString with the secret server environment
@@ -36,20 +36,20 @@ const (
 )
 
 func init() {
-	hostagent.RegisterPlatform("aws-ec2", openHost)
+	supervisor.RegisterPlatform("aws-ec2", openHost)
 }
 
 // secretParameter is the SSM parameter holding a machine's secret
-// environment until its host agent has read it.
+// environment until its supervisor has read it.
 func secretParameter(stack, machineID string) string {
 	return "/cloudsourced/" + stack + "/machines/" + machineID
 }
 
-// host is the agent side of the provider. It uses the instance role,
+// host is the supervisor side of the provider. It uses the instance role,
 // whose credentials come from the instance metadata service; only the host
 // reaches it (hop limit 1), never the containers.
 type host struct {
-	spec hostagent.Spec
+	spec supervisor.Spec
 	cfg  aws.Config
 	ssm  *ssm.Client
 	ec2  *ec2.Client
@@ -57,7 +57,7 @@ type host struct {
 	imds *imds.Client
 }
 
-func openHost(ctx context.Context, spec hostagent.Spec) (hostagent.Platform, error) {
+func openHost(ctx context.Context, spec supervisor.Spec) (supervisor.Platform, error) {
 	region := spec.Params[paramRegion]
 	if region == "" || spec.Params[paramSecret] == "" {
 		return nil, errors.New("aws-ec2 host: spec lacks region or secret parameter")
@@ -93,7 +93,7 @@ func (h *host) DeleteSecrets(ctx context.Context) error {
 }
 
 // Prepare logs the Docker CLI in to ECR.
-func (h *host) Prepare(ctx context.Context, docker hostagent.Runner) error {
+func (h *host) Prepare(ctx context.Context, docker supervisor.Runner) error {
 	registry := h.spec.Params[paramRegistry]
 	if registry == "" {
 		return nil

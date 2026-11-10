@@ -20,7 +20,7 @@ import (
 // Options configures a simulation run.
 type Options struct {
 	Name      string           // label in reports
-	Policy    scheduler.Policy // decides placement and fleet changes
+	Policy    scheduler.Policy // decides placement and pool changes
 	Sizes     []scheduler.Size // machine types the policy may create
 	Estimator scheduler.Estimator
 	// Boot and Start are the latencies until a created or a started machine
@@ -42,7 +42,7 @@ type Options struct {
 	// without use (default 24h, like the orchestrator).
 	RecentTTL time.Duration
 	// QueueTimeout fails tasks waiting longer (0 = wait forever), like
-	// fleet.queue_timeout.
+	// pool.queue_timeout.
 	QueueTimeout time.Duration
 	// MinBilling is the minimum billed time per create or start (default
 	// 60s like EC2; negative = none).
@@ -364,9 +364,9 @@ func (s *sim) task(j *job) scheduler.Task {
 		Request: s.o.Estimator.Estimate(j.Repo, fallback), Since: j.since}
 }
 
-// fleet is the policy's view, built like the orchestrator's fleetLocked.
-func (s *sim) fleet() scheduler.Fleet {
-	f := scheduler.Fleet{Now: s.now, Sizes: s.o.Sizes, Recent: map[string]time.Time{}}
+// pool is the policy's view, built like the orchestrator's poolLocked.
+func (s *sim) pool() scheduler.Pool {
+	f := scheduler.Pool{Now: s.now, Sizes: s.o.Sizes, Recent: map[string]time.Time{}}
 	for env, t := range s.recent {
 		f.Recent[env] = t
 	}
@@ -421,7 +421,7 @@ func (s *sim) settle(tick bool) {
 	if len(s.queue) == 0 && !tick {
 		return
 	}
-	s.execute(s.o.Policy.Plan(s.fleet()))
+	s.execute(s.o.Policy.Plan(s.pool()))
 	s.placeQueued()
 }
 
@@ -433,7 +433,7 @@ func (s *sim) placeQueued() {
 			continue
 		}
 		t := s.task(j)
-		f := s.fleet()
+		f := s.pool()
 		f.Queue = slices.DeleteFunc(f.Queue, func(o scheduler.Task) bool { return o.ID == t.ID })
 		pl := s.o.Policy.Place(f, t)
 		switch pl.Kind {

@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/traumventures/cloudsourced/internal/client"
 	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/cloudsourced/internal/daemon"
 )
 
 // outputsCmd manages the output FUSE: the remote build directories of the
@@ -21,7 +21,7 @@ func outputsCmd(args []string) error {
 		sub = args[0]
 	}
 	ctx := context.Background()
-	if err := client.EnsureDaemon(ctx); err != nil {
+	if err := daemon.EnsureDaemon(ctx); err != nil {
 		return err
 	}
 	switch sub {
@@ -30,7 +30,7 @@ func outputsCmd(args []string) error {
 		if err != nil {
 			return fmt.Errorf("no %s found", config.RepoFileName)
 		}
-		raw, err := client.Call(ctx, client.Request{Op: "outputs-" + sub, Root: root}, os.Stderr)
+		raw, err := daemon.Call(ctx, daemon.Request{Op: "outputs-" + sub, Root: root}, os.Stderr)
 		if err != nil {
 			return err
 		}
@@ -45,11 +45,11 @@ func outputsCmd(args []string) error {
 		}
 		return nil
 	case "status":
-		raw, err := client.Call(ctx, client.Request{Op: "outputs-status"}, os.Stderr)
+		raw, err := daemon.Call(ctx, daemon.Request{Op: "outputs-status"}, os.Stderr)
 		if err != nil {
 			return err
 		}
-		var st []client.OutputsStatus
+		var st []daemon.OutputsStatus
 		if err := json.Unmarshal(raw, &st); err != nil {
 			return err
 		}
@@ -170,10 +170,10 @@ settings = { ["rust-analyzer"] = {
 		return nil
 	}
 	ctx := context.Background()
-	if err := client.EnsureDaemon(ctx); err != nil {
+	if err := daemon.EnsureDaemon(ctx); err != nil {
 		return err
 	}
-	raw, err := client.Call(ctx, client.Request{Op: "outputs-mount", Root: root}, os.Stderr)
+	raw, err := daemon.Call(ctx, daemon.Request{Op: "outputs-mount", Root: root}, os.Stderr)
 	if err != nil {
 		return fmt.Errorf("mount outputs: %w", err)
 	}

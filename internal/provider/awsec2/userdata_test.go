@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/hostagent"
 	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/cloudsourced/internal/supervisor"
 )
 
 func TestUserDataHasNoSecrets(t *testing.T) {
@@ -36,7 +36,7 @@ func TestUserDataHasNoSecrets(t *testing.T) {
 			}
 		}
 	}
-	var hs hostagent.Spec
+	var hs supervisor.Spec
 	if err := json.Unmarshal(raw, &hs); err != nil {
 		t.Fatal(err)
 	}

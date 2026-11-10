@@ -1,11 +1,11 @@
 // Package machine is the single definition of a machine's container
-// layout: the machine server container (FUSE, capabilities, private
+// layout: the worker container (FUSE, capabilities, private
 // cgroup namespace, published QUIC port, server binary, cache volumes,
 // environment) and its service containers joined to the machine's network
 // namespace, plus the order in which they are created and started.
 //
 // The local-docker provider applies the layout with the Docker CLI on the
-// developer's host; the host agent ("cloudsourced host") applies the same
+// developer's host; the supervisor ("cloudsourced supervisor") applies the same
 // layout on VM hosts.
 package machine
 
@@ -23,7 +23,7 @@ const (
 	DepsDir       = "/deps"
 	HostStatusDir = "/run/cloudsourced-host"
 	// HostStatusEnv names the file the server publishes its status to for
-	// the host agent (see HostStatus).
+	// the supervisor (see HostStatus).
 	HostStatusEnv  = "CLOUDSOURCED_HOST_STATUS"
 	HostStatusFile = HostStatusDir + "/status.json"
 	// ServerPort is the QUIC port of the server inside the container.
@@ -128,7 +128,7 @@ func (l Layout) Containers(secret map[string]string, mode Secrets) []Container {
 			args = append(args, "--memory-swap", "-1")
 		}
 	}
-	args = append(args, l.Image, "server")
+	args = append(args, l.Image, "worker")
 	out := []Container{{Name: name, Image: l.Image, Create: args}}
 	for _, svc := range l.Services {
 		sn := ServiceName(l.ID, svc.Name)

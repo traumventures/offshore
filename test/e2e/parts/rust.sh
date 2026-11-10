@@ -125,6 +125,6 @@ check "compiler cache entries on the shared dependency volume" test "$(docker_ e
 
 step "operations: compiler cache and output metrics"
 # Machine metrics are those of the last probe: wait for one after the run.
-check "metrics: sccache hits republished from the machine" poll 30 metric_ge cloudsourced_server_compiler_cache_total 'counter="sccache_hits"' 1
-check "metrics: output bytes transferred" poll 30 metric_ge cloudsourced_server_transfer_bytes_total 'direction="output"' 1
+check "metrics: sccache hits republished from the machine" poll 30 metric_ge cloudsourced_worker_compiler_cache_total 'counter="sccache_hits"' 1
+check "metrics: output bytes transferred" poll 30 metric_ge cloudsourced_worker_transfer_bytes_total 'direction="output"' 1
 cs outputs unmount >/dev/null 2>&1 || true

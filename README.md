@@ -29,7 +29,7 @@ interface.
 laptop                                         machine (container / VM)
 cargo build ──► proxy ──► daemon ── QUIC ────► server
                  │         ├─ watcher + manifest ──► FUSE projection of /home/me/hello
-                 │         │   (metadata local on the server, content on demand by hash)
+                 │         │   (metadata local on the worker, content on demand by hash)
                  │         └─ orchestrator ─────► provider: create/start/stop/destroy
                  └──────────── QUIC exec ───────► session: own mount ns + cgroup
                                                     /home/me/hello/target = warm slot
@@ -80,20 +80,20 @@ There are three configuration files, each with one role:
 
 | file | role | read by |
 |------|------|---------|
-| client: `~/.config/cloudsourced/config.toml` (`$CLOUDSOURCED_CONFIG`) | `[orchestrator]` (embedded or remote), `user` | CLI, daemon |
-| fleet: `[fleet]`, `[providers.*]` (`$CLOUDSOURCED_FLEET_CONFIG`, `controlplane --config`; default: the client file) | sizes, policy, lifetimes, providers | the orchestrator: daemon in embedded mode, control plane |
+| client: `~/.config/cloudsourced/config.toml` (`$CLOUDSOURCED_CONFIG`) | `[control_plane]` (absent: embedded orchestrator), `user` | CLI, daemon |
+| pool: `[pool]`, `[providers.*]` (`$CLOUDSOURCED_POOL_CONFIG`, `controlplane --config`; default: the client file) | sizes, policy, lifetimes, providers | the orchestrator: daemon in embedded mode, control plane |
 | repository: `.cloudsourced.toml` | environment, caches, resources, TTLs | sent with every request |
 
-In embedded mode one file may hold the client and the fleet sections. In
-remote mode fleet sections in the client file have no effect (the client warns);
-the control plane ignores `[orchestrator]` and `user`. `user` (default `$USER`)
-salts repository ids; `fleet.id` (default `$USER`) names the fleet and is the
-`cloudsourced.owner` label of its machines and volumes. Repository settings
+In embedded mode one file may hold the client and the pool sections. In
+remote mode pool sections in the client file have no effect (the client warns);
+the control plane ignores `[control_plane]` and `user`. `user` (default `$USER`)
+salts repository ids; `pool.id` (default `$USER`) names the pool and is the
+`cloudsourced.pool` label of its machines and volumes. Repository settings
 such as `cache.build.ttl`/`cache.deps.ttl` travel in each request, so
-repositories with different settings share one fleet without affecting each
-other. Fleet settings change only by reload: the daemon applies a changed fleet
+repositories with different settings share one pool without affecting each
+other. Pool settings change only by reload: the daemon applies a changed pool
 file on the next request and on `cloudsourced reconcile`; the control plane
-when the file changes and on `SIGHUP`. Changing `fleet.id` or the providers
+when the file changes and on `SIGHUP`. Changing `pool.id` or the providers
 needs a restart. `cloudsourced config check` validates the files of the current
 mode and names their roles; `cloudsourced config show` prints the effective
 configuration with secrets redacted.
@@ -101,11 +101,8 @@ configuration with secrets redacted.
 ```toml
 user = "alice"               # client: repository id salt (default $USER)
 
-[orchestrator]
-mode = "embedded"            # client: the daemon runs the orchestrator
-
-[fleet]                      # fleet
-id             = "alice"     # labels machines (deprecated alias: owner)
+[pool]                       # pool
+id             = "alice"     # labels machines (cloudsourced.pool)
 machine_cpu    = 8
 machine_memory = "16G"
 max_machines   = 4
@@ -113,11 +110,11 @@ min_machines   = 0      # warm pool per recently used environment
 idle_stop      = "20m"
 max_lifetime   = "24h"
 
-[[fleet.provision]]     # machine level provisioning, runs once per machine
+[[machine.setup]]     # machine level provisioning, runs once per machine
 run = "echo ready"
 
 [providers.local]       # if your user cannot talk to Docker directly
-backend = "local-docker"
+type = "local-docker"
 command = ["sudo", "-n", "docker"]
 ```
 
@@ -128,7 +125,12 @@ interfaces `Policy` and `Estimator`); the orchestrator only executes its
 actions. One orchestrator can span several providers:
 
 ```toml
-[fleet]
+[providers.local]
+type         = "local-docker"
+command      = ["sudo", "-n", "docker"]
+max_machines = 4
+
+[scheduler]
 policy            = "default"
 estimator         = "history"  # learn per repo/tool/subcommand from cgroup usage, or "static"
 cpu_overcommit    = 2.0        # only slows builds down
@@ -138,23 +140,17 @@ swap              = true
 max_memory_pressure = 0.4      # PSI; no new sessions above this
 limit_jobs        = true       # CARGO_BUILD_JOBS = granted cores
 
-[[fleet.size]]
-provider = "local"
+[[providers.local.size]]
 name     = "small"
 cpu      = 4
 memory   = "8G"
 price_per_hour = 0.1
-
-[providers.local]
-backend      = "local-docker"
-command      = ["sudo", "-n", "docker"]
-max_machines = 4
 ```
 
-The legacy form (`machine_cpu`/`machine_memory` plus `[docker]` and
-`fleet.backend`) still works with a deprecation warning and maps to a single
-provider named `local`; so does `fleet.owner` (now `fleet.id`; a client without
-`user` keeps using it as repository id salt).
+Without `[providers]` the pool has one local-docker provider `local`
+(command `$CLOUDSOURCED_DOCKER`, default `docker`); a provider without
+`[[providers.NAME.size]]` gets one size `default` of `pool.machine_cpu` and
+`pool.machine_memory`.
 
 ### Shared control plane
 
@@ -162,7 +158,7 @@ The orchestrator can run as a shared service instead of inside every daemon.
 Clients only fetch leases from it; build traffic goes directly to the machines.
 
 ```sh
-# fleet and providers in the control plane's fleet file (--config FILE)
+# pool and providers in the control plane's pool file (--config FILE)
 cloudsourced controlplane                        # self-signed, :7443, fingerprint pinned
 cloudsourced controlplane --hostname cs.example.com   # Let's Encrypt, :443 (+ :80 for ACME)
 cloudsourced controlplane client-config          # prints the client block below
@@ -175,8 +171,7 @@ domain the control plane pins its persistent self-signed certificate; with one,
 in a reverse proxy and use `--insecure-http`). Clients:
 
 ```toml
-[orchestrator]
-mode        = "remote"
+[control_plane]
 url         = "https://10.0.0.5:7443"   # or https://cs.example.com
 fingerprint = "0b91…"                    # only for the self-signed certificate
 api_key     = "env:CLOUDSOURCED_API_KEY" # or file:…, cmd:…
@@ -186,9 +181,9 @@ client_key  = "client-key.pem"
 
 `--client-ca ca.pem` additionally requires a client certificate signed by that
 CA (mutual TLS); the API key is still checked. The control plane keeps the
-fleet master key in `<state>/master.key` (0600, created on first start). It is
+pool master key in `<state>/master.key` (0600, created on first start). It is
 the only secret that matters: every machine identity and token is derived from
-it. Replicas or a rebuilt control plane share a fleet by importing the same key
+it. Replicas or a rebuilt control plane share a pool by importing the same key
 with `CLOUDSOURCED_MASTER_KEY` (hex or base64) or
 `CLOUDSOURCED_MASTER_KEY_FILE`.
 
@@ -198,32 +193,31 @@ Container image (`make image`), running it on a Docker host and on AWS
 ### AWS EC2
 
 ```toml
-[[fleet.size]]
-provider = "aws"
-name     = "c7a.2xlarge"     # instance type
-cpu      = 8
-memory   = "15G"
-price_per_hour = 0.42
-
 [providers.aws]
-backend        = "aws-ec2"
+type           = "aws-ec2"
 profile        = "my-profile"           # optional
 region         = "eu-central-1"
 allow_cidrs    = ["203.0.113.4/32"]     # who may reach machines (QUIC, UDP 7443); default: own public IP
 docker_command = ["docker"]             # builds and pushes environment images
 disk_gb        = 100
+
+[[providers.aws.size]]
+name     = "c7a.2xlarge"     # instance type
+cpu      = 8
+memory   = "15G"
+price_per_hour = 0.42
 ```
 
 On first use the provider creates the CloudFormation stack `cloudsourced`
 (`internal/provider/awsec2/stack.yaml`): security group, instance role, S3
-bucket for the server binary, ECR repository for environment images, a reaper
+bucket for the worker binary, ECR repository for environment images, a reaper
 Lambda (every 10 minutes it terminates machines past their expiry) and a
 resource group of everything tagged `project=cloudsourced`. Machines are
 Amazon Linux 2023 instances running the same container layout as local-docker
-(`internal/machine`), applied by the host agent `cloudsourced host` (a systemd
+(`internal/machine`), applied by the supervisor `cloudsourced supervisor` (a systemd
 unit). User data carries only the public machine spec; the machine's secrets
 (server key, token) travel in an SSM SecureString parameter
-`/cloudsourced/<stack>/machines/<id>` that the agent reads once with the
+`/cloudsourced/<stack>/machines/<id>` that the supervisor reads once with the
 instance role and deletes. Machines terminate themselves at `max_lifetime`,
 and stop themselves when idle for `idle_stop` while no orchestrator has probed
 them for `max(idle_stop, 10m)` (an offline control plane does not leave them
@@ -233,8 +227,8 @@ limit 1). The caller's credentials need `ssm:PutParameter`/`DeleteParameter`.
 #### Spot and arm64
 
 ```toml
-[[fleet.size]]
-provider       = "aws"
+
+[[providers.aws.size]]
 name           = "x4-spot"            # a name of your choice
 cpu            = 4
 memory         = "7G"
@@ -244,8 +238,7 @@ instance_types = ["c7a.xlarge", "c6a.xlarge", "m7a.xlarge"]   # tried in order
 spot_discount  = 0.5                  # expected discount (default 0.5) for sizing and costs
 spot_fallback  = true                 # on-demand when no type has spot capacity (default)
 
-[[fleet.size]]
-provider       = "aws"
+[[providers.aws.size]]
 name           = "c7g.xlarge"
 arch           = "arm64"              # default "amd64"
 cpu            = 4
@@ -268,7 +261,7 @@ accounted at the on-demand price.
 The risk: AWS can take a spot machine back with two minutes' notice. The host
 agent polls the metadata service (`spot/instance-action` and the rebalance
 recommendation). A rebalance recommendation only marks the machine at risk
-(new work prefers other machines). On an interruption notice the server
+(new work prefers other machines). On an interruption notice the worker
 drains: no new sessions, running
 sessions continue until the deadline and fail if they are still running
 then. The orchestrator places new
@@ -348,7 +341,7 @@ mode  = "immutable"         # watch (default) | immutable | hidden
 
 [cache.build]
 paths = ["target"]          # worker-local, never synchronised
-ttl   = "24h"               # per build slot, capped by the fleet's max_lifetime
+ttl   = "24h"               # per build slot, capped by the pool's max_lifetime
 
 [cache.deps]
 paths = ["$CARGO_HOME/registry", "$CARGO_HOME/git"]
@@ -453,16 +446,16 @@ sandbox (`SCCACHE_SERVER_UDS`, `SCCACHE_DIR` in a private temporary
 directory); it ends with the session. The cache backend is WebDAV
 (`SCCACHE_WEBDAV_ENDPOINT`), served by `internal/blobcache`:
 
-* By default the machine server serves it on `127.0.0.1` from a directory
+* By default the worker serves it on `127.0.0.1` from a directory
   store under `<deps dir>/sccache` (`CLOUDSOURCED_SCCACHE_DIR`). The
-  dependency volume is shared by the fleet's machines, so a new machine gets
+  dependency volume is shared by the pool's machines, so a new machine gets
   hits for everything an earlier one compiled. Keys are prefixed with the
   environment hash, so toolchains never mix.
-* On AWS the host agent serves the cache itself on the Docker bridge
+* On AWS the supervisor serves the cache itself on the Docker bridge
   gateway (port 7480, reachable from sessions, not from outside the host)
   from the stack's bucket with the instance role (`s3://<bucket>/cache/<owner>/sccache/`,
   deleted after a day by the bucket lifecycle rule), and passes
-  `CLOUDSOURCED_SCCACHE_ENDPOINT` to the machine server; the server appends
+  `CLOUDSOURCED_SCCACHE_ENDPOINT` to the worker; the worker appends
   the environment hash to that URL (`blobcache.Handler` without a fixed
   namespace). `blobcache.S3StoreFromEnv` (`CLOUDSOURCED_SCCACHE_S3=bucket/prefix`)
   offers the same store to other hosts.
@@ -554,10 +547,10 @@ dependencies; `internal/metrics`):
 * Control plane: `GET /metrics` on the API port (API key required) and,
   with `--metrics-listen 127.0.0.1:9090` (`$CLOUDSOURCED_METRICS_LISTEN`),
   without authentication on a separate plain HTTP listener for a local
-  scraper. Fleet metrics: `cloudsourced_machines{provider,size,state}`,
+  scraper. Pool metrics: `cloudsourced_machines{provider,size,state}`,
   `cloudsourced_queue_length`, `cloudsourced_acquire_wait_seconds{result}`,
   `cloudsourced_placements_total{kind}` (assign, queue, reject, timeout),
-  `cloudsourced_fleet_actions_total{action}`,
+  `cloudsourced_pool_actions_total{action}`,
   `cloudsourced_provider_errors_total{provider,op}`,
   `cloudsourced_image_builds_total{provider,result}`,
   `cloudsourced_image_build_seconds{provider}`,
@@ -568,18 +561,18 @@ dependencies; `internal/metrics`):
 * Machines report their metrics in the status stream the orchestrator
   already probes (scope `probe`, no extra port), and the orchestrator
   republishes them with `machine`, `provider` and `size` labels:
-  `cloudsourced_server_sessions_running`,
-  `cloudsourced_server_session_duration_seconds`,
-  `cloudsourced_server_session_exits_total{code}`,
-  `cloudsourced_server_oom_kills_total`,
-  `cloudsourced_server_sessions_rejected_total{reason}`,
-  `cloudsourced_server_pressure{resource}`,
-  `cloudsourced_server_reserved{resource}`,
-  `cloudsourced_server_memory_used_bytes`,
-  `cloudsourced_server_compiler_cache_total{counter}` (sccache counters),
-  `cloudsourced_server_transfer_bytes_total{direction}` (fetch, writeback,
-  output), `cloudsourced_server_ready`, `_draining`, `_warm_repos`. Machine
-  counters restart with the machine server.
+  `cloudsourced_worker_sessions_running`,
+  `cloudsourced_worker_session_duration_seconds`,
+  `cloudsourced_worker_session_exits_total{code}`,
+  `cloudsourced_worker_oom_kills_total`,
+  `cloudsourced_worker_sessions_rejected_total{reason}`,
+  `cloudsourced_worker_pressure{resource}`,
+  `cloudsourced_worker_reserved{resource}`,
+  `cloudsourced_worker_memory_used_bytes`,
+  `cloudsourced_worker_compiler_cache_total{counter}` (sccache counters),
+  `cloudsourced_worker_transfer_bytes_total{direction}` (fetch, writeback,
+  output), `cloudsourced_worker_ready`, `_draining`, `_warm_repos`. Machine
+  counters restart with the worker.
 * `cloudsourced metrics` prints the daemon's metrics
   (`cloudsourced_daemon_requests_total{op,result}`,
   `cloudsourced_daemon_prepare_seconds{result}`,
@@ -589,7 +582,7 @@ dependencies; `internal/metrics`):
 
 **Logs.** `CLOUDSOURCED_LOG_FORMAT=json` (default `text`) and
 `CLOUDSOURCED_LOG_LEVEL=debug|info|warn|error` apply to the daemon
-(`<state>/daemon.log`), the control plane and machine servers; the
+(`<state>/daemon.log`), the control plane and workers; the
 orchestrator passes both to the machines it creates. The control plane logs
 every API request with a `request_id` (the client's `X-Request-Id` when
 well formed, returned in the response header), and acquisitions with
@@ -600,14 +593,14 @@ variables enable it in every component (`OTEL_TRACES_EXPORTER=otlp|console|none`
 `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
 `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER[_ARG]`,
 `OTEL_SDK_DISABLED`), as does a `[telemetry]` section in the client and the
-fleet configuration (the environment wins):
+pool configuration (the environment wins):
 
 ```toml
 [telemetry]
 endpoint = "https://otel.example.com:4318"  # OTLP/HTTP base URL
 headers = { "x-api-key" = "env:OTEL_KEY" }  # references only (env:, file:, cmd:)
 sampling = 0.25                             # new traces; downstream follows the parent
-machine_endpoint = "http://10.0.0.5:4318"   # fleet file: the collector as seen by machines
+machine_endpoint = "http://10.0.0.5:4318"   # pool file: the collector as seen by machines
 ```
 
 Spans are exported as OTLP/HTTP with JSON encoding (accepted by the
@@ -628,15 +621,15 @@ cloudsourced.run (proxy: tool, subcommand, flag names, repo id, decision, reason
 │  └─ daemon.prepare (repo id, env hash, usage key, estimate, lease, machine)
 │     ├─ daemon.env_resolve, daemon.image_ensure, daemon.manifest_refresh, daemon.estimate
 │     ├─ [remote] controlplane /v1/acquire (client) > controlplane /v1/acquire (server)
-│     │  └─ fleet.acquire (queue wait, placement, reason, machine, provider, size, price, reservation, spot)
-│     │       ~ fleet.create / fleet.start (linked root spans: provider, size, price, duration, ready event)
+│     │  └─ pool.acquire (queue wait, placement, reason, machine, provider, size, price, reservation, spot)
+│     │       ~ pool.create / pool.start (linked root spans: provider, size, price, duration, ready event)
 │     └─ daemon.attach (machine, attempt)
 ├─ proxy.connect (session, server wait)
-├─ server.exec (machine: lease, reservation, slot, warm, peak memory, CPU seconds, OOM, exit code, sccache counters)
-│  ├─ server.process, server.writeback, server.outputs
+├─ worker.exec (machine: lease, reservation, slot, warm, peak memory, CPU seconds, OOM, exit code, sccache counters)
+│  ├─ worker.process, worker.writeback, worker.outputs
 ├─ proxy.exec (exit code, usage), proxy.writeback, proxy.outputs
 └─ daemon.release > controlplane /v1/release
-orchestrator.reconcile > fleet.stop / fleet.destroy (background, provider latency)
+orchestrator.reconcile > pool.stop / pool.destroy (background, provider latency)
 ```
 
 Only the subcommand and the names of flags of a tool's arguments are
@@ -660,7 +653,7 @@ protected). See [docs/SCHEDULER.md](docs/SCHEDULER.md#calibrating-the-simulator-
 | build slots | build TTL ≤ 24h ≤ `max_lifetime` | server garbage collection; die with the machine's cache volume |
 | compiler cache | 24h | blobcache never serves older entries; S3 lifecycle `cache/` 1 day |
 | dependency caches | `[cache.deps] ttl` (default 7 days) | volume expiry label, orchestrator reaps volumes |
-| machine secrets (AWS SSM) | until the host agent reads them | agent deletes after reading; reaper deletes parameters under `/cloudsourced/<stack>/machines/` without a live machine (after 15 min) |
+| machine secrets (AWS SSM) | until the supervisor reads them | agent deletes after reading; reaper deletes parameters under `/cloudsourced/<stack>/machines/` without a live machine (after 15 min) |
 | server binaries (S3 `bin/`) | 30 days | bucket lifecycle |
 | environment images (ECR) | 30 days | repository lifecycle |
 
@@ -694,7 +687,7 @@ Design notes and roadmap: [docs/PLAN.md](docs/PLAN.md).
 ## Security notes
 
 * Server connections use QUIC with TLS 1.3. Each machine's Ed25519 key and
-  self-signed certificate are derived from the fleet master key
+  self-signed certificate are derived from the pool master key
   (HKDF-SHA256 over the machine id; the certificate is deterministic in id
   and expiry), so clients pin a fingerprint the orchestrator can always
   recompute and provider labels need not be trusted. A machine only receives

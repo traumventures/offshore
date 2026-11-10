@@ -16,7 +16,7 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-// S3Env enables the S3 store for a host agent: "bucket/prefix". The prefix
+// S3Env enables the S3 store for a supervisor: "bucket/prefix". The prefix
 // should start with "cache/", where the aws-ec2 stack's lifecycle rule
 // deletes objects after one day (the store itself never serves objects
 // older than its TTL). S3TTLEnv optionally lowers the TTL (Go duration).

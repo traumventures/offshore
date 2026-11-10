@@ -17,10 +17,10 @@ headers = { "x-api-key" = "env:OTEL_KEY" }
 sampling = 0.5
 events_retention_days = 7
 
-[fleet]
+[pool]
 id = "f"
 `), 0o600)
-	t.Setenv("CLOUDSOURCED_FLEET_CONFIG", path)
+	t.Setenv("CLOUDSOURCED_POOL_CONFIG", path)
 	c, err := LoadClientFrom(path)
 	if err != nil {
 		t.Fatal(err)
@@ -28,12 +28,12 @@ id = "f"
 	if c.Telemetry.Endpoint != "http://collector:4318" || c.Telemetry.Headers["x-api-key"] != "env:OTEL_KEY" || *c.Telemetry.Sampling != 0.5 {
 		t.Fatalf("client telemetry %+v", c.Telemetry)
 	}
-	f, err := LoadFleet(path)
+	f, err := LoadPool(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if f.Telemetry.EventsRetentionDays != 7 {
-		t.Fatalf("fleet telemetry %+v", f.Telemetry)
+		t.Fatalf("pool telemetry %+v", f.Telemetry)
 	}
 	for _, w := range append(c.Warnings, f.Warnings...) {
 		if strings.Contains(w, "telemetry") {

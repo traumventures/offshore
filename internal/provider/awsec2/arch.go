@@ -23,7 +23,7 @@ func archOf(a string) string {
 }
 
 // serverBinaries returns the server binary per architecture. Machines run
-// the static linux build of their architecture (the host agent and the
+// the static linux build of their architecture (the supervisor and the
 // server in the machine container are the same binary):
 //
 //   - binary_amd64 / binary_arm64 options name them explicitly;

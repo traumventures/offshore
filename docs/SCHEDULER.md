@@ -1,13 +1,13 @@
 # Scheduler
 
 The scheduler (`internal/scheduler`) decides where a session runs (`Place`)
-and how the fleet changes (`Plan`) as pure functions of a fleet snapshot.
+and how the pool changes (`Plan`) as pure functions of a pool snapshot.
 The orchestrator only gathers state and executes the decisions, so policies
 can be tested and simulated without machines.
 
 ## Default policy
 
-`fleet.policy = "default"` (alias `"binpack"`):
+`pool.policy = "default"` (alias `"binpack"`):
 
 - **Placement**: machines with a warm build cache for the repository come
   first; then machines that still have *physical* room (CPU overcommit slows
@@ -30,7 +30,7 @@ can be tested and simulated without machines.
   still allows lose against sizes that absorb more; a small stopped machine
   is not started when its slot is needed for a larger new machine, and an
   empty running machine is stopped to make room for a larger one when the
-  fleet is at its limit. Unknown prices (0) prefer the size absorbing the
+  pool is at its limit. Unknown prices (0) prefer the size absorbing the
   most demand, then the smaller one.
 - **Spot and architecture**: spot sizes count with their expected price
   (`price_per_hour × (1 − spot_discount)`), so they win when cheaper per
@@ -57,7 +57,10 @@ can be tested and simulated without machines.
   24 hours, raised by scheduled windows:
 
   ```toml
-  [[fleet.warm_pool]]
+
+[scheduler]
+
+[[scheduler.warm_pool]]
   days = ["mon", "tue", "wed", "thu", "fri"]   # empty = every day
   from = "08:00"
   to = "19:00"                                # earlier than from spans midnight
@@ -68,19 +71,19 @@ can be tested and simulated without machines.
 - **Limits**: `max_machines` now also bounds starting stopped machines (the
   previous policy could exceed it).
 
-`fleet.policy = "classic"` keeps the previous behaviour (rendezvous
+`pool.policy = "classic"` keeps the previous behaviour (rendezvous
 placement, cheapest size for the aggregate demand, no consolidation) for
 comparison.
 
 New keys: `policy = "default" | "binpack" | "classic"`, `consolidate_below`
-(0 = off), `consolidate_target`, `[[fleet.warm_pool]]`.
+(0 = off), `consolidate_target`, `[[scheduler.warm_pool]]`.
 
 ## Simulator
 
-`cloudsourced sim` replays traces against the fleet configuration:
+`cloudsourced sim` replays traces against the pool configuration:
 
 ```sh
-cloudsourced sim -config internal/scheduler/sim/testdata/fleet.toml \
+cloudsourced sim -config internal/scheduler/sim/testdata/pool.toml \
   internal/scheduler/sim/testdata/team-week.json internal/scheduler/sim/testdata/small-week.json
 cloudsourced sim -generate trace.json -profile team -seed 1 -days 5 -tz Europe/Berlin
 ```
@@ -161,7 +164,7 @@ writes an analysis event log to its state directory:
 estimate, placement and reason, queue wait, machine, size, price) and each
 finished session (`task_end`: reservation, measured peak memory, CPU
 seconds, wall time, OOM, warm build cache, sccache counters). Machine events
-record the fleet (`machine_create`, `machine_ready`, `machine_start`,
+record the pool (`machine_create`, `machine_ready`, `machine_start`,
 `machine_stop`, `machine_destroy`, `machine_drain`, `machine_undrain` and
 `machine_state` for changes observed from the provider, e.g. a machine that
 stopped itself when idle) with provider, size, price, capacity, spot flag
@@ -189,8 +192,8 @@ simulator replays:
 
 ```sh
 cloudsourced sim export --since 7d -o real-week.json
-cloudsourced sim -config fleet-candidate.toml -policy default,classic real-week.json
-cloudsourced sim -config fleet-candidate.toml -estimator history real-week.json
+cloudsourced sim -config pool-candidate.toml -policy default,classic real-week.json
+cloudsourced sim -config pool-candidate.toml -estimator history real-week.json
 ```
 
 Each job keeps its repository id, environment hash, arrival time (relative
@@ -202,7 +205,7 @@ the measured number of busy cores (CPU seconds / wall time), so that
 by `1 + cold-penalty` (export flag `-cold-penalty`, default 0.5 like the
 simulator's, which adds the penalty back for cold machines). `-request-cpu`
 keeps the requested CPU instead. Workflow: export a representative week,
-check that `cloudsourced sim` with the current fleet configuration
+check that `cloudsourced sim` with the current pool configuration
 reproduces the report's cost and queue wait roughly (adjust `-boot`,
 `-start` and `-cold-penalty` until it does), then compare candidate sizes,
 overcommit factors and policies on the same trace.

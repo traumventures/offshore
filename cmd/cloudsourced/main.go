@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/traumventures/cloudsourced/internal/clock"
+	"github.com/traumventures/cloudsourced/internal/envbuild"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -21,19 +22,18 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/client"
 	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/envbuild"
-	"github.com/traumventures/cloudsourced/internal/hostagent"
+	"github.com/traumventures/cloudsourced/internal/daemon"
 	"github.com/traumventures/cloudsourced/internal/logs"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/proxy"
 	"github.com/traumventures/cloudsourced/internal/sandbox"
-	"github.com/traumventures/cloudsourced/internal/server"
-	"github.com/traumventures/cloudsourced/internal/telemetry"
+	"github.com/traumventures/cloudsourced/internal/supervisor"
+	"github.com/traumventures/cloudsourced/internal/tracing"
 	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/cloudsourced/internal/worker"
 )
 
 var version = "dev"
@@ -46,21 +46,21 @@ Usage:
   cloudsourced shim uninstall              remove proxies
   cloudsourced status [--json]             show machines, sessions and cost today
   cloudsourced why [N|last|list] [--json]  explain a recent run (placement, timings)
-  cloudsourced metrics                     daemon, fleet and machine metrics (Prometheus text)
+  cloudsourced metrics                     daemon, pool and machine metrics (Prometheus text)
   cloudsourced fetch <glob>...             copy outputs from the latest remote build
   cloudsourced outputs mount|unmount|status
                                            mount the remote build directories (target/)
                                            read-only at their local path (output FUSE)
   cloudsourced down                        destroy all machines and caches
-  cloudsourced reconcile                   reload the fleet configuration, apply the policy now
+  cloudsourced reconcile                   reload the pool configuration, apply the policy now
   cloudsourced daemon run|stop|status      manage the local daemon
   cloudsourced env [hash|dockerfile]       show the environment image of this repo
   cloudsourced editor [--mode local|lsp-remote] [vscode|zed|neovim]
                                            rust-analyzer settings for remote checks
-  cloudsourced config check [--fleet FILE] validate the configuration files of this mode
-  cloudsourced config show [--fleet FILE]  print the effective configuration (secrets redacted)
+  cloudsourced config check [--pool FILE] validate the configuration files of this mode
+  cloudsourced config show [--pool FILE]  print the effective configuration (secrets redacted)
   cloudsourced controlplane [flags]        serve a shared control plane (see --help)
-  cloudsourced sim [flags] <trace>...      simulate the fleet policy on a build trace
+  cloudsourced sim [flags] <trace>...      simulate the pool policy on a build trace
   cloudsourced sim export [--since 7d] -o trace.json
                                            convert the event log into a simulator trace
   cloudsourced report [--since 7d] [--json] cost, utilisation, queue wait, cache and
@@ -69,8 +69,9 @@ Usage:
   cloudsourced version
 
 Internal:
-  cloudsourced server                      machine server (started by providers)
-  cloudsourced host [--spec F] [--state D] host agent on VM machines (systemd, root)
+  cloudsourced worker                      machine worker (started by providers)
+  cloudsourced supervisor [--spec F] [--state D]
+                                           supervisor on VM machines (systemd, root)
   cloudsourced sandbox-init                session namespace init
 
 Environment:
@@ -80,7 +81,7 @@ Environment:
   CLOUDSOURCED_VERBOSE=1          print the machine used for each run
   CLOUDSOURCED_PORTS=8080,3000:3001  forward local ports into the session
   CLOUDSOURCED_CONFIG=FILE        client configuration (default ~/.config/cloudsourced/config.toml)
-  CLOUDSOURCED_FLEET_CONFIG=FILE  fleet configuration (default: the client configuration file)
+  CLOUDSOURCED_POOL_CONFIG=FILE  pool configuration (default: the client configuration file)
   CLOUDSOURCED_LOG_FORMAT=text|json  log format of daemon, control plane and machines
   CLOUDSOURCED_LOG_LEVEL=debug|info|warn|error  log level (CLOUDSOURCED_DEBUG=1: debug)
   OTEL_TRACES_EXPORTER=otlp|console|none, OTEL_EXPORTER_OTLP_ENDPOINT=URL
@@ -130,10 +131,10 @@ func run(cmd string, args []string) error {
 			return errors.New("run: missing command")
 		}
 		os.Exit(proxy.Main(args[0], args[1:]))
-	case "server":
+	case "worker":
 		log := logger() // before the CLOUDSOURCED_* variables are dropped
-		defer flushTelemetry(telemetry.SetupFromConfig(telemetry.ServiceServer, config.Telemetry{}, "", log))
-		cfg, err := server.ConfigFromEnv()
+		defer flushTelemetry(tracing.SetupFromConfig(tracing.ServiceWorker, config.Telemetry{}, "", log))
+		cfg, err := worker.ConfigFromEnv()
 		if err != nil {
 			return err
 		}
@@ -143,15 +144,15 @@ func run(cmd string, args []string) error {
 				os.Unsetenv(k)
 			}
 		}
-		s, err := server.New(cfg, log)
+		s, err := worker.New(cfg, log)
 		if err != nil {
 			return err
 		}
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 		defer cancel()
 		return s.Run(ctx)
-	case "host":
-		return hostCmd(args)
+	case "supervisor":
+		return supervisorCmd(args)
 	case "sandbox-init":
 		err := sandbox.Init()
 		fmt.Fprintln(os.Stderr, err)
@@ -174,19 +175,19 @@ func run(cmd string, args []string) error {
 	case "metrics":
 		return metricsCmd(args)
 	case "down":
-		if err := client.EnsureDaemon(context.Background()); err != nil {
+		if err := daemon.EnsureDaemon(context.Background()); err != nil {
 			return err
 		}
-		_, err := client.Call(context.Background(), client.Request{Op: "down"}, os.Stderr)
+		_, err := daemon.Call(context.Background(), daemon.Request{Op: "down"}, os.Stderr)
 		if err == nil {
 			fmt.Println("all machines and caches destroyed")
 		}
 		return err
 	case "reconcile":
-		if err := client.EnsureDaemon(context.Background()); err != nil {
+		if err := daemon.EnsureDaemon(context.Background()); err != nil {
 			return err
 		}
-		_, err := client.Call(context.Background(), client.Request{Op: "reconcile"}, os.Stderr)
+		_, err := daemon.Call(context.Background(), daemon.Request{Op: "reconcile"}, os.Stderr)
 		return err
 	case "shim":
 		return shimCmd(args)
@@ -221,9 +222,9 @@ func daemonCmd(args []string) error {
 	case "run":
 		log := logger()
 		if c, err := config.LoadClient(); err == nil {
-			defer flushTelemetry(telemetry.SetupFromConfig(telemetry.ServiceDaemon, c.Telemetry, c.Dir(), log))
+			defer flushTelemetry(tracing.SetupFromConfig(tracing.ServiceDaemon, c.Telemetry, c.Dir(), log))
 		}
-		d, err := client.NewDaemon(log)
+		d, err := daemon.NewDaemon(log)
 		if err != nil {
 			return err
 		}
@@ -231,16 +232,16 @@ func daemonCmd(args []string) error {
 		defer cancel()
 		return d.Serve(ctx)
 	case "start":
-		return client.EnsureDaemon(context.Background())
+		return daemon.EnsureDaemon(context.Background())
 	case "stop":
-		raw, err := client.Call(context.Background(), client.Request{Op: "ping"}, nil)
+		raw, err := daemon.Call(context.Background(), daemon.Request{Op: "ping"}, nil)
 		if err != nil {
 			fmt.Println("daemon not running")
 			return nil
 		}
 		var info struct{ PID int }
 		json.Unmarshal(raw, &info)
-		client.Call(context.Background(), client.Request{Op: "shutdown"}, nil)
+		daemon.Call(context.Background(), daemon.Request{Op: "shutdown"}, nil)
 		// Wait for the process to exit, not just for the socket to close.
 		for i := 0; i < 200 && info.PID > 0; i++ {
 			if syscall.Kill(info.PID, 0) != nil {
@@ -251,12 +252,12 @@ func daemonCmd(args []string) error {
 		fmt.Println("daemon stopped")
 		return nil
 	case "status":
-		raw, err := client.Call(context.Background(), client.Request{Op: "ping"}, nil)
+		raw, err := daemon.Call(context.Background(), daemon.Request{Op: "ping"}, nil)
 		if err != nil {
 			fmt.Println("daemon not running")
 			return exitCode(3)
 		}
-		fmt.Printf("daemon running %s (socket %s, log %s)\n", raw, client.SocketPath(), client.LogPath())
+		fmt.Printf("daemon running %s (socket %s, log %s)\n", raw, daemon.SocketPath(), daemon.LogPath())
 		return nil
 	}
 	return errors.New("usage: cloudsourced daemon run|start|stop|status")
@@ -279,10 +280,10 @@ func status(args []string) error {
 		}
 	}
 	ctx := context.Background()
-	if err := client.EnsureDaemon(ctx); err != nil {
+	if err := daemon.EnsureDaemon(ctx); err != nil {
 		return err
 	}
-	raw, err := client.Call(ctx, client.Request{Op: "status"}, os.Stderr)
+	raw, err := daemon.Call(ctx, daemon.Request{Op: "status"}, os.Stderr)
 	if err != nil {
 		return err
 	}
@@ -490,18 +491,18 @@ func fetch(globs []string) error {
 	if err != nil {
 		return fmt.Errorf("no %s found", config.RepoFileName)
 	}
-	if err := client.EnsureDaemon(ctx); err != nil {
+	if err := daemon.EnsureDaemon(ctx); err != nil {
 		return err
 	}
-	raw, err := client.Call(ctx, client.Request{Op: "prepare", Root: root}, os.Stderr)
+	raw, err := daemon.Call(ctx, daemon.Request{Op: "prepare", Root: root}, os.Stderr)
 	if err != nil {
 		return err
 	}
-	var prep client.Prepared
+	var prep daemon.Prepared
 	if err := json.Unmarshal(raw, &prep); err != nil {
 		return err
 	}
-	defer client.Call(ctx, client.Request{Op: "release", Lease: prep.Lease}, nil)
+	defer daemon.Call(ctx, daemon.Request{Op: "release", Lease: prep.Lease}, nil)
 	conn, err := transport.Dial(ctx, prep.Addr, prep.Fingerprint)
 	if err != nil {
 		return err
@@ -533,26 +534,26 @@ func fetch(globs []string) error {
 	return nil
 }
 
-// hostCmd runs the host agent of a VM machine.
-func hostCmd(args []string) error {
-	fs := flag.NewFlagSet("host", flag.ContinueOnError)
-	specPath := fs.String("spec", hostagent.SpecPath, "public machine spec")
-	stateDir := fs.String("state", hostagent.StateDir, "root-only agent state")
+// supervisorCmd runs the supervisor of a VM machine.
+func supervisorCmd(args []string) error {
+	fs := flag.NewFlagSet("supervisor", flag.ContinueOnError)
+	specPath := fs.String("spec", supervisor.SpecPath, "public machine spec")
+	stateDir := fs.String("state", supervisor.StateDir, "root-only agent state")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	spec, err := hostagent.LoadSpec(*specPath)
+	spec, err := supervisor.LoadSpec(*specPath)
 	if err != nil {
 		return err
 	}
 	log := logger()
 	// Machines are told how to trace through their environment.
-	defer flushTelemetry(telemetry.SetupFromConfig(telemetry.ServiceHost, config.Telemetry{
+	defer flushTelemetry(tracing.SetupFromConfig(tracing.ServiceSupervisor, config.Telemetry{
 		Exporter: spec.Layout.Env["OTEL_TRACES_EXPORTER"], Endpoint: spec.Layout.Env["OTEL_EXPORTER_OTLP_ENDPOINT"],
 	}, "", log))
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
-	plat, err := hostagent.OpenPlatform(ctx, spec)
+	plat, err := supervisor.OpenPlatform(ctx, spec)
 	if err != nil {
 		return err
 	}
@@ -560,8 +561,8 @@ func hostCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	a := &hostagent.Agent{
-		Spec: spec, Platform: plat, StateDir: *stateDir, Docker: hostagent.DockerCLI("docker"), Log: log, Clock: clk,
+	a := &supervisor.Supervisor{
+		Spec: spec, Platform: plat, StateDir: *stateDir, Docker: supervisor.DockerCLI("docker"), Log: log, Clock: clk,
 		Shutdown: func() error { return exec.Command("shutdown", "-h", "now").Run() },
 	}
 	return a.Run(ctx)

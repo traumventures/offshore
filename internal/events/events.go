@@ -5,7 +5,7 @@
 // export` read it.
 //
 // Task events describe sessions (arrival and placement, end with measured
-// usage); machine events describe the fleet (create, ready, start, stop,
+// usage); machine events describe the pool (create, ready, start, stop,
 // destroy, drain, observed state changes). Every event carries the fields
 // needed to interpret it on its own, so readers need no other state.
 package events

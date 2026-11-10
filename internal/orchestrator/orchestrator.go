@@ -1,4 +1,4 @@
-// Package orchestrator assigns sessions to machines and manages the fleet:
+// Package orchestrator assigns sessions to machines and manages the pool:
 // cache-affine scheduling, scale up, warm pool, idle stop, lifetime
 // rotation and cleanup of expired resources.
 package orchestrator
@@ -26,15 +26,15 @@ import (
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/telemetry"
+	"github.com/traumventures/cloudsourced/internal/tracing"
 	"github.com/traumventures/cloudsourced/internal/transport"
 )
 
-// Config is the fleet configuration. Placement and scaling decisions are
+// Config is the pool configuration. Placement and scaling decisions are
 // made by Policy; the orchestrator only gathers state and executes them.
-// It holds fleet settings only: repository settings travel in Request.
+// It holds pool settings only: repository settings travel in Request.
 type Config struct {
-	Owner        string           // fleet id, the cloudsourced.owner label of all resources
+	Owner        string           // pool id, the cloudsourced.pool label of all resources
 	Sizes        []scheduler.Size // machine types; the first is the default
 	MaxLifetime  time.Duration
 	QueueTimeout time.Duration
@@ -64,7 +64,7 @@ type Request struct {
 	// BuildTTL bounds the age of the session's build slot data
 	// (cache.build.ttl; 0 = DefaultBuildTTL). The effective value, capped
 	// by max_lifetime, is returned in Lease.BuildTTL and enforced per slot
-	// by the machine server, so repositories with different TTLs can share
+	// by the worker, so repositories with different TTLs can share
 	// a machine.
 	BuildTTL time.Duration `json:",omitempty"`
 	// DepsTTL is the lifetime of the shared dependency cache volume a new
@@ -129,7 +129,7 @@ type Lease struct {
 	// this lease on this machine until shortly after the machine expires.
 	Token string
 	Grant scheduler.Grant
-	// MemoryOvercommit is the fleet's memory overcommit factor; the server
+	// MemoryOvercommit is the pool's memory overcommit factor; the server
 	// uses it as admission safety net.
 	MemoryOvercommit float64
 	// Provider, Size and PricePerHour describe the leased machine; Reason
@@ -150,7 +150,7 @@ type Machine struct {
 	Status   *proto.Status
 	StatusAt time.Time
 	Draining bool
-	// PricePerHour comes from the fleet size of the machine (0: unknown).
+	// PricePerHour comes from the pool size of the machine (0: unknown).
 	PricePerHour float64
 	// Uptime lists the periods in which the machine was observed starting
 	// or running (the last one is open while it is up). It is kept in
@@ -244,7 +244,7 @@ type creation struct {
 	at   time.Time
 }
 
-// Orchestrator manages one owner's fleet.
+// Orchestrator manages one owner's pool.
 type Orchestrator struct {
 	cfg      Config
 	provs    map[string]provider.Provider // by provider instance name
@@ -274,7 +274,7 @@ type Orchestrator struct {
 	// ProbeFunc fetches a server status; replaceable in tests.
 	ProbeFunc func(ctx context.Context, addr, fingerprint, token string) (proto.Status, error)
 
-	// Clock is the time of fleet decisions: idle stop, lifetime expiry,
+	// Clock is the time of pool decisions: idle stop, lifetime expiry,
 	// pending lease and volume TTLs, warm pool windows, uptime. Waits,
 	// probe recency and latency metrics use real time. Set before use;
 	// New takes it from $CLOUDSOURCED_TEST_CLOCK (default: real time).
@@ -303,7 +303,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 	}
 	master, err := auth.LoadMaster(stateDir)
 	if err != nil {
-		return nil, fmt.Errorf("orchestrator: fleet master key: %w", err)
+		return nil, fmt.Errorf("orchestrator: pool master key: %w", err)
 	}
 	fixConfig(&cfg)
 	clk, err := clock.FromEnv()
@@ -324,8 +324,8 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 	return o, nil
 }
 
-// SetConfig updates the fleet configuration and rebuilds the default policy.
-// It is meant for explicit reloads of the fleet configuration, never for
+// SetConfig updates the pool configuration and rebuilds the default policy.
+// It is meant for explicit reloads of the pool configuration, never for
 // request specific settings (those travel in Request).
 func (o *Orchestrator) SetConfig(cfg Config) {
 	o.mu.Lock()
@@ -338,7 +338,7 @@ func (o *Orchestrator) SetConfig(cfg Config) {
 	o.cfg = cfg
 }
 
-// Config returns the fleet configuration in effect.
+// Config returns the pool configuration in effect.
 func (o *Orchestrator) Config() Config {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -633,9 +633,9 @@ func Probe(ctx context.Context, addr, fingerprint, token string) (proto.Status, 
 	return st, err
 }
 
-// fleetLocked builds the scheduler's view of the fleet.
-func (o *Orchestrator) fleetLocked(now time.Time) scheduler.Fleet {
-	f := scheduler.Fleet{Now: now, Sizes: o.cfg.Sizes, Recent: map[string]time.Time{}, EnvArch: map[string]string{}}
+// poolLocked builds the scheduler's view of the pool.
+func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
+	f := scheduler.Pool{Now: now, Sizes: o.cfg.Sizes, Recent: map[string]time.Time{}, EnvArch: map[string]string{}}
 	for env, t := range o.recentEnvs {
 		f.Recent[env] = t
 	}
@@ -727,7 +727,7 @@ var ErrQueueTimeout = errors.New("no machine capacity available")
 var ErrUnschedulable = errors.New("cannot schedule")
 
 // Acquire reserves capacity for a session. The policy decides placement;
-// while the task waits, the policy's fleet plan is executed (start, create,
+// while the task waits, the policy's pool plan is executed (start, create,
 // stop, destroy, drain). log receives progress messages for the user.
 func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) (Lease, error) {
 	start := time.Now()
@@ -781,7 +781,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 	refreshed := false
 	for {
 		o.mu.Lock()
-		f := o.fleetLocked(o.now())
+		f := o.poolLocked(o.now())
 		pl := o.policy.Place(f, task)
 		switch pl.Kind {
 		case scheduler.Assign:
@@ -813,7 +813,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			o.metrics.placements.Inc("queue")
 		}
 		o.queue[task.ID] = task
-		f = o.fleetLocked(o.now())
+		f = o.poolLocked(o.now())
 		acts := o.policy.Plan(f)
 		o.markLocked(acts)
 		ch := o.changed
@@ -1068,13 +1068,13 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	if cfg.MaxLifetime > 0 {
 		spec.Env["CLOUDSOURCED_BUILD_TTL"] = cfg.MaxLifetime.String()
 	}
-	for k, v := range logs.Forward() { // machines log like the fleet
+	for k, v := range logs.Forward() { // machines log like the pool
 		spec.Env[k] = v
 	}
-	for k, v := range telemetry.Forward() { // and trace to the same backend
+	for k, v := range tracing.Forward() { // and trace to the same backend
 		spec.Env[k] = v
 	}
-	for k, v := range telemetry.ForwardSecret() {
+	for k, v := range tracing.ForwardSecret() {
 		spec.SecretEnv[k] = v
 	}
 	prov, ok := o.provs[size.Provider]
@@ -1246,7 +1246,7 @@ func (o *Orchestrator) Snapshot() []Machine {
 	return out
 }
 
-// priceLocked returns the hourly price of a fleet size (0: unknown). A
+// priceLocked returns the hourly price of a pool size (0: unknown). A
 // machine of a spot size that fell back to on-demand capacity (market)
 // costs the on-demand price.
 func (o *Orchestrator) priceLocked(prov, size, market string) float64 {
@@ -1281,12 +1281,12 @@ func (o *Orchestrator) removeLocked(id string) {
 
 // Reconcile enforces hard invariants (expired and failed machines are
 // destroyed, expiring busy machines drain, orphaned volumes are deleted)
-// and executes the policy's fleet plan.
+// and executes the policy's pool plan.
 func (o *Orchestrator) Reconcile(ctx context.Context) error {
 	start := time.Now()
-	ctx, span := telemetry.Start(ctx, "orchestrator.reconcile")
+	ctx, span := tracing.Start(ctx, "orchestrator.reconcile")
 	err := o.reconcile(ctx)
-	telemetry.End(span, err)
+	tracing.End(span, err)
 	result := "ok"
 	if err != nil {
 		result = "error"
@@ -1324,7 +1324,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	o.execute(ctx, invariant, true)
 
 	o.mu.Lock()
-	acts := o.policy.Plan(o.fleetLocked(o.now()))
+	acts := o.policy.Plan(o.poolLocked(o.now()))
 	o.markLocked(acts)
 	o.mu.Unlock()
 	o.execute(context.WithoutCancel(ctx), acts, true)

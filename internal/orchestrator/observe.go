@@ -11,7 +11,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/events"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/telemetry"
+	"github.com/traumventures/cloudsourced/internal/tracing"
 )
 
 // observer records the analysis event log and holds what Finish needs to
@@ -70,7 +70,7 @@ func (o *Orchestrator) machineEventLocked(typ, id string) events.Event {
 	return ev
 }
 
-// machineSpan starts the span of a fleet action. Creation and start are
+// machineSpan starts the span of a pool action. Creation and start are
 // background work: new roots linked to the triggering request.
 func machineSpan(ctx context.Context, action string, ev events.Event) (context.Context, trace.Span) {
 	attrs := trace.WithAttributes(
@@ -80,12 +80,12 @@ func machineSpan(ctx context.Context, action string, ev events.Event) (context.C
 		attribute.Float64("cloudsourced.price_per_hour", ev.Price),
 	)
 	if action == "create" || action == "start" {
-		return telemetry.StartLinked(ctx, "fleet."+action, attrs)
+		return tracing.StartLinked(ctx, "pool."+action, attrs)
 	}
-	return telemetry.Start(ctx, "fleet."+action, attrs)
+	return tracing.Start(ctx, "pool."+action, attrs)
 }
 
-// traced runs a fleet action with its span and event. Creation and start
+// traced runs a pool action with its span and event. Creation and start
 // are recorded when requested (capacity, and cost, begin), followed by
 // machine_ready from waitReady; stop and destroy when done, with the
 // provider latency.
@@ -103,7 +103,7 @@ func (o *Orchestrator) traced(ctx context.Context, a scheduler.Action, fn func(c
 	}
 	ctx, span := machineSpan(ctx, a.Kind.String(), ev)
 	span.SetAttributes(attribute.String("cloudsourced.reason", a.Reason))
-	ev.TraceID = telemetry.TraceID(ctx)
+	ev.TraceID = tracing.TraceID(ctx)
 	start := time.Now()
 	if a.Kind == scheduler.Create || a.Kind == scheduler.Start {
 		ev.Time = start
@@ -128,7 +128,7 @@ func (o *Orchestrator) readyEvent(ctx context.Context, id string) {
 		ev.LatencyMs = o.now().Sub(c.at).Milliseconds()
 	}
 	o.mu.Unlock()
-	ev.TraceID = telemetry.TraceID(ctx)
+	ev.TraceID = tracing.TraceID(ctx)
 	o.obs.log.Append(ev)
 	trace.SpanFromContext(ctx).AddEvent("machine ready", trace.WithAttributes(attribute.Int64("cloudsourced.ready_ms", ev.LatencyMs)))
 }
@@ -158,7 +158,7 @@ func (o *Orchestrator) stateEventLocked(id string, state provider.State) {
 
 // startAcquire starts the span of a capacity request.
 func startAcquire(ctx context.Context, req Request) (context.Context, trace.Span) {
-	return telemetry.Start(ctx, "fleet.acquire", trace.WithAttributes(
+	return tracing.Start(ctx, "pool.acquire", trace.WithAttributes(
 		attribute.String("cloudsourced.repo_id", req.RepoID),
 		attribute.String("cloudsourced.env_hash", req.EnvHash),
 		attribute.Float64("cloudsourced.need.cpu", req.Need.CPU),
@@ -179,7 +179,7 @@ func (o *Orchestrator) endAcquire(ctx context.Context, span trace.Span, req Requ
 		Type: events.TaskPlaced, Task: lease.ID, Repo: req.RepoID, Env: req.EnvHash, Key: req.Key,
 		Arrival: arrival.UTC(), WaitMs: wait.Milliseconds(), Placement: kind, Reason: lease.Reason,
 		Machine: lease.MachineID, Provider: lease.Provider, Size: lease.Size, Price: lease.PricePerHour,
-		TraceID: telemetry.TraceID(ctx),
+		TraceID: tracing.TraceID(ctx),
 	}
 	need, limit := req.Need, req.Limit
 	ev.Need = &need
@@ -223,7 +223,7 @@ func (o *Orchestrator) endAcquire(ctx context.Context, span trace.Span, req Requ
 		attribute.Int64("cloudsourced.reserve.memory", lease.Grant.Reserve.Memory),
 		attribute.Bool("cloudsourced.spot", ev.Spot),
 	)
-	telemetry.End(span, err)
+	tracing.End(span, err)
 }
 
 // Finish records the end of a task with the usage its session reported.
@@ -246,7 +246,7 @@ func (o *Orchestrator) Finish(ctx context.Context, leaseID, key string, u *sched
 	}
 	usage := *u
 	ev.Usage = &usage
-	if tid := telemetry.TraceID(ctx); tid != "" {
+	if tid := tracing.TraceID(ctx); tid != "" {
 		ev.TraceID = tid
 	}
 	o.obs.log.Append(ev)

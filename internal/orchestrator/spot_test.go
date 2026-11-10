@@ -36,7 +36,7 @@ func TestInterruptedMachineGetsNoSessions(t *testing.T) {
 		t.Fatal("session placed on an interrupted machine")
 	}
 	o.mu.Lock()
-	fl := o.fleetLocked(time.Now())
+	fl := o.poolLocked(time.Now())
 	o.mu.Unlock()
 	for _, m := range fl.Machines {
 		if m.ID == l1.MachineID && (!m.Interrupted || !m.Draining) {

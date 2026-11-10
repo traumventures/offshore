@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/traumventures/cloudsourced/internal/cas"
-	"github.com/traumventures/cloudsourced/internal/client"
 	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/cloudsourced/internal/daemon"
 	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/outputs"
+	"github.com/traumventures/cloudsourced/internal/outputfs"
 	"github.com/traumventures/cloudsourced/internal/proto"
 )
 
@@ -51,11 +51,11 @@ func localState(p string) (state string, hash string) {
 // receiveBlobs requests hashes and stores them in a staging directory.
 func receiveBlobs(pc *proto.Conn, hashes []string) (map[string]string, func(), error) {
 	staged := map[string]string{}
-	dir, err := os.MkdirTemp(client.StateDir(), "staging-")
+	dir, err := os.MkdirTemp(daemon.StateDir(), "staging-")
 	cleanup := func() { os.RemoveAll(dir) }
 	if err != nil {
-		os.MkdirAll(client.StateDir(), 0o700)
-		if dir, err = os.MkdirTemp(client.StateDir(), "staging-"); err != nil {
+		os.MkdirAll(daemon.StateDir(), 0o700)
+		if dir, err = os.MkdirTemp(daemon.StateDir(), "staging-"); err != nil {
 			pc.Send(proto.TNeed, proto.Need{})
 			return nil, func() {}, err
 		}
@@ -248,7 +248,7 @@ func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry) error {
 	var todo []planned
 	needSet := map[string]bool{}
 	var need []string
-	mounts := outputs.Mounts()
+	mounts := outputfs.Mounts()
 	var store *cas.Store
 	var cached []manifest.Entry
 	for _, e := range files {
@@ -256,9 +256,9 @@ func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry) error {
 		if err != nil {
 			continue
 		}
-		if outputs.Covering(mounts, dst) != "" {
+		if outputfs.Covering(mounts, dst) != "" {
 			if store == nil {
-				if store, err = cas.New(client.OutputsCASDir()); err != nil {
+				if store, err = cas.New(daemon.OutputsCASDir()); err != nil {
 					return err
 				}
 			}
@@ -298,7 +298,7 @@ func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry) error {
 				}
 			}
 		}
-		if _, err := client.Call(context.Background(), client.Request{Op: "outputs-hint", Root: root, Files: cached}, nil); err != nil {
+		if _, err := daemon.Call(context.Background(), daemon.Request{Op: "outputs-hint", Root: root, Files: cached}, nil); err != nil {
 			return fmt.Errorf("outputs: %w", err)
 		}
 	}

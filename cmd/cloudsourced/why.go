@@ -12,8 +12,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/client"
-	"github.com/traumventures/cloudsourced/internal/runlog"
+	"github.com/traumventures/cloudsourced/internal/daemon"
+	"github.com/traumventures/cloudsourced/internal/events"
 )
 
 const whyUsage = "usage: cloudsourced why [N|last|list] [--json]  (N=1 is the most recent run)"
@@ -37,14 +37,14 @@ func why(args []string) error {
 			n = v
 		}
 	}
-	runs, err := runlog.Recent(client.StateDir(), 0)
+	runs, err := events.Recent(daemon.StateDir(), 0)
 	if err != nil {
 		return err
 	}
 	if list {
 		if asJSON {
 			if runs == nil {
-				runs = []runlog.Run{}
+				runs = []events.Run{}
 			}
 			return writeJSON(os.Stdout, runs)
 		}
@@ -70,11 +70,11 @@ func writeJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
-func commandLine(r runlog.Run) string {
+func commandLine(r events.Run) string {
 	return strings.TrimSpace(r.Tool + " " + strings.Join(r.Args, " "))
 }
 
-func printRunList(w io.Writer, runs []runlog.Run) {
+func printRunList(w io.Writer, runs []events.Run) {
 	if len(runs) == 0 {
 		fmt.Fprintln(w, "no runs recorded yet")
 		return
@@ -99,7 +99,7 @@ func printRunList(w io.Writer, runs []runlog.Run) {
 func ms(v int64) string { return (time.Duration(v) * time.Millisecond).String() }
 
 // printRun prints one run human readable.
-func printRun(w io.Writer, r runlog.Run) {
+func printRun(w io.Writer, r events.Run) {
 	fmt.Fprintf(w, "%s  %s\n", r.Time.Local().Format("2006-01-02 15:04:05"), commandLine(r))
 	if r.Cwd != "" {
 		fmt.Fprintf(w, "  directory  %s\n", r.Cwd)
@@ -136,7 +136,7 @@ func printRun(w io.Writer, r runlog.Run) {
 		fmt.Fprintf(w, "  error      %s\n", r.Error)
 	}
 	t := r.Timings
-	if r.Mode == runlog.Remote {
+	if r.Mode == events.Remote {
 		fmt.Fprintln(w, "  timings")
 		tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 		for _, p := range []struct {

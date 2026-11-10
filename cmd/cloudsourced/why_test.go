@@ -6,17 +6,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/runlog"
+	"github.com/traumventures/cloudsourced/internal/events"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
 )
 
 func TestPrintRun(t *testing.T) {
 	code := 101
-	r := runlog.Run{
-		Time: time.Now(), Tool: "cargo", Args: []string{"build"}, Mode: runlog.Remote, Why: "[tool.cargo] allows remote execution",
+	r := events.Run{
+		Time: time.Now(), Tool: "cargo", Args: []string{"build"}, Mode: events.Remote, Why: "[tool.cargo] allows remote execution",
 		Machine: "abc123", Provider: "aws", Size: "c7a", Price: 0.25, Placement: "warm build slot for repository",
 		Slot: "s1", Warm: true, Exit: &code, Ports: []string{"8080"},
-		Timings: runlog.Timings{Queue: 1500, Run: 2000, Total: 4000},
+		Timings: events.Timings{Queue: 1500, Run: 2000, Total: 4000},
 		Usage:   &scheduler.Usage{PeakMemory: 3 << 30, CPUSeconds: 12.5},
 		Cache:   map[string]int64{"sccache_misses": 2, "sccache_hits": 40},
 	}
@@ -37,8 +37,8 @@ func TestWhyReadsRunLog(t *testing.T) {
 	if err := why(nil); err == nil {
 		t.Fatal("expected error without runs")
 	}
-	runlog.Append(dir, runlog.Run{Tool: "a", Mode: runlog.Local, Why: "x"})
-	runlog.Append(dir, runlog.Run{Tool: "b", Mode: runlog.Local, Why: "y"})
+	events.Append(dir, events.Run{Tool: "a", Mode: events.Local, Why: "x"})
+	events.Append(dir, events.Run{Tool: "b", Mode: events.Local, Why: "y"})
 	if err := why([]string{"2"}); err != nil {
 		t.Fatal(err)
 	}

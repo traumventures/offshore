@@ -40,7 +40,7 @@ func TestMachineContainerArgs(t *testing.T) {
 		"-e", "CLOUDSOURCED_CPU=2", "-e", "CLOUDSOURCED_MACHINE_ID=m1",
 		"-e", "CLOUDSOURCED_KEY=pem\nkey", "-e", "CLOUDSOURCED_TOKEN=tok",
 		"--cpus", "2", "--memory", "1073741824", "--memory-swap", "-1",
-		"img:1", "server"}
+		"img:1", "worker"}
 	if !reflect.DeepEqual(cs[0].Create, want) {
 		t.Fatalf("machine args\n got %q\nwant %q", cs[0].Create, want)
 	}

@@ -3,7 +3,7 @@ Description: >-
   cloudsourced control plane on a small EC2 instance - the "cloudsourced
   controlplane" container (systemd), an Elastic IP, encrypted EBS for its
   state, and an instance role that lets the aws-ec2 provider manage the build
-  fleet. Without Hostname it serves a self-signed, fingerprint-pinned
+  pool. Without Hostname it serves a self-signed, fingerprint-pinned
   certificate on 7443; with Hostname it gets a Let's Encrypt certificate and
   serves on 443 (optionally with a Route 53 record).
 Metadata:
@@ -21,9 +21,9 @@ Metadata:
         on the instance and read with "controlplane info --show-key").
       - IMDSv2 only; the instance role is never reachable from build sessions
         (they run on separate machines, not here).
-      - The fleet stack (internal/provider/awsec2/stack.yaml) is created by
+      - The pool stack (internal/provider/awsec2/stack.yaml) is created by
         the provider with this role, so the role may manage only resources
-        named after FleetStackName.
+        named after PoolStackName.
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label: { default: Network }
@@ -32,8 +32,8 @@ Metadata:
         Parameters: [Hostname, HostedZoneId, AcmeEmail]
       - Label: { default: Control plane }
         Parameters: [InstanceType, ImageUri, StateVolumeSize, LatestAmiId]
-      - Label: { default: Build fleet }
-        Parameters: [FleetStackName, FleetOwner, MachineInstanceType, MachineCpu, MachineMemory, MaxMachines]
+      - Label: { default: Build pool }
+        Parameters: [PoolStackName, PoolId, MachineInstanceType, MachineCpu, MachineMemory, MaxMachines]
 
 Parameters:
   VpcId:
@@ -85,19 +85,19 @@ Parameters:
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
-  FleetStackName:
+  PoolStackName:
     Type: String
     Default: cloudsourced
     AllowedPattern: '^[a-z][a-z0-9-]{0,30}$'
-    Description: Name of the fleet stack the aws-ec2 provider creates and manages (its "stack" option).
-  FleetOwner:
+    Description: Name of the pool stack the aws-ec2 provider creates and manages (its "stack" option).
+  PoolId:
     Type: String
     Default: cloudsourced
-    Description: fleet.owner of the control plane (machines are labelled with it).
+    Description: pool.id of the control plane (machines carry it in the cloudsourced.pool label).
   MachineInstanceType:
     Type: String
     Default: c7a.xlarge
-    Description: Instance type of build machines (first fleet size; edit config.toml for more).
+    Description: Instance type of build machines (first pool size; edit config.toml for more).
   MachineCpu:
     Type: Number
     Default: 4
@@ -171,7 +171,7 @@ Resources:
   InstanceRole:
     Type: AWS::IAM::Role
     Properties:
-      Description: cloudsourced control plane - manages the build fleet with the aws-ec2 provider
+      Description: cloudsourced control plane - manages the build pool with the aws-ec2 provider
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -200,7 +200,7 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:ResourceAccount: !Ref AWS::AccountId
-        - PolicyName: fleet-operator
+        - PolicyName: pool-operator
           # The aws-ec2 provider's permissions (see docs/CONTROLPLANE.md). The
           # first block runs machines; the second lets it create and update
           # its own CloudFormation stack (CloudFormation acts with the
@@ -251,7 +251,7 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:ResourceTag/project: cloudsourced
-              - Sid: MachineIngressAndFleetSecurityGroup
+              - Sid: MachineIngressAndPoolSecurityGroup
                 Effect: Allow
                 Action:
                   - ec2:AuthorizeSecurityGroupIngress
@@ -263,7 +263,7 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:ResourceTag/project: cloudsourced
-              - Sid: CreateFleetSecurityGroup
+              - Sid: CreatePoolSecurityGroup
                 Effect: Allow
                 Action: ec2:CreateSecurityGroup
                 Resource:
@@ -273,8 +273,8 @@ Resources:
                 Effect: Allow
                 Action: iam:PassRole
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${FleetStackName}-MachineRole-*"
-                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${FleetStackName}-ReaperRole-*"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${PoolStackName}-MachineRole-*"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${PoolStackName}-ReaperRole-*"
                 Condition:
                   StringEquals:
                     iam:PassedToService: [ec2.amazonaws.com, lambda.amazonaws.com]
@@ -284,21 +284,21 @@ Resources:
                 Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}::parameter/aws/service/ami-amazon-linux-latest/*"
               - Sid: MachineSecretChannel
                 # SecretEnv of machines (workpack P1): written before launch,
-                # deleted by the host agent after reading.
+                # deleted by the supervisor after reading.
                 Effect: Allow
                 Action: [ssm:PutParameter, ssm:GetParameter, ssm:DeleteParameter, ssm:AddTagsToResource]
-                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cloudsourced/${FleetStackName}/*"
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cloudsourced/${PoolStackName}/*"
               - Sid: ArtifactsAndImages
                 Effect: Allow
                 Action: [s3:*]
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:s3:::${FleetStackName}-artifactbucket-*"
-                  - !Sub "arn:${AWS::Partition}:s3:::${FleetStackName}-artifactbucket-*/*"
+                  - !Sub "arn:${AWS::Partition}:s3:::${PoolStackName}-artifactbucket-*"
+                  - !Sub "arn:${AWS::Partition}:s3:::${PoolStackName}-artifactbucket-*/*"
               - Sid: EnvironmentRepository
                 Effect: Allow
                 Action: [ecr:*]
-                Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${FleetStackName}-envrepository-*"
-              - Sid: FleetStack
+                Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${PoolStackName}-envrepository-*"
+              - Sid: PoolStack
                 Effect: Allow
                 Action:
                   - cloudformation:CreateStack
@@ -307,8 +307,8 @@ Resources:
                   - cloudformation:DescribeStackEvents
                   - cloudformation:GetTemplate
                   - cloudformation:TagResource
-                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${FleetStackName}/*"
-              - Sid: FleetStackRoles
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${PoolStackName}/*"
+              - Sid: PoolStackRoles
                 Effect: Allow
                 Action:
                   - iam:CreateRole
@@ -323,20 +323,20 @@ Resources:
                   - iam:ListRolePolicies
                   - iam:ListAttachedRolePolicies
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${FleetStackName}-MachineRole-*"
-                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${FleetStackName}-ReaperRole-*"
-              - Sid: FleetStackManagedPolicies
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${PoolStackName}-MachineRole-*"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${PoolStackName}-ReaperRole-*"
+              - Sid: PoolStackManagedPolicies
                 Effect: Allow
                 Action: [iam:AttachRolePolicy, iam:DetachRolePolicy]
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${FleetStackName}-MachineRole-*"
-                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${FleetStackName}-ReaperRole-*"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${PoolStackName}-MachineRole-*"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${PoolStackName}-ReaperRole-*"
                 Condition:
                   ArnEquals:
                     iam:PolicyARN:
                       - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
                       - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-              - Sid: FleetStackInstanceProfile
+              - Sid: PoolStackInstanceProfile
                 Effect: Allow
                 Action:
                   - iam:CreateInstanceProfile
@@ -345,23 +345,23 @@ Resources:
                   - iam:AddRoleToInstanceProfile
                   - iam:RemoveRoleFromInstanceProfile
                   - iam:TagInstanceProfile
-                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/${FleetStackName}-MachineInstanceProfile-*"
-              - Sid: FleetStackReaper
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/${PoolStackName}-MachineInstanceProfile-*"
+              - Sid: PoolStackReaper
                 Effect: Allow
                 Action: [lambda:*]
-                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${FleetStackName}-Reaper-*"
-              - Sid: FleetStackReaperLogs
+                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${PoolStackName}-Reaper-*"
+              - Sid: PoolStackReaperLogs
                 Effect: Allow
                 Action: [logs:CreateLogGroup, logs:DeleteLogGroup, logs:PutRetentionPolicy, logs:TagResource, logs:TagLogGroup, logs:ListTagsForResource]
-                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${FleetStackName}-Reaper-*"
-              - Sid: FleetStackSchedule
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${PoolStackName}-Reaper-*"
+              - Sid: PoolStackSchedule
                 Effect: Allow
                 Action: [events:PutRule, events:DeleteRule, events:DescribeRule, events:PutTargets, events:RemoveTargets, events:TagResource, events:ListTagsForResource]
-                Resource: !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${FleetStackName}-ReaperSchedule-*"
-              - Sid: FleetStackResourceGroup
+                Resource: !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${PoolStackName}-ReaperSchedule-*"
+              - Sid: PoolStackResourceGroup
                 Effect: Allow
                 Action: [resource-groups:*]
-                Resource: !Sub "arn:${AWS::Partition}:resource-groups:${AWS::Region}:${AWS::AccountId}:group/${FleetStackName}"
+                Resource: !Sub "arn:${AWS::Partition}:resource-groups:${AWS::Region}:${AWS::AccountId}:group/${PoolStackName}"
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -419,26 +419,25 @@ Resources:
           chown 10001:10001 /var/lib/cloudsourced
           chmod 0700 /var/lib/cloudsourced
 
-          # Fleet configuration, written once; edit it on the volume afterwards.
+          # Pool configuration, written once; edit it on the volume afterwards.
           if [ ! -e /var/lib/cloudsourced/config.toml ]; then
             cat > /var/lib/cloudsourced/config.toml <<'CFG'
-          [fleet]
-          owner = "${FleetOwner}"
+          [pool]
+          id = "${PoolId}"
           max_machines = ${MaxMachines}
 
-          [[fleet.size]]
-          provider = "aws"
-          name = "${MachineInstanceType}"
-          cpu = ${MachineCpu}
-          memory = "${MachineMemory}"
-
           [providers.aws]
-          backend = "aws-ec2"
+          type = "aws-ec2"
           region = "${AWS::Region}"
-          stack = "${FleetStackName}"
+          stack = "${PoolStackName}"
           subnet = "${SubnetId}"
           allow_cidrs = ["${ClientCidr}"]
           docker_command = ["docker"]
+
+          [[providers.aws.size]]
+          name = "${MachineInstanceType}"
+          cpu = ${MachineCpu}
+          memory = "${MachineMemory}"
           CFG
             chown 10001:10001 /var/lib/cloudsourced/config.toml
           fi
@@ -576,7 +575,7 @@ Outputs:
     Value: !GetAtt ControlPlaneRepository.RepositoryUri
   ClientConfigCommand:
     Description: >-
-      Prints the client [orchestrator] block and the API key on the instance
+      Prints the client [control_plane] block and the API key on the instance
       (then: aws ssm get-command-invocation --command-id <CommandId> --instance-id <InstanceId>).
     Value: !Sub
       - "aws ssm send-command --region ${AWS::Region} --instance-ids ${Instance} --document-name AWS-RunShellScript --parameters 'commands=[\"docker exec cloudsourced-controlplane cloudsourced controlplane client-config --url ${ClientUrl}\",\"docker exec cloudsourced-controlplane cloudsourced controlplane info --show-key\"]'"

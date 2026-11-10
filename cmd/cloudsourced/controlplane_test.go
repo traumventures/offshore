@@ -17,7 +17,7 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 
 	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/fleet"
+	"github.com/traumventures/cloudsourced/internal/pool"
 )
 
 func parseOK(t *testing.T, args ...string) *cpOptions {
@@ -213,13 +213,13 @@ func TestClientConfigBlock(t *testing.T) {
 	b, _ := json.Marshal(st)
 	os.WriteFile(filepath.Join(dir, cpStateFile), b, 0o644)
 	got, err := clientConfigBlock(dir, "", "", "env:CLOUDSOURCED_API_KEY", noProbe)
-	want := "[orchestrator]\nmode = \"remote\"\nurl = \"https://10.0.0.5:7443\"\nfingerprint = \"ab12\"\napi_key = \"env:CLOUDSOURCED_API_KEY\"\n"
+	want := "[control_plane]\nurl = \"https://10.0.0.5:7443\"\nfingerprint = \"ab12\"\napi_key = \"env:CLOUDSOURCED_API_KEY\"\n"
 	if err != nil || got != want {
 		t.Fatalf("self-signed block:\n%s\nwant:\n%s (%v)", got, want, err)
 	}
 	// What the client writes must validate as remote mode.
-	if !strings.Contains(got, `mode = "remote"`) {
-		t.Fatal("no remote mode")
+	if !strings.HasPrefix(got, "[control_plane]\n") {
+		t.Fatal("no [control_plane]")
 	}
 
 	st = cpState{TLS: "acme", Hostname: "cs.example.com", URLs: []string{"https://cs.example.com"}}
@@ -281,10 +281,10 @@ func TestTranslateMount(t *testing.T) {
 }
 
 func TestMachineBinary(t *testing.T) {
-	u := &config.FleetConfig{Providers: map[string]map[string]any{
-		"local": {"backend": "local-docker"},
-		"fixed": {"backend": "local-docker", "binary": "/opt/cs"},
-		"aws":   {"backend": "aws-ec2"},
+	u := &config.PoolConfig{Providers: map[string]map[string]any{
+		"local": {"type": "local-docker"},
+		"fixed": {"type": "local-docker", "binary": "/opt/cs"},
+		"aws":   {"type": "aws-ec2"},
 	}}
 	setMachineBinary(u, "/host/state/bin/cloudsourced")
 	if u.Providers["local"]["binary"] != "/host/state/bin/cloudsourced" || u.Providers["fixed"]["binary"] != "/opt/cs" || u.Providers["aws"]["binary"] != nil {
@@ -334,7 +334,7 @@ func TestLoadAPIKeyNeverLogsSource(t *testing.T) {
 func TestControlplaneServe(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CLOUDSOURCED_CONFIG", filepath.Join(dir, "none.toml"))
-	t.Setenv("CLOUDSOURCED_DOCKER", "true") // empty fleet
+	t.Setenv("CLOUDSOURCED_DOCKER", "true") // empty pool
 	t.Setenv("CLOUDSOURCED_API_KEY", "")
 	t.Setenv("CLOUDSOURCED_IN_CONTAINER", "")
 	o := parseOK(t, "--listen", "127.0.0.1:0", "--hostname", "cs.example.com", "--acme=false")
@@ -352,7 +352,7 @@ func TestControlplaneServe(t *testing.T) {
 	if st.TLS != "self-signed" || !strings.HasPrefix(st.URLs[0], "https://cs.example.com:") || st.APIKey != filepath.Join(o.StateDir, "api-key") {
 		t.Fatalf("state %+v", st)
 	}
-	r, err := fleet.NewRemote("https://"+st.Listen, st.Fingerprint, "wrong-key-0123456789")
+	r, err := pool.NewRemote("https://"+st.Listen, st.Fingerprint, "wrong-key-0123456789")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestControlplaneServe(t *testing.T) {
 		t.Fatalf("wrong key accepted: %v", err)
 	}
 	key, _ := os.ReadFile(filepath.Join(o.StateDir, "api-key"))
-	r, _ = fleet.NewRemote("https://"+st.Listen, st.Fingerprint, strings.TrimSpace(string(key)))
+	r, _ = pool.NewRemote("https://"+st.Listen, st.Fingerprint, strings.TrimSpace(string(key)))
 	if _, err := r.Status(context.Background()); err != nil {
 		t.Fatalf("status with the pinned fingerprint: %v", err)
 	}

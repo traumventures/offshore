@@ -8,7 +8,7 @@ import (
 )
 
 // CostApproximation documents how costs are estimated.
-const CostApproximation = "price_per_hour of the machine's fleet size times its observed starting/running time; " +
+const CostApproximation = "price_per_hour of the machine's pool size times its observed starting/running time; " +
 	"machines first seen up count from their creation time, restarts before the control plane started and " +
 	"machines removed before it started are not visible, and billing granularity of the provider is ignored"
 
@@ -24,7 +24,7 @@ type SizeCost struct {
 	Unpriced     bool    `json:"unpriced,omitempty"` // no price configured
 }
 
-// CostReport is the estimated fleet cost since a point in time.
+// CostReport is the estimated pool cost since a point in time.
 type CostReport struct {
 	Since         time.Time  `json:"since"`
 	Sizes         []SizeCost `json:"sizes"`

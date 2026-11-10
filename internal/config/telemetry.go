@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// Telemetry is the [telemetry] section of the client and the fleet
+// Telemetry is the [telemetry] section of the client and the pool
 // configuration. Tracing is off unless an exporter or endpoint is set here
 // or by the standard OTEL_* environment variables (which win).
 //
@@ -13,8 +13,8 @@ import (
 //	endpoint = "https://otel.example.com:4318"   # OTLP/HTTP base URL
 //	headers = { "x-api-key" = "env:OTEL_KEY" }   # secret references
 //	sampling = 0.25                              # parent based ratio
-//	machine_endpoint = "http://10.0.0.5:4318"    # fleet: as seen by machines
-//	events_retention_days = 30                   # fleet: analysis event log
+//	machine_endpoint = "http://10.0.0.5:4318"    # pool: as seen by machines
+//	events_retention_days = 30                   # pool: analysis event log
 type Telemetry struct {
 	// Exporter is "otlp", "console" or "none" ("" = otlp when an endpoint
 	// is set, else none).
@@ -29,11 +29,11 @@ type Telemetry struct {
 	Sampling *float64 `toml:"sampling"`
 	// ServiceName overrides the component's default service.name.
 	ServiceName string `toml:"service_name"`
-	// MachineEndpoint is the OTLP base URL forwarded to machines (fleet
+	// MachineEndpoint is the OTLP base URL forwarded to machines (pool
 	// configuration; default: Endpoint).
 	MachineEndpoint string `toml:"machine_endpoint"`
 	// EventsRetentionDays bounds the analysis event log of the orchestrator
-	// (fleet configuration; default 30).
+	// (pool configuration; default 30).
 	EventsRetentionDays int `toml:"events_retention_days"`
 }
 

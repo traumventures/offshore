@@ -1,10 +1,10 @@
 // Package awsec2 runs machines as EC2 instances. Each instance runs Docker
-// and the host agent ("cloudsourced host"), which applies the same machine
+// and the supervisor ("cloudsourced supervisor"), which applies the same machine
 // container layout as the local-docker backend (machine.Layout: server with
 // FUSE, services in its network namespace, cache volumes on the instance
 // disk), so behaviour matches the reference backend. User data carries only
 // the public machine spec; the secret server environment travels through
-// an SSM SecureString parameter that the agent reads once and deletes.
+// an SSM SecureString parameter that the supervisor reads once and deletes.
 //
 // Shared infrastructure (security group, instance role, artifact bucket,
 // image repository, reaper) is a CloudFormation stack, created on first use.
@@ -336,8 +336,8 @@ func publicIP(ctx context.Context) (string, error) {
 // --- images ---
 
 // ImagePlatform is the platform of instances of a size whose architecture
-// is unknown here: amd64. The fleet knows the architecture of its sizes
-// (fleet.size arch) and uses that instead.
+// is unknown here: amd64. The pool knows the architecture of its sizes
+// (pool.size arch) and uses that instead.
 func (e *EC2) ImagePlatform(string) image.Platform { return image.LinuxAMD64 }
 
 // ImageRegistry is the ECR repository of the stack.
@@ -436,7 +436,7 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	tags := []ec2types.Tag{
 		{Key: aws.String("Name"), Value: aws.String("cloudsourced-" + spec.ID)},
 		{Key: aws.String(tagProject), Value: aws.String(project)},
-		{Key: aws.String(provider.LabelOwner), Value: aws.String(spec.Owner)},
+		{Key: aws.String(provider.LabelPool), Value: aws.String(spec.Owner)},
 		{Key: aws.String(provider.LabelMachine), Value: aws.String(spec.ID)},
 		{Key: aws.String(provider.LabelKind), Value: aws.String("machine")},
 		{Key: aws.String(provider.LabelEnvHash), Value: aws.String(spec.EnvHash)},
@@ -480,7 +480,7 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	if e.subnet != "" {
 		input.NetworkInterfaces[0].SubnetId = aws.String(e.subnet)
 	}
-	// The secret environment goes through SSM: the host agent reads it
+	// The secret environment goes through SSM: the supervisor reads it
 	// with the instance role and deletes it.
 	if err := e.putSecrets(ctx, spec); err != nil {
 		return provider.Machine{}, err
@@ -546,7 +546,7 @@ func (e *EC2) instances(ctx context.Context, owner, machine string) ([]ec2types.
 		{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "stopping", "stopped", "shutting-down"}},
 	}
 	if owner != "" {
-		filters = append(filters, ec2types.Filter{Name: aws.String("tag:" + provider.LabelOwner), Values: []string{owner}})
+		filters = append(filters, ec2types.Filter{Name: aws.String("tag:" + provider.LabelPool), Values: []string{owner}})
 	}
 	if machine != "" {
 		filters = append(filters, ec2types.Filter{Name: aws.String("tag:" + provider.LabelMachine), Values: []string{machine}})
@@ -666,7 +666,7 @@ func (e *EC2) Destroy(ctx context.Context, id string) error {
 	if err := e.terminate(ctx, is); err != nil {
 		return err
 	}
-	// Normally the agent has deleted it already.
+	// Normally the supervisor has deleted it already.
 	return e.deleteSecrets(ctx, id)
 }
 

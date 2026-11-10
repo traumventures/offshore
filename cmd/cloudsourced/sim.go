@@ -11,18 +11,18 @@ import (
 	"time"
 
 	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/fleet"
+	"github.com/traumventures/cloudsourced/internal/pool"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
 	"github.com/traumventures/cloudsourced/internal/scheduler/sim"
 )
 
 const simUsage = `Usage:
   cloudsourced sim [flags] <trace.json|trace.csv>...
-      replay traces against the fleet configuration and compare policies
+      replay traces against the pool configuration and compare policies
   cloudsourced sim -generate out.json [-profile team|small] [-seed N] [-days N] [-tz ZONE]
       write a synthetic bursty workday trace
   cloudsourced sim export [-since 7d] [-until T] [-o trace.json] [-cold-penalty 0.5] [-request-cpu]
-      convert the fleet's event log (real runs) into a trace
+      convert the pool's event log (real runs) into a trace
 
 Flags:
 `
@@ -33,9 +33,9 @@ func simCmd(args []string) error {
 	}
 	fs := flag.NewFlagSet("sim", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(fs.Output(), simUsage); fs.PrintDefaults() }
-	cfgPath := fs.String("config", "", "fleet configuration (TOML, [fleet] section); default: the active fleet configuration")
+	cfgPath := fs.String("config", "", "pool configuration (TOML, [pool] section); default: the active pool configuration")
 	policies := fs.String("policy", "default,classic", "comma separated policies to compare (default, binpack, classic)")
-	estimator := fs.String("estimator", "", "static | history (default: fleet.estimator)")
+	estimator := fs.String("estimator", "", "static | history (default: pool.estimator)")
 	boot := fs.String("boot", "60s", "create latency until a machine is ready: DUR or provider=DUR,...")
 	start := fs.String("start", "20s", "start latency of a stopped machine: DUR or provider=DUR,...")
 	cold := fs.Float64("cold-penalty", 0.5, "extra build time without a warm cache, as a fraction (-1 = none)")
@@ -74,13 +74,13 @@ func simCmd(args []string) error {
 		return errors.New("sim: no trace given")
 	}
 	if *cfgPath == "" {
-		*cfgPath = config.FleetConfigPath()
+		*cfgPath = config.PoolConfigPath()
 	}
-	u, err := config.LoadFleet(*cfgPath)
+	u, err := config.LoadPool(*cfgPath)
 	if err != nil {
 		return err
 	}
-	oc := fleet.Config(u)
+	oc := pool.Config(u)
 	bootLat, err := latencies(*boot)
 	if err != nil {
 		return fmt.Errorf("-boot: %w", err)
@@ -89,7 +89,7 @@ func simCmd(args []string) error {
 	if err != nil {
 		return fmt.Errorf("-start: %w", err)
 	}
-	est := u.Fleet.Estimator
+	est := u.Pool.Estimator
 	if *estimator != "" {
 		est = *estimator
 	}

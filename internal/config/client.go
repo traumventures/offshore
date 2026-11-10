@@ -13,9 +13,9 @@ import (
 // The configuration is split in three:
 //
 //   - the client configuration (~/.config/cloudsourced/config.toml): where
-//     the orchestrator runs ([orchestrator]), the user identity (user) and
+//     the orchestrator runs ([control_plane]; absent = embedded), the user identity (user) and
 //     local behaviour. Read by the CLI and the local daemon.
-//   - the fleet configuration ([fleet], [providers.*]): machine sizes,
+//   - the pool configuration ([pool], [providers.*]): machine sizes,
 //     scheduling policy, lifetimes and providers. Read by the orchestrator
 //     only: the control plane (its own file) or, in embedded mode, the
 //     daemon. By default it is the client file, so a single file serves a
@@ -23,39 +23,44 @@ import (
 //   - the repository configuration (.cloudsourced.toml, see Repo): per
 //     repository settings that travel with each request.
 
-// rawFile is the TOML schema shared by client and fleet files, so that one
+// rawFile is the TOML schema shared by client and pool files, so that one
 // file may hold both.
 type rawFile struct {
-	User         string                    `toml:"user"`
-	Orchestrator Orchestrator              `toml:"orchestrator"`
-	Fleet        Fleet                     `toml:"fleet"`
-	Docker       Docker                    `toml:"docker"`
-	Providers    map[string]map[string]any `toml:"providers"`
-	Telemetry    Telemetry                 `toml:"telemetry"`
+	User         string        `toml:"user"`
+	ControlPlane *ControlPlane `toml:"control_plane"`
+	Pool         Pool          `toml:"pool"`
+	Scheduler    Scheduler     `toml:"scheduler"`
+	Machine      struct {
+		Setup []ProvisionStep `toml:"setup"`
+	} `toml:"machine"`
+	Providers map[string]map[string]any `toml:"providers"`
+	Telemetry Telemetry                 `toml:"telemetry"`
 }
 
 // Client is the client configuration.
 type Client struct {
 	// Path is the file the configuration was read from.
 	Path string `toml:"-"`
-	// User identifies the user towards the fleet; it salts repository ids
+	// User identifies the user towards the pool; it salts repository ids
 	// (cache affinity, build slots). Default: $USER.
 	User string `toml:"user"`
-	// Orchestrator selects where fleet decisions are made: in the local
+	// Orchestrator selects where pool decisions are made: in the local
 	// daemon ("embedded") or in a shared control plane ("remote").
-	Orchestrator Orchestrator `toml:"orchestrator"`
+	ControlPlane ControlPlane `toml:"control_plane"`
 	// Telemetry configures tracing of the proxy and the daemon.
 	Telemetry Telemetry `toml:"telemetry"`
-	// FleetSections lists fleet sections present in the client file. They
+	// PoolSections lists pool sections present in the client file. They
 	// configure the embedded orchestrator and have no effect in remote mode.
-	FleetSections []string `toml:"-"`
-	// Warnings are deprecations and ineffective settings found while loading.
+	PoolSections []string `toml:"-"`
+	// Warnings are ineffective settings found while loading.
 	Warnings []string `toml:"-"`
 }
 
-// Orchestrator configures the control plane connection.
-type Orchestrator struct {
-	Mode string `toml:"mode"` // "embedded" | "remote"
+// ControlPlane configures the connection to a shared control plane.
+type ControlPlane struct {
+	// Mode is "remote" when [control_plane] is set, else "embedded" (the
+	// daemon runs the orchestrator).
+	Mode string `toml:"-"`
 	// URL of a remote control plane, e.g. "https://cs.example.com" or
 	// "https://10.0.0.5:7443".
 	URL string `toml:"url"`
@@ -84,60 +89,51 @@ func ClientConfigPath() string {
 }
 
 // Embedded reports whether the orchestrator runs in the local daemon.
-func (c *Client) Embedded() bool { return c.Orchestrator.Mode == "embedded" }
+func (c *Client) Embedded() bool { return c.ControlPlane.Mode == "embedded" }
 
 // Dir is the directory relative references and paths are resolved against.
 func (c *Client) Dir() string { return filepath.Dir(c.Path) }
 
 // LoadClient loads the client configuration, applying defaults when it is
-// absent. Fleet sections are accepted (embedded single-file setups) but not
-// interpreted; use LoadFleet for them.
+// absent. Pool sections are accepted (embedded single-file setups) but not
+// interpreted; use LoadPool for them.
 func LoadClient() (*Client, error) { return LoadClientFrom(ClientConfigPath()) }
 
 // LoadClientFrom loads the client configuration from path.
 func LoadClientFrom(path string) (*Client, error) {
 	c := &Client{Path: path}
-	legacyOwner := ""
 	data, err := os.ReadFile(path)
 	if err == nil {
 		var raw rawFile
 		if err := decodeStrict(data, &raw); err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
-		c.User, c.Orchestrator, c.Telemetry = raw.User, raw.Orchestrator, raw.Telemetry
-		top, _ := topLevel(data)
-		c.FleetSections = fleetSections(top)
-		if raw.Fleet.ID == "" {
-			legacyOwner = raw.Fleet.Owner
+		c.User, c.Telemetry = raw.User, raw.Telemetry
+		if raw.ControlPlane != nil {
+			c.ControlPlane = *raw.ControlPlane
+			c.ControlPlane.Mode = "remote"
 		}
+		top, _ := topLevel(data)
+		c.PoolSections = poolSections(top)
 	} else if !os.IsNotExist(err) {
 		return nil, err
-	}
-	if c.User == "" && legacyOwner != "" {
-		// Before the split, fleet.owner also salted repository ids; keep
-		// them (and warm caches) stable.
-		c.User = legacyOwner
-		c.Warnings = append(c.Warnings, fmt.Sprintf("%s: user defaults to the deprecated fleet.owner %q; set user = %q to keep it", path, legacyOwner, legacyOwner))
 	}
 	if c.User == "" {
 		c.User = defaultUser()
 	}
-	o := &c.Orchestrator
+	o := &c.ControlPlane
 	if o.Mode == "" {
 		o.Mode = "embedded"
-		if o.URL != "" {
-			o.Mode = "remote"
-		}
 	}
 	if o.Mode == "remote" && o.APIKey == "" {
 		o.APIKey = "env:CLOUDSOURCED_API_KEY"
 	}
-	if len(c.FleetSections) > 0 {
-		switch fp := FleetConfigPath(); {
+	if len(c.PoolSections) > 0 {
+		switch fp := PoolConfigPath(); {
 		case o.Mode == "remote":
-			c.Warnings = append(c.Warnings, fmt.Sprintf("%s: %s have no effect in remote mode (the control plane's fleet configuration applies)", path, strings.Join(c.FleetSections, ", ")))
+			c.Warnings = append(c.Warnings, fmt.Sprintf("%s: %s have no effect in remote mode (the control plane's pool configuration applies)", path, strings.Join(c.PoolSections, ", ")))
 		case fp != path:
-			c.Warnings = append(c.Warnings, fmt.Sprintf("%s: %s have no effect, the fleet configuration is %s (CLOUDSOURCED_FLEET_CONFIG)", path, strings.Join(c.FleetSections, ", "), fp))
+			c.Warnings = append(c.Warnings, fmt.Sprintf("%s: %s have no effect, the pool configuration is %s (CLOUDSOURCED_POOL_CONFIG)", path, strings.Join(c.PoolSections, ", "), fp))
 		}
 	}
 	if err := c.Validate(); err != nil {
@@ -152,20 +148,20 @@ func (c *Client) Validate() error {
 	if strings.ContainsAny(c.User, "\x00\n") || strings.TrimSpace(c.User) == "" {
 		errs = append(errs, fmt.Sprintf("user: invalid %q", c.User))
 	}
-	switch o := c.Orchestrator; o.Mode {
+	switch o := c.ControlPlane; o.Mode {
 	case "embedded":
 	case "remote":
 		if !strings.HasPrefix(o.URL, "https://") && !strings.HasPrefix(o.URL, "http://") {
-			errs = append(errs, "orchestrator.url: an http(s) URL is required in remote mode")
+			errs = append(errs, "control_plane.url: an http(s) URL is required")
 		}
 		if o.Fingerprint != "" && !strings.HasPrefix(o.URL, "https://") {
-			errs = append(errs, "orchestrator.fingerprint: requires an https URL")
+			errs = append(errs, "control_plane.fingerprint: requires an https URL")
 		}
 		if (o.ClientCert == "") != (o.ClientKey == "") {
-			errs = append(errs, "orchestrator.client_cert and client_key must be set together")
+			errs = append(errs, "control_plane.client_cert and client_key must be set together")
 		}
 		if o.ClientCert != "" && !strings.HasPrefix(o.URL, "https://") {
-			errs = append(errs, "orchestrator.client_cert: requires an https URL")
+			errs = append(errs, "control_plane.client_cert: requires an https URL")
 		}
 	default:
 		errs = append(errs, fmt.Sprintf("orchestrator.mode: unsupported %q (embedded, remote)", o.Mode))
@@ -184,7 +180,7 @@ func defaultUser() string {
 	return "default"
 }
 
-// validID accepts fleet ids usable in labels and resource names.
+// validID accepts pool ids usable in labels and resource names.
 func validID(s string) bool {
 	if s == "" || len(s) > 63 {
 		return false
@@ -197,9 +193,9 @@ func validID(s string) bool {
 	return true
 }
 
-func (u *FleetConfig) displayPath() string {
+func (u *PoolConfig) displayPath() string {
 	if u.Path == "" {
-		return "fleet configuration"
+		return "pool configuration"
 	}
 	return u.Path
 }
@@ -232,7 +228,9 @@ func sections(top map[string]bool, names ...string) []string {
 	return out
 }
 
-func clientSections(top map[string]bool) []string { return sections(top, "orchestrator", "user") }
-func fleetSections(top map[string]bool) []string {
-	return sections(top, "fleet", "providers", "docker")
+func clientSections(top map[string]bool) []string {
+	return sections(top, "control_plane", "user")
+}
+func poolSections(top map[string]bool) []string {
+	return sections(top, "pool", "scheduler", "machine", "providers")
 }

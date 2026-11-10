@@ -10,12 +10,12 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/traumventures/cloudsourced/internal/client"
 	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/cloudsourced/internal/daemon"
+	"github.com/traumventures/cloudsourced/internal/events"
 	"github.com/traumventures/cloudsourced/internal/logs"
 	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/runlog"
-	"github.com/traumventures/cloudsourced/internal/telemetry"
+	"github.com/traumventures/cloudsourced/internal/tracing"
 )
 
 // runTrace is the root span of one tool run ("cloudsourced.run"). Its
@@ -23,7 +23,7 @@ import (
 type runTrace struct {
 	ctx   context.Context
 	span  trace.Span
-	rec   *runlog.Run
+	rec   *events.Run
 	user  string
 	ended bool
 }
@@ -40,9 +40,9 @@ func startTrace(tool string, args []string) *runTrace {
 	if c, err := config.LoadClient(); err == nil {
 		tc, dir, tr.user = c.Telemetry, c.Dir(), c.User
 	}
-	telemetry.SetupFromConfig(telemetry.ServiceProxy, tc, dir, logs.FromEnv())
-	sub, flags := telemetry.Args(args)
-	tr.ctx, tr.span = telemetry.Start(tr.ctx, "cloudsourced.run", trace.WithAttributes(
+	tracing.SetupFromConfig(tracing.ServiceProxy, tc, dir, logs.FromEnv())
+	sub, flags := tracing.Args(args)
+	tr.ctx, tr.span = tracing.Start(tr.ctx, "cloudsourced.run", trace.WithAttributes(
 		attribute.String("cloudsourced.tool", tool),
 		attribute.String("cloudsourced.subcommand", sub),
 		attribute.StringSlice("cloudsourced.flags", flags),
@@ -60,20 +60,20 @@ func (tr *runTrace) finish(code int) {
 	tr.ended = true
 	if r := tr.rec; r != nil {
 		decision := r.Mode
-		if r.Mode == runlog.Local && strings.HasPrefix(r.Why, "fallback:") {
+		if r.Mode == events.Local && strings.HasPrefix(r.Why, "fallback:") {
 			decision = "fallback"
 		}
 		tr.span.SetAttributes(
 			attribute.String("cloudsourced.decision", decision),
 			attribute.String("cloudsourced.reason", r.Why),
-			attribute.String("cloudsourced.repo_id", client.RepoID(tr.user, r.Repo)),
+			attribute.String("cloudsourced.repo_id", daemon.RepoID(tr.user, r.Repo)),
 		)
 		if r.Machine != "" {
 			tr.span.SetAttributes(attribute.String("cloudsourced.machine", r.Machine), attribute.String("cloudsourced.lease", r.Lease),
 				attribute.String("cloudsourced.provider", r.Provider), attribute.String("cloudsourced.size", r.Size))
 		}
 	} else {
-		tr.span.SetAttributes(attribute.String("cloudsourced.decision", runlog.Local), attribute.String("cloudsourced.reason", "not in a repository"))
+		tr.span.SetAttributes(attribute.String("cloudsourced.decision", events.Local), attribute.String("cloudsourced.reason", "not in a repository"))
 	}
 	if code >= 0 {
 		tr.span.SetAttributes(attribute.Int("process.exit.code", code))
@@ -82,7 +82,7 @@ func (tr *runTrace) finish(code int) {
 		}
 	}
 	tr.span.End()
-	telemetry.Shutdown(3 * time.Second)
+	tracing.Shutdown(3 * time.Second)
 }
 
 // execAttrs records the remote process outcome on a span.

@@ -21,7 +21,7 @@ import (
 //	cloudsourced debug probe ADDR FINGERPRINT TOKEN
 //	cloudsourced debug clock [advance DURATION]
 //
-// "token" signs with the fleet master key of a state dir (or
+// "token" signs with the pool master key of a state dir (or
 // $CLOUDSOURCED_MASTER_KEY); "probe" prints a machine's status. "clock"
 // shows or advances the test clock of $CLOUDSOURCED_TEST_CLOCK
 // (offset:FILE), which the orchestrator uses for idle stop and expiry:

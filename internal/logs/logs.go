@@ -1,12 +1,12 @@
 // Package logs configures structured logging for the daemon, the control
-// plane and machine servers from the environment:
+// plane and workers from the environment:
 //
 //	CLOUDSOURCED_LOG_FORMAT=text|json  (default text)
 //	CLOUDSOURCED_LOG_LEVEL=debug|info|warn|error  (default info;
 //	                                  CLOUDSOURCED_DEBUG=1 means debug)
 //
 // The orchestrator forwards both variables to the machines it creates, so
-// a fleet logs in one format.
+// a pool logs in one format.
 package logs
 
 import (
@@ -78,7 +78,7 @@ func FromEnv() *slog.Logger {
 }
 
 // Forward returns the logging variables set in this process, for the
-// environment of child services (machine servers).
+// environment of child services (workers).
 func Forward() map[string]string {
 	out := map[string]string{}
 	for _, k := range []string{EnvFormat, EnvLevel} {

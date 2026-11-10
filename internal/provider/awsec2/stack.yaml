@@ -41,7 +41,7 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: >-
-          Used by the host agent only (containers cannot reach the metadata
+          Used by the supervisor only (containers cannot reach the metadata
           service). It reads and deletes the machine's secret parameter once,
           pulls images and the server binary, and stops its own instance when
           idle while no orchestrator observes it.
@@ -209,7 +209,7 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:ResourceTag/cloudsourced.kind: machine
-              # Orphaned machine secrets (host agents delete theirs after
+              # Orphaned machine secrets (supervisors delete theirs after
               # reading; these are left by machines that never booted).
               - Effect: Allow
                 Action: ssm:GetParametersByPath

@@ -123,7 +123,7 @@ func unix(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
 func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provider.Machine, error) {
 	now := time.Now()
 	common := map[string]string{
-		provider.LabelOwner:     spec.Owner,
+		provider.LabelPool:      spec.Owner,
 		provider.LabelMachine:   spec.ID,
 		provider.LabelCreatedAt: unix(now),
 		provider.LabelExpiresAt: unix(spec.ExpiresAt),
@@ -219,7 +219,7 @@ func (d *Docker) depsVolume(ctx context.Context, spec provider.MachineSpec) (str
 	}
 	name := fmt.Sprintf("cs-deps-%s-%d", sanitize(spec.Owner), now.Unix())
 	l := map[string]string{
-		provider.LabelOwner:     spec.Owner,
+		provider.LabelPool:      spec.Owner,
 		provider.LabelKind:      "deps",
 		provider.LabelCreatedAt: unix(now),
 		provider.LabelExpiresAt: unix(now.Add(ttl)),
@@ -357,7 +357,7 @@ func (d *Docker) Destroy(ctx context.Context, id string) error {
 
 // List returns all machines of owner.
 func (d *Docker) List(ctx context.Context, owner string) ([]provider.Machine, error) {
-	out, err := d.output(ctx, "ps", "-a", "--filter", "label="+provider.LabelOwner+"="+owner,
+	out, err := d.output(ctx, "ps", "-a", "--filter", "label="+provider.LabelPool+"="+owner,
 		"--filter", "label="+provider.LabelKind+"=machine", "--format", "{{.Names}}")
 	if err != nil {
 		return nil, err
@@ -371,7 +371,7 @@ func (d *Docker) Volumes(ctx context.Context, owner string) ([]provider.Volume, 
 	// One listing with the labels: inspecting the listed names separately
 	// fails as a whole when a volume disappears in between (a concurrent
 	// destroy), which made reconciles fail.
-	out, err := d.output(ctx, "volume", "ls", "--filter", "label="+provider.LabelOwner+"="+owner, "--format", "{{.Name}}\t{{.Labels}}")
+	out, err := d.output(ctx, "volume", "ls", "--filter", "label="+provider.LabelPool+"="+owner, "--format", "{{.Name}}\t{{.Labels}}")
 	if err != nil {
 		return nil, err
 	}

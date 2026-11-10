@@ -14,8 +14,7 @@ import (
 
 // Label keys attached to every resource.
 const (
-	LabelOwner     = "cloudsourced.owner"
-	LabelFleet     = "cloudsourced.fleet"
+	LabelPool      = "cloudsourced.pool"
 	LabelMachine   = "cloudsourced.machine"
 	LabelEnvHash   = "cloudsourced.env-hash"
 	LabelCreatedAt = "cloudsourced.created-at"
@@ -57,7 +56,7 @@ type MachineSpec struct {
 	DepsTTL      time.Duration // lifetime of shared dependency cache volumes
 	IdleStop     time.Duration // machine stops itself after this long idle and unobserved (0: never)
 	Services     []Service
-	Env          map[string]string // CLOUDSOURCED_* variables of the machine server
+	Env          map[string]string // CLOUDSOURCED_* variables of the worker
 	SecretEnv    map[string]string // secret CLOUDSOURCED_* variables
 }
 

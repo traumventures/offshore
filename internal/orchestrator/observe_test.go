@@ -8,8 +8,8 @@ import (
 
 	"github.com/traumventures/cloudsourced/internal/events"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/telemetry"
-	"github.com/traumventures/cloudsourced/internal/telemetry/telemetrytest"
+	"github.com/traumventures/cloudsourced/internal/tracing"
+	"github.com/traumventures/cloudsourced/internal/tracing/tracingtest"
 )
 
 func readEvents(t *testing.T, o *Orchestrator) []events.Event {
@@ -35,10 +35,10 @@ func byType(evs []events.Event, typ string) []events.Event {
 // machine creation it triggers is a linked root span, and the event log
 // records placement, machine lifecycle and the task's usage.
 func TestAcquireSpansAndEvents(t *testing.T) {
-	rec := telemetrytest.Record(t)
+	rec := tracingtest.Record(t)
 	f := newFake()
 	o := newTestOrch(t, f, func(c *Config) { c.Sizes[0].PricePerHour = 0.5 })
-	ctx, root := telemetry.Start(context.Background(), "test.root")
+	ctx, root := tracing.Start(context.Background(), "test.root")
 	r := req("r1")
 	r.Key = "r1/cargo/build"
 	l, err := o.Acquire(ctx, r, io.Discard)
@@ -49,9 +49,9 @@ func TestAcquireSpansAndEvents(t *testing.T) {
 	o.Finish(ctx, l.ID, r.Key, &scheduler.Usage{PeakMemory: 1 << 30, CPUSeconds: 12, Wall: 10 * time.Second, Warm: true,
 		Cache: map[string]int64{"sccache_hits": 2}})
 	o.Release(l.ID)
-	acq := telemetrytest.Find(rec, "fleet.acquire")
+	acq := tracingtest.Find(rec, "pool.acquire")
 	if acq == nil || acq.Parent().SpanID() != root.SpanContext().SpanID() || acq.SpanContext().TraceID() != root.SpanContext().TraceID() {
-		t.Fatalf("fleet.acquire must be a child of the caller:\n%s", telemetrytest.Tree(rec, root.SpanContext().TraceID()))
+		t.Fatalf("pool.acquire must be a child of the caller:\n%s", tracingtest.Tree(rec, root.SpanContext().TraceID()))
 	}
 	attrs := map[string]string{}
 	for _, kv := range acq.Attributes() {
@@ -60,14 +60,14 @@ func TestAcquireSpansAndEvents(t *testing.T) {
 	if attrs["cloudsourced.placement"] != "assign" || attrs["cloudsourced.machine"] != l.MachineID || attrs["cloudsourced.size"] != "m4" || attrs["cloudsourced.price_per_hour"] != "0.5" {
 		t.Fatalf("acquire attributes %v", attrs)
 	}
-	var create = telemetrytest.Find(rec, "fleet.create")
+	var create = tracingtest.Find(rec, "pool.create")
 	for i := 0; create == nil && i < 100; i++ {
 		time.Sleep(20 * time.Millisecond)
-		create = telemetrytest.Find(rec, "fleet.create")
+		create = tracingtest.Find(rec, "pool.create")
 	}
 	if create == nil || create.SpanContext().TraceID() == root.SpanContext().TraceID() || len(create.Links()) != 1 ||
 		create.Links()[0].SpanContext.TraceID() != root.SpanContext().TraceID() {
-		t.Fatalf("fleet.create must be a new root linked to the request: %+v", create)
+		t.Fatalf("pool.create must be a new root linked to the request: %+v", create)
 	}
 	evs := readEvents(t, o)
 	placed := byType(evs, events.TaskPlaced)
@@ -95,7 +95,7 @@ func TestAcquireSpansAndEvents(t *testing.T) {
 }
 
 func TestReconcileActionEvents(t *testing.T) {
-	rec := telemetrytest.Record(t)
+	rec := tracingtest.Record(t)
 	f := newFake()
 	o := newTestOrch(t, f, nil)
 	l, err := o.Acquire(context.Background(), req("r1"), io.Discard)
@@ -113,9 +113,9 @@ func TestReconcileActionEvents(t *testing.T) {
 	if len(d) != 1 || d[0].Machine != l.MachineID || d[0].Reason != "expired" {
 		t.Fatalf("machine_destroy %+v", d)
 	}
-	rs := telemetrytest.Find(rec, "orchestrator.reconcile")
-	ds := telemetrytest.Find(rec, "fleet.destroy")
+	rs := tracingtest.Find(rec, "orchestrator.reconcile")
+	ds := tracingtest.Find(rec, "pool.destroy")
 	if rs == nil || ds == nil || ds.Parent().SpanID() != rs.SpanContext().SpanID() {
-		t.Fatalf("fleet.destroy must be a child of orchestrator.reconcile")
+		t.Fatalf("pool.destroy must be a child of orchestrator.reconcile")
 	}
 }

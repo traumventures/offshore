@@ -10,9 +10,9 @@ import (
 func TestSpotAndArchSizes(t *testing.T) {
 	u, err := loadUserFrom(t, `
 [providers.aws]
-backend = "aws-ec2"
+type = "aws-ec2"
 
-[[fleet.size]]
+[[providers.aws.size]]
 name = "x4-spot"
 cpu = 4
 memory = "8G"
@@ -20,7 +20,7 @@ price_per_hour = 0.2
 spot = true
 instance_types = ["c7a.xlarge", "c6a.xlarge", "m7a.xlarge"]
 
-[[fleet.size]]
+[[providers.aws.size]]
 name = "g4"
 cpu = 4
 memory = "8G"
@@ -30,7 +30,7 @@ spot = true
 spot_discount = 0.5
 spot_fallback = false
 
-[[fleet.size]]
+[[providers.aws.size]]
 name = "c7a.xlarge"
 cpu = 4
 memory = "8G"
@@ -39,7 +39,7 @@ price_per_hour = 0.2
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := u.Fleet.Sizes
+	s := u.Pool.Sizes
 	if s[0].Arch != ArchAMD64 || !s[0].Spot || !s[0].Fallback() || math.Abs(s[0].EffectivePrice()-0.1) > 1e-9 || len(s[0].InstanceTypes) != 3 {
 		t.Errorf("spot size: %+v (price %v)", s[0], s[0].EffectivePrice())
 	}
@@ -58,30 +58,34 @@ func TestSpotAndArchValidation(t *testing.T) {
 	}
 	for name, tc := range map[string]struct{ body, want string }{
 		"bad arch": {`[providers.aws]
-backend = "aws-ec2"
-[[fleet.size]]
+type = "aws-ec2"
+
+[[providers.aws.size]]
 name = "s"
 cpu = 1
 memory = "1G"
 arch = "riscv64"`, "unsupported \"riscv64\""},
 		"bad discount": {`[providers.aws]
-backend = "aws-ec2"
-[[fleet.size]]
+type = "aws-ec2"
+
+[[providers.aws.size]]
 name = "s"
 cpu = 1
 memory = "1G"
 spot = true
 spot_discount = 1.5`, "spot_discount"},
 		"spot on local docker": {`[providers.local]
-backend = "local-docker"
-[[fleet.size]]
+type = "local-docker"
+
+[[providers.local.size]]
 name = "s"
 cpu = 1
 memory = "1G"
 spot = true`, "need an aws-ec2 provider"},
 		"foreign arch on local docker": {`[providers.local]
-backend = "local-docker"
-[[fleet.size]]
+type = "local-docker"
+
+[[providers.local.size]]
 name = "s"
 cpu = 1
 memory = "1G"

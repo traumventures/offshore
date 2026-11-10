@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// HostStatus is what the server publishes for the host agent, refreshed
+// HostStatus is what the server publishes for the supervisor, refreshed
 // every few seconds. Times are unix seconds (0: unset).
 type HostStatus struct {
 	UpdatedAt int64 `json:"updated_at"`
@@ -51,7 +51,7 @@ func ReadHostStatus(path string) (HostStatus, error) {
 	return st, err
 }
 
-// Decision is what the host agent should do with its machine.
+// Decision is what the supervisor should do with its machine.
 type Decision int
 
 const (
@@ -70,7 +70,7 @@ func (d Decision) String() string {
 	return "keep"
 }
 
-// Lifecycle parameters of the host agent's decision.
+// Lifecycle parameters of the supervisor's decision.
 const (
 	// MinUnobserved is the minimum time without an orchestrator probe
 	// before a machine stops itself; a running control plane keeps deciding.
@@ -88,7 +88,7 @@ func UnobservedWindow(idleStop time.Duration) time.Duration {
 	return max(idleStop, MinUnobserved)
 }
 
-// Decide is the host agent's lifecycle decision. st is nil when no
+// Decide is the supervisor's lifecycle decision. st is nil when no
 // current status is available.
 func Decide(now, expiresAt time.Time, idleStop time.Duration, st *HostStatus) Decision {
 	if st != nil && now.Sub(time.Unix(st.UpdatedAt, 0)) > StatusStale {
@@ -113,7 +113,7 @@ func Decide(now, expiresAt time.Time, idleStop time.Duration, st *HostStatus) De
 }
 
 // DrainNoticeFile is the file (next to the status file, in the host status
-// directory) through which the host agent tells the server that the machine
+// directory) through which the supervisor tells the server that the machine
 // is about to be taken away, e.g. by a spot interruption. The server then
 // drains: no new sessions, running sessions continue until the deadline.
 const DrainNoticeFile = "drain.json"

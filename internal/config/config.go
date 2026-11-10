@@ -469,7 +469,7 @@ func (r *Repo) ExtraRootPaths() []string {
 }
 
 // CacheTTLs returns cache.build.ttl and cache.deps.ttl. They are repository
-// settings that travel with every request; the fleet caps them by its
+// settings that travel with every request; the pool caps them by its
 // max_lifetime.
 func (r *Repo) CacheTTLs() (build, deps time.Duration) {
 	build, _ = ParseDuration(r.Cache.Build.TTL)
