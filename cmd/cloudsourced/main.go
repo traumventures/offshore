@@ -47,6 +47,7 @@ Usage:
   cloudsourced editor [vscode|zed|neovim]  rust-analyzer settings for remote checks
   cloudsourced config check                validate configuration files
   cloudsourced controlplane [flags]        serve a shared control plane (see --help)
+  cloudsourced sim [flags] <trace>...      simulate the fleet policy on a build trace
   cloudsourced version
 
 Internal:
@@ -134,6 +135,8 @@ func run(cmd string, args []string) error {
 		os.Exit(126)
 	case "controlplane":
 		return controlplane(args)
+	case "sim":
+		return simCmd(args)
 	case "daemon":
 		return daemonCmd(args)
 	case "status":
