@@ -226,7 +226,27 @@ func (l *Local) target(name, size string) (image.Target, bool) {
 	if !ok {
 		return image.Target{}, false
 	}
-	return image.Target{Name: name, Platform: h.ImagePlatform(size), Registry: h.ImageRegistry(), Builder: h.ImageBuilder()}, true
+	platform := h.ImagePlatform(size)
+	if a := l.sizeArch(name, size); a != "" {
+		platform = image.Platform("linux/" + a)
+	}
+	return image.Target{Name: name, Platform: platform, Registry: h.ImageRegistry(), Builder: h.ImageBuilder()}, true
+}
+
+// sizeArch returns the configured architecture of a fleet size ("": not
+// configured). The environment of a machine of this size is built for it.
+func (l *Local) sizeArch(prov, size string) string {
+	l.cfgMu.Lock()
+	defer l.cfgMu.Unlock()
+	if l.cfg == nil {
+		return ""
+	}
+	for _, sz := range l.cfg.Fleet.Sizes {
+		if sz.Provider == prov && sz.Name == size {
+			return config.MachineArch(sz.Arch)
+		}
+	}
+	return ""
 }
 
 // ensureImage makes env available to machines of a provider and returns

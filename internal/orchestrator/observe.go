@@ -55,7 +55,7 @@ func (o *Orchestrator) machineEventLocked(typ, id string) events.Event {
 	if m, ok := o.machines[id]; ok {
 		size := m.Labels[provider.LabelSize]
 		ev.Provider, ev.Size, ev.Env = m.Provider, size, m.EnvHash
-		ev.Price = o.priceLocked(m.Provider, size)
+		ev.Price = o.priceLocked(m.Provider, size, m.Labels[provider.LabelMarket])
 		ev.Spot = spot(m.Labels)
 		if m.CPU > 0 || m.Memory > 0 {
 			ev.Capacity = &scheduler.Resources{CPU: m.CPU, Memory: m.Memory}

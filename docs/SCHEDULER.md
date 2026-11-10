@@ -32,6 +32,19 @@ can be tested and simulated without machines.
   empty running machine is stopped to make room for a larger one when the
   fleet is at its limit. Unknown prices (0) prefer the size absorbing the
   most demand, then the smaller one.
+- **Spot and architecture**: spot sizes count with their expected price
+  (`price_per_hour × (1 − spot_discount)`), so they win when cheaper per
+  unit, and at equal cost a spot size wins over an on-demand one. Machines
+  are only created from sizes of the environment's architecture (the
+  repository's `resources.arch`; unknown environments are amd64), and a
+  task no size of its architecture can hold is rejected. A machine with an
+  interruption notice (`Machine.Interrupted`, reported by its server)
+  drains, is never undrained or counted as capacity, and stops as soon as
+  it is empty, even inside the warm pool; the demand creates capacity
+  elsewhere. A rebalance recommendation only marks a machine `AtRisk`: it
+  keeps serving, but placement prefers other machines at equal fit
+  (rebalance recommendations often come without an interruption, and
+  draining on them would make spot machines useless in busy pools).
 - **Consolidation**: when the machines of an environment are reserved below
   `consolidate_below` (default 0.5) and the others stay below
   `consolidate_target` (default 0.75) after taking its share, the least
