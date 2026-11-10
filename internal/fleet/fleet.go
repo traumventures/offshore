@@ -69,8 +69,18 @@ func Config(u *config.User, r *config.Repo) orchestrator.Config {
 			MaxCPUPressure: f.MaxCPUPressure, MaxMemoryPressure: f.MaxMemoryPressure,
 			SoftLimit: f.SoftLimit, Swap: f.Swap, LimitJobs: f.LimitJobs,
 			MinMachines: f.MinMachines, MaxMachines: f.MaxMachines, IdleStop: idle,
-			ProviderMax: map[string]int{},
+			ProviderMax: map[string]int{}, Variant: f.Policy, ConsolidateTarget: f.ConsolidateTarget,
 		},
+	}
+	if f.ConsolidateBelow != nil {
+		c.Policy.ConsolidateBelow = *f.ConsolidateBelow
+	}
+	for _, w := range f.WarmPool {
+		days, from, to, loc, err := w.Parse()
+		if err != nil {
+			continue // rejected by validation
+		}
+		c.Policy.WarmPool = append(c.Policy.WarmPool, scheduler.WarmWindow{Days: days, From: from, To: to, Machines: w.Machines, Location: loc})
 	}
 	for name, opts := range u.Providers {
 		switch v := opts["max_machines"].(type) {

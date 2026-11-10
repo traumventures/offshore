@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/provider"
@@ -157,5 +158,16 @@ func TestUnpackRejectsTraversal(t *testing.T) {
 	}
 	if err := PackEnv(&buf, provider.ImageSpec{Tag: "t", ContextDir: dir, Dockerfile: "/etc/passwd"}); err == nil {
 		t.Fatal("dockerfile outside the context must be rejected")
+	}
+}
+
+func TestConfigMapsSchedulingKeys(t *testing.T) {
+	below := 0.4
+	u := &config.User{Fleet: config.Fleet{Policy: "classic", ConsolidateBelow: &below, ConsolidateTarget: 0.7, MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s",
+		WarmPool: []config.WarmPool{{Days: []string{"mon"}, From: "08:00", To: "18:00", Machines: 1, Timezone: "UTC"}}}}
+	p := Config(u, nil).Policy
+	if p.Variant != "classic" || p.ConsolidateBelow != 0.4 || p.ConsolidateTarget != 0.7 || len(p.WarmPool) != 1 ||
+		p.WarmPool[0].From != 8*time.Hour || p.WarmPool[0].To != 18*time.Hour || p.WarmPool[0].Days[0] != time.Monday || p.WarmPool[0].Machines != 1 {
+		t.Fatalf("%+v", p)
 	}
 }
