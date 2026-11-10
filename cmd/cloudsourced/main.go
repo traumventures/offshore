@@ -21,6 +21,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/client"
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/envbuild"
+	"github.com/traumventures/cloudsourced/internal/logs"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
@@ -40,6 +41,7 @@ Usage:
   cloudsourced shim uninstall              remove proxies
   cloudsourced status [--json]             show machines, sessions and cost today
   cloudsourced why [N|last|list] [--json]  explain a recent run (placement, timings)
+  cloudsourced metrics                     daemon, fleet and machine metrics (Prometheus text)
   cloudsourced fetch <glob>...             copy outputs from the latest remote build
   cloudsourced down                        destroy all machines and caches
   cloudsourced reconcile                   apply the fleet policy now
@@ -62,6 +64,8 @@ Environment:
   CLOUDSOURCED_STDIN=always|never stdin forwarding policy
   CLOUDSOURCED_VERBOSE=1          print the machine used for each run
   CLOUDSOURCED_PORTS=8080,3000:3001  forward local ports into the session
+  CLOUDSOURCED_LOG_FORMAT=text|json  log format of daemon, control plane and machines
+  CLOUDSOURCED_LOG_LEVEL=debug|info|warn|error  log level (CLOUDSOURCED_DEBUG=1: debug)
 `
 
 func init() {
@@ -93,13 +97,9 @@ type exitCode int
 
 func (e exitCode) Error() string { return fmt.Sprintf("exit code %d", int(e)) }
 
-func logger() *slog.Logger {
-	level := slog.LevelInfo
-	if os.Getenv("CLOUDSOURCED_DEBUG") != "" {
-		level = slog.LevelDebug
-	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-}
+// logger logs to stderr in the format of CLOUDSOURCED_LOG_FORMAT and
+// CLOUDSOURCED_LOG_LEVEL (see internal/logs).
+func logger() *slog.Logger { return logs.FromEnv() }
 
 func run(cmd string, args []string) error {
 	switch cmd {
@@ -112,6 +112,7 @@ func run(cmd string, args []string) error {
 		}
 		os.Exit(proxy.Main(args[0], args[1:]))
 	case "server":
+		log := logger() // before the CLOUDSOURCED_* variables are dropped
 		cfg, err := server.ConfigFromEnv()
 		if err != nil {
 			return err
@@ -122,7 +123,7 @@ func run(cmd string, args []string) error {
 				os.Unsetenv(k)
 			}
 		}
-		s, err := server.New(cfg, logger())
+		s, err := server.New(cfg, log)
 		if err != nil {
 			return err
 		}
@@ -146,6 +147,8 @@ func run(cmd string, args []string) error {
 		return status(args)
 	case "why":
 		return why(args)
+	case "metrics":
+		return metricsCmd(args)
 	case "down":
 		if err := client.EnsureDaemon(context.Background()); err != nil {
 			return err

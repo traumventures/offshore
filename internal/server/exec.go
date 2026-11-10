@@ -89,9 +89,11 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	ready, draining := s.ready, s.draining
 	s.mu.Unlock()
 	if !ready {
+		s.metrics.rejected.Inc("not_ready")
 		return prepErr(errors.New("machine is not ready"))
 	}
 	if draining {
+		s.metrics.rejected.Inc("draining")
 		return prepErr(errors.New("machine is draining"))
 	}
 	// Barrier: every root must have applied the client's manifest version.
@@ -137,6 +139,7 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	}
 	if limit > 0 && used+req.Grant.Reserve.Memory > limit {
 		s.mu.Unlock()
+		s.metrics.rejected.Inc("full")
 		return prepErr(fmt.Errorf("machine full: %d of %d bytes memory reserved", used, limit))
 	}
 	s.sessions[se.id] = se
@@ -325,6 +328,7 @@ loop:
 		pc.Write(proto.TStderr, []byte(fmt.Sprintf("cloudsourced: session exceeded its memory limit (%d bytes); the next run reserves more\n", req.Grant.MemoryMax)))
 	}
 	s.log.Info("session finished", "session", se.id, "code", exit.Code, "duration", time.Since(se.started).Round(time.Millisecond))
+	s.metrics.sessionEnded(exit.Code, exit.Usage.Wall.Seconds(), exit.Usage.OOM, exit.Cache)
 	if clientGone {
 		return nil
 	}
@@ -458,7 +462,7 @@ func (s *Server) writeback(pc *proto.Conn, frames chan frame, req proto.Exec) er
 	if err := pc.Send(proto.TWriteback, wb); err != nil {
 		return err
 	}
-	if err := s.sendNeeded(pc, frames, blobs); err != nil {
+	if err := s.sendNeeded(pc, frames, blobs, transferWriteback); err != nil {
 		return err
 	}
 	var res proto.WritebackResult
@@ -481,7 +485,7 @@ func (s *Server) writeback(pc *proto.Conn, frames chan frame, req proto.Exec) er
 	return nil
 }
 
-func (s *Server) sendNeeded(pc *proto.Conn, frames chan frame, blobs map[string]string) error {
+func (s *Server) sendNeeded(pc *proto.Conn, frames chan frame, blobs map[string]string, direction string) error {
 	var need proto.Need
 	if err := next(frames, proto.TNeed, &need); err != nil {
 		return err
@@ -501,6 +505,7 @@ func (s *Server) sendNeeded(pc *proto.Conn, frames chan frame, blobs map[string]
 		if err != nil {
 			return err
 		}
+		s.metrics.bytes.Add(float64(fi.Size()), direction)
 	}
 	return nil
 }
@@ -548,7 +553,7 @@ func (s *Server) sendOutputs(pc *proto.Conn, frames chan frame, repo, data strin
 	if err := pc.Send(proto.TOutputs, proto.Outputs{Files: files}); err != nil {
 		return err
 	}
-	if err := s.sendNeeded(pc, frames, blobs); err != nil {
+	if err := s.sendNeeded(pc, frames, blobs, transferOutput); err != nil {
 		return err
 	}
 	return next(frames, proto.TDone, nil)

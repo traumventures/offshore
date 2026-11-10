@@ -356,6 +356,114 @@ because paths are identical, diagnostics need no rewriting. Proc-macro
 libraries and build script outputs are returned via eager outputs
 (`target/debug/deps/*.so`, `target/debug/build/*/out/**`).
 
+## Compatibility
+
+Machines are Linux x86_64 (arm64 machines may follow). Everything that
+builds or tests through `cargo` (or another proxied tool) on Linux works;
+what needs local hardware, a GUI or another OS stays local.
+
+**Works remotely** (output identical to a local run):
+
+* `cargo build`, `check`, `test`, `clippy`, `doc`, `bench`, `run` (also with
+  forwarded ports, see `[tool.X] ports`), `fmt`
+* `cargo nextest` (the whole run executes on one machine; running nextest
+  locally is fine too), `cargo hack`, `cargo llvm-cov`, `cargo miri`,
+  `cargo fuzz`, `cargo udeps`, `cargo expand`, `cargo deny`, `cargo audit`,
+  `cargo insta`
+* cross compilation with target toolchains: `cargo zigbuild`, `cargo xwin`,
+  `wasm-pack build`, `trunk build`, `maturin build`
+* linkers `mold` and `lld` (`[environment] linker`)
+* wrappers such as `bacon`, `cargo watch`, `just` and `make` run locally;
+  the `cargo` they start goes through the proxy
+
+**Limited:**
+
+* rust-analyzer stays local; flycheck and build scripts run remotely
+  (`cloudsourced editor`). Proc-macro dylibs must come back as outputs
+  (eager outputs or the output mount); a fully remote mode via an LSP
+  bridge is not part of this release.
+* `cargo tarpaulin` needs `ptrace`, which sessions do not get; use
+  `cargo llvm-cov`.
+* `maturin develop` installs into the local virtualenv: build remotely with
+  `maturin build`, install the wheel locally.
+* `cross` needs Docker in the session (not available): use `zigbuild` or
+  target toolchains in the environment image.
+* Bazel and Buck2 have their own remote execution; use that instead.
+
+**Local only:**
+
+* flashing and debugging hardware (`probe-rs`, `espflash`, `cargo embed`):
+  build remotely, flash locally (`cloudsourced fetch` or outputs).
+* `trunk serve`, `tauri dev` and other dev servers can run remotely with
+  port forwarding (`[tool.X] ports`); anything that opens local windows or
+  devices runs locally.
+* macOS, iOS and Windows-native targets (other than `xwin` builds) need the
+  respective host and run locally.
+
+Only tools with an installed shim are proxied; `CLOUDSOURCED_DISABLE=1`
+always runs locally.
+
+## Operations
+
+**Metrics.** All components export Prometheus text format (no extra
+dependencies; `internal/metrics`):
+
+* Control plane: `GET /metrics` on the API port (API key required) and,
+  with `--metrics-listen 127.0.0.1:9090` (`$CLOUDSOURCED_METRICS_LISTEN`),
+  without authentication on a separate plain HTTP listener for a local
+  scraper. Fleet metrics: `cloudsourced_machines{provider,size,state}`,
+  `cloudsourced_queue_length`, `cloudsourced_acquire_wait_seconds{result}`,
+  `cloudsourced_placements_total{kind}` (assign, queue, reject, timeout),
+  `cloudsourced_fleet_actions_total{action}`,
+  `cloudsourced_provider_errors_total{provider,op}`,
+  `cloudsourced_image_builds_total{provider,result}`,
+  `cloudsourced_image_build_seconds{provider}`,
+  `cloudsourced_reconcile_duration_seconds{result}`,
+  `cloudsourced_cost_per_hour{provider}`, `cloudsourced_environments_recent`,
+  `cloudsourced_http_requests_total{path,result}`,
+  `cloudsourced_http_request_duration_seconds{path}`.
+* Machines report their metrics in the status stream the orchestrator
+  already probes (scope `probe`, no extra port), and the orchestrator
+  republishes them with `machine`, `provider` and `size` labels:
+  `cloudsourced_server_sessions_running`,
+  `cloudsourced_server_session_duration_seconds`,
+  `cloudsourced_server_session_exits_total{code}`,
+  `cloudsourced_server_oom_kills_total`,
+  `cloudsourced_server_sessions_rejected_total{reason}`,
+  `cloudsourced_server_pressure{resource}`,
+  `cloudsourced_server_reserved{resource}`,
+  `cloudsourced_server_memory_used_bytes`,
+  `cloudsourced_server_compiler_cache_total{counter}` (sccache counters),
+  `cloudsourced_server_transfer_bytes_total{direction}` (fetch, writeback,
+  output), `cloudsourced_server_ready`, `_draining`, `_warm_repos`. Machine
+  counters restart with the machine server.
+* `cloudsourced metrics` prints the daemon's metrics
+  (`cloudsourced_daemon_requests_total{op,result}`,
+  `cloudsourced_daemon_prepare_seconds{result}`,
+  `cloudsourced_daemon_runs_total{tool,mode}`, `cloudsourced_daemon_roots`,
+  `cloudsourced_daemon_machine_connections`) with the embedded
+  orchestrator's (embedded mode) or the control plane's (remote mode).
+
+**Logs.** `CLOUDSOURCED_LOG_FORMAT=json` (default `text`) and
+`CLOUDSOURCED_LOG_LEVEL=debug|info|warn|error` apply to the daemon
+(`<state>/daemon.log`), the control plane and machine servers; the
+orchestrator passes both to the machines it creates. The control plane logs
+every API request with a `request_id` (the client's `X-Request-Id` when
+well formed, returned in the response header), and acquisitions with
+lease, machine and placement reason.
+
+**24 h guarantees and cleanup.**
+
+| What | Bound | Enforced by |
+| --- | --- | --- |
+| machines | `max_lifetime` (default 24h) | server drains and exits at expiry; orchestrator destroys; AWS: instance shuts down (terminate on shutdown), reaper Lambda terminates 5 min after `expires-at` every 10 min |
+| build slots | build TTL ≤ 24h ≤ `max_lifetime` | server garbage collection; die with the machine's cache volume |
+| compiler cache | 24h | blobcache never serves older entries; S3 lifecycle `cache/` 1 day |
+| dependency caches | `[cache.deps] ttl` (default 7 days) | volume expiry label, orchestrator reaps volumes |
+| machine secrets (AWS SSM) | until the host agent reads them | agent deletes after reading; reaper deletes parameters under `/cloudsourced/<stack>/machines/` without a live machine (after 15 min) |
+| server binaries (S3 `bin/`) | 30 days | bucket lifecycle |
+| environment images (ECR) | 30 days | repository lifecycle |
+
 ## Development
 
 ```sh

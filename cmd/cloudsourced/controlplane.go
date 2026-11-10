@@ -61,6 +61,7 @@ type cpOptions struct {
 	ACMEHTTP      string // listen address for HTTP-01 challenges ("" = off)
 	MachineBinary string // "" auto, "self", or a path on the Docker host
 	ClientCA      string // require client certificates signed by this CA (mutual TLS)
+	MetricsListen string // plain HTTP /metrics without authentication ("" = off)
 }
 
 // cpState is what a running control plane publishes for "controlplane
@@ -113,6 +114,7 @@ func parseControlplaneFlags(args []string) (*cpOptions, error) {
 	fs.StringVar(&o.ClientCA, "client-ca", "", "require client certificates signed by this CA (PEM) in addition to the API key (mutual TLS)")
 	fs.StringVar(&o.APIKeyFile, "api-key-file", "", "file with the API key (default $CLOUDSOURCED_API_KEY or a generated <state>/api-key)")
 	fs.StringVar(&o.MachineBinary, "machine-binary", os.Getenv("CLOUDSOURCED_MACHINE_BINARY"), "server binary of local-docker machines as a path on the Docker host; \"self\" = this executable; default: this executable, or a copy in <state>/bin when running in a container ($CLOUDSOURCED_MACHINE_BINARY)")
+	fs.StringVar(&o.MetricsListen, "metrics-listen", os.Getenv("CLOUDSOURCED_METRICS_LISTEN"), "also serve GET /metrics over plain HTTP without authentication on this address, e.g. 127.0.0.1:9090 (/metrics on the API port needs the API key; $CLOUDSOURCED_METRICS_LISTEN)")
 	fs.Usage = controlplaneUsage(fs)
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -258,6 +260,13 @@ func serveControlplane(o *cpOptions) error {
 	}
 	srv.Reload = load
 	hs := &http.Server{Handler: srv, ReadHeaderTimeout: 30 * time.Second, TLSConfig: tc}
+	var metricsSrv *http.Server
+	if o.MetricsListen != "" {
+		if host, _, _ := net.SplitHostPort(o.MetricsListen); host == "" || !(host == "localhost" || net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback()) {
+			log.Warn("--metrics-listen is not a loopback address; /metrics there has no authentication", "addr", o.MetricsListen)
+		}
+		metricsSrv = &http.Server{Addr: o.MetricsListen, Handler: srv.MetricsHandler(), ReadHeaderTimeout: 10 * time.Second}
+	}
 	var challenge *http.Server
 	if mgr != nil && o.ACMEHTTP != "" {
 		// HTTP-01 challenges; every other request is redirected to HTTPS.
@@ -298,6 +307,9 @@ func serveControlplane(o *cpOptions) error {
 	default:
 		fmt.Fprintf(os.Stderr, "  tls:         self-signed, fingerprint %s\n", st.Fingerprint)
 	}
+	if metricsSrv != nil {
+		fmt.Fprintf(os.Stderr, "  metrics:     http://%s/metrics (no authentication)\n", o.MetricsListen)
+	}
 	fmt.Fprintf(os.Stderr, "  api key:     %s", keySource)
 	if generated {
 		fmt.Fprint(os.Stderr, " (generated)")
@@ -320,6 +332,13 @@ func serveControlplane(o *cpOptions) error {
 			}
 		}()
 	}
+	if metricsSrv != nil {
+		go func() {
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errc <- fmt.Errorf("metrics listener: %w", err)
+			}
+		}()
+	}
 	select {
 	case <-ctx.Done():
 		err = nil
@@ -331,6 +350,9 @@ func serveControlplane(o *cpOptions) error {
 	defer c()
 	if challenge != nil {
 		challenge.Shutdown(sctx)
+	}
+	if metricsSrv != nil {
+		metricsSrv.Shutdown(sctx)
 	}
 	if serr := hs.Shutdown(sctx); serr != nil && err == nil {
 		err = serr
