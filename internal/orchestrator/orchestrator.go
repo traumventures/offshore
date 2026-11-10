@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/traumventures/cloudsourced/internal/auth"
+	"github.com/traumventures/cloudsourced/internal/events"
 	"github.com/traumventures/cloudsourced/internal/logs"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
@@ -149,7 +150,9 @@ type Machine struct {
 	Provider string // name of the provider instance
 	Status   *proto.Status
 	StatusAt time.Time
-	Draining bool
+	// sampledAt is when the last machine_sample event was written.
+	sampledAt time.Time
+	Draining  bool
 	// PricePerHour comes from the pool size of the machine (0: unknown).
 	PricePerHour float64
 	// Uptime lists the periods in which the machine was observed starting
@@ -555,6 +558,14 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		}
 		m.Status = r.status
 		m.StatusAt = time.Now()
+		if st := r.status; st != nil && st.Ready && m.StatusAt.Sub(m.sampledAt) >= events.SampleInterval {
+			m.sampledAt = m.StatusAt
+			ev := o.machineEventLocked(events.MachineSample, r.id)
+			ev.Reserved = &scheduler.Resources{CPU: st.UsedCPU, Memory: st.UsedMemory}
+			used, pr := st.Measured, st.Pressure
+			ev.Used, ev.Pressure, ev.Sessions = &used, &pr, len(st.Sessions)
+			o.obs.log.Append(ev)
+		}
 	}
 	// The data is as old as the listing, not as the end of the probes:
 	// a session that ended while a slow refresh ran is not in it.

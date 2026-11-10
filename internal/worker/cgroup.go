@@ -143,6 +143,65 @@ func (c *cgroups) current(dir string) int64 {
 	return n
 }
 
+// stall reads the PSI "some total" of a session cgroup: seconds at least
+// one of its tasks waited for CPU or memory.
+func (c *cgroups) stall(dir string) (cpu, memory float64) {
+	if dir == "" {
+		return 0, 0
+	}
+	return psiTotal(filepath.Join(dir, "cpu.pressure")), psiTotal(filepath.Join(dir, "memory.pressure"))
+}
+
+func psiTotal(file string) float64 {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(line, "some ") {
+			continue
+		}
+		for _, kv := range strings.Fields(line)[1:] {
+			if v, ok := strings.CutPrefix(kv, "total="); ok {
+				us, _ := strconv.ParseFloat(v, 64)
+				return us / 1e6
+			}
+		}
+	}
+	return 0
+}
+
+// cpuSeconds returns the CPU time of everything on the machine (the
+// worker's cgroup, sessions included; /proc/stat without cgroups).
+func cpuSeconds() (float64, bool) {
+	if b, err := os.ReadFile(filepath.Join(cgroupRoot, "cpu.stat")); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			if f := strings.Fields(line); len(f) == 2 && f[0] == "usage_usec" {
+				us, _ := strconv.ParseFloat(f[1], 64)
+				return us / 1e6, true
+			}
+		}
+	}
+	b, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0, false
+	}
+	line, _, _ := strings.Cut(string(b), "\n")
+	f := strings.Fields(line)
+	if len(f) < 4 || f[0] != "cpu" {
+		return 0, false
+	}
+	var ticks float64
+	for i, v := range f[1:] {
+		if i == 3 || i == 4 { // idle, iowait
+			continue
+		}
+		n, _ := strconv.ParseFloat(v, 64)
+		ticks += n
+	}
+	return ticks / 100, true // USER_HZ
+}
+
 // pressure reads PSI "some avg10" of the machine for cpu and memory.
 func pressure() scheduler.Pressure {
 	read := func(res string) float64 {

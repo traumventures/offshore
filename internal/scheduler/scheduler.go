@@ -228,6 +228,12 @@ type Usage struct {
 	OOM        bool          `json:"oom"`
 	Warm       bool          `json:"warm"` // build cache was reused
 	ExitCode   int           `json:"exit_code"`
+	// CPUStall and MemoryStall are the seconds at least one task of the
+	// session waited for CPU or memory (cgroup PSI "some total"): how much
+	// contention (overcommit, neighbours) slowed it down. Recorded in the
+	// event log, not learned from.
+	CPUStall    float64 `json:"cpu_stall_seconds,omitempty"`
+	MemoryStall float64 `json:"memory_stall_seconds,omitempty"`
 	// Cache holds counters of cache integrations (e.g. "sccache_hits");
 	// recorded in the event log, not learned from.
 	Cache map[string]int64 `json:"cache,omitempty"`

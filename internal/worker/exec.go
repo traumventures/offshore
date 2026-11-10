@@ -348,6 +348,7 @@ loop:
 	pspan.End()
 	exit.Usage.Wall = time.Since(se.started)
 	exit.Usage.PeakMemory, exit.Usage.CPUSeconds = s.cg.usage(cgDir)
+	exit.Usage.CPUStall, exit.Usage.MemoryStall = s.cg.stall(cgDir)
 	exit.Usage.Warm = warm
 	exit.Usage.ExitCode = exit.Code
 	if s.cg.oomKilled(cgDir) {

@@ -147,14 +147,18 @@ type Worker struct {
 
 	ccEndpoint string // compiler cache WebDAV endpoint for sessions ("" = off)
 
-	mu        sync.Mutex
-	mounts    map[string]*sourcefs.Projection
-	sources   map[string]*quic.Conn // root -> client connection serving blobs
-	sessions  map[string]*session
-	idleSince time.Time
-	lastProbe time.Time // last status request (an orchestrator probe)
-	ready     bool
-	draining  bool
+	mu       sync.Mutex
+	mounts   map[string]*sourcefs.Projection
+	sources  map[string]*quic.Conn // root -> client connection serving blobs
+	sessions map[string]*session
+	// cpuLast is the machine CPU time at cpuAt; Measured.CPU is the rate
+	// since then (cores busy), refreshed at most every cpuInterval.
+	cpuLast, cpuRate float64
+	cpuAt            time.Time
+	idleSince        time.Time
+	lastProbe        time.Time // last status request (an orchestrator probe)
+	ready            bool
+	draining         bool
 	// drainReason and interruptAt describe a drain the server started on
 	// its own (expiry, host drain notice).
 	drainReason string
@@ -468,6 +472,27 @@ func (s *Worker) Status() proto.Status {
 	return st
 }
 
+// cpuInterval is the shortest window the busy-core rate is measured over.
+const cpuInterval = 5 * time.Second
+
+// cpuBusyLocked returns how many cores the machine kept busy since the
+// previous measurement (0 before the second one).
+func (s *Worker) cpuBusyLocked() float64 {
+	now := time.Now()
+	if !s.cpuAt.IsZero() && now.Sub(s.cpuAt) < cpuInterval {
+		return s.cpuRate
+	}
+	v, ok := cpuSeconds()
+	if !ok {
+		return 0
+	}
+	if !s.cpuAt.IsZero() && v >= s.cpuLast {
+		s.cpuRate = (v - s.cpuLast) / now.Sub(s.cpuAt).Seconds()
+	}
+	s.cpuLast, s.cpuAt = v, now
+	return s.cpuRate
+}
+
 // statusOnly reports machine state without metrics.
 func (s *Worker) statusOnly() proto.Status {
 	s.mu.Lock()
@@ -492,6 +517,7 @@ func (s *Worker) statusOnly() proto.Status {
 			CPU: r.CPU, Memory: r.Memory, Lease: se.req.Lease,
 		})
 	}
+	st.Measured.CPU = s.cpuBusyLocked()
 	st.Pressure = pressure()
 	if len(s.sessions) == 0 {
 		st.IdleSince = s.idleSince.Unix()
