@@ -57,6 +57,9 @@ type Lease struct {
 	Fingerprint string
 	Token       string
 	Grant       scheduler.Grant
+	// MemoryOvercommit is the fleet's memory overcommit factor; the server
+	// uses it as admission safety net.
+	MemoryOvercommit float64
 }
 
 // Machine is the orchestrator view of a machine.
@@ -465,7 +468,7 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 		switch pl.Kind {
 		case scheduler.Assign:
 			m := o.machines[pl.Machine]
-			lease := Lease{ID: task.ID, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: m.Token, Grant: pl.Grant}
+			lease := Lease{ID: task.ID, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: m.Token, Grant: pl.Grant, MemoryOvercommit: o.cfg.Policy.MemoryOvercommit}
 			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: time.Now().Add(2 * time.Minute)}
 			o.mu.Unlock()
 			return lease, nil

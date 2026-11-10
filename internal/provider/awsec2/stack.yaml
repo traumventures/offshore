@@ -1,0 +1,265 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  cloudsourced shared infrastructure for the aws-ec2 provider. Build machines are
+  EC2 instances created by the cloudsourced orchestrator (not by this stack); this
+  stack holds what they share - security group, instance role, a bucket for the
+  server binary, the environment image repository, a reaper that terminates
+  expired machines when no orchestrator is running, and a resource group.
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    why: >-
+      Machines are short lived (at most max_lifetime, default 24h) and must never
+      outlive it, even when the orchestrator is offline. Caches live on the
+      instance disks and die with them; nothing here stores build state.
+    must:
+      - Every resource carries the tag project=cloudsourced (set on the stack).
+      - TemplateVersion output must change whenever this template changes.
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC of the build machines (the default VPC unless configured).
+Resources:
+  MachineSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Ingress (UDP 7443, QUIC) is managed by the provider from its allow_cidrs
+          option, because client addresses change; the stack only owns the group.
+    Properties:
+      GroupDescription: cloudsourced build machines - QUIC from allowed clients only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: package registries, crates, image pulls
+
+  MachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: machine
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchCheckLayerAvailability
+                Resource: !GetAtt EnvRepository.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${ArtifactBucket.Arn}/bin/*"
+
+  MachineInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref MachineRole]
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Holds only reproducible artifacts (server binaries, cache objects with a
+          one day lifetime), so it is deleted with the stack instead of retained.
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - Id: cache-24h
+            Status: Enabled
+            Prefix: cache/
+            ExpirationInDays: 1
+          - Id: binaries
+            Status: Enabled
+            Prefix: bin/
+            ExpirationInDays: 30
+          - Id: incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              Bool: { aws:SecureTransport: "false" }
+
+  EnvRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Environment images are content addressed and rebuilt on demand.
+    Properties:
+      EmptyOnDelete: true
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration: { ScanOnPush: false }
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"environment images expire after 30 days",
+            "selection":{"tagStatus":"any","countType":"sinceImagePushed","countUnit":"days","countNumber":30},
+            "action":{"type":"expire"}}]}
+
+  ReaperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: reaper
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ec2:DescribeInstances
+                Resource: "*"
+              - Effect: Allow
+                Action: ec2:TerminateInstances
+                Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/cloudsourced.kind: machine
+
+  Reaper:
+    Type: AWS::Lambda::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Last safety net for the 24h guarantee. Machines terminate themselves at
+          expiry and the orchestrator destroys them, but a stopped machine cannot
+          do the former and an offline orchestrator cannot do the latter.
+    Properties:
+      Description: Terminates cloudsourced machines past their expires-at tag
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 128
+      Role: !GetAtt ReaperRole.Arn
+      Code:
+        ZipFile: |
+          import time
+          import boto3
+
+          GRACE = 300  # seconds after expiry, the orchestrator goes first
+
+          def handler(event, context):
+              ec2 = boto3.client("ec2")
+              now = time.time()
+              doomed = []
+              pages = ec2.get_paginator("describe_instances").paginate(Filters=[
+                  {"Name": "tag:cloudsourced.kind", "Values": ["machine"]},
+                  {"Name": "instance-state-name", "Values": ["pending", "running", "stopping", "stopped"]},
+              ])
+              for page in pages:
+                  for r in page["Reservations"]:
+                      for i in r["Instances"]:
+                          tags = {t["Key"]: t["Value"] for t in i.get("Tags", [])}
+                          try:
+                              expires = int(tags.get("cloudsourced.expires-at", "0"))
+                          except ValueError:
+                              expires = 0
+                          if expires and now > expires + GRACE:
+                              doomed.append(i["InstanceId"])
+              for k in range(0, len(doomed), 50):
+                  ec2.terminate_instances(InstanceIds=doomed[k:k + 50])
+              print({"terminated": doomed})
+              return {"terminated": doomed}
+
+  ReaperLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Reaper}"
+      RetentionInDays: 14
+
+  ReaperSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Run the cloudsourced reaper
+      ScheduleExpression: rate(10 minutes)
+      State: ENABLED
+      Targets:
+        - Id: reaper
+          Arn: !GetAtt Reaper.Arn
+
+  ReaperPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref Reaper
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ReaperSchedule.Arn
+
+  ResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name: !Ref AWS::StackName
+      Description: Everything tagged project=cloudsourced, including build machines
+      ResourceQuery:
+        Type: TAG_FILTERS_1_0
+        Query:
+          ResourceTypeFilters: [AWS::AllSupported]
+          TagFilters:
+            - Key: project
+              Values: [cloudsourced]
+
+Outputs:
+  TemplateVersion:
+    Value: "1"
+  SecurityGroupId:
+    Value: !Ref MachineSecurityGroup
+  InstanceProfileArn:
+    Value: !GetAtt MachineInstanceProfile.Arn
+  BucketName:
+    Value: !Ref ArtifactBucket
+  RepositoryUri:
+    Value: !GetAtt EnvRepository.RepositoryUri

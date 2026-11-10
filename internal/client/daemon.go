@@ -1,5 +1,5 @@
 // Package client implements the local daemon (file watching, manifests,
-// machine connections, embedded orchestrator) and its RPC interface.
+// machine connections, local or remote fleet) and its RPC interface.
 package client
 
 import (
@@ -20,10 +20,9 @@ import (
 
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/envbuild"
+	"github.com/traumventures/cloudsourced/internal/fleet"
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	_ "github.com/traumventures/cloudsourced/internal/provider/localdocker"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
 )
 
@@ -47,62 +46,13 @@ func LogPath() string { return filepath.Join(StateDir(), "daemon.log") }
 // Daemon is the local client service.
 type Daemon struct {
 	log   *slog.Logger
-	orch  *orchestrator.Orchestrator
-	provs map[string]provider.Provider
-	est   scheduler.Estimator
+	fleet fleet.Fleet
+	local *fleet.Local // nil when the control plane is remote
 
-	mu     sync.Mutex
-	roots  map[string]*root
-	conns  map[string]*machineConn
-	images map[string]bool // provider + "\x00" + env hash
-	imgMu  map[string]*sync.Mutex
-	plans  map[string]*envbuild.Plan // env hash -> plan
-	stop   context.CancelFunc
-}
-
-func fleetConfig(u *config.User, r *config.Repo) orchestrator.Config {
-	idle, lifetime, queue := u.Fleet.Durations()
-	var provision []string
-	for _, p := range u.Fleet.Provision {
-		provision = append(provision, p.Run)
-	}
-	var sizes []scheduler.Size
-	for _, sz := range u.Fleet.Sizes {
-		mem, _ := config.ParseBytes(sz.Memory)
-		sizes = append(sizes, scheduler.Size{Provider: sz.Provider, Name: sz.Name,
-			Capacity: scheduler.Resources{CPU: sz.CPU, Memory: mem}, PricePerHour: sz.PricePerHour})
-	}
-	f := u.Fleet
-	c := orchestrator.Config{
-		Owner: f.Owner, Sizes: sizes, MaxLifetime: lifetime, QueueTimeout: queue,
-		Provision: provision, Swap: f.Swap,
-		BuildTTL: 24 * time.Hour, DepsTTL: 7 * 24 * time.Hour,
-		Policy: scheduler.Config{
-			CPUOvercommit: f.CPUOvercommit, MemoryOvercommit: f.MemoryOvercommit,
-			MaxCPUPressure: f.MaxCPUPressure, MaxMemoryPressure: f.MaxMemoryPressure,
-			SoftLimit: f.SoftLimit, Swap: f.Swap, LimitJobs: f.LimitJobs,
-			MinMachines: f.MinMachines, MaxMachines: f.MaxMachines, IdleStop: idle,
-			ProviderMax: map[string]int{},
-		},
-	}
-	for name, opts := range u.Providers {
-		switch v := opts["max_machines"].(type) {
-		case int64:
-			c.Policy.ProviderMax[name] = int(v)
-		case float64:
-			c.Policy.ProviderMax[name] = int(v)
-		}
-	}
-	if r != nil {
-		c.BuildTTL, _ = config.ParseDuration(r.Cache.Build.TTL)
-		c.DepsTTL, _ = config.ParseDuration(r.Cache.Deps.TTL)
-	}
-	// The build cache never outlives a machine, and machines never outlive
-	// max_lifetime; cap the build TTL accordingly.
-	if c.BuildTTL <= 0 || c.BuildTTL > lifetime {
-		c.BuildTTL = lifetime
-	}
-	return c
+	mu    sync.Mutex
+	roots map[string]*root
+	conns map[string]*machineConn
+	stop  context.CancelFunc
 }
 
 // NewDaemon creates the daemon from the user configuration.
@@ -111,41 +61,26 @@ func NewDaemon(log *slog.Logger) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	provs := map[string]provider.Provider{}
-	for _, name := range u.ProviderNames() {
-		opts := map[string]any{"binary": os.Getenv("CLOUDSOURCED_SERVER_BINARY")}
-		for k, v := range u.Providers[name] {
-			opts[k] = v
-		}
-		p, err := provider.Open(u.ProviderBackend(name), opts)
+	d := &Daemon{log: log, roots: map[string]*root{}, conns: map[string]*machineConn{}}
+	if o := u.Orchestrator; o.Mode == "remote" {
+		key, err := config.ResolveRef(o.APIKey, filepath.Dir(config.UserConfigPath()))
 		if err != nil {
-			return nil, fmt.Errorf("provider %s: %w", name, err)
+			return nil, fmt.Errorf("orchestrator.api_key: %w", err)
 		}
-		provs[name] = p
+		r, err := fleet.NewRemote(o.URL, o.Fingerprint, key)
+		if err != nil {
+			return nil, err
+		}
+		d.fleet = r
+		log.Info("using remote control plane", "url", o.URL)
+		return d, nil
 	}
-	orch, err := orchestrator.New(fleetConfig(u, nil), provs, StateDir(), log)
+	l, err := fleet.NewLocal(u, StateDir(), log)
 	if err != nil {
 		return nil, err
 	}
-	var est scheduler.Estimator = scheduler.Static{}
-	if u.Fleet.Estimator == "history" {
-		est = scheduler.NewHistory(filepath.Join(StateDir(), "usage-history.json"))
-	}
-	d := &Daemon{
-		log: log, orch: orch, provs: provs, est: est,
-		roots: map[string]*root{}, conns: map[string]*machineConn{},
-		images: map[string]bool{}, imgMu: map[string]*sync.Mutex{}, plans: map[string]*envbuild.Plan{},
-	}
-	orch.EnsureImage = func(ctx context.Context, p provider.Provider, envHash string) error {
-		d.mu.Lock()
-		plan := d.plans[envHash]
-		d.mu.Unlock()
-		if plan == nil {
-			return fmt.Errorf("environment %s is unknown to this daemon", envHash)
-		}
-		return d.ensureImage(ctx, p, plan, io.Discard)
-	}
-	orch.OnMachineDown = d.dropConn
+	l.OnMachineDown(d.dropConn)
+	d.fleet, d.local = l, l
 	return d, nil
 }
 
@@ -198,7 +133,9 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		<-ctx.Done()
 		ln.Close()
 	}()
-	go d.reconcileLoop(ctx)
+	if d.local != nil {
+		go d.local.Run(ctx, 15*time.Second)
+	}
 	d.log.Info("daemon started", "socket", sock, "pid", os.Getpid())
 	for {
 		c, err := ln.Accept()
@@ -220,21 +157,6 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	d.mu.Unlock()
 	d.log.Info("daemon stopped")
 	return nil
-}
-
-func (d *Daemon) reconcileLoop(ctx context.Context) {
-	t := time.NewTicker(15 * time.Second)
-	defer t.Stop()
-	for {
-		if err := d.orch.Reconcile(ctx); err != nil && ctx.Err() == nil {
-			d.log.Warn("reconcile", "err", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-	}
 }
 
 // Request is a daemon RPC request.
@@ -321,11 +243,7 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 	case "prepare":
 		return d.prepare(ctx, req, progress)
 	case "release":
-		d.orch.Release(req.Lease)
-		if req.Usage != nil && req.UsageKey != "" {
-			d.est.Observe(req.UsageKey, *req.Usage)
-		}
-		return nil, nil
+		return nil, d.fleet.Release(ctx, req.Lease, req.UsageKey, req.Usage)
 	case "sync":
 		r := d.rootByPath(req.Root)
 		if r == nil {
@@ -334,12 +252,14 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 		v, err := r.refresh()
 		return map[string]uint64{"version": v}, err
 	case "status":
-		if err := d.orch.Refresh(ctx); err != nil {
-			return nil, err
-		}
-		return d.orch.Snapshot(), nil
+		return d.fleet.Status(ctx)
 	case "reconcile":
-		return nil, d.orch.Reconcile(ctx)
+		if d.local != nil {
+			if u, err := config.LoadUser(); err == nil {
+				d.local.Configure(u, nil)
+			}
+		}
+		return nil, d.fleet.Reconcile(ctx)
 	case "down":
 		d.mu.Lock()
 		for id, mc := range d.conns {
@@ -347,7 +267,7 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 			delete(d.conns, id)
 		}
 		d.mu.Unlock()
-		return nil, d.orch.DestroyAll(ctx)
+		return nil, d.fleet.DestroyAll(ctx)
 	case "shutdown":
 		d.stop()
 		return nil, nil
@@ -389,77 +309,6 @@ func RepoID(owner, root string) string {
 	return manifest.HashBytes([]byte(owner + "\x00" + root))[:20]
 }
 
-// ensureImages makes the environment available on every provider that
-// may host it, in parallel.
-func (d *Daemon) ensureImages(ctx context.Context, plan *envbuild.Plan, progress io.Writer) error {
-	d.mu.Lock()
-	d.plans[plan.Hash] = plan
-	d.mu.Unlock()
-	errs := make(chan error, len(d.provs))
-	for _, p := range d.provs {
-		go func(p provider.Provider) { errs <- d.ensureImage(ctx, p, plan, progress) }(p)
-	}
-	var first error
-	for range d.provs {
-		if err := <-errs; err != nil && first == nil {
-			first = err
-		}
-	}
-	return first
-}
-
-func (d *Daemon) ensureImage(ctx context.Context, p provider.Provider, plan *envbuild.Plan, progress io.Writer) error {
-	key := p.Name() + "\x00" + plan.Hash
-	d.mu.Lock()
-	if d.images[key] {
-		d.mu.Unlock()
-		return nil
-	}
-	m, ok := d.imgMu[key]
-	if !ok {
-		m = &sync.Mutex{}
-		d.imgMu[key] = m
-	}
-	d.mu.Unlock()
-	m.Lock()
-	defer m.Unlock()
-	d.mu.Lock()
-	done := d.images[key]
-	d.mu.Unlock()
-	if done {
-		return nil
-	}
-	spec, dir, err := plan.Context()
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(dir)
-	logf, err := os.OpenFile(filepath.Join(StateDir(), "env-build.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	defer logf.Close()
-	fmt.Fprintf(logf, "=== %s environment %s\n", time.Now().Format(time.RFC3339), plan.Tag)
-	start := time.Now()
-	// Announce only when a build actually produces output.
-	var once sync.Once
-	w := writerFunc(func(b []byte) (int, error) {
-		once.Do(func() {
-			fmt.Fprintf(progress, "cloudsourced: preparing environment image %s on %s (log: %s)\n", plan.Tag, p.Name(), logf.Name())
-		})
-		return logf.Write(b)
-	})
-	err = p.EnsureImage(ctx, spec, w)
-	if err != nil {
-		return fmt.Errorf("environment image: %w (see %s)", err, logf.Name())
-	}
-	d.log.Info("environment image ready", "provider", p.Name(), "tag", plan.Tag, "duration", time.Since(start).Round(time.Millisecond))
-	d.mu.Lock()
-	d.images[key] = true
-	d.mu.Unlock()
-	return nil
-}
-
 func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (*Prepared, error) {
 	repo, err := config.LoadRepo(req.Root)
 	if err != nil {
@@ -469,12 +318,15 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	if err != nil {
 		return nil, err
 	}
-	d.orch.SetConfig(fleetConfig(u, repo))
+	if d.local != nil {
+		d.local.Configure(u, repo)
+	}
 	plan, err := envbuild.Resolve(repo)
 	if err != nil {
 		return nil, err
 	}
-	if err := d.ensureImages(ctx, plan, progress); err != nil {
+	env := fleet.Env{Hash: plan.Hash, Tag: plan.Tag, Context: plan.Context}
+	if err := d.fleet.EnsureEnv(ctx, env, progress); err != nil {
 		return nil, err
 	}
 	// Track all roots and bring their manifests up to date.
@@ -494,13 +346,16 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	}
 	repoID := RepoID(u.Fleet.Owner, repo.Root)
 	key := UsageKey(repoID, req.Tool, req.Args)
-	need := d.est.Estimate(key, scheduler.Resources{CPU: repo.Resources.CPU, Memory: repo.MemoryBytes()})
+	need, err := d.fleet.Estimate(ctx, key, scheduler.Resources{CPU: repo.Resources.CPU, Memory: repo.MemoryBytes()})
+	if err != nil {
+		return nil, err
+	}
 	if max := repo.MaxMemoryBytes(); max > 0 && need.Memory > max {
 		need.Memory = max
 	}
 	var lease orchestrator.Lease
 	for attempt := 1; ; attempt++ {
-		lease, err = d.orch.Acquire(ctx, orchestrator.Request{
+		lease, err = d.fleet.Acquire(ctx, orchestrator.Request{
 			EnvHash: plan.Hash, Image: plan.Tag, Services: plan.Services, RepoID: repoID,
 			Key: key, Need: need, Limit: scheduler.Resources{Memory: repo.MaxMemoryBytes()},
 		}, progress)
@@ -512,23 +367,19 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 			break
 		}
 		// The machine may have stopped or moved since it was last probed.
-		d.orch.Unreachable(lease.ID, lease.MachineID)
+		d.fleet.Unreachable(ctx, lease.ID, lease.MachineID)
 		if attempt == 3 || ctx.Err() != nil {
 			return nil, err
 		}
 		d.log.Warn("machine unreachable, retrying placement", "machine", lease.MachineID, "err", err)
 	}
-	ttl := fleetConfig(u, repo).BuildTTL
+	ttl := fleet.Config(u, repo).BuildTTL
 	return &Prepared{
 		Machine: lease.MachineID, Addr: lease.Addr, Fingerprint: lease.Fingerprint, Token: lease.Token,
 		Lease: lease.ID, RepoID: repoID, EnvHash: plan.Hash, Roots: versions, BuildTTL: ttl.String(),
-		Grant: lease.Grant, UsageKey: key, MemoryOvercommit: u.Fleet.MemoryOvercommit,
+		Grant: lease.Grant, UsageKey: key, MemoryOvercommit: lease.MemoryOvercommit,
 	}, nil
 }
-
-type writerFunc func([]byte) (int, error)
-
-func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
 
 func (d *Daemon) attachAll(ctx context.Context, lease orchestrator.Lease, repo *config.Repo, roots map[string]*root) error {
 	actx, cancel := context.WithTimeout(ctx, 20*time.Second)

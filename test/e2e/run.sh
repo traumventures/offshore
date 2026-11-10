@@ -9,6 +9,10 @@
 #
 # Requirements: docker (set E2E_DOCKER="sudo -n docker" if your user is not
 # in the docker group), /dev/fuse, a static build at bin/cloudsourced.
+#
+# E2E_REMOTE=1 runs the same test against a shared control plane
+# ("cloudsourced controlplane", self-signed TLS, API key) instead of the
+# orchestrator embedded in the daemon.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -21,6 +25,10 @@ PROJ="$WORK/hello"
 
 export CLOUDSOURCED_STATE_DIR="$WORK/state"
 export CLOUDSOURCED_CONFIG="$WORK/config.toml"
+FLEETCFG="$CLOUDSOURCED_CONFIG"   # fleet and providers; the control plane's in remote mode
+REMOTE="${E2E_REMOTE:-}"
+CPSTATE="$WORK/cp-state"
+CPPID=""
 export CLOUDSOURCED_SHIM_DIR="$WORK/shims"
 export CLOUDSOURCED_REQUIRE_REMOTE=1
 unset CLOUDSOURCED_DISABLE CLOUDSOURCED_ACTIVE
@@ -41,6 +49,7 @@ cleanup() {
   step "cleanup"
   cs down >/dev/null 2>&1 || true
   cs daemon stop >/dev/null 2>&1 || true
+  stop_cp
   local left
   left="$(docker_ ps -aq --filter "label=cloudsourced.owner=$OWNER" | wc -l)"
   left=$((left + $(docker_ volume ls -q --filter "label=cloudsourced.owner=$OWNER" | wc -l)))
@@ -60,7 +69,7 @@ RUSTV="$(docker_ run --rm rust:1-slim-bookworm rustc --version | awk '{print $2}
 printf '[toolchain]\nchannel = "%s"\nprofile = "minimal"\n' "$RUSTV" > "$PROJ/rust-toolchain.toml"
 
 write_config() { # lifetime idle min max
-  cat > "$CLOUDSOURCED_CONFIG" <<EOF
+  cat > "$FLEETCFG" <<EOF
 [fleet]
 owner = "$OWNER"
 machine_cpu = 4
@@ -79,6 +88,30 @@ run = "echo provisioned-by-fleet > /cache/fleet-provision"
 command = [$(printf '"%s",' $DOCKER | sed 's/,$//')]
 EOF
 }
+stop_cp() { if [ -n "$CPPID" ]; then kill "$CPPID" 2>/dev/null; wait "$CPPID" 2>/dev/null; CPPID=""; fi; }
+start_cp() {
+  CLOUDSOURCED_CONFIG="$FLEETCFG" CLOUDSOURCED_STATE_DIR="$CPSTATE" "$BIN" controlplane --listen "127.0.0.1:$CPPORT" >>"$WORK/cp.log" 2>&1 &
+  CPPID=$!
+  for _ in $(seq 100); do curl -skf "https://127.0.0.1:$CPPORT/healthz" >/dev/null && return 0; sleep 0.1; done
+  echo "control plane did not start:"; cat "$WORK/cp.log"; return 1
+}
+# restart_daemon applies a changed fleet configuration.
+restart_daemon() { cs daemon stop >/dev/null; if [ -n "$REMOTE" ]; then stop_cp; start_cp; fi; }
+
+if [ -n "$REMOTE" ]; then
+  FLEETCFG="$WORK/cp-config.toml"
+  CPPORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  write_config 24h 10m 0 2
+  start_cp || exit 1
+  FP="$(sed -n 's/.*"Fingerprint":"\([0-9a-f]*\)".*/\1/p' "$CPSTATE/tls.json")"
+  cat > "$CLOUDSOURCED_CONFIG" <<EOF
+[orchestrator]
+mode = "remote"
+url = "https://127.0.0.1:$CPPORT"
+fingerprint = "$FP"
+api_key = "file:$CPSTATE/api-key"
+EOF
+fi
 write_config 24h 10m 0 2
 
 step "first remote build (environment image, machine provisioning, FUSE, outputs)"
@@ -194,10 +227,11 @@ check "Cargo.lock updated by remote cargo" contains "$(cat "$PROJ/Cargo.lock")" 
 check "registry cache stored on the deps volume" contains "$(docker_ exec "$MACHINE" sh -c 'ls /deps/usr__local__cargo__registry/cache/*/')" "itoa-"
 
 step "parallel sessions: one machine runs several, scale out beyond capacity"
-for i in 1 2 3; do (run sh -c "sleep 6; hostname" > "$WORK/par$i" 2>&1) & done
+pids=""
+for i in 1 2 3; do (run sh -c "sleep 6; hostname" > "$WORK/par$i" 2>&1) & pids="$pids $!"; done
 sleep 3
 status="$(cs status)"
-wait
+wait $pids
 machines="$(cat "$WORK"/par* | grep '^cs-' | sort -u | wc -l)"
 sessions_max="$(echo "$status" | awk '/^[0-9a-f]+ /{print $(NF-2)}' | sort -n | tail -1)"
 check "two 2G sessions share one 4G machine" eq "$sessions_max" 2
@@ -205,8 +239,8 @@ check "third session scaled out to a second machine" eq "$machines" 2
 check "parallel sessions succeed" eq "$(cat "$WORK"/par* | grep -c '^cs-')" 3
 
 step "lifecycle: idle stop, warm restart, lifetime expiry, cleanup"
-cs down >/dev/null; cs daemon stop >/dev/null
-write_config 75s 10s 0 2
+cs down >/dev/null
+write_config 75s 10s 0 2; restart_daemon
 run cargo build -q >/dev/null 2>&1
 M="$(docker_ ps -q --filter "label=cloudsourced.owner=$OWNER" --filter label=cloudsourced.kind=machine | head -1)"
 NAME="$(docker_ inspect -f '{{.Name}}' "$M" | tr -d /)"
@@ -223,12 +257,10 @@ for _ in $(seq 30); do [ -z "$(docker_ volume ls -q --filter "name=cs-cache-${NA
 check "its build cache volume is gone" test -z "$(docker_ volume ls -q --filter "name=cs-cache-${NAME#cs-}")"
 
 step "fail open when no machine can be provisioned"
-cs daemon stop >/dev/null
 write_config 24h 10m 0 2
-sed -i 's/^command = .*/command = ["false"]/' "$CLOUDSOURCED_CONFIG"
+sed -i 's/^command = .*/command = ["false"]/' "$FLEETCFG"; restart_daemon
 out="$(cd "$PROJ" && CLOUDSOURCED_REQUIRE_REMOTE= "$BIN" run sh -c 'echo ${CLOUDSOURCED_SESSION:-local}' 2>&1)"
 check "falls back to local execution" contains "$out" "local"
 (cd "$PROJ" && "$BIN" run sh -c true >/dev/null 2>&1); code=$?
 check "CLOUDSOURCED_REQUIRE_REMOTE turns fallback into an error" eq "$code" 125
-cs daemon stop >/dev/null
-write_config 24h 10m 0 2
+write_config 24h 10m 0 2; restart_daemon

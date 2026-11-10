@@ -12,8 +12,11 @@ import (
 
 // User is the per-user configuration: where and how machines run.
 type User struct {
-	Fleet  Fleet  `toml:"fleet"`
-	Docker Docker `toml:"docker"` // shorthand for a single local-docker provider
+	// Orchestrator selects where fleet decisions are made: in the local
+	// daemon ("embedded") or in a shared control plane ("remote").
+	Orchestrator Orchestrator `toml:"orchestrator"`
+	Fleet        Fleet        `toml:"fleet"`
+	Docker       Docker       `toml:"docker"` // shorthand for a single local-docker provider
 	// Providers are named provider instances, e.g. [providers.local] with
 	// backend = "local-docker" and [providers.aws] with backend = "aws-ec2".
 	// Every other key of the table is passed to the backend as an option.
@@ -22,6 +25,19 @@ type User struct {
 
 // Backends known to the configuration.
 var Backends = []string{"local-docker", "aws-ec2"}
+
+// Orchestrator configures the control plane connection.
+type Orchestrator struct {
+	Mode string `toml:"mode"` // "embedded" | "remote"
+	// URL of a remote control plane, e.g. "https://cs.example.com" or
+	// "https://10.0.0.5:7443".
+	URL string `toml:"url"`
+	// Fingerprint pins a self-signed control plane certificate (hex SHA-256,
+	// printed by "cloudsourced controlplane"). Empty: verify against system CAs.
+	Fingerprint string `toml:"fingerprint"`
+	// APIKey is a reference (env:VAR, file:PATH, cmd:COMMAND) to the API key.
+	APIKey string `toml:"api_key"`
+}
 
 // Fleet configures machine provisioning and scaling.
 type Fleet struct {
@@ -104,6 +120,15 @@ func LoadUser() (*User, error) {
 }
 
 func (u *User) applyDefaults() {
+	if u.Orchestrator.Mode == "" {
+		u.Orchestrator.Mode = "embedded"
+		if u.Orchestrator.URL != "" {
+			u.Orchestrator.Mode = "remote"
+		}
+	}
+	if u.Orchestrator.Mode == "remote" && u.Orchestrator.APIKey == "" {
+		u.Orchestrator.APIKey = "env:CLOUDSOURCED_API_KEY"
+	}
 	f := &u.Fleet
 	if f.Backend == "" {
 		f.Backend = "local-docker"
@@ -199,6 +224,18 @@ func (u *User) ProviderBackend(name string) string {
 // Validate checks the user configuration.
 func (u *User) Validate() error {
 	var errs []string
+	switch o := u.Orchestrator; o.Mode {
+	case "embedded":
+	case "remote":
+		if !strings.HasPrefix(o.URL, "https://") && !strings.HasPrefix(o.URL, "http://") {
+			errs = append(errs, "orchestrator.url: an http(s) URL is required in remote mode")
+		}
+		if o.Fingerprint != "" && !strings.HasPrefix(o.URL, "https://") {
+			errs = append(errs, "orchestrator.fingerprint: requires an https URL")
+		}
+	default:
+		errs = append(errs, fmt.Sprintf("orchestrator.mode: unsupported %q (embedded, remote)", o.Mode))
+	}
 	f := u.Fleet
 	for _, name := range u.ProviderNames() {
 		b := u.ProviderBackend(name)

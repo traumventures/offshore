@@ -46,6 +46,7 @@ Usage:
   cloudsourced env [hash|dockerfile]       show the environment image of this repo
   cloudsourced editor [vscode|zed|neovim]  rust-analyzer settings for remote checks
   cloudsourced config check                validate configuration files
+  cloudsourced controlplane [flags]        serve a shared control plane (see --help)
   cloudsourced version
 
 Internal:
@@ -131,6 +132,8 @@ func run(cmd string, args []string) error {
 			os.Exit(127)
 		}
 		os.Exit(126)
+	case "controlplane":
+		return controlplane(args)
 	case "daemon":
 		return daemonCmd(args)
 	case "status":
