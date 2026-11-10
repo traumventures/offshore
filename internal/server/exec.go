@@ -24,6 +24,9 @@ import (
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/sandbox"
+	"github.com/traumventures/cloudsourced/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type session struct {
@@ -63,12 +66,14 @@ type frame struct {
 
 // serveExec runs one remote process with full stream, signal and exit code
 // forwarding, followed by write back and output transfer.
-func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream, claims auth.Claims) error {
+func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream, claims auth.Claims) (err error) {
 	begin := time.Now()
 	var req proto.Exec
 	if err := pc.Expect(proto.TExec, &req); err != nil {
 		return err
 	}
+	ctx, span := s.startExecSpan(ctx, req)
+	defer func() { telemetry.End(span, err) }()
 	prepErr := func(err error) error {
 		pc.SendError("prepare", err)
 		return err
@@ -112,6 +117,7 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		}
 	}
 	cancel()
+	span.AddEvent("barrier passed", trace.WithAttributes(attribute.Int64("cloudsourced.barrier_ms", time.Since(begin).Milliseconds())))
 	if _, ok := req.Roots[req.Repo]; !ok {
 		return prepErr(fmt.Errorf("repository root %s is not attached", req.Repo))
 	}
@@ -258,6 +264,8 @@ func (s *Server) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		close(outDone)
 	}
 	se.pgid = cmd.Process.Pid
+	_, pspan := telemetry.Start(ctx, "server.process")
+	span.SetAttributes(attribute.String("cloudsourced.session", se.id), attribute.String("cloudsourced.slot", filepath.Base(slot)), attribute.Bool("cloudsourced.warm", warm))
 	s.log.Info("session started", "session", se.id, "argv", req.Argv, "cwd", req.Cwd, "slot", slot)
 	pc.Send(proto.TStarted, proto.Started{Session: se.id, Machine: s.cfg.MachineID, Slot: filepath.Base(slot), WaitMs: time.Since(begin).Milliseconds()})
 
@@ -328,6 +336,7 @@ loop:
 	} else if waitErr != nil {
 		exit.Code = 127
 	}
+	pspan.End()
 	exit.Usage.Wall = time.Since(se.started)
 	exit.Usage.PeakMemory, exit.Usage.CPUSeconds = s.cg.usage(cgDir)
 	exit.Usage.Warm = warm
@@ -339,16 +348,23 @@ loop:
 	s.log.Info("session finished", "session", se.id, "code", exit.Code, "duration", time.Since(se.started).Round(time.Millisecond))
 	s.metrics.sessionEnded(exit.Code, exit.Usage.Wall.Seconds(), exit.Usage.OOM, exit.Cache)
 	unregister() // the session's processes are gone
+	exitAttrs(span, exit, req, clientGone)
 	if clientGone {
 		return nil
 	}
 	if err := pc.Send(proto.TExit, exit); err != nil {
 		return err
 	}
-	if err := s.writeback(pc, frames, req); err != nil {
+	_, wspan := telemetry.Start(ctx, "server.writeback")
+	err = s.writeback(pc, frames, req)
+	telemetry.End(wspan, err)
+	if err != nil {
 		return err
 	}
-	if err := s.sendOutputs(pc, frames, req.Repo, data, req.Build, req.Eager); err != nil {
+	_, ospan := telemetry.Start(ctx, "server.outputs")
+	err = s.sendOutputs(pc, frames, req.Repo, data, req.Build, req.Eager)
+	telemetry.End(ospan, err)
+	if err != nil {
 		return err
 	}
 	return pc.Write(proto.TDone, nil)

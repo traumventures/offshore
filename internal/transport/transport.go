@@ -21,6 +21,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/cloudsourced/internal/telemetry"
 )
 
 // Identity is a server certificate with its key in PEM form.
@@ -135,7 +136,7 @@ func OpenStream(ctx context.Context, conn *quic.Conn, token, kind string) (*quic
 		return nil, nil, err
 	}
 	pc := proto.NewConn(s)
-	if err := pc.Send(proto.THello, proto.Hello{Token: token, Kind: kind}); err != nil {
+	if err := pc.Send(proto.THello, proto.Hello{Token: token, Kind: kind, TraceParent: telemetry.Inject(ctx)}); err != nil {
 		s.CancelRead(0)
 		s.Close()
 		return nil, nil, err

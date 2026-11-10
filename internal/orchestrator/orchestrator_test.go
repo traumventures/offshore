@@ -37,9 +37,6 @@ func newNamedFake(name string) *fakeProvider {
 
 func (f *fakeProvider) Name() string        { return f.name }
 func (f *fakeProvider) Caps() provider.Caps { return provider.Caps{} }
-func (f *fakeProvider) EnsureImage(context.Context, provider.ImageSpec, io.Writer) error {
-	return nil
-}
 
 func (f *fakeProvider) Create(_ context.Context, s provider.MachineSpec) (provider.Machine, error) {
 	f.mu.Lock()

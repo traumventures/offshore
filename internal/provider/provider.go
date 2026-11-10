@@ -5,10 +5,11 @@ package provider
 import (
 	"context"
 	"fmt"
-	"io"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/traumventures/cloudsourced/internal/image"
 )
 
 // Label keys attached to every resource.
@@ -113,9 +114,6 @@ type Caps struct {
 type Provider interface {
 	Name() string
 	Caps() Caps
-	// EnsureImage makes the environment image available, building it from
-	// the given build context if necessary. Build output goes to log.
-	EnsureImage(ctx context.Context, img ImageSpec, log io.Writer) error
 	// Create provisions and starts a new machine.
 	Create(ctx context.Context, spec MachineSpec) (Machine, error)
 	// Start restarts a stopped machine (its disk is kept).
@@ -132,13 +130,19 @@ type Provider interface {
 }
 
 // ImageSpec describes an environment image to build.
-type ImageSpec struct {
-	Tag        string
-	ContextDir string
-	Dockerfile string // path inside ContextDir
-	BaseTag    string // optional user base image built first
-	BaseDir    string
-	BaseFile   string
+type ImageSpec = image.Spec
+
+// ImageHost is implemented by providers whose machines run the environment
+// image: the image pipeline builds it for the platform and pushes it to the
+// registry right before a machine is created. Providers that do not
+// implement it get the environment tag and must have the image already.
+type ImageHost interface {
+	// ImagePlatform is the platform machines of the named size run.
+	ImagePlatform(size string) image.Platform
+	// ImageRegistry is where machines pull the image from.
+	ImageRegistry() image.Registry
+	// ImageBuilder builds images for this provider (its Docker CLI).
+	ImageBuilder() image.Builder
 }
 
 // Factory creates a provider.

@@ -160,6 +160,34 @@ else
   check "daemon logs JSON" contains "$(grep '"msg":"daemon started"' "$CLOUDSOURCED_STATE_DIR/daemon.log" | tail -1)" '"level":"INFO"'
 fi
 
+step "observability: one trace per run, event log, report, simulator export"
+out="$(run sh -c 'echo traced' 2>&1)"
+check "traced run succeeds" contains "$out" "traced"
+trace=""
+for _ in $(seq 30); do # batch exporters flush within 5 s
+  trace="$(python3 "$HERE/otlp_sink.py" check "$OTLP_OUT" 2>/dev/null | grep cloudsourced-proxy | grep cloudsourced-daemon | grep cloudsourced-server | head -1)"
+  [ -n "$trace" ] && break; sleep 1
+done
+check "one trace has proxy, daemon and server spans" test -n "$trace"
+check "  ... with run, prepare, acquire and session spans" sh -c 'case "$1" in *cloudsourced.run*daemon.prepare*fleet.acquire*server.exec*) exit 0;; esac; echo "     $1"; exit 1' _ "$trace"
+[ -n "$REMOTE" ] && check "  ... and control plane spans" contains "$trace" "cloudsourced-controlplane"
+check "spans carry no secrets" sh -c '! grep -q -e from-cmd -e file-secret ${2:+-e "$2"} "$1"' _ "$OTLP_OUT" "$([ -n "$REMOTE" ] && cat "$CPSTATE/api-key")"
+rep="$(cs report --since 1d 2>&1)"
+check "report shows cost" contains "$rep" "cost: \$"
+check "report shows utilisation" contains "$rep" "utilisation: reserved"
+json_get() { python3 -c 'import json,sys; v=json.load(sys.stdin)
+for k in sys.argv[1].split("."): v=v[k]
+print(v)' "$1"; }
+repj="$(cs report --since 1d --json 2>/dev/null)"
+check "report counts finished sessions from the event log" test "$(echo "$repj" | json_get tasks)" -ge 5
+check "report has machine cost (price x machine-hours)" python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) > 0 else 1)' "$(echo "$repj" | json_get cost.total)"
+check "report has queue waits" test "$(echo "$repj" | json_get queue_wait.count)" -ge 5
+out="$(cs sim export --since 1d -o "$WORK/real.json" 2>&1)"
+check "sim export writes the real runs as a trace" contains "$out" "jobs to $WORK/real.json"
+out="$(cs sim -config "$FLEETCFG" -json "$WORK/real.json" 2>&1)"; code=$?
+check "cloudsourced sim replays the exported trace" eq "$code" 0
+check "  ... and completes its jobs" test "$(echo "$out" | python3 -c 'import json,sys; print(min(r["completed"] for r in json.load(sys.stdin)))' 2>/dev/null || echo 0)" -ge 5
+
 step "machine authentication (derived identity, signed scoped tokens)"
 MDIR="$CLOUDSOURCED_STATE_DIR"; [ -n "$REMOTE" ] && MDIR="$CPSTATE"
 label() { docker_ inspect -f "{{index .Config.Labels \"$1\"}}" "$MACHINE"; }

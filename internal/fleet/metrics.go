@@ -57,9 +57,9 @@ func (l *Local) provName(p provider.Provider) string {
 }
 
 // imageBuilt records one environment image preparation.
-func (l *Local) imageBuilt(p provider.Provider, start time.Time, err error) {
+func (l *Local) imageBuilt(name string, start time.Time, err error) {
 	reg := l.Registry()
-	name, result := l.provName(p), "ok"
+	result := "ok"
 	if err != nil {
 		result = "error"
 		reg.Counter("cloudsourced_provider_errors_total", "", "provider", "op").Inc(name, "ensure_image")
@@ -112,7 +112,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter, r *http.Request) {
 // knownPath bounds the path label of HTTP metrics.
 func knownPath(p string) string {
 	switch p {
-	case pathEnv, pathAcquire, pathRelease, pathUnreachable, pathEstimate, pathStatus, pathReconcile, pathDown, pathHealth, pathMetrics:
+	case pathEnv, pathAcquire, pathRelease, pathUnreachable, pathEstimate, pathStatus, pathReconcile, pathDown, pathHealth, pathMetrics, pathEvents:
 		return p
 	}
 	return "other"

@@ -101,6 +101,14 @@ trap 'cleanup; exit $?' EXIT
 [ -x "$BIN" ] || { echo "missing $BIN (run make build)"; exit 2; }
 docker_ info >/dev/null 2>&1 || { echo "docker not usable via: $DOCKER"; exit 2; }
 
+# Tracing: every component exports spans to a local OTLP/HTTP stub
+# (test/e2e/otlp_sink.py); machines reach it through the Docker bridge.
+OTLP_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1])')"
+OTLP_OUT="$WORK/otlp.jsonl"
+python3 "$HERE/otlp_sink.py" "$OTLP_PORT" "$OTLP_OUT" $$ >/dev/null 2>&1 &
+export OTEL_TRACES_EXPORTER=otlp OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:$OTLP_PORT"
+export CLOUDSOURCED_OTEL_MACHINE_ENDPOINT="http://$(docker_ network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'):$OTLP_PORT"
+
 cp -r "$HERE/fixture/hello" "$PROJ"
 echo file-secret > "$PROJ/.secret"
 RUSTV="${E2E_RUSTV:-$(docker_ run --rm rust:1-slim-bookworm rustc --version | awk '{print $2}')}"

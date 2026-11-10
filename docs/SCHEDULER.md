@@ -138,6 +138,62 @@ environments and here only lowers the maximum wait, because start latency
 (20 s) is already short. `TestSampleTraces` in `internal/scheduler/sim`
 asserts the cost/p95 claim on the sample traces.
 
+## Calibrating the simulator from real runs
+
+The orchestrator (control plane, or the daemon in embedded mode) always
+writes an analysis event log to its state directory:
+`events-YYYY-MM-DD.jsonl` (UTC days, one JSON object per line, kept
+`[telemetry] events_retention_days` days, default 30; files are capped at
+256 MiB per day). Task events record each request (`task_placed`: arrival,
+estimate, placement and reason, queue wait, machine, size, price) and each
+finished session (`task_end`: reservation, measured peak memory, CPU
+seconds, wall time, OOM, warm build cache, sccache counters). Machine events
+record the fleet (`machine_create`, `machine_ready`, `machine_start`,
+`machine_stop`, `machine_destroy`, `machine_drain`, `machine_undrain` and
+`machine_state` for changes observed from the provider, e.g. a machine that
+stopped itself when idle) with provider, size, price, capacity, spot flag
+and provider latency. In remote mode the daemon already reports usage on
+release, so the control plane's log covers every client.
+
+`cloudsourced report` summarises a window from it:
+
+```sh
+cloudsourced report --since 7d          # or --since 2026-11-01 --until 2026-11-08, --json
+```
+
+- cost: machine-hours × price per UTC day and per provider/size; attributed
+  to repositories by the sessions' reserved share of their machine (mean of
+  CPU and memory share), the rest is idle cost;
+- utilisation: reserved CPU/memory vs. capacity of the machines that were
+  up, CPU time and peak memory vs. reservation (overprovisioning);
+- queue wait p50/p95/max of assigned requests, requests by outcome;
+- warm vs. cold build caches, summed sccache counters;
+- estimator accuracy: measured peak / memory estimate (p50, p95, mean,
+  MAPE), sessions above their estimate, OOM kills, busy cores / CPU estimate.
+
+`cloudsourced sim export` turns the finished sessions into a trace the
+simulator replays:
+
+```sh
+cloudsourced sim export --since 7d -o real-week.json
+cloudsourced sim -config fleet-candidate.toml -policy default,classic real-week.json
+cloudsourced sim -config fleet-candidate.toml -estimator history real-week.json
+```
+
+Each job keeps its repository id, environment hash, arrival time (relative
+to the hour of the first arrival), requested memory (the estimate the
+orchestrator packed with) and measured peak memory. The duration is
+normalised to what the simulator models, a warm build at full CPU: `cpu` is
+the measured number of busy cores (CPU seconds / wall time), so that
+`duration × cpu` reproduces the measured CPU time, and cold runs are divided
+by `1 + cold-penalty` (export flag `-cold-penalty`, default 0.5 like the
+simulator's, which adds the penalty back for cold machines). `-request-cpu`
+keeps the requested CPU instead. Workflow: export a representative week,
+check that `cloudsourced sim` with the current fleet configuration
+reproduces the report's cost and queue wait roughly (adjust `-boot`,
+`-start` and `-cold-penalty` until it does), then compare candidate sizes,
+overcommit factors and policies on the same trace.
+
 ## Open issues
 
 - The orchestrator drops environments from its recent list after 24 hours,
@@ -148,3 +204,6 @@ asserts the cost/p95 claim on the sample traces.
   includes, but EBS/AMI warm-up effects after a start are not modelled.
 - The simulator assumes peak memory for the whole run and constant CPU use;
   real builds have phases.
+- `sim export` cannot tell a build that was slowed by CPU contention from
+  one that is not parallel: both appear as fewer busy cores for longer. The
+  event log has no per-session pressure yet.

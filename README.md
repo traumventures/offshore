@@ -352,7 +352,6 @@ time; restarts and removals that happened while the daemon or control plane
 was not running are not visible, and provider billing granularity is
 ignored.
 
-<<<<<<< HEAD
 ### Output FUSE
 
 By default only `eager` outputs come back after a run; `cloudsourced fetch`
@@ -384,7 +383,7 @@ cloudsourced outputs unmount
   back to the local directory, and the daemon log says which machine was
   unreachable. The machine is not asked again for 20 s.
 - The mount survives daemon restarts (state in `$STATE/outputs/state.json`).
-=======
+
 ### Compiler cache and linker
 
 `[cache.compiler] tool = "sccache"` adds the pinned static sccache release
@@ -423,7 +422,6 @@ rustc's own `-fuse-ld=lld` for its bundled rust-lld),
 which sessions use as `CARGO_TARGET_<host triple>_LINKER` unless set. This
 leaves `RUSTFLAGS` and `rustflags` from `.cargo/config.toml` untouched; a
 `target.<triple>.linker` in `.cargo/config.toml` is overridden by it.
->>>>>>> main
 
 ### rust-analyzer
 
@@ -537,6 +535,63 @@ orchestrator passes both to the machines it creates. The control plane logs
 every API request with a `request_id` (the client's `X-Request-Id` when
 well formed, returned in the response header), and acquisitions with
 lease, machine and placement reason.
+
+**Tracing.** OpenTelemetry tracing is off by default. The standard
+variables enable it in every component (`OTEL_TRACES_EXPORTER=otlp|console|none`,
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
+`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER[_ARG]`,
+`OTEL_SDK_DISABLED`), as does a `[telemetry]` section in the client and the
+fleet configuration (the environment wins):
+
+```toml
+[telemetry]
+endpoint = "https://otel.example.com:4318"  # OTLP/HTTP base URL
+headers = { "x-api-key" = "env:OTEL_KEY" }  # references only (env:, file:, cmd:)
+sampling = 0.25                             # new traces; downstream follows the parent
+machine_endpoint = "http://10.0.0.5:4318"   # fleet file: the collector as seen by machines
+```
+
+Spans are exported as OTLP/HTTP with JSON encoding (accepted by the
+OpenTelemetry Collector and OTLP backends on `/v1/traces`; OTLP/gRPC is not
+supported, which keeps gRPC and protobuf out of the static binary). Default
+service names: `cloudsourced-proxy`, `-daemon`, `-controlplane`, `-server`,
+`-host`. The orchestrator forwards the exporter settings to the machines it
+creates (headers as secrets; `machine_endpoint` or
+`$CLOUDSOURCED_OTEL_MACHINE_ENDPOINT` overrides the endpoint), servers do
+not pass `OTEL_*` on to sessions, and `console` writes to stderr or to
+`$CLOUDSOURCED_OTEL_CONSOLE_FILE`. One tool run is one trace, propagated as
+W3C `traceparent` (daemon RPC field, control plane HTTP header, optional
+`traceparent` field of the QUIC `Hello` and `Exec` frames):
+
+```
+cloudsourced.run (proxy: tool, subcommand, flag names, repo id, decision, reason, exit code)
+├─ proxy.prepare
+│  └─ daemon.prepare (repo id, env hash, usage key, estimate, lease, machine)
+│     ├─ daemon.env_resolve, daemon.image_ensure, daemon.manifest_refresh, daemon.estimate
+│     ├─ [remote] controlplane /v1/acquire (client) > controlplane /v1/acquire (server)
+│     │  └─ fleet.acquire (queue wait, placement, reason, machine, provider, size, price, reservation, spot)
+│     │       ~ fleet.create / fleet.start (linked root spans: provider, size, price, duration, ready event)
+│     └─ daemon.attach (machine, attempt)
+├─ proxy.connect (session, server wait)
+├─ server.exec (machine: lease, reservation, slot, warm, peak memory, CPU seconds, OOM, exit code, sccache counters)
+│  ├─ server.process, server.writeback, server.outputs
+├─ proxy.exec (exit code, usage), proxy.writeback, proxy.outputs
+└─ daemon.release > controlplane /v1/release
+orchestrator.reconcile > fleet.stop / fleet.destroy (background, provider latency)
+```
+
+Only the subcommand and the names of flags of a tool's arguments are
+recorded, never their values, positional arguments, environment or tokens.
+
+**Event log and reports.** Independent of tracing, the orchestrator writes
+an analysis event log (`events-YYYY-MM-DD.jsonl` in its state directory,
+`[telemetry] events_retention_days`, default 30) of task and machine events.
+`cloudsourced report [--since 7d] [--json]` shows cost per day, repository
+and size, utilisation and overprovisioning, queue wait p50/p95, warm vs.
+cold caches and estimator accuracy; `cloudsourced sim export --since 7d -o
+trace.json` converts the real runs into a simulator trace (both work
+embedded and remote, via the control plane's `POST /v1/events`, API key
+protected). See [docs/SCHEDULER.md](docs/SCHEDULER.md#calibrating-the-simulator-from-real-runs).
 
 **24 h guarantees and cleanup.**
 
