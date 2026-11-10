@@ -18,6 +18,7 @@ import (
 
 	"github.com/traumventures/cloudsourced/internal/client"
 	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/cloudsourced/internal/outputs"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/runlog"
 	"github.com/traumventures/cloudsourced/internal/transport"
@@ -44,6 +45,9 @@ func Main(tool string, args []string) int {
 	local := func(why string) int {
 		rec.Why = why
 		recordLocal(rec)
+		if tool == "cargo" && anyMountBelow(rootDir) {
+			warn("build outputs of this repository are mounted read-only (output FUSE); a local build cannot write there (cloudsourced outputs unmount)")
+		}
 		return execLocal(tool, args)
 	}
 	if os.Getenv("CLOUDSOURCED_DISABLE") != "" {
@@ -90,6 +94,16 @@ func Main(tool string, args []string) int {
 func recordLocal(rec *runlog.Run) {
 	rec.Timings.Total = runlog.Ms(time.Since(rec.Time))
 	runlog.Append(client.StateDir(), *rec)
+}
+
+// anyMountBelow reports whether an output mount exists inside root.
+func anyMountBelow(root string) bool {
+	for _, m := range outputs.Mounts() {
+		if strings.HasPrefix(m, root+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func warn(format string, a ...any) {

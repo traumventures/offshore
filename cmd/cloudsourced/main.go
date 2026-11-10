@@ -43,11 +43,15 @@ Usage:
   cloudsourced why [N|last|list] [--json]  explain a recent run (placement, timings)
   cloudsourced metrics                     daemon, fleet and machine metrics (Prometheus text)
   cloudsourced fetch <glob>...             copy outputs from the latest remote build
+  cloudsourced outputs mount|unmount|status
+                                           mount the remote build directories (target/)
+                                           read-only at their local path (output FUSE)
   cloudsourced down                        destroy all machines and caches
   cloudsourced reconcile                   reload the fleet configuration, apply the policy now
   cloudsourced daemon run|stop|status      manage the local daemon
   cloudsourced env [hash|dockerfile]       show the environment image of this repo
-  cloudsourced editor [vscode|zed|neovim]  rust-analyzer settings for remote checks
+  cloudsourced editor [--mode local|lsp-remote] [vscode|zed|neovim]
+                                           rust-analyzer settings for remote checks
   cloudsourced config check [--fleet FILE] validate the configuration files of this mode
   cloudsourced config show [--fleet FILE]  print the effective configuration (secrets redacted)
   cloudsourced controlplane [flags]        serve a shared control plane (see --help)
@@ -177,6 +181,8 @@ func run(cmd string, args []string) error {
 		return envCmd(args)
 	case "editor":
 		return editorCmd(args)
+	case "outputs":
+		return outputsCmd(args)
 	case "config":
 		return configCmd(args, os.Stdout)
 	case "version", "--version":
@@ -503,55 +509,5 @@ func fetch(globs []string) error {
 	if len(outs.Files) == 0 {
 		return errors.New("no matching outputs on the machine")
 	}
-	return nil
-}
-
-// editorCmd prints rust-analyzer settings that run flycheck and build
-// scripts remotely. rust-analyzer itself stays local; proc-macro libraries
-// and build script outputs come back through eager outputs.
-func editorCmd(args []string) error {
-	editor := "vscode"
-	if len(args) > 0 {
-		editor = args[0]
-	}
-	self, _ := os.Executable()
-	check := []string{self, "run", "cargo", "check", "--workspace", "--all-targets", "--message-format=json"}
-	q := func(xs []string) string {
-		b, _ := json.Marshal(xs)
-		return string(b)
-	}
-	switch editor {
-	case "vscode":
-		fmt.Printf(`// .vscode/settings.json
-{
-  "rust-analyzer.check.overrideCommand": %s,
-  "rust-analyzer.cargo.buildScripts.overrideCommand": %s
-}
-`, q(check), q(check))
-	case "zed":
-		fmt.Printf(`// .zed/settings.json
-{
-  "lsp": { "rust-analyzer": { "initialization_options": {
-    "check": { "overrideCommand": %s },
-    "cargo": { "buildScripts": { "overrideCommand": %s } }
-  } } }
-}
-`, q(check), q(check))
-	case "neovim":
-		fmt.Printf(`-- rust-analyzer settings (lspconfig)
-settings = { ["rust-analyzer"] = {
-  check = { overrideCommand = %s },
-  cargo = { buildScripts = { overrideCommand = %s } },
-} }
-`, strings.NewReplacer("[", "{", "]", "}").Replace(q(check)), strings.NewReplacer("[", "{", "]", "}").Replace(q(check)))
-	default:
-		return fmt.Errorf("unknown editor %q (vscode, zed, neovim)", editor)
-	}
-	fmt.Print(`
-# Proc macros and build script outputs must exist locally for rust-analyzer.
-# Add them to the eager outputs in .cloudsourced.toml:
-#   [tool.cargo]
-#   eager = ["target/debug/deps/*.so", "target/debug/build/*/out/**"]
-`)
 	return nil
 }

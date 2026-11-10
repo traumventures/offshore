@@ -24,7 +24,7 @@ type serverMetrics struct {
 const (
 	transferFetch     = "fetch"     // source blobs fetched from the client (FUSE)
 	transferWriteback = "writeback" // changed files sent back
-	transferOutput    = "output"    // output files sent to the client
+	transferOutput    = "output"    // output files sent to the client (eager, fetch, output mount)
 )
 
 func newServerMetrics(s *Server) *serverMetrics {

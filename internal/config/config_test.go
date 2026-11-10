@@ -83,6 +83,24 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestOutputsAndEditorModes(t *testing.T) {
+	r, err := LoadRepo(writeRepo(t, "version = 1\n[environment]\nimage = \"rust:1\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Outputs.Mode != OutputsEager || r.Editor.RustAnalyzer != RustAnalyzerLocal {
+		t.Fatalf("defaults: %+v %+v", r.Outputs, r.Editor)
+	}
+	r, err = LoadRepo(writeRepo(t, "version = 1\n[environment]\nimage = \"rust:1\"\n[cache.build]\npaths = [\"target\"]\n[outputs]\nmode = \"fuse\"\n[editor]\nrust_analyzer = \"lsp-remote\"\n"))
+	if err != nil || r.Outputs.Mode != OutputsFuse || r.Editor.RustAnalyzer != RustAnalyzerLSPRemote {
+		t.Fatalf("fuse/lsp-remote: %v", err)
+	}
+	_, err = LoadRepo(writeRepo(t, "version = 1\n[environment]\nimage = \"rust:1\"\n[outputs]\nmode = \"fuse\"\n[editor]\nrust_analyzer = \"remote\"\n"))
+	if err == nil || !strings.Contains(err.Error(), "needs [cache.build] paths") || !strings.Contains(err.Error(), "editor.rust_analyzer") {
+		t.Fatalf("validation: %v", err)
+	}
+}
+
 func TestCompilerCacheAndLinker(t *testing.T) {
 	dir := writeRepo(t, `
 version = 1
