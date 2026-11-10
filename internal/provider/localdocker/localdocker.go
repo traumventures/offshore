@@ -368,24 +368,30 @@ func (d *Docker) List(ctx context.Context, owner string) ([]provider.Machine, er
 
 // Volumes lists cache volumes of owner.
 func (d *Docker) Volumes(ctx context.Context, owner string) ([]provider.Volume, error) {
-	out, err := d.output(ctx, "volume", "ls", "-q", "--filter", "label="+provider.LabelOwner+"="+owner)
+	// One listing with the labels: inspecting the listed names separately
+	// fails as a whole when a volume disappears in between (a concurrent
+	// destroy), which made reconciles fail.
+	out, err := d.output(ctx, "volume", "ls", "--filter", "label="+provider.LabelOwner+"="+owner, "--format", "{{.Name}}\t{{.Labels}}")
 	if err != nil {
 		return nil, err
 	}
-	names := strings.Fields(string(out))
-	if len(names) == 0 {
-		return nil, nil
-	}
-	out, err = d.output(ctx, append([]string{"volume", "inspect"}, names...)...)
-	if err != nil {
-		return nil, err
-	}
-	var res []struct {
+	type volInfo struct {
 		Name   string
 		Labels map[string]string
 	}
-	if err := json.Unmarshal(out, &res); err != nil {
-		return nil, err
+	var res []volInfo
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		name, labels, _ := strings.Cut(line, "\t")
+		if name == "" {
+			continue
+		}
+		r := volInfo{Name: name, Labels: map[string]string{}}
+		for _, kv := range strings.Split(labels, ",") {
+			if k, v, ok := strings.Cut(kv, "="); ok {
+				r.Labels[k] = v
+			}
+		}
+		res = append(res, r)
 	}
 	var vs []provider.Volume
 	for _, r := range res {

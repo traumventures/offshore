@@ -503,3 +503,28 @@ func TestLeaseDetailsAndCostHistory(t *testing.T) {
 		t.Fatalf("costs %+v", r)
 	}
 }
+
+// The cache volume of a machine that is being created exists before the
+// provider lists the machine; the volume reaper must not delete it.
+func TestReapKeepsVolumeOfMachineBeingCreated(t *testing.T) {
+	f := newFake()
+	o := newTestOrch(t, f, nil)
+	f.mu.Lock()
+	f.volumes["cs-cache-new1"] = provider.Volume{Name: "cs-cache-new1", Kind: "cache"}
+	f.volumes["cs-cache-gone"] = provider.Volume{Name: "cs-cache-gone", Kind: "cache"}
+	f.mu.Unlock()
+	o.mu.Lock()
+	o.creating["new1"] = creation{prov: "fake", env: "env1env1env1env1", at: o.now()}
+	o.mu.Unlock()
+	if err := o.reapVolumes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.volumes["cs-cache-new1"]; !ok {
+		t.Fatal("cache volume of a machine being created was deleted")
+	}
+	if _, ok := f.volumes["cs-cache-gone"]; ok {
+		t.Fatal("orphaned cache volume survived")
+	}
+}

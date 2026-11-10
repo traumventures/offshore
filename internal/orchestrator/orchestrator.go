@@ -1355,6 +1355,14 @@ func (o *Orchestrator) reapProvider(ctx context.Context, p provider.Provider) er
 	for _, m := range list {
 		alive["cs-cache-"+m.ID] = true
 	}
+	// A machine being created has its cache volume before the provider
+	// lists the machine: that volume is not orphaned. (o.creating is read
+	// after the listing, so a creation that finished in between is listed.)
+	o.mu.Lock()
+	for id := range o.creating {
+		alive["cs-cache-"+id] = true
+	}
+	o.mu.Unlock()
 	now := o.now()
 	for _, v := range vols {
 		expired := !v.ExpiresAt.IsZero() && !now.Before(v.ExpiresAt)
