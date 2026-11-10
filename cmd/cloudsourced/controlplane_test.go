@@ -281,7 +281,7 @@ func TestTranslateMount(t *testing.T) {
 }
 
 func TestMachineBinary(t *testing.T) {
-	u := &config.User{Providers: map[string]map[string]any{
+	u := &config.FleetConfig{Providers: map[string]map[string]any{
 		"local": {"backend": "local-docker"},
 		"fixed": {"backend": "local-docker", "binary": "/opt/cs"},
 		"aws":   {"backend": "aws-ec2"},

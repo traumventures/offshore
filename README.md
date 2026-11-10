@@ -51,7 +51,9 @@ cargo build ──► proxy ──► daemon ── QUIC ────► server
 * **Build caches.** Worker-local directories (`target/`) are bind-mounted from
   build slots. A session leases a slot exclusively, so parallel builds of one
   repository never block each other; slots are reused warm and never older
-  than the build TTL (24 h). Machines themselves live at most `max_lifetime`.
+  than the repository's build TTL (`cache.build.ttl`, default 24 h, recorded
+  per slot, so repositories with different TTLs share machines). Machines
+  themselves live at most `max_lifetime`, which also caps the build TTL.
 * **Compiler cache.** With `[cache.compiler] tool = "sccache"` sessions run
   cargo with `RUSTC_WRAPPER=sccache` against a WebDAV cache (see below), so a
   fresh machine reuses compiled dependencies. Entries are never served after
@@ -72,11 +74,38 @@ bin/cloudsourced shim install cargo
 export PATH="$HOME/.cloudsourced/bin:$PATH"
 ```
 
-If your user cannot talk to Docker directly, configure the CLI invocation in
-`~/.config/cloudsourced/config.toml`:
+### Configuration files
+
+There are three configuration files, each with one role:
+
+| file | role | read by |
+|------|------|---------|
+| client: `~/.config/cloudsourced/config.toml` (`$CLOUDSOURCED_CONFIG`) | `[orchestrator]` (embedded or remote), `user` | CLI, daemon |
+| fleet: `[fleet]`, `[providers.*]` (`$CLOUDSOURCED_FLEET_CONFIG`, `controlplane --config`; default: the client file) | sizes, policy, lifetimes, providers | the orchestrator: daemon in embedded mode, control plane |
+| repository: `.cloudsourced.toml` | environment, caches, resources, TTLs | sent with every request |
+
+In embedded mode one file may hold the client and the fleet sections. In
+remote mode fleet sections in the client file have no effect (the client warns);
+the control plane ignores `[orchestrator]` and `user`. `user` (default `$USER`)
+salts repository ids; `fleet.id` (default `$USER`) names the fleet and is the
+`cloudsourced.owner` label of its machines and volumes. Repository settings
+such as `cache.build.ttl`/`cache.deps.ttl` travel in each request, so
+repositories with different settings share one fleet without affecting each
+other. Fleet settings change only by reload: the daemon applies a changed fleet
+file on the next request and on `cloudsourced reconcile`; the control plane
+when the file changes and on `SIGHUP`. Changing `fleet.id` or the providers
+needs a restart. `cloudsourced config check` validates the files of the current
+mode and names their roles; `cloudsourced config show` prints the effective
+configuration with secrets redacted.
 
 ```toml
-[fleet]
+user = "alice"               # client: repository id salt (default $USER)
+
+[orchestrator]
+mode = "embedded"            # client: the daemon runs the orchestrator
+
+[fleet]                      # fleet
+id             = "alice"     # labels machines (deprecated alias: owner)
 machine_cpu    = 8
 machine_memory = "16G"
 max_machines   = 4
@@ -87,7 +116,8 @@ max_lifetime   = "24h"
 [[fleet.provision]]     # machine level provisioning, runs once per machine
 run = "echo ready"
 
-[docker]
+[providers.local]       # if your user cannot talk to Docker directly
+backend = "local-docker"
 command = ["sudo", "-n", "docker"]
 ```
 
@@ -121,8 +151,10 @@ command      = ["sudo", "-n", "docker"]
 max_machines = 4
 ```
 
-The legacy form (`machine_cpu`/`machine_memory` plus `[docker]`) still works and
-maps to a single provider named `local`.
+The legacy form (`machine_cpu`/`machine_memory` plus `[docker]` and
+`fleet.backend`) still works with a deprecation warning and maps to a single
+provider named `local`; so does `fleet.owner` (now `fleet.id`; a client without
+`user` keeps using it as repository id salt).
 
 ### Shared control plane
 
@@ -130,7 +162,7 @@ The orchestrator can run as a shared service instead of inside every daemon.
 Clients only fetch leases from it; build traffic goes directly to the machines.
 
 ```sh
-# fleet and providers in the control plane's config.toml
+# fleet and providers in the control plane's fleet file (--config FILE)
 cloudsourced controlplane                        # self-signed, :7443, fingerprint pinned
 cloudsourced controlplane --hostname cs.example.com   # Let's Encrypt, :443 (+ :80 for ACME)
 cloudsourced controlplane client-config          # prints the client block below
@@ -257,11 +289,11 @@ mode  = "immutable"         # watch (default) | immutable | hidden
 
 [cache.build]
 paths = ["target"]          # worker-local, never synchronised
-ttl   = "24h"
+ttl   = "24h"               # per build slot, capped by the fleet's max_lifetime
 
 [cache.deps]
 paths = ["$CARGO_HOME/registry", "$CARGO_HOME/git"]
-ttl   = "7d"
+ttl   = "7d"                # lifetime of a dependency volume a new machine starts
 
 [cache.compiler]            # optional shared compiler cache
 tool = "sccache"            # installs a pinned sccache into the image
@@ -331,7 +363,7 @@ directory); it ends with the session. The cache backend is WebDAV
 
 * By default the machine server serves it on `127.0.0.1` from a directory
   store under `<deps dir>/sccache` (`CLOUDSOURCED_SCCACHE_DIR`). The
-  dependency volume is shared by the owner's machines, so a new machine gets
+  dependency volume is shared by the fleet's machines, so a new machine gets
   hits for everything an earlier one compiled. Keys are prefixed with the
   environment hash, so toolchains never mix.
 * On AWS the host agent serves the cache itself on the Docker bridge

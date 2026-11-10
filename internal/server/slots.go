@@ -17,7 +17,9 @@ import (
 // repository never share a build directory. New slots are cloned from the
 // most recently used one with reflinks when the filesystem supports it.
 // Slot data never outlives its TTL, measured from the creation of the
-// oldest data it contains.
+// oldest data it contains. The TTL is the repository's (sent with every
+// session) and recorded per slot, so repositories with different TTLs can
+// share a machine; the machine-wide TTL is an upper bound.
 type slots struct {
 	dir    string
 	mu     sync.Mutex
@@ -25,8 +27,19 @@ type slots struct {
 }
 
 type slotMeta struct {
-	Created  int64 `json:"created"`   // unix seconds of the oldest contained data
-	LastUsed int64 `json:"last_used"` // unix seconds
+	Created  int64 `json:"created"`       // unix seconds of the oldest contained data
+	LastUsed int64 `json:"last_used"`     // unix seconds
+	TTL      int64 `json:"ttl,omitempty"` // seconds; TTL of the last session (0 = machine TTL)
+}
+
+// expired reports whether the slot data is too old under the slot's TTL,
+// bounded by max.
+func (m slotMeta) expired(now time.Time, max time.Duration) bool {
+	ttl := max
+	if d := time.Duration(m.TTL) * time.Second; d > 0 && d < ttl {
+		ttl = d
+	}
+	return now.Sub(time.Unix(m.Created, 0)) >= ttl
 }
 
 func newSlots(dir string) (*slots, error) {
@@ -101,6 +114,7 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 		byRecent(free)
 		c := free[0]
 		c.meta.LastUsed = now.Unix()
+		c.meta.TTL = int64(ttl / time.Second)
 		if err := writeMeta(c.path, c.meta); err != nil {
 			return "", false, err
 		}
@@ -115,7 +129,7 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 	if err := os.MkdirAll(p, 0o755); err != nil {
 		return "", false, err
 	}
-	meta := slotMeta{Created: now.Unix(), LastUsed: now.Unix()}
+	meta := slotMeta{Created: now.Unix(), LastUsed: now.Unix(), TTL: int64(ttl / time.Second)}
 	// Warm start: clone the most recently used slot if reflinks are cheap.
 	byRecent(all)
 	cloned := false
@@ -153,7 +167,8 @@ func (s *slots) release(slot string) {
 	}
 }
 
-// latest returns the most recently used unexpired slot of a repo.
+// latest returns the most recently used unexpired slot of a repo; ttl is
+// the upper bound (machine TTL).
 func (s *slots) latest(repoID string, ttl time.Duration) (string, error) {
 	repoDir := filepath.Join(s.dir, repoID)
 	des, err := os.ReadDir(repoDir)
@@ -164,7 +179,7 @@ func (s *slots) latest(repoID string, ttl time.Duration) (string, error) {
 	for _, de := range des {
 		p := filepath.Join(repoDir, de.Name())
 		m, err := readMeta(p)
-		if err != nil || time.Since(time.Unix(m.Created, 0)) >= ttl {
+		if err != nil || m.expired(time.Now(), ttl) {
 			continue
 		}
 		if m.LastUsed > bestUsed {
@@ -177,7 +192,7 @@ func (s *slots) latest(repoID string, ttl time.Duration) (string, error) {
 	return best, nil
 }
 
-// gc deletes expired, unleased slots.
+// gc deletes expired, unleased slots; ttl is the upper bound (machine TTL).
 func (s *slots) gc(ttl time.Duration) (removed int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -191,7 +206,7 @@ func (s *slots) gc(ttl time.Duration) (removed int) {
 				continue
 			}
 			m, err := readMeta(p)
-			if err != nil || time.Since(time.Unix(m.Created, 0)) >= ttl {
+			if err != nil || m.expired(time.Now(), ttl) {
 				os.RemoveAll(p)
 				removed++
 			}

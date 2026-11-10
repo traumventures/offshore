@@ -140,11 +140,19 @@ func testConfig(prov string) Config {
 }
 
 func newTestOrch(t *testing.T, f *fakeProvider, mod func(*Config)) *Orchestrator {
+	return newTestOrchIn(t, f, t.TempDir(), mod)
+}
+
+func newTestOrchDir(t *testing.T, f *fakeProvider, dir string) *Orchestrator {
+	return newTestOrchIn(t, f, dir, nil)
+}
+
+func newTestOrchIn(t *testing.T, f *fakeProvider, dir string, mod func(*Config)) *Orchestrator {
 	cfg := testConfig("fake")
 	if mod != nil {
 		mod(&cfg)
 	}
-	o, err := New(cfg, map[string]provider.Provider{"fake": f}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	o, err := New(cfg, map[string]provider.Provider{"fake": f}, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
