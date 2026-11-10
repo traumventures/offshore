@@ -23,7 +23,7 @@ class Pager:
 
 class FakeEC2:
     def __init__(self, instances):
-        self.instances, self.calls, self.terminated = instances, [], []
+        self.instances, self.calls, self.terminated, self.canceled = instances, [], [], []
 
     def get_paginator(self, op):
         assert op == "describe_instances"
@@ -34,6 +34,10 @@ class FakeEC2:
 
     def terminate_instances(self, InstanceIds):
         self.terminated.extend(InstanceIds)
+
+    def cancel_spot_instance_requests(self, SpotInstanceRequestIds):
+        assert not self.terminated, "spot requests are canceled before terminating"
+        self.canceled.extend(SpotInstanceRequestIds)
 
 
 class NotFound(Exception):
@@ -95,6 +99,16 @@ class ReaperTest(unittest.TestCase):
         self.assertEqual(ssm.calls, [{"Path": "/cloudsourced/st/machines", "Recursive": True}])
         states = ec2.calls[0]["Filters"][1]["Values"]
         self.assertNotIn("terminated", states)
+
+    def test_cancels_spot_requests_of_expired_machines(self):
+        old = inst("i-spot", "spot", NOW - 3600)
+        old["SpotInstanceRequestId"] = "sir-old"
+        live = inst("i-live", "live", NOW + 3600)
+        live["SpotInstanceRequestId"] = "sir-live"
+        ec2 = FakeEC2([old, live, inst("i-od", "od", NOW - 3600)])
+        reaper.handler({}, None, ec2=ec2, ssm=FakeSSM([]), now=NOW)
+        self.assertEqual(ec2.canceled, ["sir-old"])
+        self.assertEqual(sorted(ec2.terminated), ["i-od", "i-spot"])
 
     def test_batches_terminations(self):
         ec2 = FakeEC2([inst("i-%d" % n, "m%d" % n, NOW - 3600) for n in range(120)])

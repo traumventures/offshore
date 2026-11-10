@@ -10,8 +10,9 @@
 # cloudsourced (uid 10001); the Docker socket of the host is passed in with
 # --group-add <gid of the socket>. See docs/CONTROLPLANE.md.
 #
-# Machines are linux/amd64, and so is the server binary the control plane
-# hands to them (its own executable), so the image is linux/amd64 only.
+# The control plane runs linux/amd64; the server binary it hands to amd64
+# machines is its own executable, arm64 machines get
+# /usr/local/bin/cloudsourced-linux-arm64.
 
 ARG GO_VERSION=1.26
 ARG DOCKER_VERSION=29
@@ -25,7 +26,8 @@ COPY cmd ./cmd
 COPY internal ./internal
 ARG VERSION=dev
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/cloudsourced ./cmd/cloudsourced
+    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/cloudsourced ./cmd/cloudsourced \
+ && GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/cloudsourced-linux-arm64 ./cmd/cloudsourced
 
 FROM docker:${DOCKER_VERSION}-cli AS runtime
 # setcap lets the unprivileged user bind :443 and :80 (ACME) without root.
@@ -33,6 +35,8 @@ RUN apk add --no-cache ca-certificates libcap-utils \
  && adduser -D -H -u 10001 -h /var/lib/cloudsourced cloudsourced \
  && install -d -o 10001 -g 10001 -m 0700 /var/lib/cloudsourced
 COPY --from=build /out/cloudsourced /usr/local/bin/cloudsourced
+# Server binary of arm64 machines (aws-ec2 sizes with arch = "arm64").
+COPY --from=build /out/cloudsourced-linux-arm64 /usr/local/bin/cloudsourced-linux-arm64
 RUN setcap cap_net_bind_service=+ep /usr/local/bin/cloudsourced \
  && apk del libcap-utils
 ENV CLOUDSOURCED_STATE_DIR=/var/lib/cloudsourced \

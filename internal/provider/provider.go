@@ -24,27 +24,39 @@ const (
 	LabelMemory    = "cloudsourced.memory"
 	LabelFinger    = "cloudsourced.fingerprint"
 	LabelSize      = "cloudsourced.size"
+	LabelArch      = "cloudsourced.arch"   // machine architecture (amd64, arm64)
+	LabelMarket    = "cloudsourced.market" // capacity market: spot or on-demand
 )
 
 // MachineSpec describes a machine to create. Providers treat the server
 // environment as opaque: Env is public, SecretEnv must be delivered
 // confidentially (never in plain instance metadata such as user data).
 type MachineSpec struct {
-	ID        string
-	Owner     string
-	Image     string // environment image reference
-	EnvHash   string
-	Size      string // machine type name
-	CPU       float64
-	Memory    int64
-	Swap      bool // allow sessions to swap
-	ExpiresAt time.Time
-	Finger    string        // expected server certificate fingerprint (public)
-	DepsTTL   time.Duration // lifetime of shared dependency cache volumes
-	IdleStop  time.Duration // machine stops itself after this long idle and unobserved (0: never)
-	Services  []Service
-	Env       map[string]string // CLOUDSOURCED_* variables of the machine server
-	SecretEnv map[string]string // secret CLOUDSOURCED_* variables
+	ID      string
+	Owner   string
+	Image   string // environment image reference
+	EnvHash string
+	Size    string // machine type name
+	// Arch is the machine architecture ("amd64", "arm64"; empty: amd64);
+	// Image is built for it.
+	Arch string
+	// InstanceTypes are the provider machine types providing Size, tried
+	// in order (empty: Size itself).
+	InstanceTypes []string
+	// Spot asks for interruptible spot capacity; SpotFallback allows
+	// on-demand capacity when no spot capacity is available.
+	Spot         bool
+	SpotFallback bool
+	CPU          float64
+	Memory       int64
+	Swap         bool // allow sessions to swap
+	ExpiresAt    time.Time
+	Finger       string        // expected server certificate fingerprint (public)
+	DepsTTL      time.Duration // lifetime of shared dependency cache volumes
+	IdleStop     time.Duration // machine stops itself after this long idle and unobserved (0: never)
+	Services     []Service
+	Env          map[string]string // CLOUDSOURCED_* variables of the machine server
+	SecretEnv    map[string]string // secret CLOUDSOURCED_* variables
 }
 
 // SortedKeys returns the keys of m in order.
@@ -139,7 +151,16 @@ type ImageSpec struct {
 	BaseTag    string // optional user base image built first
 	BaseDir    string
 	BaseFile   string
+	// Platform is the image platform, e.g. "linux/arm64" (empty:
+	// linux/amd64).
+	Platform string
 }
+
+// Market values of LabelMarket.
+const (
+	MarketSpot     = "spot"
+	MarketOnDemand = "on-demand"
+)
 
 // Factory creates a provider.
 type Factory func(opts map[string]any) (Provider, error)

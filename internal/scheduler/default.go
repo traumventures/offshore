@@ -222,7 +222,7 @@ func (p Default) Place(f Fleet, t Task) Placement {
 }
 
 func (p Default) fitsAnySize(f Fleet, t Task) bool {
-	for _, s := range f.Sizes {
+	for _, s := range f.SizesFor(t.EnvHash) {
 		if p.sizeAdmissible(s).Fits(t.Request) {
 			return true
 		}
@@ -256,7 +256,10 @@ func (p Default) smallestSize(sizes []Size, need Resources, perProvider map[stri
 		if ss[i].PricePerHour != ss[j].PricePerHour {
 			return ss[i].PricePerHour < ss[j].PricePerHour
 		}
-		return ss[i].Capacity.Memory < ss[j].Capacity.Memory
+		if ss[i].Capacity.Memory != ss[j].Capacity.Memory {
+			return ss[i].Capacity.Memory < ss[j].Capacity.Memory
+		}
+		return ss[i].Spot && !ss[j].Spot
 	})
 	for _, s := range ss {
 		if p.sizeAdmissible(s).Fits(need) {
@@ -341,7 +344,10 @@ func (p Default) bestSize(sizes []Size, tasks []Task, perProvider map[string]int
 		if a.s.PricePerHour != b.s.PricePerHour {
 			return a.s.PricePerHour < b.s.PricePerHour
 		}
-		return a.s.Capacity.Memory < b.s.Capacity.Memory
+		if a.s.Capacity.Memory != b.s.Capacity.Memory {
+			return a.s.Capacity.Memory < b.s.Capacity.Memory
+		}
+		return a.s.Spot && !b.s.Spot
 	})
 	return cs[0].s, cs[0].rest, true
 }
@@ -358,6 +364,9 @@ type planState struct {
 }
 
 func (p Default) usable(m Machine, now time.Time) bool {
+	if m.Interrupted {
+		return false
+	}
 	return m.ExpiresAt.IsZero() || m.ExpiresAt.Sub(now) > p.cfg().ExpiryMargin
 }
 
@@ -434,7 +443,7 @@ func (p Default) scaleOutClassic(st *planState, env string) {
 			break
 		}
 		want := Resources{CPU: math.Max(need.CPU, largest.CPU), Memory: max(need.Memory, largest.Memory)}
-		size, ok := p.smallestSize(f.Sizes, want, st.perProvider)
+		size, ok := p.smallestSize(f.SizesFor(env), want, st.perProvider)
 		if !ok || size.Capacity.CPU <= 0 || size.Capacity.Memory <= 0 {
 			break
 		}
@@ -516,7 +525,7 @@ func (p Default) scaleOut(st *planState, env string) {
 		}
 		// With few machine slots left, a small stopped machine must not
 		// take a slot a larger new machine needs.
-		if slots := c.MaxMachines - st.active; p.machinesNeeded(f.Sizes, rest, st.perProvider) > slots-1 {
+		if slots := c.MaxMachines - st.active; p.machinesNeeded(f.SizesFor(env), rest, st.perProvider) > slots-1 {
 			continue
 		}
 		tasks = rest
@@ -528,7 +537,7 @@ func (p Default) scaleOut(st *planState, env string) {
 		if st.active >= c.MaxMachines && !p.freeSlot(st, env, tasks[0].Request) {
 			return
 		}
-		size, rest, ok := p.bestSize(f.Sizes, tasks, st.perProvider, c.MaxMachines-st.active)
+		size, rest, ok := p.bestSize(f.SizesFor(env), tasks, st.perProvider, c.MaxMachines-st.active)
 		if !ok {
 			// Providers at their machine limit: stopped machines of other
 			// environments hold their slots.
@@ -624,6 +633,12 @@ func (p Default) idleStop(st *planState) map[string]int {
 	}
 	for _, m := range f.Machines {
 		if m.State != Running || m.Sessions > 0 || m.Reserved.Memory > 0 || len(st.queued[m.EnvHash]) > 0 {
+			continue
+		}
+		// An interrupted machine stops as soon as it is empty, before it is
+		// taken away: stopped by us, it stays a warm machine.
+		if m.Interrupted {
+			st.acts = append(st.acts, Action{Kind: Stop, Machine: m.ID, Reason: "interrupted"})
 			continue
 		}
 		// A machine drained by consolidation stops as soon as it is empty.
@@ -724,7 +739,7 @@ func (p Default) warmPool(st *planState, running map[string]int) {
 				st.stopped[env] = s[1:]
 				st.active++
 			} else {
-				size, ok := p.smallestSize(f.Sizes, Resources{}, st.perProvider)
+				size, ok := p.smallestSize(f.SizesFor(env), Resources{}, st.perProvider)
 				if !ok {
 					break
 				}

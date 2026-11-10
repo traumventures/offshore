@@ -248,7 +248,14 @@ type Status struct {
 	ExpiresAt int64               `json:"expires_at"`
 	Mounts    []string            `json:"mounts"`
 	Draining  bool                `json:"draining"`
-	WarmRepos []string            `json:"warm_repos,omitempty"` // repo IDs with unexpired build slots
+	// InterruptAt is when the machine will be taken away (unix seconds; 0:
+	// no notice), e.g. a spot interruption or rebalance recommendation:
+	// the server drains and running sessions get until then.
+	InterruptAt int64 `json:"interrupt_at,omitempty"`
+	// DrainReason says why a server drains on its own ("expired",
+	// "spot-interruption", "spot-rebalance"; empty: by the orchestrator).
+	DrainReason string   `json:"drain_reason,omitempty"`
+	WarmRepos   []string `json:"warm_repos,omitempty"` // repo IDs with unexpired build slots
 	// Metrics is the server's metrics snapshot; the orchestrator republishes
 	// it with machine labels (no extra port or scope on the machine).
 	Metrics []metrics.Family `json:"metrics,omitempty"`

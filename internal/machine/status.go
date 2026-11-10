@@ -111,3 +111,62 @@ func Decide(now, expiresAt time.Time, idleStop time.Duration, st *HostStatus) De
 	}
 	return IdleStop
 }
+
+// DrainNoticeFile is the file (next to the status file, in the host status
+// directory) through which the host agent tells the server that the machine
+// is about to be taken away, e.g. by a spot interruption. The server then
+// drains: no new sessions, running sessions continue until the deadline.
+const DrainNoticeFile = "drain.json"
+
+// Drain reasons of a DrainNotice.
+const (
+	DrainSpotInterruption = "spot-interruption"
+	DrainSpotRebalance    = "spot-rebalance"
+)
+
+// DrainNotice is a host's notice that its machine goes away.
+type DrainNotice struct {
+	Reason   string `json:"reason"`
+	Deadline int64  `json:"deadline"` // unix seconds the machine is taken away (0: unknown)
+	Action   string `json:"action,omitempty"`
+	Noticed  int64  `json:"noticed"` // unix seconds the host noticed it
+}
+
+// WriteDrainNotice replaces the drain notice in dir atomically.
+func WriteDrainNotice(dir string, n DrainNotice) error {
+	b, err := json.Marshal(n)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".drain-*")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	os.Chmod(tmp.Name(), 0o644)
+	return os.Rename(tmp.Name(), filepath.Join(dir, DrainNoticeFile))
+}
+
+// ReadDrainNotice reads the drain notice in dir; ok is false when there is
+// none.
+func ReadDrainNotice(dir string) (n DrainNotice, ok bool, err error) {
+	b, err := os.ReadFile(filepath.Join(dir, DrainNoticeFile))
+	if os.IsNotExist(err) {
+		return n, false, nil
+	}
+	if err != nil {
+		return n, false, err
+	}
+	if err := json.Unmarshal(b, &n); err != nil {
+		return n, false, err
+	}
+	return n, true, nil
+}

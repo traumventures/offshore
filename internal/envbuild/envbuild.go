@@ -31,6 +31,9 @@ type Plan struct {
 	Tag        string
 	Dockerfile string
 	Services   []provider.Service
+	// Platform is the image platform of the repository's architecture
+	// (resources.arch), e.g. "linux/arm64".
+	Platform string
 	files      map[string]string // context path -> source file
 	tools      map[string]tool   // context path -> pinned release binary
 	baseDir    string
@@ -41,7 +44,7 @@ type Plan struct {
 // Resolve computes the environment hash and Dockerfile for a repository.
 func Resolve(r *config.Repo) (*Plan, error) {
 	env := r.Environment
-	p := &Plan{files: map[string]string{}, tools: map[string]tool{}}
+	p := &Plan{files: map[string]string{}, tools: map[string]tool{}, Platform: Platform(r.Resources.Arch)}
 	var hashParts []string
 	add := func(s string) { hashParts = append(hashParts, s) }
 	add("generator=" + generatorVersion)
@@ -216,8 +219,17 @@ func (p *Plan) Context() (provider.ImageSpec, string, error) {
 	}
 	return provider.ImageSpec{
 		Tag: p.Tag, ContextDir: dir, Dockerfile: df,
-		BaseTag: p.baseTag, BaseDir: p.baseDir, BaseFile: p.baseFile,
+		BaseTag: p.baseTag, BaseDir: p.baseDir, BaseFile: p.baseFile, Platform: p.Platform,
 	}, dir, nil
+}
+
+// Platform returns the container platform of a repository architecture
+// (resources.arch "x86_64" or "aarch64").
+func Platform(arch string) string {
+	if arch == "aarch64" || arch == "arm64" {
+		return "linux/arm64"
+	}
+	return "linux/amd64"
 }
 
 func copyTree(src, dst string) error {

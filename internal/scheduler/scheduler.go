@@ -40,7 +40,29 @@ type Size struct {
 	Provider     string    `json:"provider"` // provider instance that creates it
 	Name         string    `json:"name"`
 	Capacity     Resources `json:"capacity"`
-	PricePerHour float64   `json:"price_per_hour"` // 0 when unknown
+	PricePerHour float64   `json:"price_per_hour"` // expected price (spot: after the discount); 0 when unknown
+	// Arch is the machine architecture ("amd64", "arm64"; empty: amd64).
+	// Machines are only created for environments of their architecture.
+	Arch string `json:"arch,omitempty"`
+	// Spot sizes are cheaper but can be interrupted; at equal cost the
+	// policy prefers them.
+	Spot bool `json:"spot,omitempty"`
+	// OnDemandPrice is the price of a spot size's machines that fell back
+	// to on-demand capacity (0: PricePerHour).
+	OnDemandPrice float64 `json:"on_demand_price,omitempty"`
+	// InstanceTypes and SpotFallback are passed to the provider: machine
+	// types providing this size, in order, and whether a spot size may
+	// launch on-demand when no spot capacity is available.
+	InstanceTypes []string `json:"instance_types,omitempty"`
+	SpotFallback  bool     `json:"spot_fallback,omitempty"`
+}
+
+// ArchOf returns a size's architecture (amd64 when unset).
+func (s Size) ArchOf() string {
+	if s.Arch == "" {
+		return "amd64"
+	}
+	return s.Arch
 }
 
 // Task is a session that needs capacity.
@@ -78,6 +100,10 @@ type Machine struct {
 	Size      string
 	State     State
 	Draining  bool      // no new sessions; stop when empty
+	// Interrupted machines are being taken away (spot interruption or
+	// rebalance notice): they drain and are never undrained, started or
+	// counted as capacity again.
+	Interrupted bool
 	Capacity  Resources // physical capacity
 	Reserved  Resources // sum of reservations of sessions and pending leases
 	Used      Resources // measured usage (best effort)
@@ -106,6 +132,24 @@ type Fleet struct {
 	Queue    []Task               // tasks waiting for capacity
 	Sizes    []Size               // machine types that can be created
 	Recent   map[string]time.Time // environment hash -> last use
+	// EnvArch is the machine architecture of each known environment
+	// ("amd64", "arm64"); environments without an entry are amd64.
+	EnvArch map[string]string
+}
+
+// SizesFor returns the sizes whose architecture matches env's.
+func (f Fleet) SizesFor(env string) []Size {
+	arch := f.EnvArch[env]
+	if arch == "" {
+		arch = "amd64"
+	}
+	var out []Size
+	for _, s := range f.Sizes {
+		if s.ArchOf() == arch {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // PlacementKind is the outcome of Place.

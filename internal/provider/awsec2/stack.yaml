@@ -201,6 +201,14 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:ResourceTag/cloudsourced.kind: machine
+              # Spot machines: cancel their persistent request first, or it
+              # relaunches the terminated instance.
+              - Effect: Allow
+                Action: ec2:CancelSpotInstanceRequests
+                Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:spot-instances-request/*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/cloudsourced.kind: machine
               # Orphaned machine secrets (host agents delete theirs after
               # reading; these are left by machines that never booted).
               - Effect: Allow
@@ -242,7 +250,7 @@ Resources:
 
 
           def machines(ec2):
-              """Return (instance id, tags) of every live machine."""
+              """Return (instance id, tags, spot request id) of every live machine."""
               out = []
               pages = ec2.get_paginator("describe_instances").paginate(Filters=[
                   {"Name": "tag:cloudsourced.kind", "Values": ["machine"]},
@@ -252,7 +260,7 @@ Resources:
                   for r in page["Reservations"]:
                       for i in r["Instances"]:
                           tags = {t["Key"]: t["Value"] for t in i.get("Tags", [])}
-                          out.append((i["InstanceId"], tags))
+                          out.append((i["InstanceId"], tags, i.get("SpotInstanceRequestId")))
               return out
 
 
@@ -281,12 +289,17 @@ Resources:
           def handler(event, context, ec2=None, ssm=None, now=None):
               ec2 = ec2 or boto3.client("ec2")
               now = time.time() if now is None else now
-              doomed, alive = [], set()
-              for instance_id, tags in machines(ec2):
+              doomed, alive, requests = [], set(), []
+              for instance_id, tags, request in machines(ec2):
                   if expired(tags, now):
                       doomed.append(instance_id)
+                      if request:
+                          requests.append(request)
                   elif tags.get("cloudsourced.machine"):
                       alive.add(tags["cloudsourced.machine"])
+              # A persistent spot request would relaunch its terminated instance.
+              for k in range(0, len(requests), 50):
+                  ec2.cancel_spot_instance_requests(SpotInstanceRequestIds=requests[k:k + 50])
               for k in range(0, len(doomed), 50):
                   ec2.terminate_instances(InstanceIds=doomed[k:k + 50])
               deleted = []
@@ -344,7 +357,7 @@ Resources:
 
 Outputs:
   TemplateVersion:
-    Value: "5"
+    Value: "6"
   SecurityGroupId:
     Value: !Ref MachineSecurityGroup
   InstanceProfileArn:
