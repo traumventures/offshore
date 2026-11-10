@@ -79,10 +79,12 @@ http_service() { run sh -c 'for i in $(seq 50); do bash -c "exec 3<>/dev/tcp/127
 
 cleanup() {
   step "cleanup"
-  cs outputs unmount >/dev/null 2>&1 || true
-  cs down >/dev/null 2>&1 || true
-  cs daemon stop >/dev/null 2>&1 || true
-  stop_cp
+  # timed STEP CMD...: runs a teardown step and reports slow ones.
+  timed() { local t=$SECONDS; "$@" >/dev/null 2>&1; [ $((SECONDS - t)) -ge 5 ] && echo "     ($* took $((SECONDS - t))s)"; return 0; }
+  timed cs outputs unmount
+  timed cs down
+  timed cs daemon stop
+  timed stop_cp
   local left
   left="$(docker_ ps -aq --filter "label=cloudsourced.owner=$OWNER" | wc -l)"
   left=$((left + $(docker_ volume ls -q --filter "label=cloudsourced.owner=$OWNER" | wc -l)))
