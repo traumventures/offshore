@@ -16,8 +16,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/traumventures/cloudsourced/internal/image"
 	"github.com/traumventures/cloudsourced/internal/machine"
 	"github.com/traumventures/cloudsourced/internal/provider"
 )
@@ -52,7 +54,12 @@ type Docker struct {
 	Command []string // docker CLI invocation
 	Host    string   // address of published ports
 	Binary  string   // static cloudsourced binary mounted into machines
+
+	builderOnce sync.Once
+	builder     *image.DockerBuilder
 }
+
+var _ provider.ImageHost = (*Docker)(nil)
 
 func (d *Docker) Name() string { return "local-docker" }
 
@@ -69,9 +76,6 @@ func (d *Docker) run(ctx context.Context, stdout io.Writer, args ...string) erro
 		cmd.Stdout = io.Discard
 	}
 	cmd.Stderr = &stderr
-	if lw, ok := stdout.(interface{ IsLog() bool }); ok && lw.IsLog() {
-		cmd.Stderr = stdout
-	}
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
@@ -88,26 +92,16 @@ func (d *Docker) output(ctx context.Context, args ...string) ([]byte, error) {
 	return out.Bytes(), err
 }
 
-// logWriter marks a writer that should also receive stderr.
-type logWriter struct{ io.Writer }
+// ImagePlatform is the platform of the local Docker daemon.
+func (d *Docker) ImagePlatform(string) image.Platform { return image.Native() }
 
-func (logWriter) IsLog() bool { return true }
+// ImageRegistry is the local daemon itself: machines run local images.
+func (d *Docker) ImageRegistry() image.Registry { return image.DockerDaemon{CLI: d.Command} }
 
-// EnsureImage builds the environment image unless it already exists.
-func (d *Docker) EnsureImage(ctx context.Context, img provider.ImageSpec, log io.Writer) error {
-	if _, err := d.output(ctx, "image", "inspect", "--format", "{{.Id}}", img.Tag); err == nil {
-		return nil
-	}
-	if img.BaseTag != "" {
-		if _, err := d.output(ctx, "image", "inspect", "--format", "{{.Id}}", img.BaseTag); err != nil {
-			fmt.Fprintf(log, "building base image %s\n", img.BaseTag)
-			if err := d.run(ctx, logWriter{log}, "build", "-t", img.BaseTag, "-f", img.BaseFile, img.BaseDir); err != nil {
-				return err
-			}
-		}
-	}
-	fmt.Fprintf(log, "building environment image %s\n", img.Tag)
-	return d.run(ctx, logWriter{log}, "build", "-t", img.Tag, "-f", img.Dockerfile, img.ContextDir)
+// ImageBuilder builds with the provider's Docker CLI.
+func (d *Docker) ImageBuilder() image.Builder {
+	d.builderOnce.Do(func() { d.builder = &image.DockerBuilder{CLI: d.Command} })
+	return d.builder
 }
 
 func labels(kv map[string]string) []string {

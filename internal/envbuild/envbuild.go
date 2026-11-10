@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/cloudsourced/internal/image"
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/provider"
 )
@@ -64,7 +65,13 @@ func Resolve(r *config.Repo) (*Plan, error) {
 		p.baseTag = "cloudsourced-base:" + h[:16]
 		from = p.baseTag
 	}
-	fmt.Fprintf(&df, "FROM %s\n", from)
+	if p.baseTag != "" {
+		// The image pipeline substitutes the base built for another
+		// platform through this argument.
+		fmt.Fprintf(&df, "ARG %s=%s\nFROM ${%s}\n", image.BaseArg, from, image.BaseArg)
+	} else {
+		fmt.Fprintf(&df, "FROM %s\n", from)
+	}
 	df.WriteString("SHELL [\"/bin/sh\", \"-ec\"]\n")
 	pk := append([]string{}, env.Packages.Apt...)
 	if env.Linker == config.LinkerLLD && !slices.Contains(pk, "lld") {
