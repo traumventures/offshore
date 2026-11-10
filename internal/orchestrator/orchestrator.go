@@ -256,9 +256,11 @@ type Orchestrator struct {
 	// ProbeFunc fetches a server status; replaceable in tests.
 	ProbeFunc func(ctx context.Context, addr, fingerprint, token string) (proto.Status, error)
 
-	// EnsureImage makes the environment image available on a provider
-	// before a machine is created there (nil: images are assumed present).
-	EnsureImage func(ctx context.Context, prov provider.Provider, envHash string) error
+	// PrepareImage makes the environment image available on a provider
+	// right before a machine of the given size is created there and returns
+	// the reference the machine runs (nil, or an empty reference: the image
+	// is assumed present under the environment's tag).
+	PrepareImage func(ctx context.Context, provName string, prov provider.Provider, envHash, size string) (string, error)
 
 	metrics *orchMetrics
 }
@@ -998,12 +1000,16 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	if !ok {
 		return fmt.Errorf("size %s: unknown provider %q", size.Name, size.Provider)
 	}
-	if o.EnsureImage != nil {
-		if err := o.EnsureImage(ctx, prov, envHash); err != nil {
+	if o.PrepareImage != nil {
+		ref, err := o.PrepareImage(ctx, size.Provider, prov, envHash, size.Name)
+		if err != nil {
 			return err
 		}
+		if ref != "" {
+			spec.Image = ref
+		}
 	}
-	o.log.Info("creating machine", "id", id, "provider", size.Provider, "size", size.Name, "env", envHash[:min(12, len(envHash))], "image", image)
+	o.log.Info("creating machine", "id", id, "provider", size.Provider, "size", size.Name, "env", envHash[:min(12, len(envHash))], "image", spec.Image)
 	m, err := prov.Create(ctx, spec)
 	if err != nil {
 		return o.provErr(size.Provider, "create", err)

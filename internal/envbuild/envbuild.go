@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/cloudsourced/internal/image"
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/provider"
 )
@@ -31,9 +32,6 @@ type Plan struct {
 	Tag        string
 	Dockerfile string
 	Services   []provider.Service
-	// Platform is the image platform of the repository's architecture
-	// (resources.arch), e.g. "linux/arm64".
-	Platform string
 	files    map[string]string // context path -> source file
 	tools    map[string]tool   // context path -> pinned release binary
 	baseDir  string
@@ -44,7 +42,7 @@ type Plan struct {
 // Resolve computes the environment hash and Dockerfile for a repository.
 func Resolve(r *config.Repo) (*Plan, error) {
 	env := r.Environment
-	p := &Plan{files: map[string]string{}, tools: map[string]tool{}, Platform: Platform(r.Resources.Arch)}
+	p := &Plan{files: map[string]string{}, tools: map[string]tool{}}
 	var hashParts []string
 	add := func(s string) { hashParts = append(hashParts, s) }
 	add("generator=" + generatorVersion)
@@ -67,7 +65,13 @@ func Resolve(r *config.Repo) (*Plan, error) {
 		p.baseTag = "cloudsourced-base:" + h[:16]
 		from = p.baseTag
 	}
-	fmt.Fprintf(&df, "FROM %s\n", from)
+	if p.baseTag != "" {
+		// The image pipeline substitutes the base built for another
+		// platform through this argument.
+		fmt.Fprintf(&df, "ARG %s=%s\nFROM ${%s}\n", image.BaseArg, from, image.BaseArg)
+	} else {
+		fmt.Fprintf(&df, "FROM %s\n", from)
+	}
 	df.WriteString("SHELL [\"/bin/sh\", \"-ec\"]\n")
 	pk := append([]string{}, env.Packages.Apt...)
 	if env.Linker == config.LinkerLLD && !slices.Contains(pk, "lld") {
@@ -219,17 +223,8 @@ func (p *Plan) Context() (provider.ImageSpec, string, error) {
 	}
 	return provider.ImageSpec{
 		Tag: p.Tag, ContextDir: dir, Dockerfile: df,
-		BaseTag: p.baseTag, BaseDir: p.baseDir, BaseFile: p.baseFile, Platform: p.Platform,
+		BaseTag: p.baseTag, BaseDir: p.baseDir, BaseFile: p.baseFile,
 	}, dir, nil
-}
-
-// Platform returns the container platform of a repository architecture
-// (resources.arch "x86_64" or "aarch64").
-func Platform(arch string) string {
-	if arch == "aarch64" || arch == "arm64" {
-		return "linux/arm64"
-	}
-	return "linux/amd64"
 }
 
 func copyTree(src, dst string) error {

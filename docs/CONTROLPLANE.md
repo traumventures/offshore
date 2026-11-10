@@ -93,6 +93,26 @@ certificates). It runs as uid 10001 with `cap_net_bind_service` on the binary
 (for 443/80), state in `/var/lib/cloudsourced` (also `$HOME`, so the Docker
 CLI's registry logins persist), config `/var/lib/cloudsourced/config.toml`.
 
+### Environment images
+
+The control plane builds environment images (`internal/image`): once per
+environment hash and platform, with the Docker CLI of the provider that
+needs it (local-docker `command`, aws-ec2 `docker_command`), reusing an
+existing image and Docker's layer cache. Registries receive images lazily:
+
+- local-docker machines run the image from the local daemon; it is built
+  eagerly when a client registers the environment, so the first build is
+  reported to the user right away;
+- aws-ec2 pushes to the stack's ECR repository (`<repo>:<hash>-<arch>`) right
+  before the first instance of that environment is launched; the build and
+  push are reported to the clients waiting for that machine.
+
+The registry is asked first (ECR `DescribeImages`): when it already holds
+the image, nothing is built and Docker is not called, so a control plane
+that only serves aws-ec2 and finds its images in ECR does not need Docker.
+Building a new environment does need a Docker CLI on the control plane (a
+remote builder is a possible extension).
+
 Access to the host's Docker socket is equivalent to root on the host; the
 container is unprivileged otherwise. It needs the socket's group:
 `--group-add $(stat -c %g /var/run/docker.sock)`.

@@ -22,13 +22,12 @@ type packMeta struct {
 	Dockerfile string `json:"dockerfile"` // relative to ctx/
 	BaseTag    string `json:"base_tag,omitempty"`
 	BaseFile   string `json:"base_file,omitempty"` // relative to base/
-	Platform   string `json:"platform,omitempty"`  // image platform (empty: linux/amd64)
 }
 
 // PackEnv writes the build context of spec as a gzipped tar: meta.json,
 // ctx/ (the context directory) and base/ (the optional base image context).
 func PackEnv(w io.Writer, spec provider.ImageSpec) error {
-	meta := packMeta{Tag: spec.Tag, BaseTag: spec.BaseTag, Platform: spec.Platform}
+	meta := packMeta{Tag: spec.Tag, BaseTag: spec.BaseTag}
 	var err error
 	if meta.Dockerfile, err = inside(spec.ContextDir, spec.Dockerfile); err != nil {
 		return err
@@ -183,7 +182,6 @@ func UnpackEnv(r io.Reader, dir string) (provider.ImageSpec, error) {
 		ContextDir: filepath.Join(dir, "ctx"),
 		Dockerfile: filepath.Join(dir, "ctx", filepath.FromSlash(meta.Dockerfile)),
 		BaseTag:    meta.BaseTag,
-		Platform:   meta.Platform,
 	}
 	if meta.BaseTag != "" {
 		spec.BaseDir = filepath.Join(dir, "base")

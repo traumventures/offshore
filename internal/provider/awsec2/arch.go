@@ -81,11 +81,3 @@ func amiParameter(arch string) string {
 	}
 	return "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-" + suffix
 }
-
-// imagePlatform is the container platform of an environment image.
-func imagePlatform(img provider.ImageSpec) string {
-	if img.Platform != "" {
-		return img.Platform
-	}
-	return "linux/amd64"
-}

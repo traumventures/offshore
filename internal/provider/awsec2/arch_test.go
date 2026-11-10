@@ -59,8 +59,11 @@ func TestArchSelection(t *testing.T) {
 	if k := binaryKey(archARM64, []byte("x")); !strings.HasPrefix(k, "bin/cloudsourced-linux-arm64-") || k == binaryKey(archAMD64, []byte("x")) {
 		t.Error(k)
 	}
-	if imagePlatform(provider.ImageSpec{}) != "linux/amd64" || imagePlatform(provider.ImageSpec{Platform: "linux/arm64"}) != "linux/arm64" {
-		t.Error("image platform")
+	if got := machineImage("r", provider.MachineSpec{Image: "cloudsourced-env:abc", Arch: archARM64}); got != "r:abc-arm64" {
+		t.Errorf("arm64 machine image %s", got)
+	}
+	if got := machineImage("r", provider.MachineSpec{Image: "cloudsourced-env:abc"}); got != "r:abc-amd64" {
+		t.Errorf("amd64 machine image %s", got)
 	}
 	if archOf("") != archAMD64 {
 		t.Error("default arch")
