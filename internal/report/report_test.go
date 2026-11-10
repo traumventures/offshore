@@ -156,3 +156,26 @@ func TestSimExportRoundTrip(t *testing.T) {
 		t.Fatalf("request cpu %+v", req.Jobs)
 	}
 }
+
+func TestMachineSamplesAndContention(t *testing.T) {
+	t0 := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	capa := &scheduler.Resources{CPU: 8, Memory: 16 << 30}
+	sample := func(min int, busy float64, sessions int) events.Event {
+		return events.Event{Time: t0.Add(time.Duration(min) * time.Minute), Type: events.MachineSample, Machine: "m", Provider: "aws", Size: "x8",
+			Capacity: capa, Reserved: &scheduler.Resources{CPU: 4}, Used: &scheduler.Resources{CPU: busy, Memory: 4 << 30},
+			Pressure: &scheduler.Pressure{CPU: 0.1}, Sessions: sessions}
+	}
+	evs := []events.Event{sample(1, 8, 2), sample(2, 4, 1), sample(3, 0, 0),
+		{Time: t0.Add(4 * time.Minute), Type: events.TaskEnd, Usage: &scheduler.Usage{Wall: 100 * time.Second, CPUStall: 25}}}
+	r := Compute(evs, t0, t0.Add(time.Hour))
+	if len(r.Samples) != 1 {
+		t.Fatalf("samples %+v", r.Samples)
+	}
+	s := r.Samples[0]
+	if s.Size != "aws/x8" || s.Samples != 3 || s.BusyCPUMean != 0.5 || s.SessionsMax != 2 || s.ReservedCPU != 0.5 || s.MemoryMean != 0.25 {
+		t.Fatalf("%+v", s)
+	}
+	if r.CPUStallShare != 0.25 {
+		t.Fatalf("stall %v", r.CPUStallShare)
+	}
+}

@@ -42,7 +42,14 @@ const (
 	// MachineState: a state change observed from the provider (e.g. a
 	// machine stopped itself when idle, or disappeared).
 	MachineState = "machine_state"
+	// MachineSample: periodic utilisation of a running machine (every
+	// SampleInterval): reservations, measured usage
+	// (busy cores, session memory), pressure and session count.
+	MachineSample = "machine_sample"
 )
+
+// SampleInterval is how often a running machine is sampled.
+const SampleInterval = 10 * time.Second
 
 // Event is one line of the log. Zero fields are omitted.
 type Event struct {
@@ -76,6 +83,12 @@ type Event struct {
 	// LatencyMs is the provider call duration of a machine action.
 	LatencyMs int64  `json:"latency_ms,omitempty"`
 	Error     string `json:"error,omitempty"`
+
+	// MachineSample fields.
+	Reserved *scheduler.Resources `json:"reserved,omitempty"` // sum of session reservations
+	Used     *scheduler.Resources `json:"used,omitempty"`     // busy cores, memory of sessions
+	Pressure *scheduler.Pressure  `json:"pressure,omitempty"` // PSI some avg10, 0..1
+	Sessions int                  `json:"sessions,omitempty"`
 
 	// TraceID correlates the event with a distributed trace.
 	TraceID string `json:"trace_id,omitempty"`

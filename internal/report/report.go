@@ -36,6 +36,29 @@ type Report struct {
 	QueueWait    Wait        `json:"queue_wait"`
 	Cache        Cache       `json:"cache"`
 	Estimator    Accuracy    `json:"estimator"`
+	// Samples summarises machine_sample events per size: how busy machines
+	// really were over time.
+	Samples []SizeSamples `json:"samples,omitempty"`
+	// Contention is the share of session wall time in which a session
+	// waited for CPU (or memory): the price of overcommit and neighbours.
+	CPUStallShare    float64 `json:"cpu_stall_share"`
+	MemoryStallShare float64 `json:"memory_stall_share"`
+}
+
+// SizeSamples aggregates the utilisation samples of machines of one size.
+// Busy and reserved are fractions of capacity; pressure is PSI some avg10.
+type SizeSamples struct {
+	Size        string  `json:"size"`
+	Samples     int     `json:"samples"` // one per machine and SampleInterval
+	BusyCPUMean float64 `json:"busy_cpu_mean"`
+	BusyCPUP95  float64 `json:"busy_cpu_p95"`
+	ReservedCPU float64 `json:"reserved_cpu_mean"`
+	MemoryMean  float64 `json:"memory_mean"`
+	MemoryP95   float64 `json:"memory_p95"`
+	SessionsMax int     `json:"sessions_max"`
+	IdleShare   float64 `json:"idle_share"` // samples without sessions
+	CPUPressP95 float64 `json:"cpu_pressure_p95"`
+	MemPressP95 float64 `json:"memory_pressure_p95"`
 }
 
 // Cost is machine-hours × price. Machine cost is attributed to the tasks
@@ -322,6 +345,16 @@ func Compute(evs []events.Event, from, to time.Time) Report {
 	r.Cost.ByDay = sorted(byDay, false)
 	r.Cost.BySize = sorted(bySize, true)
 	r.Cost.ByRepo = sorted(byRepo, true)
+	r.Samples = sampleStats(evs, from, to)
+	var wall, cpuStall, memStall float64
+	for _, ev := range evs {
+		if ev.Type == events.TaskEnd && ev.Usage != nil && !ev.Time.Before(from) && !ev.Time.After(to) {
+			wall += ev.Usage.Wall.Seconds()
+			cpuStall += ev.Usage.CPUStall
+			memStall += ev.Usage.MemoryStall
+		}
+	}
+	r.CPUStallShare, r.MemoryStallShare = div(cpuStall, wall), div(memStall, wall)
 	ut := &r.Utilisation
 	ut.ReservedCPU = div(ut.ReservedCPUHours, ut.CapacityCPUHours)
 	ut.ReservedMemory = div(ut.ReservedMemGiBH, ut.CapacityMemGiBH)
@@ -354,6 +387,62 @@ func Compute(evs []events.Event, from, to time.Time) Report {
 		r.Estimator.CPURatio = sum / float64(n)
 	}
 	return r
+}
+
+// sampleStats summarises machine_sample events per size.
+func sampleStats(evs []events.Event, from, to time.Time) []SizeSamples {
+	type acc struct {
+		busy, res, mem, cpuP, memP []float64
+		idle, maxS                 int
+	}
+	by := map[string]*acc{}
+	for _, ev := range evs {
+		if ev.Type != events.MachineSample || ev.Capacity == nil || ev.Used == nil || ev.Time.Before(from) || ev.Time.After(to) {
+			continue
+		}
+		key := ev.Provider + "/" + ev.Size
+		a := by[key]
+		if a == nil {
+			a = &acc{}
+			by[key] = a
+		}
+		c := ev.Capacity
+		a.busy = append(a.busy, div(ev.Used.CPU, c.CPU))
+		a.mem = append(a.mem, div(float64(ev.Used.Memory), float64(c.Memory)))
+		if ev.Reserved != nil {
+			a.res = append(a.res, div(ev.Reserved.CPU, c.CPU))
+		}
+		if ev.Pressure != nil {
+			a.cpuP = append(a.cpuP, ev.Pressure.CPU)
+			a.memP = append(a.memP, ev.Pressure.Memory)
+		}
+		if ev.Sessions == 0 {
+			a.idle++
+		}
+		a.maxS = max(a.maxS, ev.Sessions)
+	}
+	mean := func(xs []float64) float64 {
+		s := 0.0
+		for _, x := range xs {
+			s += x
+		}
+		return div(s, float64(len(xs)))
+	}
+	p95 := func(xs []float64) float64 {
+		ys := append([]float64(nil), xs...)
+		sort.Float64s(ys)
+		return percentile(ys, 0.95)
+	}
+	var out []SizeSamples
+	for k, a := range by {
+		out = append(out, SizeSamples{
+			Size: k, Samples: len(a.busy), BusyCPUMean: mean(a.busy), BusyCPUP95: p95(a.busy),
+			ReservedCPU: mean(a.res), MemoryMean: mean(a.mem), MemoryP95: p95(a.mem), SessionsMax: a.maxS,
+			IdleShare: div(float64(a.idle), float64(len(a.busy))), CPUPressP95: p95(a.cpuP), MemPressP95: p95(a.memP),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Size < out[j].Size })
+	return out
 }
 
 func div(a, b float64) float64 {
@@ -430,6 +519,18 @@ func (r Report) Write(w io.Writer) {
 		100*u.ReservedCPU, 100*u.ReservedMemory, 100*u.UsedCPU)
 	fmt.Fprintf(w, "overprovisioning: %.0f%% of reserved CPU and %.0f%% of reserved memory unused (%.1f session-hours)\n",
 		100*u.OverprovisionCPU, 100*u.OverprovisionMem, u.SessionHours)
+	fmt.Fprintf(w, "contention: sessions waited for CPU %.0f%%, for memory %.0f%% of their wall time\n",
+		100*r.CPUStallShare, 100*r.MemoryStallShare)
+	if len(r.Samples) > 0 {
+		fmt.Fprintln(w, "\nmachine samples (every 10 s, fraction of capacity)")
+		tw := tabwriter.NewWriter(w, 2, 2, 2, ' ', 0)
+		fmt.Fprintln(tw, "  SIZE\tSAMPLES\tBUSY CPU mean/p95\tRESERVED CPU\tMEMORY mean/p95\tIDLE\tMAX SESSIONS\tPSI CPU/MEM p95")
+		for _, s := range r.Samples {
+			fmt.Fprintf(tw, "  %s\t%d\t%.0f%% / %.0f%%\t%.0f%%\t%.0f%% / %.0f%%\t%.0f%%\t%d\t%.2f / %.2f\n", s.Size, s.Samples,
+				100*s.BusyCPUMean, 100*s.BusyCPUP95, 100*s.ReservedCPU, 100*s.MemoryMean, 100*s.MemoryP95, 100*s.IdleShare, s.SessionsMax, s.CPUPressP95, s.MemPressP95)
+		}
+		tw.Flush()
+	}
 	var pl []string
 	for k, n := range r.Placements {
 		pl = append(pl, fmt.Sprintf("%s %d", k, n))

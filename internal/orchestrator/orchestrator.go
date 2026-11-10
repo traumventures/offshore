@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/traumventures/cloudsourced/internal/auth"
+	"github.com/traumventures/cloudsourced/internal/events"
 	"github.com/traumventures/cloudsourced/internal/logs"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
@@ -149,7 +150,9 @@ type Machine struct {
 	Provider string // name of the provider instance
 	Status   *proto.Status
 	StatusAt time.Time
-	Draining bool
+	// sampledAt is when the last machine_sample event was written.
+	sampledAt time.Time
+	Draining  bool
 	// PricePerHour comes from the pool size of the machine (0: unknown).
 	PricePerHour float64
 	// Uptime lists the periods in which the machine was observed starting
@@ -555,6 +558,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		}
 		m.Status = r.status
 		m.StatusAt = time.Now()
+		o.sampleLocked(r.id, m)
 	}
 	// The data is as old as the listing, not as the end of the probes:
 	// a session that ended while a slow refresh ran is not in it.
@@ -562,6 +566,66 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 	o.notify()
 	o.mu.Unlock()
 	return nil
+}
+
+// sampleLocked writes a machine_sample event from the machine's current
+// status, at most every events.SampleInterval.
+func (o *Orchestrator) sampleLocked(id string, m *Machine) {
+	st := m.Status
+	if st == nil || !st.Ready || m.StatusAt.Sub(m.sampledAt) < events.SampleInterval-time.Second {
+		return
+	}
+	m.sampledAt = m.StatusAt
+	ev := o.machineEventLocked(events.MachineSample, id)
+	ev.Reserved = &scheduler.Resources{CPU: st.UsedCPU, Memory: st.UsedMemory}
+	used, pr := st.Measured, st.Pressure
+	ev.Used, ev.Pressure, ev.Sessions = &used, &pr, len(st.Sessions)
+	o.obs.log.Append(ev)
+}
+
+// Sample probes the running machines (no provider listing) to refresh
+// their status and write machine_sample events. It runs every
+// events.SampleInterval, more often than the reconcile loop.
+func (o *Orchestrator) Sample(ctx context.Context) {
+	type target struct{ id, addr, fp, token string }
+	var ts []target
+	o.mu.Lock()
+	for id, m := range o.machines {
+		if m.State == provider.Running && m.Addr != "" {
+			ts = append(ts, target{id, m.Addr, m.Fingerprint, o.probeToken(id)})
+		}
+	}
+	o.mu.Unlock()
+	type result struct {
+		id string
+		st proto.Status
+	}
+	results := make(chan result, len(ts))
+	var wg sync.WaitGroup
+	for _, t := range ts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pctx, cancel := context.WithTimeout(ctx, ProbeTimeout)
+			defer cancel()
+			if st, err := o.ProbeFunc(pctx, t.addr, t.fp, t.token); err == nil {
+				results <- result{t.id, st}
+			}
+		}()
+	}
+	wg.Wait()
+	close(results)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for r := range results {
+		m, ok := o.machines[r.id]
+		if !ok || m.State != provider.Running {
+			continue
+		}
+		st := r.st
+		m.Status, m.StatusAt = &st, time.Now()
+		o.sampleLocked(r.id, m)
+	}
 }
 
 type taggedMachine struct {
