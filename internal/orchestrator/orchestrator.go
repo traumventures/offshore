@@ -61,6 +61,12 @@ type Lease struct {
 	// MemoryOvercommit is the fleet's memory overcommit factor; the server
 	// uses it as admission safety net.
 	MemoryOvercommit float64
+	// Provider, Size and PricePerHour describe the leased machine; Reason
+	// is the policy's placement reason (shown by `cloudsourced why`).
+	Provider     string
+	Size         string
+	PricePerHour float64
+	Reason       string
 }
 
 // Machine is the orchestrator view of a machine.
@@ -71,7 +77,71 @@ type Machine struct {
 	Status   *proto.Status
 	StatusAt time.Time
 	Draining bool
+	// PricePerHour comes from the fleet size of the machine (0: unknown).
+	PricePerHour float64
+	// Uptime lists the periods in which the machine was observed starting
+	// or running (the last one is open while it is up). It is kept in
+	// memory for about two days. A machine first seen up counts from its
+	// CreatedAt, so restarts before the orchestrator started are not
+	// visible; see UpTime.
+	Uptime []Span
+	// Removed is when a destroyed machine disappeared; such machines are
+	// listed for cost accounting only.
+	Removed  time.Time
+	observed bool
 	pending  map[string]pendingLease
+}
+
+// Span is a period of machine uptime. End is zero while the period lasts.
+type Span struct {
+	Start time.Time
+	End   time.Time
+}
+
+// historyKeep bounds the uptime history of machines.
+const historyKeep = 48 * time.Hour
+
+// observe records state transitions of the machine into its uptime.
+func (m *Machine) observe(now time.Time) {
+	up := m.State == provider.Running || m.State == provider.Starting
+	open := len(m.Uptime) > 0 && m.Uptime[len(m.Uptime)-1].End.IsZero()
+	switch {
+	case up && !open:
+		start := now
+		if !m.observed && !m.CreatedAt.IsZero() && m.CreatedAt.Before(now) {
+			start = m.CreatedAt
+		}
+		m.Uptime = append(m.Uptime, Span{Start: start})
+	case !up && open:
+		m.Uptime[len(m.Uptime)-1].End = now
+	}
+	m.observed = true
+	for len(m.Uptime) > 0 && !m.Uptime[0].End.IsZero() && now.Sub(m.Uptime[0].End) > historyKeep {
+		m.Uptime = m.Uptime[1:]
+	}
+}
+
+// UpTime returns how long the machine was up between from and now.
+func (m *Machine) UpTime(from, now time.Time) time.Duration {
+	var d time.Duration
+	for _, sp := range m.Uptime {
+		start, end := sp.Start, sp.End
+		if end.IsZero() || end.After(now) {
+			end = now
+		}
+		if start.Before(from) {
+			start = from
+		}
+		if end.After(start) {
+			d += end.Sub(start)
+		}
+	}
+	return d
+}
+
+// Cost returns the estimated cost of the machine's uptime since from.
+func (m *Machine) Cost(from, now time.Time) float64 {
+	return m.PricePerHour * m.UpTime(from, now).Hours()
 }
 
 type pendingLease struct {
@@ -107,6 +177,7 @@ type Orchestrator struct {
 	queue      map[string]scheduler.Task // waiting tasks
 	recentEnvs map[string]time.Time      // env hash -> last use (warm pool)
 	images     map[string]string         // env hash -> image
+	removed    []*Machine                // destroyed machines (cost history)
 	services   map[string][]provider.Service
 	changed    chan struct{}
 
@@ -269,6 +340,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 			pm.State = provider.Starting
 		}
 		m.Machine = pm
+		m.observe(time.Now())
 		if pm.State != provider.Running {
 			m.Status = nil
 		}
@@ -287,7 +359,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 	}
 	for id := range o.machines {
 		if !seen[id] && o.machines[id].State != provider.Starting {
-			delete(o.machines, id)
+			o.removeLocked(id)
 			down = append(down, id)
 		}
 	}
@@ -476,7 +548,9 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 		switch pl.Kind {
 		case scheduler.Assign:
 			m := o.machines[pl.Machine]
-			lease := Lease{ID: task.ID, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: m.Token, Grant: pl.Grant, MemoryOvercommit: o.cfg.Policy.MemoryOvercommit}
+			size := m.Labels[provider.LabelSize]
+			lease := Lease{ID: task.ID, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: m.Token, Grant: pl.Grant, MemoryOvercommit: o.cfg.Policy.MemoryOvercommit,
+				Provider: m.Provider, Size: size, PricePerHour: o.priceLocked(m.Provider, size), Reason: pl.Reason}
 			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: time.Now().Add(2 * time.Minute)}
 			o.mu.Unlock()
 			return lease, nil
@@ -544,6 +618,7 @@ func (o *Orchestrator) markLocked(acts []scheduler.Action) {
 		case scheduler.Start:
 			if m, ok := o.machines[a.Machine]; ok {
 				m.State = provider.Starting
+				m.observe(time.Now())
 				m.Status = nil
 				o.creating[a.Machine] = creation{prov: m.Provider, env: m.EnvHash, at: time.Now()}
 			}
@@ -628,7 +703,7 @@ func (o *Orchestrator) destroyMachine(ctx context.Context, id, reason string) {
 	}
 	os.Remove(o.secretPath(id))
 	o.mu.Lock()
-	delete(o.machines, id)
+	o.removeLocked(id)
 	o.mu.Unlock()
 }
 
@@ -636,6 +711,7 @@ func (o *Orchestrator) setState(id string, st provider.State) {
 	o.mu.Lock()
 	if m, ok := o.machines[id]; ok {
 		m.State = st
+		m.observe(time.Now())
 		m.Status = nil
 		m.Addr = ""
 	}
@@ -738,7 +814,9 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 		return err
 	}
 	o.mu.Lock()
-	o.machines[id] = &Machine{Machine: m, Provider: size.Provider, Token: token, pending: map[string]pendingLease{}}
+	nm := &Machine{Machine: m, Provider: size.Provider, Token: token, pending: map[string]pendingLease{}}
+	nm.observe(time.Now())
+	o.machines[id] = nm
 	o.mu.Unlock()
 	return o.waitReady(ctx, id)
 }
@@ -764,6 +842,7 @@ func (o *Orchestrator) startMachine(ctx context.Context, id string) {
 	o.mu.Lock()
 	if mm, ok := o.machines[id]; ok {
 		mm.Machine = m
+		mm.observe(time.Now())
 		mm.Status = nil
 		mm.Draining = false
 	}
@@ -815,6 +894,7 @@ func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 				m := o.machines[id]
 				if m != nil {
 					m.Machine = pm
+					m.observe(time.Now())
 				}
 				token := ""
 				if m != nil {
@@ -854,14 +934,58 @@ func (o *Orchestrator) Snapshot() []Machine {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	var out []Machine
+	now := time.Now()
 	for _, m := range o.machines {
+		m.observe(now)
 		c := *m
 		c.Token = ""
 		c.pending = nil
+		c.Uptime = append([]Span(nil), m.Uptime...)
+		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize])
 		out = append(out, c)
 	}
+	kept := o.removed[:0]
+	for _, m := range o.removed {
+		if now.Sub(m.Removed) > historyKeep {
+			continue
+		}
+		kept = append(kept, m)
+		c := *m
+		c.Uptime = append([]Span(nil), m.Uptime...)
+		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize])
+		out = append(out, c)
+	}
+	o.removed = kept
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out
+}
+
+// priceLocked returns the hourly price of a fleet size (0: unknown).
+func (o *Orchestrator) priceLocked(prov, size string) float64 {
+	for _, sz := range o.cfg.Sizes {
+		if sz.Name == size && (sz.Provider == prov || sz.Provider == "") {
+			return sz.PricePerHour
+		}
+	}
+	return 0
+}
+
+// removeLocked forgets a machine that no longer exists, keeping its uptime
+// for cost accounting.
+func (o *Orchestrator) removeLocked(id string) {
+	m, ok := o.machines[id]
+	if !ok {
+		return
+	}
+	delete(o.machines, id)
+	now := time.Now()
+	m.State = provider.Failed
+	m.observe(now)
+	m.Removed = now
+	m.Status, m.Token, m.pending, m.Addr = nil, "", nil, ""
+	if len(m.Uptime) > 0 {
+		o.removed = append(o.removed, m)
+	}
 }
 
 // Reconcile enforces hard invariants (expired and failed machines are
@@ -962,6 +1086,9 @@ func (o *Orchestrator) DestroyAll(ctx context.Context) error {
 		}
 	}
 	o.mu.Lock()
+	for id := range o.machines {
+		o.removeLocked(id)
+	}
 	o.machines = map[string]*Machine{}
 	o.recentEnvs = map[string]time.Time{}
 	o.saveRecentLocked()
