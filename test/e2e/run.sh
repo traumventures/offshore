@@ -304,11 +304,11 @@ check "proc-macro library loads locally (dlopen)" python3 -c 'import ctypes, sys
 out="$(cd "$PROJ" && cs editor --mode lsp-remote vscode 2>&1)"
 check "editor lsp-remote routes checks through the proxy" contains "$out" '"rust-analyzer.cargo.buildScripts.overrideCommand": ["'
 if RA="$(cd "$PROJ" && rustup which rust-analyzer 2>/dev/null)" && [ -x "$RA" ]; then
-  # rust-analyzer runs locally; every cargo call goes through the proxy, the
-  # proc macro built remotely is loaded from the mount.
-  out="$(cd "$PROJ" && CARGO="$CLOUDSOURCED_SHIM_DIR/cargo" PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" timeout 300 "$RA" analysis-stats . 2>&1)"
-  # Greeter::NAME only has a type if the derive was expanded.
-  check "rust-analyzer expands the remote proc macro (all expression types known)" contains "$(echo "$out" | grep 'exprs:' | tail -1)" "??ty: 0 "
+  # rust-analyzer runs locally with the lsp-remote settings: checks and build
+  # scripts go through the proxy, the proc macro built remotely is loaded
+  # from the mount. The type of Greeter::NAME.len() needs the expanded derive.
+  out="$(python3 "$HERE/ra_lsp.py" "$RA" "$PROJ" "[\"$BIN\",\"run\",\"cargo\",\"check\",\"--workspace\",\"--all-targets\",\"--message-format=json\"]" 2>&1)"
+  check "rust-analyzer (LSP, lsp-remote settings) expands the remote proc macro" contains "$out" "let _len: usize"
 else
   echo "     (rust-analyzer for the remote toolchain not installed locally: skipped)"
 fi

@@ -230,6 +230,7 @@ cloudsourced status                 # machines, sessions, cost today (--json)
 cloudsourced why                    # last run: local/remote and why, machine,
                                     # placement, timings, usage (N, list, --json)
 cloudsourced fetch 'target/debug/deps/*.so'   # lazy outputs
+cloudsourced outputs mount          # or browse target/ of the remote build
 cloudsourced down                   # destroy machines and caches
 ```
 
@@ -255,13 +256,54 @@ time; restarts and removals that happened while the daemon or control plane
 was not running are not visible, and provider billing granularity is
 ignored.
 
+### Output FUSE
+
+By default only `eager` outputs come back after a run; `cloudsourced fetch`
+copies others on request. With the output FUSE the remote build directories
+(`[cache.build] paths`, e.g. `target/`) appear at their local path:
+
+```sh
+cloudsourced outputs mount      # or [outputs] mode = "fuse" in .cloudsourced.toml
+cloudsourced outputs status
+cloudsourced outputs unmount
+```
+
+- The mount is a read-only overlay over the local `target/` (owned by the
+  daemon, mounted with `fusermount3`). Entries of the latest remote build win;
+  local files that do not exist remotely (earlier local builds, fetched
+  files) stay visible. Nothing below the mount point is modified, it is all
+  there again after `unmount`. Local `cargo` cannot write into the mount
+  (`EROFS`); unmount before building locally.
+- Directories are listed on first access from the machine of the latest
+  build, file contents are downloaded whole on first open into a local content
+  cache (`$STATE/outputs/cas`, keyed by BLAKE3) and reused as long as path,
+  size and mtime are unchanged. Every remote run starts a new generation:
+  listings and kernel caches are dropped, unchanged contents are kept.
+- Eager outputs inside a mounted directory are stored in the content cache
+  instead of being written below the mount point, so they are served
+  without the machine.
+- When the machine is stopped or gone, cached listings and contents are
+  still served; uncached files fail with `EIO`, uncached directories fall
+  back to the local directory, and the daemon log says which machine was
+  unreachable. The machine is not asked again for 20 s.
+- The mount survives daemon restarts (state in `$STATE/outputs/state.json`).
+
 ### rust-analyzer
 
 `cloudsourced editor vscode` (or `zed`, `neovim`) prints settings that run
 flycheck and build scripts through the proxy. rust-analyzer stays local;
 because paths are identical, diagnostics need no rewriting. Proc-macro
-libraries and build script outputs are returned via eager outputs
-(`target/debug/deps/*.so`, `target/debug/build/*/out/**`).
+libraries and build script outputs must be available locally:
+
+- `--mode local` (default): via eager outputs
+  (`target/debug/deps/*.so`, `target/debug/build/*/out/**`).
+- `--mode lsp-remote` (or `[editor] rust_analyzer = "lsp-remote"`): via the
+  output FUSE, which the command mounts. The paths rust-analyzer gets from
+  the remote `cargo check --message-format=json` (proc-macro `.so`, `OUT_DIR`)
+  resolve inside the mount. `cargo metadata` stays local (dependency sources
+  must exist locally). The local toolchain must match the remote one
+  (`rust-toolchain.toml`), otherwise rust-analyzer's proc-macro server
+  rejects the libraries.
 
 ## Development
 
