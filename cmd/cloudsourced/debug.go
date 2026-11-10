@@ -55,7 +55,10 @@ func debugCmd(args []string) error {
 		if len(args) != 4 {
 			return errors.New("usage: cloudsourced debug probe ADDR FINGERPRINT TOKEN")
 		}
-		st, err := orchestrator.Probe(context.Background(), args[1], args[2], args[3])
+		// A diagnostic command: wait longer than the orchestrator would.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		st, err := orchestrator.Probe(ctx, args[1], args[2], args[3])
 		if err != nil {
 			return err
 		}

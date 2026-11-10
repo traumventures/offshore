@@ -134,6 +134,7 @@ type sccacheJSON struct {
 		CacheErrors           sccacheCount `json:"cache_errors"`
 		CacheReadErrors       int64        `json:"cache_read_errors"`
 		CacheWriteErrors      int64        `json:"cache_write_errors"`
+		CacheWrites           int64        `json:"cache_writes"`
 		NonCacheableCompiling int64        `json:"non_cacheable_compilations"`
 	} `json:"stats"`
 }
@@ -151,18 +152,27 @@ func (c sccacheCount) total() (n int64) {
 
 // parseSccacheStats maps the statistics to proto.Exit.Cache counters.
 func parseSccacheStats(b []byte) (map[string]int64, error) {
+	st, _, err := parseSccacheJSON(b)
+	return st, err
+}
+
+// parseSccacheJSON returns the counters and the number of cache writes
+// still in flight (every miss is followed by exactly one write, counted
+// as a write or a write error once it finished).
+func parseSccacheJSON(b []byte) (map[string]int64, int64, error) {
 	var j sccacheJSON
 	if err := json.Unmarshal(b, &j); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	st := j.Stats
+	pending := st.CacheMisses.total() - st.CacheWrites - st.CacheWriteErrors
 	return map[string]int64{
 		"sccache_requests":      st.CompileRequests,
 		"sccache_hits":          st.CacheHits.total(),
 		"sccache_misses":        st.CacheMisses.total(),
 		"sccache_not_cacheable": st.RequestsNotCacheable + st.NonCacheableCompiling,
 		"sccache_errors":        st.CacheErrors.total() + st.CacheReadErrors + st.CacheWriteErrors,
-	}, nil
+	}, pending, nil
 }
 
 // sccacheStats reads the statistics of the session's sccache server and
@@ -171,15 +181,11 @@ func (s *Server) sccacheStats(env []string, session string) map[string]int64 {
 	if !sccacheStarted(session) {
 		return nil
 	}
-	out, err := runSccache(env, "--show-stats", "--stats-format=json")
-	var st map[string]int64
-	if err == nil {
-		st, err = parseSccacheStats(out)
-	}
+	st, err := awaitSccacheWrites(env, sccacheWriteWait)
 	if err != nil {
 		s.log.Warn("compiler cache statistics", "session", session, "err", err)
 	}
-	stopSccache(env, session)
+	runSccache(env, "--stop-server")
 	return st
 }
 
@@ -192,7 +198,32 @@ func sccacheStarted(session string) bool {
 // cgroups it might otherwise outlive the session.
 func stopSccache(env []string, session string) {
 	if sccacheStarted(session) {
+		awaitSccacheWrites(env, sccacheWriteWait)
 		runSccache(env, "--stop-server")
+	}
+}
+
+// sccacheWriteWait bounds the wait for pending cache writes at session end.
+const sccacheWriteWait = 30 * time.Second
+
+// awaitSccacheWrites polls the statistics of the session's sccache server
+// until every cache miss has been written (or failed to). sccache answers
+// a compilation before it stores the result; the session's processes are
+// killed when it ends, so without this wait a slow upload (a loaded host,
+// a remote cache) is lost and the next machine misses. It returns the last
+// statistics.
+func awaitSccacheWrites(env []string, max time.Duration) (map[string]int64, error) {
+	deadline := time.Now().Add(max)
+	for {
+		out, err := runSccache(env, "--show-stats", "--stats-format=json")
+		if err != nil {
+			return nil, err
+		}
+		st, pending, err := parseSccacheJSON(out)
+		if err != nil || pending <= 0 || time.Now().After(deadline) {
+			return st, err
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 

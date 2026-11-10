@@ -47,6 +47,14 @@ cs()   { "$BIN" "$@"; }
 sccache_hits() { local n; n="$(echo "$1" | sed -n 's/.*sccache: \([0-9]*\) hits.*/\1/p' | tail -1)"; echo "${n:-0}"; [ -n "$n" ] || echo "$1" | tail -5 | sed 's/^/       /' >&2; }
 run()  { (cd "$PROJ" && "$BIN" run "$@"); }
 docker_() { $DOCKER "$@"; }
+# freeport prints a currently free local TCP port. Fixed ports collide with
+# concurrent e2e runs on the same host.
+freeport() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
+# poll SECONDS CMD...: retry CMD (quietly) until it succeeds or the time is
+# up, then run it once more with its output (the check's diagnostics).
+# no_sessions: no machine runs a session (sessions column of cs status).
+no_sessions() { cs status | awk '/^[0-9a-f]+ / && $(NF-2) > 0 {busy=1} END {exit busy}'; }
+poll() { local end=$((SECONDS + $1)); shift; while [ $SECONDS -lt $end ]; do "$@" >/dev/null 2>&1 && return 0; sleep 1; done; "$@"; }
 
 cleanup() {
   step "cleanup"
@@ -67,6 +75,9 @@ trap 'cleanup; exit $?' EXIT
 docker_ info >/dev/null 2>&1 || { echo "docker not usable via: $DOCKER"; exit 2; }
 
 cp -r "$HERE/fixture/hello" "$PROJ"
+# Local ports of the forwarding checks, free on this host.
+FWD_ENV="$(freeport)"; FWD_SVC="$(freeport)"; FWD_BUSY="$(freeport)"
+sed -i "s/\"18092:18080\"/\"$FWD_SVC:18080\"/" "$PROJ/.cloudsourced.toml"
 echo file-secret > "$PROJ/.secret"
 RUSTV="$(docker_ run --rm rust:1-slim-bookworm rustc --version | awk '{print $2}')"
 printf '[toolchain]\nchannel = "%s"\nprofile = "minimal"\n' "$RUSTV" > "$PROJ/rust-toolchain.toml"
@@ -121,8 +132,8 @@ restart_daemon() { cs daemon stop >/dev/null; if [ -n "$REMOTE" ]; then stop_cp;
 
 if [ -n "$REMOTE" ]; then
   FLEETCFG="$WORK/cp-config.toml"
-  CPPORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
-  MPORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  CPPORT="$(freeport)"
+  MPORT="$(freeport)"
   write_config 24h 10m 0 2
   start_cp || exit 1
   FP="$(sed -n 's/.*"Fingerprint":"\([0-9a-f]*\)".*/\1/p' "$CPSTATE/tls.json")"
@@ -244,24 +255,25 @@ out="$(cd "$WORK" && PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" sh -c 'echo ${CLOUDSOUR
 check "outside a configured repo the real tool runs" eq "$out" "local"
 
 step "developer experience: port forwarding, cloudsourced why, cost in status"
-# curl_local PORT PATH: poll a forwarded local port for up to ~10s.
-curl_local() { for _ in $(seq 50); do curl -sf --max-time 2 "http://127.0.0.1:$1$2" && return 0; sleep 0.2; done; return 1; }
-(cd "$PROJ" && CLOUDSOURCED_PORTS=18091:18081 exec "$BIN" run sh -c 'busybox httpd -f -p 18081 -h /etc & sleep 8; echo dev-server-done' > "$WORK/fwd" 2>&1) & fpid=$!
-got="$(curl_local 18091 /hostname)"
+# curl_local PORT PATH: poll a forwarded local port for up to ~40s (session
+# start on a loaded host). The sessions below outlive that.
+curl_local() { for _ in $(seq 200); do curl -sf --max-time 2 "http://127.0.0.1:$1$2" && return 0; sleep 0.2; done; return 1; }
+(cd "$PROJ" && CLOUDSOURCED_PORTS=$FWD_ENV:18081 exec "$BIN" run sh -c 'busybox httpd -f -p 18081 -h /etc & sleep 20; echo dev-server-done' > "$WORK/fwd" 2>&1) & fpid=$!
+got="$(curl_local $FWD_ENV /hostname)"
 check "dev server in the session reachable on the local port (CLOUDSOURCED_PORTS)" contains "$got" "cs-"
 wait $fpid; code=$?
 check "forwarded session exits normally" eq "$code" 0
 check "forwarded session output intact" contains "$(cat "$WORK/fwd")" "dev-server-done"
-check "local port closed when the session ends" test -n "$(curl -s --max-time 2 http://127.0.0.1:18091/hostname >/dev/null || echo closed)"
-(cd "$PROJ" && exec "$BIN" run bash -c 'sleep 6' > "$WORK/fwd2" 2>&1) & fpid=$!
-got="$(curl_local 18092 /hostname)"
+check "local port closed when the session ends" test -n "$(curl -s --max-time 2 http://127.0.0.1:$FWD_ENV/hostname >/dev/null || echo closed)"
+(cd "$PROJ" && exec "$BIN" run bash -c 'sleep 20' > "$WORK/fwd2" 2>&1) & fpid=$!
+got="$(curl_local $FWD_SVC /hostname)"
 check "service reachable through [tool.bash] ports (local:remote)" contains "$got" "cs-"
 wait $fpid
-python3 -c 'import socket,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1",18093)); s.listen(); time.sleep(30)' & busypid=$!
-sleep 0.5
-out="$(cd "$PROJ" && CLOUDSOURCED_PORTS=18093 "$BIN" run sh -c 'echo still-runs' 2>&1)"; code=$?
+python3 -c 'import socket,sys,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1",int(sys.argv[1]))); s.listen(); time.sleep(300)' "$FWD_BUSY" & busypid=$!
+poll 10 sh -c "ss -ltn | grep -q '127.0.0.1:$FWD_BUSY '"
+out="$(cd "$PROJ" && CLOUDSOURCED_PORTS=$FWD_BUSY "$BIN" run sh -c 'echo still-runs' 2>&1)"; code=$?
 kill $busypid 2>/dev/null; wait $busypid 2>/dev/null
-check "busy local port: clear error" contains "$out" "local port 18093 is already in use"
+check "busy local port: clear error" contains "$out" "local port $FWD_BUSY is already in use"
 check "busy local port: run continues" eq "$code" 0
 check "busy local port: command output" contains "$out" "still-runs"
 run sh -c 'exit 3' >/dev/null 2>&1
@@ -340,6 +352,9 @@ if RA="$(cd "$PROJ" && rustup which rust-analyzer 2>/dev/null)" && [ -x "$RA" ];
   # from the mount. The type of Greeter::NAME.len() needs the expanded derive.
   out="$(python3 "$HERE/ra_lsp.py" "$RA" "$PROJ" "[\"$BIN\",\"run\",\"cargo\",\"check\",\"--workspace\",\"--all-targets\",\"--message-format=json\"]" 2>&1)"
   check "rust-analyzer (LSP, lsp-remote settings) expands the remote proc macro" contains "$out" "let _len: usize"
+  # Its remote checks end with it; later steps expect the repository's
+  # build slot to be free (a busy slot gives a session another one).
+  poll 60 no_sessions >/dev/null
 else
   echo "     (rust-analyzer for the remote toolchain not installed locally: skipped)"
 fi
@@ -367,12 +382,15 @@ check "compiler cache entries on the shared dependency volume" test "$(docker_ e
 step "operations: metrics and structured logs"
 # metric TEXT NAME LABELSUBSTR: value of the first sample of NAME whose labels contain LABELSUBSTR.
 metric() { local v; v="$(echo "$1" | awk -v n="$2" -v l="$3" 'index($0, n"{")==1 && index($0, l) {print $NF; exit}')"; echo "${v:-0}"; }
+# metric_ge NAME LABELSUBSTR MIN: the current value (cs metrics) is at least MIN.
+metric_ge() { local v; v="$(metric "$(cs metrics)" "$1" "$2")"; [ "${v%.*}" -ge "$3" ] || { echo "     $1{$2} = $v"; return 1; }; }
 MLABEL="$(docker_ inspect -f '{{index .Config.Labels "cloudsourced.machine"}}' "$MACHINE")"
 m="$(cs metrics)"
 check "metrics: daemon counts prepares" test "$(metric "$m" cloudsourced_daemon_requests_total 'op="prepare",result="ok"')" -ge 1
 check "metrics: fleet machines by provider, size and state" contains "$m" 'cloudsourced_machines{provider="local",size="default",state="running"} 1'
 check "metrics: machine session exits with machine label" contains "$m" "cloudsourced_server_session_exits_total{machine=\"$MLABEL\",provider=\"local\",size=\"default\",code=\"101\"}"
-check "metrics: sccache hits republished from the machine" test "$(metric "$m" cloudsourced_server_compiler_cache_total 'counter="sccache_hits"')" -ge 1
+# Machine metrics are those of the last probe: wait for one after the run.
+check "metrics: sccache hits republished from the machine" poll 30 metric_ge cloudsourced_server_compiler_cache_total 'counter="sccache_hits"' 1
 check "metrics: output bytes transferred" test "$(metric "$m" cloudsourced_server_transfer_bytes_total 'direction="output"' | cut -d. -f1)" -gt 0
 check "metrics: acquire wait histogram" test "$(metric "$m" cloudsourced_acquire_wait_seconds_count 'result="assigned"')" -ge 1
 check "metrics: cost per hour of running machines" contains "$m" 'cloudsourced_cost_per_hour{provider="local"} 0.5'
@@ -414,13 +432,22 @@ fi
 check "status carries no tokens or seeds" sh -c 'case "$1" in *Token*|*"$2"*) exit 1;; esac' _ "$st" "$SEED"
 
 step "parallel sessions: one machine runs several, scale out beyond capacity"
+# The sessions last long enough to overlap even when session start and the
+# second machine's creation are slow (a loaded host): otherwise the third
+# session would rightly wait for a free slot on the first machine. The
+# status is polled while they run; the most sessions seen on one machine
+# counts.
 pids=""
-for i in 1 2 3; do (run sh -c "sleep 6; hostname" > "$WORK/par$i" 2>&1) & pids="$pids $!"; done
-sleep 3
-status="$(cs status)"
+for i in 1 2 3; do (run sh -c "sleep 40; hostname" > "$WORK/par$i" 2>&1) & pids="$pids $!"; done
+sessions_max=0
+for _ in $(seq 40); do
+  n="$(cs status 2>/dev/null | awk '/^[0-9a-f]+ /{print $(NF-2)}' | sort -n | tail -1)"
+  [ "${n:-0}" -gt "$sessions_max" ] && sessions_max="$n"
+  [ "$sessions_max" -ge 2 ] && break
+  sleep 1
+done
 wait $pids
 machines="$(cat "$WORK"/par* | grep '^cs-' | sort -u | wc -l)"
-sessions_max="$(echo "$status" | awk '/^[0-9a-f]+ /{print $(NF-2)}' | sort -n | tail -1)"
 check "two 2G sessions share one 4G machine" eq "$sessions_max" 2
 check "third session scaled out to a second machine" eq "$machines" 2
 check "parallel sessions succeed" eq "$(cat "$WORK"/par* | grep -c '^cs-')" 3

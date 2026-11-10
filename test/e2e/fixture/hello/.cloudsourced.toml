@@ -46,7 +46,8 @@ env   = ["RUSTFLAGS", "CARGO_TERM_*", "RUST_LOG", "RUST_BACKTRACE"]
 env = ["E2E_*"]
 
 # Dev server ports: the web service (18080 in the machine's network
-# namespace) is reachable locally on 18092 while a bash session runs.
+# namespace) is reachable locally on 18092 while a bash session runs
+# (the e2e substitutes a free local port).
 [tool.bash]
 ports = ["18092:18080"]
 

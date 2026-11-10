@@ -141,6 +141,20 @@ type Machine struct {
 	Removed  time.Time
 	observed bool
 	pending  map[string]pendingLease
+	// listed is when the provider view in Machine was taken (the start of
+	// the listing) or last changed locally. Older listings are stale: a
+	// slow readiness poll must not overwrite a newer state or expiry.
+	listed time.Time
+}
+
+// update applies a provider listing started at listedAt unless the machine
+// has a newer view; it reports whether pm was applied.
+func (m *Machine) update(pm provider.Machine, listedAt time.Time) bool {
+	if listedAt.Before(m.listed) {
+		return false
+	}
+	m.Machine, m.listed = pm, listedAt
+	return true
 }
 
 // Span is a period of machine uptime. End is zero while the period lasts.
@@ -405,6 +419,7 @@ func newID(n int) string {
 
 // Refresh reloads machines from the provider and probes running servers.
 func (o *Orchestrator) Refresh(ctx context.Context) error {
+	listedAt := time.Now()
 	list, err := o.listAll(ctx)
 	if err != nil {
 		return err
@@ -426,6 +441,9 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 			m = &Machine{Provider: tm.prov, pending: map[string]pendingLease{}}
 			o.machines[pm.ID] = m
 		}
+		if listedAt.Before(m.listed) {
+			continue // changed since the listing started
+		}
 		if m.State == provider.Running && pm.State != provider.Running {
 			down = append(down, pm.ID)
 		}
@@ -438,7 +456,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 			pm.State = provider.Starting
 		}
 		pm.Fingerprint = o.fingerprint(pm)
-		m.Machine = pm
+		m.update(pm, listedAt)
 		m.observe(time.Now())
 		if pm.State != provider.Running {
 			m.Status = nil
@@ -447,7 +465,9 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 			wg.Add(1)
 			go func(id, addr, fp, token string) {
 				defer wg.Done()
-				st, err := o.ProbeFunc(ctx, addr, fp, token)
+				pctx, cancel := context.WithTimeout(ctx, ProbeTimeout)
+				st, err := o.ProbeFunc(pctx, addr, fp, token)
+				cancel()
 				if err != nil {
 					results <- probe{id, nil}
 					return
@@ -456,8 +476,10 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 			}(pm.ID, pm.Addr, pm.Fingerprint, o.probeToken(pm.ID))
 		}
 	}
-	for id := range o.machines {
-		if !seen[id] && o.machines[id].State != provider.Starting {
+	for id, m := range o.machines {
+		// A machine created or changed after the listing started is not
+		// missing from it.
+		if !seen[id] && m.State != provider.Starting && !listedAt.Before(m.listed) {
 			o.removeLocked(id)
 			down = append(down, id)
 		}
@@ -473,12 +495,22 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 	close(results)
 	o.mu.Lock()
 	for r := range results {
-		if m, ok := o.machines[r.id]; ok {
-			m.Status = r.status
-			m.StatusAt = time.Now()
+		m, ok := o.machines[r.id]
+		if !ok {
+			continue
 		}
+		if r.status == nil && m.Status != nil && m.State == provider.Running && time.Since(m.StatusAt) < statusGrace {
+			// A single failed probe (e.g. a timeout on a loaded host) does
+			// not make a running machine unschedulable: keep the last
+			// status for a short while.
+			continue
+		}
+		m.Status = r.status
+		m.StatusAt = time.Now()
 	}
-	o.refreshed = time.Now()
+	// The data is as old as the listing, not as the end of the probes:
+	// a session that ended while a slow refresh ran is not in it.
+	o.refreshed = listedAt
 	o.notify()
 	o.mu.Unlock()
 	return nil
@@ -523,10 +555,22 @@ func (o *Orchestrator) provOf(id string) (provider.Provider, error) {
 	return p, nil
 }
 
+// ProbeTimeout bounds a status probe (Probe applies it when the context has
+// no deadline; the orchestrator's own probes always use it). It is
+// generous: on a loaded host the QUIC handshake alone may take seconds.
+const ProbeTimeout = 10 * time.Second
+
+// statusGrace is how long the last status of a running machine survives
+// failed probes.
+const statusGrace = 30 * time.Second
+
 // Probe fetches a server's status.
 func Probe(ctx context.Context, addr, fingerprint, token string) (proto.Status, error) {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, ProbeTimeout)
+		defer cancel()
+	}
 	conn, err := transport.Dial(ctx, addr, fingerprint)
 	if err != nil {
 		return proto.Status{}, err
@@ -754,6 +798,7 @@ func (o *Orchestrator) markLocked(acts []scheduler.Action) {
 		case scheduler.Start:
 			if m, ok := o.machines[a.Machine]; ok {
 				m.State = provider.Starting
+				m.listed = time.Now()
 				m.observe(time.Now())
 				m.Status = nil
 				o.creating[a.Machine] = creation{prov: m.Provider, env: m.EnvHash, at: time.Now()}
@@ -846,6 +891,7 @@ func (o *Orchestrator) setState(id string, st provider.State) {
 	o.mu.Lock()
 	if m, ok := o.machines[id]; ok {
 		m.State = st
+		m.listed = time.Now()
 		m.observe(time.Now())
 		m.Status = nil
 		m.Addr = ""
@@ -971,7 +1017,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	}
 	m.Fingerprint = ident.Fingerprint
 	o.mu.Lock()
-	nm := &Machine{Machine: m, Provider: size.Provider, pending: map[string]pendingLease{}}
+	nm := &Machine{Machine: m, Provider: size.Provider, pending: map[string]pendingLease{}, listed: time.Now()}
 	nm.observe(time.Now())
 	o.machines[id] = nm
 	o.mu.Unlock()
@@ -991,6 +1037,7 @@ func (o *Orchestrator) startMachine(ctx context.Context, id string) {
 		o.log.Error("start machine", "id", id, "err", err)
 		return
 	}
+	startedAt := time.Now()
 	m, err := p.Start(ctx, id)
 	if err != nil {
 		o.provErr(o.provName(p), "start", err)
@@ -999,7 +1046,7 @@ func (o *Orchestrator) startMachine(ctx context.Context, id string) {
 	}
 	o.mu.Lock()
 	if mm, ok := o.machines[id]; ok {
-		mm.Machine = m
+		mm.update(m, startedAt)
 		mm.observe(time.Now())
 		mm.Status = nil
 		mm.Draining = false
@@ -1039,6 +1086,7 @@ func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 	}
 	interval, maxInterval := pollIntervals(p.Caps())
 	for time.Now().Before(deadline) {
+		listedAt := time.Now()
 		list, err := p.List(ctx, o.cfg.Owner)
 		o.provErr(o.provName(p), "list", err)
 		if err == nil {
@@ -1051,15 +1099,18 @@ func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 				}
 				pm.Fingerprint = o.fingerprint(pm)
 				o.mu.Lock()
+				fresh := false
 				if m := o.machines[id]; m != nil {
-					m.Machine = pm
+					fresh = m.update(pm, listedAt)
 					m.observe(time.Now())
 				}
 				o.mu.Unlock()
-				if pm.Addr == "" {
+				if !fresh || pm.Addr == "" {
 					continue
 				}
-				st, err := o.ProbeFunc(ctx, pm.Addr, pm.Fingerprint, o.probeToken(id))
+				pctx, cancel := context.WithTimeout(ctx, ProbeTimeout)
+				st, err := o.ProbeFunc(pctx, pm.Addr, pm.Fingerprint, o.probeToken(id))
+				cancel()
 				if err == nil {
 					o.mu.Lock()
 					if m := o.machines[id]; m != nil {
