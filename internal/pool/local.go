@@ -365,8 +365,32 @@ func (l *Local) Unreachable(_ context.Context, leaseID, machineID string) error 
 	return nil
 }
 
+// Estimate returns the learned need of key, capped at what the largest
+// configured size admits: a run whose measured peak plus headroom exceeds
+// every machine still gets the largest one (it ran before, so its real
+// peak fitted) instead of being rejected as unschedulable forever.
 func (l *Local) Estimate(_ context.Context, key string, fallback scheduler.Resources) (scheduler.Resources, error) {
-	return l.est.Estimate(key, fallback), nil
+	need := l.est.Estimate(key, fallback)
+	l.cfgMu.Lock()
+	u := l.cfg
+	l.cfgMu.Unlock()
+	if u == nil {
+		return need, nil
+	}
+	var maxCPU float64
+	var maxMem int64
+	for _, sz := range u.Pool.Sizes {
+		mem, _ := config.ParseBytes(sz.Memory)
+		maxCPU = max(maxCPU, sz.CPU*max(u.Pool.CPUOvercommit, 1))
+		maxMem = max(maxMem, int64(float64(mem)*max(u.Pool.MemoryOvercommit, 1)))
+	}
+	if maxMem > 0 && need.Memory > maxMem && fallback.Memory <= maxMem {
+		need.Memory = maxMem
+	}
+	if maxCPU > 0 && need.CPU > maxCPU && fallback.CPU <= maxCPU {
+		need.CPU = maxCPU
+	}
+	return need, nil
 }
 
 func (l *Local) Status(ctx context.Context) ([]orchestrator.Machine, error) {
