@@ -148,7 +148,16 @@ func Resolve(r *config.Repo) (*Plan, error) {
 // addTools installs the compiler cache and linker selected by the
 // repository. Repositories without these settings get no extra lines, so
 // their Dockerfile and hash are unchanged.
-func (p *Plan) addTools(r *config.Repo, add func(string), df *strings.Builder) error {
+func (p *Plan) addTools(r *config.Repo, add func(string), out *strings.Builder) error {
+	// The generated lines are part of the hash: changing them rebuilds
+	// exactly the environments that use them.
+	var df strings.Builder
+	defer func() {
+		if df.Len() > 0 {
+			add("tools-dockerfile=" + df.String())
+			out.WriteString(df.String())
+		}
+	}()
 	install := func(name string) error {
 		t, err := releaseFor(name, r.Resources.Arch)
 		if err != nil {
@@ -156,7 +165,7 @@ func (p *Plan) addTools(r *config.Repo, add func(string), df *strings.Builder) e
 		}
 		add(fmt.Sprintf("tool=%s@%s:%s", t.Name, t.Version, t.SHA256))
 		p.tools["tools/"+name] = t
-		fmt.Fprintf(df, "COPY tools/%s /usr/local/bin/%s\n", name, name)
+		fmt.Fprintf(&df, "COPY tools/%s /usr/local/bin/%s\n", name, name)
 		return nil
 	}
 	if r.Cache.Compiler.Tool == config.CompilerCacheSccache {
@@ -176,7 +185,7 @@ func (p *Plan) addTools(r *config.Repo, add func(string), df *strings.Builder) e
 		// only selects the linker, so RUSTFLAGS stay untouched. The flag
 		// comes last: rustc itself passes -fuse-ld=lld for its bundled
 		// rust-lld on x86_64 Linux, and the last -fuse-ld wins.
-		fmt.Fprintf(df, "RUN printf '#!/bin/sh\\nexec cc \"$@\" -fuse-ld=%s\\n' > %s && chmod 755 %s\n", l, config.LinkerDriver(l), config.LinkerDriver(l))
+		fmt.Fprintf(&df, "RUN printf '#!/bin/sh\\nexec cc \"$@\" -fuse-ld=%s\\n' > %s && chmod 755 %s\n", l, config.LinkerDriver(l), config.LinkerDriver(l))
 	}
 	return nil
 }
