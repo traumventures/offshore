@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
 
@@ -26,6 +27,9 @@ type Local struct {
 	provs    map[string]provider.Provider
 	est      scheduler.Estimator
 
+	cfgMu sync.Mutex
+	cfg   *config.FleetConfig // applied fleet configuration
+
 	mu     sync.Mutex
 	envs   map[string]Env  // env hash -> source, for machines created later
 	images map[string]bool // provider + "\x00" + env hash
@@ -35,10 +39,10 @@ type Local struct {
 var _ Fleet = (*Local)(nil)
 
 // NewLocal opens every configured provider and creates the orchestrator.
-func NewLocal(u *config.User, stateDir string, log *slog.Logger) (*Local, error) {
+func NewLocal(u *config.FleetConfig, stateDir string, log *slog.Logger) (*Local, error) {
 	provs := map[string]provider.Provider{}
 	for _, name := range u.ProviderNames() {
-		opts := map[string]any{"binary": os.Getenv("CLOUDSOURCED_SERVER_BINARY"), "owner": u.Fleet.Owner}
+		opts := map[string]any{"binary": os.Getenv("CLOUDSOURCED_SERVER_BINARY"), "owner": u.Fleet.ID}
 		for k, v := range u.Providers[name] {
 			opts[k] = v
 		}
@@ -48,7 +52,7 @@ func NewLocal(u *config.User, stateDir string, log *slog.Logger) (*Local, error)
 		}
 		provs[name] = p
 	}
-	orch, err := orchestrator.New(Config(u, nil), provs, stateDir, log)
+	orch, err := orchestrator.New(Config(u), provs, stateDir, log)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +61,7 @@ func NewLocal(u *config.User, stateDir string, log *slog.Logger) (*Local, error)
 		est = scheduler.NewHistory(filepath.Join(stateDir, "usage-history.json"))
 	}
 	l := &Local{
-		log: log, stateDir: stateDir, orch: orch, provs: provs, est: est,
+		log: log, stateDir: stateDir, orch: orch, provs: provs, est: est, cfg: u,
 		envs: map[string]Env{}, images: map[string]bool{}, imgMu: map[string]*sync.Mutex{},
 	}
 	orch.EnsureImage = func(ctx context.Context, p provider.Provider, envHash string) error {
@@ -72,9 +76,40 @@ func NewLocal(u *config.User, stateDir string, log *slog.Logger) (*Local, error)
 	return l, nil
 }
 
-// Configure applies a (re-read) configuration; r is the repository of the
-// request in embedded mode and nil in the control plane.
-func (l *Local) Configure(u *config.User, r *config.Repo) { l.orch.SetConfig(Config(u, r)) }
+// Reconfigure applies a reloaded fleet configuration: sizes, policy,
+// lifetimes and provisioning take effect for subsequent decisions. The fleet
+// id, the providers and the estimator are fixed for the life of the process;
+// changing them needs a restart (reported in the returned warnings).
+func (l *Local) Reconfigure(u *config.FleetConfig) (warnings []string) {
+	l.cfgMu.Lock()
+	old := l.cfg
+	l.cfg = u
+	l.cfgMu.Unlock()
+	if old != nil {
+		if old.Fleet.ID != u.Fleet.ID {
+			warnings = append(warnings, fmt.Sprintf("fleet.id changed from %q to %q: restart to apply", old.Fleet.ID, u.Fleet.ID))
+		}
+		if !reflect.DeepEqual(old.Providers, u.Providers) {
+			warnings = append(warnings, "providers changed: restart to apply")
+		}
+		if old.Fleet.Estimator != u.Fleet.Estimator {
+			warnings = append(warnings, "fleet.estimator changed: restart to apply")
+		}
+	}
+	c := Config(u)
+	if old != nil {
+		c.Owner = old.Fleet.ID // the providers still label resources with it
+	}
+	l.orch.SetConfig(c)
+	return warnings
+}
+
+// FleetConfig returns the applied fleet configuration.
+func (l *Local) FleetConfig() *config.FleetConfig {
+	l.cfgMu.Lock()
+	defer l.cfgMu.Unlock()
+	return l.cfg
+}
 
 // OnMachineDown registers a callback for machines that stop or disappear.
 func (l *Local) OnMachineDown(fn func(id string)) { l.orch.OnMachineDown = fn }

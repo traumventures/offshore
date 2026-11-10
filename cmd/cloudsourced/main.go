@@ -44,11 +44,12 @@ Usage:
   cloudsourced metrics                     daemon, fleet and machine metrics (Prometheus text)
   cloudsourced fetch <glob>...             copy outputs from the latest remote build
   cloudsourced down                        destroy all machines and caches
-  cloudsourced reconcile                   apply the fleet policy now
+  cloudsourced reconcile                   reload the fleet configuration, apply the policy now
   cloudsourced daemon run|stop|status      manage the local daemon
   cloudsourced env [hash|dockerfile]       show the environment image of this repo
   cloudsourced editor [vscode|zed|neovim]  rust-analyzer settings for remote checks
-  cloudsourced config check                validate configuration files
+  cloudsourced config check [--fleet FILE] validate the configuration files of this mode
+  cloudsourced config show [--fleet FILE]  print the effective configuration (secrets redacted)
   cloudsourced controlplane [flags]        serve a shared control plane (see --help)
   cloudsourced sim [flags] <trace>...      simulate the fleet policy on a build trace
   cloudsourced controlplane info|client-config|health
@@ -64,6 +65,8 @@ Environment:
   CLOUDSOURCED_STDIN=always|never stdin forwarding policy
   CLOUDSOURCED_VERBOSE=1          print the machine used for each run
   CLOUDSOURCED_PORTS=8080,3000:3001  forward local ports into the session
+  CLOUDSOURCED_CONFIG=FILE        client configuration (default ~/.config/cloudsourced/config.toml)
+  CLOUDSOURCED_FLEET_CONFIG=FILE  fleet configuration (default: the client configuration file)
   CLOUDSOURCED_LOG_FORMAT=text|json  log format of daemon, control plane and machines
   CLOUDSOURCED_LOG_LEVEL=debug|info|warn|error  log level (CLOUDSOURCED_DEBUG=1: debug)
 `
@@ -175,20 +178,7 @@ func run(cmd string, args []string) error {
 	case "editor":
 		return editorCmd(args)
 	case "config":
-		if len(args) == 1 && args[0] == "check" {
-			if _, err := config.LoadUser(); err != nil {
-				return err
-			}
-			fmt.Println("user configuration ok:", config.UserConfigPath())
-			if root, err := config.FindRepo("."); err == nil {
-				if _, err := config.LoadRepo(root); err != nil {
-					return err
-				}
-				fmt.Println("repository configuration ok:", filepath.Join(root, config.RepoFileName))
-			}
-			return nil
-		}
-		return errors.New("usage: cloudsourced config check")
+		return configCmd(args, os.Stdout)
 	case "version", "--version":
 		fmt.Println("cloudsourced", version)
 		return nil

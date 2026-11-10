@@ -50,6 +50,8 @@ type Daemon struct {
 	log   *slog.Logger
 	fleet fleet.Fleet
 	local *fleet.Local // nil when the control plane is remote
+	// reload applies fleet configuration changes to local (embedded mode).
+	reload *fleet.Reloader
 
 	mu    sync.Mutex
 	roots map[string]*root
@@ -59,33 +61,36 @@ type Daemon struct {
 	metrics *daemonMetrics
 }
 
-// NewDaemon creates the daemon from the user configuration.
+// NewDaemon creates the daemon from the client configuration and, in
+// embedded mode, the fleet configuration.
 func NewDaemon(log *slog.Logger) (*Daemon, error) {
-	u, err := config.LoadUser()
+	c, err := config.LoadClient()
 	if err != nil {
 		return nil, err
 	}
+	for _, w := range c.Warnings {
+		log.Warn("client configuration", "warning", w)
+	}
 	d := &Daemon{log: log, roots: map[string]*root{}, conns: map[string]*machineConn{}}
 	d.metrics = newDaemonMetrics(d)
-	if o := u.Orchestrator; o.Mode == "remote" {
-		key, err := config.ResolveRef(o.APIKey, filepath.Dir(config.UserConfigPath()))
+	if o := c.Orchestrator; o.Mode == "remote" {
+		key, err := config.ResolveRef(o.APIKey, c.Dir())
 		if err != nil {
 			return nil, fmt.Errorf("orchestrator.api_key: %w", err)
 		}
 		var certs []tls.Certificate
 		if o.ClientCert != "" {
-			dir := filepath.Dir(config.UserConfigPath())
 			abs := func(p string) string {
 				if filepath.IsAbs(p) {
 					return p
 				}
-				return filepath.Join(dir, p)
+				return filepath.Join(c.Dir(), p)
 			}
-			c, err := tls.LoadX509KeyPair(abs(o.ClientCert), abs(o.ClientKey))
+			cert, err := tls.LoadX509KeyPair(abs(o.ClientCert), abs(o.ClientKey))
 			if err != nil {
 				return nil, fmt.Errorf("orchestrator.client_cert: %w", err)
 			}
-			certs = append(certs, c)
+			certs = append(certs, cert)
 		}
 		r, err := fleet.NewRemote(o.URL, o.Fingerprint, key, certs...)
 		if err != nil {
@@ -95,12 +100,22 @@ func NewDaemon(log *slog.Logger) (*Daemon, error) {
 		log.Info("using remote control plane", "url", o.URL)
 		return d, nil
 	}
-	l, err := fleet.NewLocal(u, StateDir(), log)
+	path := config.FleetConfigPath()
+	fc, err := config.LoadFleet(path)
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range fc.Warnings {
+		log.Warn("fleet configuration", "warning", w)
+	}
+	l, err := fleet.NewLocal(fc, StateDir(), log)
 	if err != nil {
 		return nil, err
 	}
 	l.OnMachineDown(d.dropConn)
 	d.fleet, d.local = l, l
+	d.reload = fleet.NewReloader(path, config.LoadFleet, l, log)
+	log.Info("embedded orchestrator", "fleet", fc.Fleet.ID, "config", path)
 	return d, nil
 }
 
@@ -291,9 +306,10 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 	case "status":
 		return d.fleet.Status(ctx)
 	case "reconcile":
-		if d.local != nil {
-			if u, err := config.LoadUser(); err == nil {
-				d.local.Configure(u, nil)
+		if d.reload != nil {
+			// Explicit reload of the fleet configuration (embedded mode).
+			if err := d.reload.Reload(); err != nil {
+				return nil, fmt.Errorf("fleet configuration not reloaded: %w", err)
 			}
 		}
 		return nil, d.fleet.Reconcile(ctx)
@@ -354,9 +370,10 @@ func (d *Daemon) rootFor(path string, rules manifest.Rules) (*root, error) {
 	return r, nil
 }
 
-// RepoID identifies a repository for cache affinity and build slots.
-func RepoID(owner, root string) string {
-	return manifest.HashBytes([]byte(owner + "\x00" + root))[:20]
+// RepoID identifies a repository for cache affinity and build slots; user
+// is the client's user identity (config "user").
+func RepoID(user, root string) string {
+	return manifest.HashBytes([]byte(user + "\x00" + root))[:20]
 }
 
 func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (*Prepared, error) {
@@ -364,12 +381,12 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	if err != nil {
 		return nil, err
 	}
-	u, err := config.LoadUser()
+	c, err := config.LoadClient()
 	if err != nil {
 		return nil, err
 	}
-	if d.local != nil {
-		d.local.Configure(u, repo)
+	if d.reload != nil {
+		d.reload.Check() // the fleet configuration file changed: apply it
 	}
 	plan, err := envbuild.Resolve(repo)
 	if err != nil {
@@ -404,7 +421,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		roots[p], versions[p] = r, v
 	}
 	tm.Sync = lap()
-	repoID := RepoID(u.Fleet.Owner, repo.Root)
+	repoID := RepoID(c.User, repo.Root)
 	key := UsageKey(repoID, req.Tool, req.Args)
 	need, err := d.fleet.Estimate(ctx, key, scheduler.Resources{CPU: repo.Resources.CPU, Memory: repo.MemoryBytes()})
 	if err != nil {
@@ -413,11 +430,13 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	if max := repo.MaxMemoryBytes(); max > 0 && need.Memory > max {
 		need.Memory = max
 	}
+	buildTTL, depsTTL := repo.CacheTTLs()
 	var lease orchestrator.Lease
 	for attempt := 1; ; attempt++ {
 		lease, err = d.fleet.Acquire(ctx, orchestrator.Request{
 			EnvHash: plan.Hash, Image: plan.Tag, Services: plan.Services, RepoID: repoID,
 			Key: key, Need: need, Limit: scheduler.Resources{Memory: repo.MaxMemoryBytes()},
+			BuildTTL: buildTTL, DepsTTL: depsTTL,
 		}, progress)
 		if err != nil {
 			return nil, err
@@ -435,7 +454,10 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		}
 		d.log.Warn("machine unreachable, retrying placement", "machine", lease.MachineID, "err", err)
 	}
-	ttl := fleet.Config(u, repo).BuildTTL
+	ttl := lease.BuildTTL
+	if ttl <= 0 {
+		ttl = buildTTL // control plane without request-scoped TTLs; the server caps it
+	}
 	return &Prepared{
 		Machine: lease.MachineID, Addr: lease.Addr, Fingerprint: lease.Fingerprint, Token: lease.Token,
 		Lease: lease.ID, RepoID: repoID, EnvHash: plan.Hash, Roots: versions, BuildTTL: ttl.String(),

@@ -7,14 +7,18 @@ import (
 	"time"
 )
 
-func loadUserFrom(t *testing.T, content string) (*User, error) {
+func loadUserFrom(t *testing.T, content string) (*FleetConfig, error) {
+	t.Helper()
+	return LoadFleet(writeFile(t, content))
+}
+
+func writeFile(t *testing.T, content string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CLOUDSOURCED_CONFIG", p)
-	return LoadUser()
+	return p
 }
 
 func TestUserMultiProvider(t *testing.T) {

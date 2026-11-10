@@ -16,7 +16,7 @@ import (
 )
 
 func TestControlPlaneMetricsAndRequestIDs(t *testing.T) {
-	u := &config.User{Fleet: config.Fleet{Owner: "t", Estimator: "static", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s", MaxMachines: 1, CPUOvercommit: 1, MemoryOvercommit: 1},
+	u := &config.FleetConfig{Fleet: config.Fleet{ID: "t", Estimator: "static", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s", MaxMachines: 1, CPUOvercommit: 1, MemoryOvercommit: 1},
 		Providers: map[string]map[string]any{"img": {"backend": "test-img"}}}
 	state := t.TempDir()
 	var logbuf bytes.Buffer

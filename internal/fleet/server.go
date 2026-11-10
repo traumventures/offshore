@@ -17,7 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/metrics"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 )
@@ -34,9 +33,9 @@ type Server struct {
 	apiKey   string
 	stateDir string
 	log      *slog.Logger
-	// Reload re-reads the fleet configuration before each scheduling call
-	// (nil: configuration is fixed).
-	Reload func() (*config.User, error)
+	// Reloader applies changes of the fleet configuration file before
+	// scheduling calls (nil: the configuration is fixed).
+	Reloader *Reloader
 }
 
 // NewServer creates the control plane handler. Uploaded environment
@@ -153,7 +152,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, log *slog.Logger)
 		}
 	case pathReconcile:
 		h = func(ctx context.Context, _ *http.Request, _ io.Writer) (any, error) {
-			s.reload()
+			if s.Reloader != nil {
+				// Explicit reload; on error the previous configuration stays.
+				if err := s.Reloader.Reload(); err != nil {
+					return nil, fmt.Errorf("fleet configuration not reloaded: %w", err)
+				}
+			}
 			return nil, s.fleet.Reconcile(ctx)
 		}
 	case pathDown:
@@ -205,24 +209,14 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, h func(context.C
 	return err != nil
 }
 
-func (s *Server) reload() {
-	if s.Reload == nil {
-		return
-	}
-	u, err := s.Reload()
-	if err != nil {
-		s.log.Warn("configuration reload failed, keeping the previous one", "err", err)
-		return
-	}
-	s.fleet.Configure(u, nil)
-}
-
 func (s *Server) acquire(ctx context.Context, r *http.Request, progress io.Writer) (orchestrator.Lease, error) {
 	var req orchestrator.Request
 	if err := decode(r, &req); err != nil {
 		return orchestrator.Lease{}, err
 	}
-	s.reload()
+	if s.Reloader != nil {
+		s.Reloader.Check()
+	}
 	return s.fleet.Acquire(ctx, req, progress)
 }
 
