@@ -227,7 +227,6 @@ limit 1). The caller's credentials need `ssm:PutParameter`/`DeleteParameter`.
 #### Spot and arm64
 
 ```toml
-
 [[providers.aws.size]]
 name           = "x4-spot"            # a name of your choice
 cpu            = 4
@@ -258,8 +257,7 @@ more interruptions). The policy sizes with `price_per_hour × (1 −
 spot_discount)` and prefers spot at equal cost; a machine that fell back is
 accounted at the on-demand price.
 
-The risk: AWS can take a spot machine back with two minutes' notice. The host
-agent polls the metadata service (`spot/instance-action` and the rebalance
+The risk: AWS can take a spot machine back with two minutes' notice. The supervisor polls the metadata service (`spot/instance-action` and the rebalance
 recommendation). A rebalance recommendation only marks the machine at risk
 (new work prefers other machines). On an interruption notice the worker
 drains: no new sessions, running
@@ -624,7 +622,7 @@ cloudsourced.run (proxy: tool, subcommand, flag names, repo id, decision, reason
 │     │  └─ pool.acquire (queue wait, placement, reason, machine, provider, size, price, reservation, spot)
 │     │       ~ pool.create / pool.start (linked root spans: provider, size, price, duration, ready event)
 │     └─ daemon.attach (machine, attempt)
-├─ proxy.connect (session, server wait)
+├─ proxy.connect (session, worker wait)
 ├─ worker.exec (machine: lease, reservation, slot, warm, peak memory, CPU seconds, OOM, exit code, sccache counters)
 │  ├─ worker.process, worker.writeback, worker.outputs
 ├─ proxy.exec (exit code, usage), proxy.writeback, proxy.outputs

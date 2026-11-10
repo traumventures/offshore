@@ -328,7 +328,7 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 	rec.Timings.Connect = max(0, events.Ms(t1.Sub(tc))-sstarted.WaitMs)
 	fwd.serve(conn, prep.Token, sstarted.Session)
 	if verbose {
-		warn("running on %s (slot %s, prepare %s, server wait %dms)", sstarted.Machine, sstarted.Slot, t1.Sub(t0).Round(time.Millisecond), sstarted.WaitMs)
+		warn("running on %s (slot %s, prepare %s, worker wait %dms)", sstarted.Machine, sstarted.Slot, t1.Sub(t0).Round(time.Millisecond), sstarted.WaitMs)
 		if len(rec.Ports) > 0 {
 			warn("forwarding 127.0.0.1 ports %s", strings.Join(rec.Ports, ", "))
 		}
