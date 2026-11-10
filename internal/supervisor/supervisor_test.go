@@ -240,3 +240,27 @@ func TestCompilerCacheOnGateway(t *testing.T) {
 		t.Fatal("endpoint not passed to the machine")
 	}
 }
+
+type terminatingPlatform struct {
+	*fakePlatform
+	terminations int
+	err          error
+}
+
+func (p *terminatingPlatform) TerminateSelf(context.Context) error { p.terminations++; return p.err }
+
+func TestCheckTerminatesSelfAtExpiry(t *testing.T) {
+	a, p, _ := testAgent(t)
+	tp := &terminatingPlatform{fakePlatform: p}
+	a.Platform = tp
+	shutdowns := 0
+	a.Shutdown = func() error { shutdowns++; return nil }
+	a.Spec.ExpiresAt = time.Now().Add(-time.Minute).Unix()
+	if d := a.Check(context.Background()); d != machine.Terminate || tp.terminations != 1 || shutdowns != 0 {
+		t.Fatalf("expired: %v terminations=%d shutdowns=%d", d, tp.terminations, shutdowns)
+	}
+	tp.err = errors.New("denied")
+	if d := a.Check(context.Background()); d != machine.Terminate || tp.terminations != 2 || shutdowns != 1 {
+		t.Fatalf("fallback: %v terminations=%d shutdowns=%d", d, tp.terminations, shutdowns)
+	}
+}

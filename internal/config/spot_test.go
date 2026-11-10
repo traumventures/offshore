@@ -81,7 +81,7 @@ type = "local-docker"
 name = "s"
 cpu = 1
 memory = "1G"
-spot = true`, "need an aws-ec2 provider"},
+spot = true`, "need an aws-ec2 or oci provider"},
 		"foreign arch on local docker": {`[providers.local]
 type = "local-docker"
 
@@ -98,5 +98,27 @@ arch = "` + other + `"`, "local-docker machines run on this host"},
 	}
 	if MachineArch("aarch64") != ArchARM64 || MachineArch("x86_64") != ArchAMD64 || MachineArch("") != ArchAMD64 {
 		t.Error("MachineArch")
+	}
+}
+
+func TestOCIPreemptibleShapes(t *testing.T) {
+	u, err := loadUserFrom(t, `
+[providers.oci]
+type = "oci"
+compartment = "cloudsourced"
+
+[[providers.oci.size]]
+name = "a1-4"
+cpu = 4
+memory = "16G"
+arch = "arm64"
+spot = true
+instance_types = ["VM.Standard.A1.Flex"]
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := u.ProviderType("oci"); got != "oci" {
+		t.Fatalf("provider type %q", got)
 	}
 }
