@@ -334,11 +334,14 @@ directory); it ends with the session. The cache backend is WebDAV
   dependency volume is shared by the owner's machines, so a new machine gets
   hits for everything an earlier one compiled. Keys are prefixed with the
   environment hash, so toolchains never mix.
-* A host agent may serve the cache itself (for example from S3 with the
-  instance role: `blobcache.S3StoreFromEnv`, `CLOUDSOURCED_SCCACHE_S3=bucket/cache/sccache`,
-  optional `CLOUDSOURCED_SCCACHE_TTL`) and pass `CLOUDSOURCED_SCCACHE_ENDPOINT`
-  to the machine server; the server appends the environment hash to that URL
-  (`blobcache.Handler` without a fixed namespace).
+* On AWS the host agent serves the cache itself on the Docker bridge
+  gateway (port 7480, reachable from sessions, not from outside the host)
+  from the stack's bucket with the instance role (`s3://<bucket>/cache/<owner>/sccache/`,
+  deleted after a day by the bucket lifecycle rule), and passes
+  `CLOUDSOURCED_SCCACHE_ENDPOINT` to the machine server; the server appends
+  the environment hash to that URL (`blobcache.Handler` without a fixed
+  namespace). `blobcache.S3StoreFromEnv` (`CLOUDSOURCED_SCCACHE_S3=bucket/prefix`)
+  offers the same store to other hosts.
 
 sccache cannot cache incremental compilations, which cargo uses for
 workspace crates in dev profiles; dependencies are cached regardless.
