@@ -49,6 +49,7 @@ Usage:
   cloudsourced config check                validate configuration files
   cloudsourced controlplane [flags]        serve a shared control plane (see --help)
   cloudsourced sim [flags] <trace>...      simulate the fleet policy on a build trace
+  cloudsourced controlplane info|client-config|health
   cloudsourced version
 
 Internal:

@@ -127,13 +127,16 @@ Clients only fetch leases from it; build traffic goes directly to the machines.
 
 ```sh
 # fleet and providers in the control plane's config.toml
-cloudsourced controlplane --listen :7443
-# prints the API key (generated once, <state>/api-key) and, without
-# --tls-cert, the fingerprint of its self-signed certificate
+cloudsourced controlplane                        # self-signed, :7443, fingerprint pinned
+cloudsourced controlplane --hostname cs.example.com   # Let's Encrypt, :443 (+ :80 for ACME)
+cloudsourced controlplane client-config          # prints the client block below
+cloudsourced controlplane info [--show-key]      # URLs, fingerprint, API key location
 ```
 
-Behind a domain, pass `--tls-cert/--tls-key` or terminate TLS in a reverse proxy
-and use `--insecure-http`. Clients:
+The API key is generated once (`<state>/api-key`) and never logged. Without a
+domain the control plane pins its persistent self-signed certificate; with one,
+`--hostname` is all it takes (or pass `--tls-cert/--tls-key`, or terminate TLS
+in a reverse proxy and use `--insecure-http`). Clients:
 
 ```toml
 [orchestrator]
@@ -142,6 +145,9 @@ url         = "https://10.0.0.5:7443"   # or https://cs.example.com
 fingerprint = "0b91…"                    # only for the self-signed certificate
 api_key     = "env:CLOUDSOURCED_API_KEY" # or file:…, cmd:…
 ```
+
+Container image (`make image`), running it on a Docker host and on AWS
+(`deploy/aws/controlplane.yaml`): [docs/CONTROLPLANE.md](docs/CONTROLPLANE.md).
 
 ### AWS EC2
 
