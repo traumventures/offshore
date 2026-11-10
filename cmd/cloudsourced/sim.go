@@ -21,11 +21,16 @@ const simUsage = `Usage:
       replay traces against the fleet configuration and compare policies
   cloudsourced sim -generate out.json [-profile team|small] [-seed N] [-days N] [-tz ZONE]
       write a synthetic bursty workday trace
+  cloudsourced sim export [-since 7d] [-until T] [-o trace.json] [-cold-penalty 0.5] [-request-cpu]
+      convert the fleet's event log (real runs) into a trace
 
 Flags:
 `
 
 func simCmd(args []string) error {
+	if len(args) > 0 && args[0] == "export" {
+		return simExport(args[1:])
+	}
 	fs := flag.NewFlagSet("sim", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(fs.Output(), simUsage); fs.PrintDefaults() }
 	cfgPath := fs.String("config", "", "fleet configuration (TOML, [fleet] section); default: the active fleet configuration")

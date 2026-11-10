@@ -31,6 +31,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/proxy"
 	"github.com/traumventures/cloudsourced/internal/sandbox"
 	"github.com/traumventures/cloudsourced/internal/server"
+	"github.com/traumventures/cloudsourced/internal/telemetry"
 	"github.com/traumventures/cloudsourced/internal/transport"
 )
 
@@ -59,6 +60,10 @@ Usage:
   cloudsourced config show [--fleet FILE]  print the effective configuration (secrets redacted)
   cloudsourced controlplane [flags]        serve a shared control plane (see --help)
   cloudsourced sim [flags] <trace>...      simulate the fleet policy on a build trace
+  cloudsourced sim export [--since 7d] -o trace.json
+                                           convert the event log into a simulator trace
+  cloudsourced report [--since 7d] [--json] cost, utilisation, queue wait, cache and
+                                           estimator accuracy from the event log
   cloudsourced controlplane info|client-config|health
   cloudsourced version
 
@@ -77,6 +82,8 @@ Environment:
   CLOUDSOURCED_FLEET_CONFIG=FILE  fleet configuration (default: the client configuration file)
   CLOUDSOURCED_LOG_FORMAT=text|json  log format of daemon, control plane and machines
   CLOUDSOURCED_LOG_LEVEL=debug|info|warn|error  log level (CLOUDSOURCED_DEBUG=1: debug)
+  OTEL_TRACES_EXPORTER=otlp|console|none, OTEL_EXPORTER_OTLP_ENDPOINT=URL
+                                  OpenTelemetry tracing (off by default; see [telemetry])
 `
 
 func init() {
@@ -124,6 +131,7 @@ func run(cmd string, args []string) error {
 		os.Exit(proxy.Main(args[0], args[1:]))
 	case "server":
 		log := logger() // before the CLOUDSOURCED_* variables are dropped
+		defer flushTelemetry(telemetry.SetupFromConfig(telemetry.ServiceServer, config.Telemetry{}, "", log))
 		cfg, err := server.ConfigFromEnv()
 		if err != nil {
 			return err
@@ -154,6 +162,8 @@ func run(cmd string, args []string) error {
 		return controlplane(args)
 	case "sim":
 		return simCmd(args)
+	case "report":
+		return reportCmd(args)
 	case "daemon":
 		return daemonCmd(args)
 	case "status":
@@ -208,7 +218,11 @@ func daemonCmd(args []string) error {
 	}
 	switch sub {
 	case "run":
-		d, err := client.NewDaemon(logger())
+		log := logger()
+		if c, err := config.LoadClient(); err == nil {
+			defer flushTelemetry(telemetry.SetupFromConfig(telemetry.ServiceDaemon, c.Telemetry, c.Dir(), log))
+		}
+		d, err := client.NewDaemon(log)
 		if err != nil {
 			return err
 		}
@@ -530,6 +544,11 @@ func hostCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	log := logger()
+	// Machines are told how to trace through their environment.
+	defer flushTelemetry(telemetry.SetupFromConfig(telemetry.ServiceHost, config.Telemetry{
+		Exporter: spec.Layout.Env["OTEL_TRACES_EXPORTER"], Endpoint: spec.Layout.Env["OTEL_EXPORTER_OTLP_ENDPOINT"],
+	}, "", log))
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	plat, err := hostagent.OpenPlatform(ctx, spec)
@@ -537,7 +556,7 @@ func hostCmd(args []string) error {
 		return err
 	}
 	a := &hostagent.Agent{
-		Spec: spec, Platform: plat, StateDir: *stateDir, Docker: hostagent.DockerCLI("docker"), Log: logger(),
+		Spec: spec, Platform: plat, StateDir: *stateDir, Docker: hostagent.DockerCLI("docker"), Log: log,
 		Shutdown: func() error { return exec.Command("shutdown", "-h", "now").Run() },
 	}
 	return a.Run(ctx)

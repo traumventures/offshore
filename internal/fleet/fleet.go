@@ -9,6 +9,7 @@ package fleet
 import (
 	"context"
 	"io"
+	"time"
 
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
@@ -70,6 +71,9 @@ func Config(u *config.FleetConfig) orchestrator.Config {
 			MinMachines: f.MinMachines, MaxMachines: f.MaxMachines, IdleStop: idle,
 			ProviderMax: map[string]int{}, Variant: f.Policy, ConsolidateTarget: f.ConsolidateTarget,
 		},
+	}
+	if d := u.Telemetry.EventsRetentionDays; d > 0 {
+		c.EventRetention = time.Duration(d) * 24 * time.Hour
 	}
 	if f.ConsolidateBelow != nil {
 		c.Policy.ConsolidateBelow = *f.ConsolidateBelow

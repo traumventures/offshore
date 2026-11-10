@@ -180,6 +180,9 @@ type Usage struct {
 	OOM        bool          `json:"oom"`
 	Warm       bool          `json:"warm"` // build cache was reused
 	ExitCode   int           `json:"exit_code"`
+	// Cache holds counters of cache integrations (e.g. "sccache_hits");
+	// recorded in the event log, not learned from.
+	Cache map[string]int64 `json:"cache,omitempty"`
 }
 
 // Estimator predicts the resource need of tasks from past runs.

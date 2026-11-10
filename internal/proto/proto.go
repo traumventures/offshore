@@ -78,6 +78,9 @@ const (
 type Hello struct {
 	Token string `json:"token,omitempty"`
 	Kind  string `json:"kind"`
+	// TraceParent is the W3C trace context of the opening side (optional;
+	// older peers omit and ignore it).
+	TraceParent string `json:"traceparent,omitempty"`
 }
 
 // Error reports a failure. Stage "prepare" means nothing ran remotely yet.
@@ -145,6 +148,9 @@ type Exec struct {
 	CompilerCache *CompilerCache `json:"compiler_cache,omitempty"`
 	// Linker is the repository's environment.linker ("", "mold", "lld").
 	Linker string `json:"linker,omitempty"`
+	// TraceParent is the W3C trace context of the tool run (optional);
+	// the server's session span continues it.
+	TraceParent string `json:"traceparent,omitempty"`
 }
 
 // CompilerCache is the session's compiler cache configuration.

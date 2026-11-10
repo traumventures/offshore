@@ -35,6 +35,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/client"
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/fleet"
+	"github.com/traumventures/cloudsourced/internal/telemetry"
 	"github.com/traumventures/cloudsourced/internal/transport"
 )
 
@@ -225,6 +226,7 @@ func serveControlplane(o *cpOptions) error {
 	for _, w := range u.Warnings {
 		log.Warn("fleet configuration", "warning", w)
 	}
+	defer flushTelemetry(telemetry.SetupFromConfig(telemetry.ServiceControlPlane, u.Telemetry, filepath.Dir(o.Config), log))
 	// Only local-docker mounts the binary from the Docker host; other
 	// providers upload it themselves.
 	bin := ""
