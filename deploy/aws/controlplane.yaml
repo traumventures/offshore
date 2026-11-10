@@ -1,0 +1,583 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  cloudsourced control plane on a small EC2 instance - the "cloudsourced
+  controlplane" container (systemd), an Elastic IP, encrypted EBS for its
+  state, and an instance role that lets the aws-ec2 provider manage the build
+  fleet. Without Hostname it serves a self-signed, fingerprint-pinned
+  certificate on 7443; with Hostname it gets a Let's Encrypt certificate and
+  serves on 443 (optionally with a Route 53 record).
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    why: >-
+      The control plane is a single stateful process (API key, certificate,
+      ACME cache, uploaded environment contexts, usage history). Its state
+      lives on a separate encrypted volume that survives instance replacement
+      (snapshot on delete). Adding a domain later is a stack update of the
+      Hostname parameter: the instance picks it up from SSM within a minute.
+    must:
+      - No secrets in user data, parameters or outputs (the API key is generated
+        on the instance and read with "controlplane info --show-key").
+      - IMDSv2 only; the instance role is never reachable from build sessions
+        (they run on separate machines, not here).
+      - The fleet stack (internal/provider/awsec2/stack.yaml) is created by
+        the provider with this role, so the role may manage only resources
+        named after FleetStackName.
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Network }
+        Parameters: [VpcId, SubnetId, ClientCidr]
+      - Label: { default: Domain (optional) }
+        Parameters: [Hostname, HostedZoneId, AcmeEmail]
+      - Label: { default: Control plane }
+        Parameters: [InstanceType, ImageUri, StateVolumeSize, LatestAmiId]
+      - Label: { default: Build fleet }
+        Parameters: [FleetStackName, FleetOwner, MachineInstanceType, MachineCpu, MachineMemory, MaxMachines]
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC of the control plane (and of the build machines).
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet in VpcId for the control plane and the build machines.
+  ClientCidr:
+    Type: String
+    Description: >-
+      Who may use cloudsourced: reaches the control plane API (TCP 7443, or 443
+      with Hostname) and the build machines (UDP 7443). E.g. 203.0.113.4/32.
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+  Hostname:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional DNS name of the control plane, e.g. cs.example.com. Set it and
+      the control plane obtains a Let's Encrypt certificate (HTTP-01 on port 80,
+      which is then opened to the internet) and serves on 443; clients use
+      url = "https://<Hostname>" without fingerprint. The name must resolve to
+      the Elastic IP (output PublicIp) - automatic with HostedZoneId.
+    AllowedPattern: '^$|^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$'
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: Optional Route 53 hosted zone of Hostname; creates the A record.
+  AcmeEmail:
+    Type: String
+    Default: ""
+    Description: Optional contact e-mail for the Let's Encrypt account.
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium, t3a.small, t3a.medium, m7a.medium]
+    Description: x86_64 only - the control plane hands its own (amd64) binary to machines.
+  ImageUri:
+    Type: String
+    Default: ""
+    Description: >-
+      Control plane image. Empty: <ControlPlaneRepository>:latest, pushed with
+      "make image-push IMAGE_REPO=<output RepositoryUri>"; the service waits until it exists.
+  StateVolumeSize:
+    Type: Number
+    Default: 20
+    MinValue: 5
+    Description: GiB of the encrypted state volume (environment contexts, ACME cache, history).
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  FleetStackName:
+    Type: String
+    Default: cloudsourced
+    AllowedPattern: '^[a-z][a-z0-9-]{0,30}$'
+    Description: Name of the fleet stack the aws-ec2 provider creates and manages (its "stack" option).
+  FleetOwner:
+    Type: String
+    Default: cloudsourced
+    Description: fleet.owner of the control plane (machines are labelled with it).
+  MachineInstanceType:
+    Type: String
+    Default: c7a.xlarge
+    Description: Instance type of build machines (first fleet size; edit config.toml for more).
+  MachineCpu:
+    Type: Number
+    Default: 4
+  MachineMemory:
+    Type: String
+    Default: 7G
+  MaxMachines:
+    Type: Number
+    Default: 1
+    MinValue: 1
+
+Conditions:
+  HasHostname: !Not [!Equals [!Ref Hostname, ""]]
+  HasZone: !And [!Condition HasHostname, !Not [!Equals [!Ref HostedZoneId, ""]]]
+  OwnRepository: !Equals [!Ref ImageUri, ""]
+
+Resources:
+  ControlPlaneRepository:
+    Type: AWS::ECR::Repository
+    Condition: OwnRepository
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      RepositoryName: !Sub "${AWS::StackName}-image"
+      EmptyOnDelete: true
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration: { ScanOnPush: true }
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"keep the last 10 images",
+            "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},
+            "action":{"type":"expire"}}]}
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: cloudsourced control plane API (and ACME HTTP-01 with a hostname)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - !If
+          - HasHostname
+          - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !Ref ClientCidr, Description: "control plane API (ACME certificate)" }
+          - { IpProtocol: tcp, FromPort: 7443, ToPort: 7443, CidrIp: !Ref ClientCidr, Description: "control plane API (self-signed certificate)" }
+        - !If
+          - HasHostname
+          - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: "ACME HTTP-01 challenges from Let's Encrypt (everything else redirects to https)" }
+          - !Ref AWS::NoValue
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 0.0.0.0/0, Description: "AWS APIs, image pulls, ACME, build machines" }
+
+  HostConfig:
+    Type: AWS::SSM::Parameter
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Settings that may change after launch (the domain) are read from here
+          by the instance on every start and polled every minute, because user
+          data only runs on the first boot.
+    Properties:
+      Name: !Sub "/${AWS::StackName}/controlplane.env"
+      Type: String
+      Description: Environment of the cloudsourced control plane container (no secrets)
+      Value: !Sub
+        - |
+          CLOUDSOURCED_HOSTNAME=${Hostname}
+          CLOUDSOURCED_ACME_EMAIL=${AcmeEmail}
+          CLOUDSOURCED_IMAGE=${Image}
+        - Image: !If [OwnRepository, !Sub "${ControlPlaneRepository.RepositoryUri}:latest", !Ref ImageUri]
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: cloudsourced control plane - manages the build fleet with the aws-ec2 provider
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        # Session Manager: operator access without SSH (read the API key).
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Policies:
+        - PolicyName: controlplane-host
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadOwnSettings
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/*"
+              - Sid: PullControlPlaneImage
+                Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceAccount: !Ref AWS::AccountId
+        - PolicyName: fleet-operator
+          # The aws-ec2 provider's permissions (see docs/CONTROLPLANE.md). The
+          # first block runs machines; the second lets it create and update
+          # its own CloudFormation stack (CloudFormation acts with the
+          # caller's permissions), limited to resources named after the stack.
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Describe
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeImages
+                  - ec2:DescribeTags
+                  - ecr:GetAuthorizationToken
+                  - logs:DescribeLogGroups
+                Resource: "*"
+              - Sid: LaunchTaggedMachines
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*"
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/project: cloudsourced
+              - Sid: LaunchMachinesInto
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}::image/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
+              - Sid: TagAtLaunch
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    ec2:CreateAction: [RunInstances, CreateSecurityGroup]
+              - Sid: ManageMachines
+                Effect: Allow
+                Action: [ec2:StartInstances, ec2:StopInstances, ec2:TerminateInstances]
+                Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/project: cloudsourced
+              - Sid: MachineIngressAndFleetSecurityGroup
+                Effect: Allow
+                Action:
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:DeleteSecurityGroup
+                Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/project: cloudsourced
+              - Sid: CreateFleetSecurityGroup
+                Effect: Allow
+                Action: ec2:CreateSecurityGroup
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:vpc/${VpcId}"
+              - Sid: PassMachineAndReaperRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${FleetStackName}-MachineRole-*"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${FleetStackName}-ReaperRole-*"
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: [ec2.amazonaws.com, lambda.amazonaws.com]
+              - Sid: AmiAndMachineSecrets
+                Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParameters]
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}::parameter/aws/service/ami-amazon-linux-latest/*"
+              - Sid: MachineSecretChannel
+                # SecretEnv of machines (workpack P1): written before launch,
+                # deleted by the host agent after reading.
+                Effect: Allow
+                Action: [ssm:PutParameter, ssm:GetParameter, ssm:DeleteParameter, ssm:AddTagsToResource]
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cloudsourced/${FleetStackName}/*"
+              - Sid: ArtifactsAndImages
+                Effect: Allow
+                Action: [s3:*]
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${FleetStackName}-artifactbucket-*"
+                  - !Sub "arn:${AWS::Partition}:s3:::${FleetStackName}-artifactbucket-*/*"
+              - Sid: EnvironmentRepository
+                Effect: Allow
+                Action: [ecr:*]
+                Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${FleetStackName}-envrepository-*"
+              - Sid: FleetStack
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:GetTemplate
+                  - cloudformation:TagResource
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${FleetStackName}/*"
+              - Sid: FleetStackRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${FleetStackName}-MachineRole-*"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${FleetStackName}-ReaperRole-*"
+              - Sid: FleetStackManagedPolicies
+                Effect: Allow
+                Action: [iam:AttachRolePolicy, iam:DetachRolePolicy]
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${FleetStackName}-MachineRole-*"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${FleetStackName}-ReaperRole-*"
+                Condition:
+                  ArnEquals:
+                    iam:PolicyARN:
+                      - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+                      - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+              - Sid: FleetStackInstanceProfile
+                Effect: Allow
+                Action:
+                  - iam:CreateInstanceProfile
+                  - iam:DeleteInstanceProfile
+                  - iam:GetInstanceProfile
+                  - iam:AddRoleToInstanceProfile
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:TagInstanceProfile
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/${FleetStackName}-MachineInstanceProfile-*"
+              - Sid: FleetStackReaper
+                Effect: Allow
+                Action: [lambda:*]
+                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${FleetStackName}-Reaper-*"
+              - Sid: FleetStackReaperLogs
+                Effect: Allow
+                Action: [logs:CreateLogGroup, logs:DeleteLogGroup, logs:PutRetentionPolicy, logs:TagResource, logs:TagLogGroup, logs:ListTagsForResource]
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${FleetStackName}-Reaper-*"
+              - Sid: FleetStackSchedule
+                Effect: Allow
+                Action: [events:PutRule, events:DeleteRule, events:DescribeRule, events:PutTargets, events:RemoveTargets, events:TagResource, events:ListTagsForResource]
+                Resource: !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${FleetStackName}-ReaperSchedule-*"
+              - Sid: FleetStackResourceGroup
+                Effect: Allow
+                Action: [resource-groups:*]
+                Resource: !Sub "arn:${AWS::Partition}:resource-groups:${AWS::Region}:${AWS::AccountId}:group/${FleetStackName}"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1  # the container uses the host network
+          HttpEndpoint: enabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs: { VolumeSize: 30, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          SubnetId: !Ref SubnetId
+          GroupSet: [!Ref SecurityGroup]
+          AssociatePublicIpAddress: true
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}" }
+        - { Key: project, Value: cloudsourced }
+        - { Key: cloudsourced.kind, Value: controlplane }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # cloudsourced control plane host. Runs once; the services below
+          # survive reboots and pick up setting changes from SSM.
+          set -euxo pipefail
+          dnf install -y docker
+          systemctl enable --now docker
+
+          # State volume (attached by the stack as /dev/sdf; the device appears
+          # a little after boot). Formatted only when empty.
+          for i in $(seq 120); do [ -e /dev/sdf ] && break; sleep 5; done
+          dev=$(readlink -f /dev/sdf)
+          blkid "$dev" || mkfs.xfs -L cs-state "$dev"
+          mkdir -p /var/lib/cloudsourced
+          grep -q cs-state /etc/fstab || echo 'LABEL=cs-state /var/lib/cloudsourced xfs defaults,nofail 0 2' >> /etc/fstab
+          systemctl daemon-reload
+          mount -a
+          chown 10001:10001 /var/lib/cloudsourced
+          chmod 0700 /var/lib/cloudsourced
+
+          # Fleet configuration, written once; edit it on the volume afterwards.
+          if [ ! -e /var/lib/cloudsourced/config.toml ]; then
+            cat > /var/lib/cloudsourced/config.toml <<'CFG'
+          [fleet]
+          owner = "${FleetOwner}"
+          max_machines = ${MaxMachines}
+
+          [[fleet.size]]
+          provider = "aws"
+          name = "${MachineInstanceType}"
+          cpu = ${MachineCpu}
+          memory = "${MachineMemory}"
+
+          [providers.aws]
+          backend = "aws-ec2"
+          region = "${AWS::Region}"
+          stack = "${FleetStackName}"
+          subnet = "${SubnetId}"
+          allow_cidrs = ["${ClientCidr}"]
+          docker_command = ["docker"]
+          CFG
+            chown 10001:10001 /var/lib/cloudsourced/config.toml
+          fi
+
+          mkdir -p /etc/cloudsourced
+          cat > /usr/local/bin/cloudsourced-controlplane-sync <<'SH'
+          #!/bin/bash
+          # Fetch the container environment from SSM; restart on change.
+          set -euo pipefail
+          new=$(aws ssm get-parameter --region ${AWS::Region} --name "/${AWS::StackName}/controlplane.env" --query Parameter.Value --output text)
+          if [ "$new" != "$(cat /etc/cloudsourced/controlplane.env 2>/dev/null)" ]; then
+            printf '%s\n' "$new" > /etc/cloudsourced/controlplane.env
+            [ "${!1:-}" = --init ] || systemctl restart cloudsourced-controlplane
+          fi
+          SH
+          cat > /usr/local/bin/cloudsourced-controlplane-run <<'SH'
+          #!/bin/bash
+          set -euo pipefail
+          set -a; . /etc/cloudsourced/controlplane.env; set +a
+          registry=${!CLOUDSOURCED_IMAGE%%/*}
+          case "$registry" in *.dkr.ecr.*.amazonaws.com)
+            aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin "$registry" ;;
+          esac
+          # Waits (systemd restarts) until the image has been pushed.
+          docker pull "$CLOUDSOURCED_IMAGE"
+          docker rm -f cloudsourced-controlplane >/dev/null 2>&1 || true
+          exec docker run --rm --name cloudsourced-controlplane --network host \
+            --group-add "$(stat -c %g /var/run/docker.sock)" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /var/lib/cloudsourced:/var/lib/cloudsourced \
+            -e CLOUDSOURCED_HOSTNAME -e CLOUDSOURCED_ACME_EMAIL \
+            "$CLOUDSOURCED_IMAGE" controlplane
+          SH
+          chmod 0755 /usr/local/bin/cloudsourced-controlplane-sync /usr/local/bin/cloudsourced-controlplane-run
+
+          cat > /etc/systemd/system/cloudsourced-controlplane.service <<'UNIT'
+          [Unit]
+          Description=cloudsourced control plane
+          After=docker.service network-online.target
+          Requires=docker.service
+          Wants=network-online.target
+          RequiresMountsFor=/var/lib/cloudsourced
+
+          [Service]
+          ExecStartPre=/usr/local/bin/cloudsourced-controlplane-sync --init
+          ExecStart=/usr/local/bin/cloudsourced-controlplane-run
+          ExecStop=/usr/bin/docker stop -t 30 cloudsourced-controlplane
+          Restart=always
+          RestartSec=20
+          TimeoutStopSec=60
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          cat > /etc/systemd/system/cloudsourced-controlplane-sync.service <<'UNIT'
+          [Unit]
+          Description=apply cloudsourced control plane settings from SSM
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/cloudsourced-controlplane-sync
+          UNIT
+          cat > /etc/systemd/system/cloudsourced-controlplane-sync.timer <<'UNIT'
+          [Unit]
+          Description=poll cloudsourced control plane settings
+          [Timer]
+          OnBootSec=2min
+          OnUnitActiveSec=1min
+          [Install]
+          WantedBy=timers.target
+          UNIT
+          systemctl daemon-reload
+          systemctl enable --now cloudsourced-controlplane.service cloudsourced-controlplane-sync.timer
+
+  StateVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Holds the API key, the pinned certificate and the ACME account; losing
+          it means re-configuring every client, so deletion keeps a snapshot.
+    Properties:
+      AvailabilityZone: !GetAtt Instance.AvailabilityZone
+      Size: !Ref StateVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-state" }
+        - { Key: project, Value: cloudsourced }
+
+  StateVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref Instance
+      VolumeId: !Ref StateVolume
+      Device: /dev/sdf
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}" }
+        - { Key: project, Value: cloudsourced }
+
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIp.AllocationId
+      InstanceId: !Ref Instance
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasZone
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref Hostname
+      Type: A
+      TTL: "60"
+      ResourceRecords: [!Ref ElasticIp]
+
+Outputs:
+  PublicIp:
+    Description: Elastic IP of the control plane (point Hostname here when not using HostedZoneId)
+    Value: !Ref ElasticIp
+  Url:
+    Description: orchestrator.url for clients
+    Value: !If [HasHostname, !Sub "https://${Hostname}", !Sub "https://${ElasticIp}:7443"]
+  InstanceId:
+    Value: !Ref Instance
+  RepositoryUri:
+    Condition: OwnRepository
+    Description: push the image here (make image-push IMAGE_REPO=...)
+    Value: !GetAtt ControlPlaneRepository.RepositoryUri
+  ClientConfigCommand:
+    Description: >-
+      Prints the client [orchestrator] block and the API key on the instance
+      (then: aws ssm get-command-invocation --command-id <CommandId> --instance-id <InstanceId>).
+    Value: !Sub
+      - "aws ssm send-command --region ${AWS::Region} --instance-ids ${Instance} --document-name AWS-RunShellScript --parameters 'commands=[\"docker exec cloudsourced-controlplane cloudsourced controlplane client-config --url ${ClientUrl}\",\"docker exec cloudsourced-controlplane cloudsourced controlplane info --show-key\"]'"
+      - ClientUrl: !If [HasHostname, !Sub "https://${Hostname}", !Sub "https://${ElasticIp}:7443"]

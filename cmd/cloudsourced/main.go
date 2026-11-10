@@ -47,6 +47,7 @@ Usage:
   cloudsourced editor [vscode|zed|neovim]  rust-analyzer settings for remote checks
   cloudsourced config check                validate configuration files
   cloudsourced controlplane [flags]        serve a shared control plane (see --help)
+  cloudsourced controlplane info|client-config|health
   cloudsourced version
 
 Internal:
