@@ -192,7 +192,10 @@ func runNextest(ctx context.Context, rt Runtime, args []string, n nextestRun) (i
 	archive := filepath.Join(rt.Root(), rel)
 	filter := newLineFilter(os.Stderr, "Archiving ", "Archived ")
 	sniff := newSniffer(filter, nextestMissing)
-	code, err := rt.Remote(ctx, append([]string{"cargo"}, n.archiveArgs(archive)...), RemoteOptions{
+	// nextest writes the archive atomically into its directory, which a
+	// fresh build directory lacks.
+	argv := append([]string{"sh", "-c", `mkdir -p "$1" && shift && exec "$@"`, "sh", filepath.Dir(archive), "cargo"}, n.archiveArgs(archive)...)
+	code, err := rt.Remote(ctx, argv, RemoteOptions{
 		NoTTY: true, Stderr: sniff, Env: buildEnv("NEXTEST_"),
 		Collect: func(code int) ([]string, error) {
 			if code != 0 {
