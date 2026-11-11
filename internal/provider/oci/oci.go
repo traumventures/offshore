@@ -543,7 +543,11 @@ func machineTags(spec provider.MachineSpec, arch string, now time.Time) (map[str
 		{provider.LabelFinger, spec.Finger},
 		{provider.LabelSize, spec.Size},
 		{provider.LabelArch, arch},
+		{provider.LabelPrice, provider.PriceLabel(spec.PricePerHour)},
 	} {
+		if kv[1] == "" && kv[0] == provider.LabelPrice {
+			continue
+		}
 		if strings.ContainsAny(kv[1], ",=") && !ownTags[kv[0]] {
 			return nil, fmt.Errorf("oci: label %s value %q contains ',' or '='", kv[0], kv[1])
 		}

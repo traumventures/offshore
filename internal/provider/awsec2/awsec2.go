@@ -487,6 +487,9 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 		{Key: aws.String(provider.LabelSize), Value: aws.String(spec.Size)},
 		{Key: aws.String(provider.LabelArch), Value: aws.String(arch)},
 	}
+	if p := provider.PriceLabel(spec.PricePerHour); p != "" {
+		tags = append(tags, ec2types.Tag{Key: aws.String(provider.LabelPrice), Value: aws.String(p)})
+	}
 	input := &ec2.RunInstancesInput{
 		ImageId:  aws.String(ami),
 		MinCount: aws.Int32(1), MaxCount: aws.Int32(1),

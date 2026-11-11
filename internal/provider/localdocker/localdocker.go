@@ -173,6 +173,9 @@ func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provide
 		provider.LabelFinger:  spec.Finger,
 		provider.LabelSize:    spec.Size,
 	}
+	if p := provider.PriceLabel(spec.PricePerHour); p != "" {
+		mLabels[provider.LabelPrice] = p
+	}
 	for k, v := range common {
 		mLabels[k] = v
 	}

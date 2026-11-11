@@ -246,3 +246,70 @@ func TestPlaceMovesWarmSlotFromDrainingMachine(t *testing.T) {
 		t.Fatalf("moved from a busy machine: %+v", pl)
 	}
 }
+
+// Production regression (task 12f7b83a66e0935f): a 5-CPU request waited
+// 148 s for the warm slot on a busy x4 (4 CPU, its cargo check overran
+// its estimate) instead of starting the stopped x8 of the environment.
+// Once the request waited as long as a start takes, the stopped machine
+// starts; the request never waits for a machine smaller than itself.
+func TestStartStoppedInsteadOfWaitingForOverrunningSession(t *testing.T) {
+	x4 := busy("x4", res(4, 7), res(5, 4), 1)
+	x4.Size, x4.Provider, x4.WarmRepos = "x4", "aws", []string{"r"}
+	x4.Releases = []Release{{At: now.Add(-time.Minute), Start: now.Add(-113 * time.Second), Res: res(5, 4)}}
+	x8 := machine("x8", res(8, 15), Resources{})
+	x8.Size, x8.Provider, x8.State = "x8", "aws", Stopped
+	sizes := []Size{{Provider: "aws", Name: "x8", Capacity: res(8, 15), PricePerHour: 0.46}, {Provider: "aws", Name: "x16", Capacity: res(16, 30), PricePerHour: 0.93}}
+	tk := task(5, 4)
+	tk.Profile = Profile{Warm: time.Second, Cold: 4 * time.Minute, Spread: 1}
+	f := Pool{Now: now, Sizes: sizes, Machines: []Machine{x4, x8},
+		Providers: map[string]ProviderState{"aws": {Start: 16 * time.Second, Boot: 110 * time.Second}}}
+	for _, r := range []float64{0.2, 0.5} {
+		p := Default{Cfg: Config{CostOptimization: r, MaxMachines: 8, CPUOvercommit: 2, MemoryOvercommit: 1, QueueTimeout: 10 * time.Minute, IdleStop: 5 * time.Minute}}
+		if pl := p.Place(f, tk); pl.Kind != Wait || strings.Contains(pl.Reason, "on x4") {
+			t.Fatalf("r=%v: must not wait for the smaller x4: %+v", r, pl)
+		}
+		tk.Since = now.Add(-time.Minute)
+		f.Queue = []Task{tk}
+		acts := p.Plan(f)
+		started := false
+		for _, a := range acts {
+			started = started || a.Kind == Start && a.Machine == "x8"
+		}
+		if !started {
+			t.Fatalf("r=%v: waited 60s (start takes 16s), want x8 started, got %+v", r, acts)
+		}
+	}
+}
+
+// The same with a busy machine big enough for the request: its session
+// overruns, so the expected release slips on every plan; after waiting
+// as long as a start takes the stopped machine starts anyway.
+func TestQueueNoLongerThanAStart(t *testing.T) {
+	b := busy("busy", res(8, 15), res(8, 8), 1)
+	b.Size, b.Provider, b.WarmRepos = "x8", "aws", []string{"r"}
+	b.Releases = []Release{{At: now.Add(-time.Minute), Start: now.Add(-113 * time.Second), Res: res(8, 8)}}
+	st := machine("stopped", res(8, 15), Resources{})
+	st.Size, st.Provider, st.State = "x8", "aws", Stopped
+	sizes := []Size{{Provider: "aws", Name: "x8", Capacity: res(8, 15), PricePerHour: 0.46}}
+	tk := task(5, 4)
+	tk.Profile = Profile{Warm: time.Second, Cold: 4 * time.Minute, Spread: 1}
+	f := Pool{Now: now, Sizes: sizes, Machines: []Machine{b, st},
+		Providers: map[string]ProviderState{"aws": {Start: 16 * time.Second, Boot: 110 * time.Second}}}
+	p := Default{Cfg: Config{CostOptimization: 0.5, MaxMachines: 8, CPUOvercommit: 1, MemoryOvercommit: 1, QueueTimeout: 10 * time.Minute, IdleStop: 5 * time.Minute}}
+	starts := func(waited time.Duration) bool {
+		tk.Since = now.Add(-waited)
+		f.Queue = []Task{tk}
+		for _, a := range p.Plan(f) {
+			if a.Kind == Start {
+				return true
+			}
+		}
+		return false
+	}
+	if starts(time.Second) {
+		t.Fatal("fresh request: waiting for the warm slot (about 2 min) is cheaper")
+	}
+	if !starts(30 * time.Second) {
+		t.Fatal("waited 30s, a start takes 16s: want the stopped machine started")
+	}
+}
