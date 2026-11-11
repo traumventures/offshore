@@ -49,6 +49,8 @@ type objectAPI interface {
 	GetObject(ctx context.Context, req objectstorage.GetObjectRequest) (objectstorage.GetObjectResponse, error)
 	DeleteObject(ctx context.Context, req objectstorage.DeleteObjectRequest) (objectstorage.DeleteObjectResponse, error)
 	CreatePreauthenticatedRequest(ctx context.Context, req objectstorage.CreatePreauthenticatedRequestRequest) (objectstorage.CreatePreauthenticatedRequestResponse, error)
+	ListPreauthenticatedRequests(ctx context.Context, req objectstorage.ListPreauthenticatedRequestsRequest) (objectstorage.ListPreauthenticatedRequestsResponse, error)
+	DeletePreauthenticatedRequest(ctx context.Context, req objectstorage.DeletePreauthenticatedRequestRequest) (objectstorage.DeletePreauthenticatedRequestResponse, error)
 }
 
 type identityAPI interface {

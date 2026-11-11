@@ -37,6 +37,14 @@ func (s *StoreSet) Granter(ctx context.Context, prov string) (store.Granter, err
 	if p == nil && s.Override == nil {
 		return nil, nil
 	}
+	if sg, isG := p.(provider.StoreGranter); isG && s.Override == nil {
+		g, ok, err := sg.NativeGranter(ctx, prov, s.Pool)
+		if err != nil || !ok {
+			return nil, err
+		}
+		s.remember(prov, g)
+		return g, nil
+	}
 	c, ok, err := provider.StoreConfig(ctx, p, s.Pool, s.Override)
 	if err != nil || !ok {
 		return nil, err
@@ -52,11 +60,15 @@ func (s *StoreSet) Granter(ctx context.Context, prov string) (store.Granter, err
 	if err != nil {
 		return nil, err
 	}
+	s.remember(prov, g)
+	return g, nil
+}
+
+func (s *StoreSet) remember(prov string, g store.Granter) {
 	if s.granters == nil {
 		s.granters = map[string]store.Granter{}
 	}
 	s.granters[prov] = g
-	return g, nil
 }
 
 // storeGrant mints a worker grant for a repository and environment on a

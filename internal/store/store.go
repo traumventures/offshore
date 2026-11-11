@@ -64,6 +64,10 @@ type Grant struct {
 	SecretAccessKey string `json:"secret_access_key,omitempty"`
 	SessionToken    string `json:"session_token,omitempty"`
 	Expires         int64  `json:"expires,omitempty"` // unix seconds (0: never)
+	// URLs are pre-authenticated URL prefixes per scope (OCI Object Storage
+	// pre-authenticated requests): no credentials, each reaches only the
+	// objects below its scope until Expires.
+	URLs map[string]string `json:"urls,omitempty"`
 }
 
 // Expired reports whether the grant's credentials ended before now plus
@@ -101,6 +105,13 @@ var Opener = func(g Grant, scope string, ttl time.Duration) (Store, error) {
 	root := strings.Trim(path.Join(g.Prefix, cleanScope(scope)), "/")
 	if g.Dir != "" {
 		return blobcache.NewDirStore(path.Join(g.Dir, root), ttl)
+	}
+	if len(g.URLs) > 0 {
+		base, ok := urlBase(g, scope)
+		if !ok {
+			return nil, fmt.Errorf("%w: %q (no URL)", ErrScope, scope)
+		}
+		return newURLStore(base, ttl), nil
 	}
 	return newS3(context.Background(), g, root, ttl)
 }
