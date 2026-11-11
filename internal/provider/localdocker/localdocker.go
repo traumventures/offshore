@@ -342,7 +342,7 @@ func (d *Docker) Stop(ctx context.Context, id string) error {
 	if svcs := d.services(ctx, id); len(svcs) > 0 {
 		d.run(ctx, nil, append([]string{"stop", "-t", "5"}, svcs...)...)
 	}
-	return d.run(ctx, nil, "stop", "-t", "10", "cs-"+id)
+	return d.run(ctx, nil, "stop", "-t", strconv.Itoa(machine.StopTimeout), "cs-"+id)
 }
 
 // Destroy removes the machine, its services and its cache volume.

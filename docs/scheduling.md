@@ -105,8 +105,10 @@ failed start backs off for 2 minutes instead of retrying in a loop.
 Per decision:
 
 - **Place**: candidates are every way to run now (each accepting machine
-  with free capacity: warm slot, restore of the best snapshot, cold; each
-  after prune or resize if the disk is too full) and every way to wait
+  with free capacity: warm slot, restore of the best snapshot, move of a
+  warm slot from an idle (e.g. draining) machine whose slot is newer than
+  every snapshot (saved there, then restored here), cold; each after prune
+  or resize if the disk is too full) and every way to wait
   (busy or starting machines of the environment, using the expected
   release times of their sessions and the learned spread of run times).
   Waiting is only considered within 80 % of `queue_timeout`.
@@ -188,9 +190,10 @@ cheapest size for the aggregate demand, no consolidation) for comparison.
 ## Inputs: disk, slots and snapshots
 
 The pool snapshot the policy sees contains, per machine, the disk
-(`DiskTotal`, `DiskUsed`) and the size of each repository's build slot
-(`Status.Disk`), and the snapshots held in object stores
-(`Status.Snapshots`). Sizes may declare `disk`. Sessions report their slot
+(`DiskTotal`, `DiskUsed`, the worker's `Budget`) and the size of each
+repository's build slot (`Status.Disk`), and the snapshots held in object
+stores (`Status.Snapshots`, plus those the orchestrator saved, each recorded
+with the provider of the machine it came from). Sizes may declare `disk`. Sessions report their slot
 size before and after the run (`task_end.usage.slot_bytes_before/after`).
 The mechanisms for a full disk (prune, move by snapshot and restore, grow
 the disk) are in [caches-and-storage.md](caches-and-storage.md).

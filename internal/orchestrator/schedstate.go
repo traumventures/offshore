@@ -261,6 +261,13 @@ func (o *Orchestrator) prepareSlot(ctx context.Context, machineID string, a sche
 		}
 		ev.Store, ev.Bytes = a.Snapshot.Store, a.Snapshot.Bytes
 		err = slots.RestoreSlot(ctx, t, a.Repo, a.Snapshot)
+	case scheduler.SlotMove:
+		if slots == nil {
+			err = errors.New("no slot operations configured")
+			break
+		}
+		ev.Store, ev.Bytes = a.Snapshot.Store, a.Bytes
+		err = o.moveSlot(ctx, slots, t, a)
 	}
 	ev.Seconds = time.Since(start).Seconds()
 	if err != nil {

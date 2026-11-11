@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -328,9 +329,25 @@ func (a *Supervisor) status() *machine.HostStatus {
 	return &st
 }
 
+// stopWorker stops the machine container before the instance goes down,
+// giving the worker its stop timeout to save changed build slots (an OS
+// shutdown would allow only Docker's shutdown timeout).
+func (a *Supervisor) stopWorker(ctx context.Context) {
+	if a.Docker == nil {
+		return
+	}
+	name := a.Spec.Layout.Name()
+	if _, err := a.Docker(ctx, nil, nil, "stop", "-t", strconv.Itoa(machine.StopTimeout), name); err != nil {
+		a.Log.Warn("stopping the machine container", "name", name, "err", err)
+	}
+}
+
 // Check makes one lifecycle decision and acts on it.
 func (a *Supervisor) Check(ctx context.Context) machine.Decision {
 	d := machine.Decide(a.now(), a.Spec.Expires(), a.Spec.IdleStopAfter(), a.status())
+	if d == machine.Terminate || d == machine.IdleStop {
+		a.stopWorker(ctx)
+	}
 	switch d {
 	case machine.Terminate:
 		if t, ok := a.Platform.(SelfTerminator); ok {
