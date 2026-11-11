@@ -175,6 +175,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, log *slog.Logger)
 		}
 	case pathEvents:
 		h = func(ctx context.Context, r *http.Request, _ io.Writer) (any, error) { return s.serveEvents(ctx, r) }
+	case pathQueue:
+		h = s.serveQueue
 	default:
 		http.NotFound(w, r)
 		return false

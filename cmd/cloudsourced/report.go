@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/traumventures/cloudsourced/internal/daemon"
@@ -60,6 +62,7 @@ func reportCmd(args []string) error {
 	since := fs.String("since", "7d", "start of the window: 7d, 36h, 2026-11-01 or RFC 3339")
 	until := fs.String("until", "", "end of the window (default now; same formats, durations count back from now)")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
+	by := fs.String("by", "", "group sessions by label: "+strings.Join(report.GroupKeys, ", ")+" (comma separated; default agent,worktree)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -75,6 +78,16 @@ func reportCmd(args []string) error {
 		return err
 	}
 	r := report.Compute(evs, from, to)
+	if *by != "" {
+		r.Groupings = nil
+		for _, k := range strings.Split(*by, ",") {
+			k = strings.TrimSpace(k)
+			if !slices.Contains(report.GroupKeys, k) {
+				return fmt.Errorf("--by %q: want one of %s", k, strings.Join(report.GroupKeys, ", "))
+			}
+			r.Groupings = append(r.Groupings, report.Groups(evs, from, to, k))
+		}
+	}
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")

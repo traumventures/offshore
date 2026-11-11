@@ -23,6 +23,7 @@ import (
 
 	"github.com/traumventures/cloudsourced/internal/auth"
 	"github.com/traumventures/cloudsourced/internal/events"
+	"github.com/traumventures/cloudsourced/internal/labels"
 	"github.com/traumventures/cloudsourced/internal/logs"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
@@ -77,6 +78,20 @@ type Request struct {
 	// amd64). Machines for the environment are only created from sizes of
 	// this architecture.
 	Arch string `json:",omitempty"`
+	// Labels describe who runs the session (worktree, branch, user, agent
+	// and free labels, see internal/labels). They are recorded in the
+	// event log and shown in the queue; they never affect placement.
+	Labels map[string]string `json:",omitempty"`
+}
+
+// QueuedTask is a request waiting for capacity (`cloudsourced top`).
+type QueuedTask struct {
+	ID     string              `json:"id"`
+	Since  time.Time           `json:"since"`
+	RepoID string              `json:"repo_id,omitempty"`
+	Key    string              `json:"key,omitempty"`
+	Need   scheduler.Resources `json:"need"`
+	Labels map[string]string   `json:"labels,omitempty"`
 }
 
 // buildTTL returns the effective build TTL of a request.
@@ -263,6 +278,7 @@ type Orchestrator struct {
 	creating   map[string]creation       // machine id -> creation
 	queue      map[string]scheduler.Task // waiting tasks
 	queued     map[string]repoParams     // task id -> repository parameters
+	waiting    map[string]QueuedTask     // task id -> request shown in Queue
 	envParams  map[string]repoParams     // env hash -> parameters of its last request
 	recentEnvs map[string]time.Time      // env hash -> last use (warm pool)
 	images     map[string]string         // env hash -> image
@@ -317,7 +333,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		cfg: cfg, provs: provs, stateDir: stateDir, log: log, master: master, signer: master.Signer(),
 		policy:   scheduler.Default{Cfg: cfg.Policy},
 		machines: map[string]*Machine{}, creating: map[string]creation{}, queue: map[string]scheduler.Task{},
-		queued: map[string]repoParams{}, envParams: map[string]repoParams{},
+		queued: map[string]repoParams{}, waiting: map[string]QueuedTask{}, envParams: map[string]repoParams{},
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
 		ProbeFunc: Probe, Clock: clk,
 	}
@@ -816,6 +832,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 	o.services[req.EnvHash] = req.Services
 	o.envParams[req.EnvHash] = req.params()
 	o.queued[task.ID] = req.params()
+	o.waiting[task.ID] = QueuedTask{ID: task.ID, Since: time.Now(), RepoID: req.RepoID, Key: req.Key, Need: req.Need, Labels: labels.Clean(req.Labels)}
 	o.saveRecentLocked()
 	stale := time.Since(o.refreshed) > 30*time.Second
 	o.mu.Unlock()
@@ -828,6 +845,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 		o.mu.Lock()
 		delete(o.queue, task.ID)
 		delete(o.queued, task.ID)
+		delete(o.waiting, task.ID)
 		o.mu.Unlock()
 	}()
 	deadline := now.Add(o.cfg.QueueTimeout)
@@ -1454,4 +1472,19 @@ func (o *Orchestrator) DestroyAll(ctx context.Context) error {
 	o.saveRecentLocked()
 	o.mu.Unlock()
 	return nil
+}
+
+// Queue returns the requests currently waiting for capacity, oldest first.
+// A request counts from its arrival, including placement on cached state.
+func (o *Orchestrator) Queue() []QueuedTask {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := make([]QueuedTask, 0, len(o.waiting))
+	for id, t := range o.waiting {
+		if _, queued := o.queue[id]; queued {
+			out = append(out, t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Since.Before(out[j].Since) })
+	return out
 }

@@ -151,6 +151,9 @@ type Exec struct {
 	// TraceParent is the W3C trace context of the tool run (optional);
 	// the server's session span continues it.
 	TraceParent string `json:"traceparent,omitempty"`
+	// Labels describe who runs the session (internal/labels); the server
+	// reports them in Status.Sessions.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // CompilerCache is the session's compiler cache configuration.
@@ -272,6 +275,12 @@ type Session struct {
 	CPU     float64  `json:"cpu"`
 	Memory  int64    `json:"memory"`
 	Lease   string   `json:"lease,omitempty"`
+	// Labels are the session's labels (Exec.Labels).
+	Labels map[string]string `json:"labels,omitempty"`
+	// UsedMemory is the session's current memory; CPUSeconds the CPU time
+	// it consumed so far (busy cores = delta / wall delta).
+	UsedMemory int64   `json:"used_memory,omitempty"`
+	CPUSeconds float64 `json:"cpu_seconds,omitempty"`
 }
 
 // Fetch requests output files from the most recent build slot of a repo.

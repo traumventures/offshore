@@ -43,6 +43,8 @@ type Run struct {
 	Lease string    `json:"lease,omitempty"` // pool lease id
 	Slot  string    `json:"slot,omitempty"`  // build slot on the machine
 	Warm  bool      `json:"warm,omitempty"`  // build slot was warm
+	// Labels describe who ran the command (worktree, branch, user, agent).
+	Labels map[string]string `json:"labels,omitempty"`
 
 	Machine   string  `json:"machine,omitempty"`
 	Provider  string  `json:"provider,omitempty"`

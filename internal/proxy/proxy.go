@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/daemon"
 	"github.com/traumventures/cloudsourced/internal/events"
+	"github.com/traumventures/cloudsourced/internal/labels"
 	"github.com/traumventures/cloudsourced/internal/outputfs"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/tracing"
@@ -27,6 +29,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/term"
 )
+
+// progressOut receives the daemon's progress messages (machine start,
+// image build) during preparation.
+var progressOut io.Writer = os.Stderr
 
 // defaultEnv is always forwarded in addition to the tool's allowlist.
 var defaultEnv = []string{"TERM", "COLORTERM", "NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "LANG", "LC_*"}
@@ -51,7 +57,8 @@ func mainRun(tr *runTrace, tool string, args []string) int {
 	if err != nil {
 		return execLocal(tool, args)
 	}
-	rec := &events.Run{Time: time.Now(), Repo: rootDir, Cwd: cwd, Tool: tool, Args: args, Mode: events.Local}
+	rec := &events.Run{Time: time.Now(), Repo: rootDir, Cwd: cwd, Tool: tool, Args: args, Mode: events.Local,
+		Labels: labels.Detect(rootDir, "", os.Getenv)}
 	tr.rec = rec
 	local := func(why string) int {
 		rec.Why = why
@@ -225,7 +232,8 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 		tracing.End(pspan, err)
 		return 0, &fallback{err}
 	}
-	raw, err := daemon.Call(pctx, daemon.Request{Op: "prepare", Root: repo.Root, Cwd: cwd, Tool: tool, Args: args, TraceParent: tracing.Inject(pctx)}, os.Stderr)
+	raw, err := daemon.Call(pctx, daemon.Request{Op: "prepare", Root: repo.Root, Cwd: cwd, Tool: tool, Args: args,
+		Labels: rec.Labels, TraceParent: tracing.Inject(pctx)}, progressOut)
 	tracing.End(pspan, err)
 	signal.Stop(prepSig)
 	close(prepSig)
@@ -241,6 +249,9 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 	}
 	rec.Machine, rec.Provider, rec.Size, rec.Price, rec.Placement = prep.Machine, prep.Provider, prep.Size, prep.PricePerHour, prep.Reason
 	rec.Lease, rec.Timings = prep.Lease, prep.Timings
+	if prep.Labels != nil {
+		rec.Labels = prep.Labels
+	}
 	release := daemon.Request{Op: "release", Lease: prep.Lease, UsageKey: prep.UsageKey, TraceParent: tracing.Inject(ctx)}
 	started := false
 	defer func() {
@@ -279,7 +290,7 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 		Grant: prep.Grant, MemoryOvercommit: prep.MemoryOvercommit,
 		Build: repo.Cache.Build.Paths, BuildTTL: prep.BuildTTL, Deps: repo.Cache.Deps.Paths,
 		Eager: profile.Eager, Lease: prep.Lease,
-		Linker: repo.Environment.Linker, TraceParent: tracing.Inject(ctx),
+		Linker: repo.Environment.Linker, TraceParent: tracing.Inject(ctx), Labels: rec.Labels,
 	}
 	if cc := repo.Cache.Compiler; cc.Tool != "" {
 		req.CompilerCache = &proto.CompilerCache{
@@ -492,3 +503,24 @@ func copyStdin(pc *proto.Conn) {
 // resolveSecret reads a secret reference locally. Secret values only travel
 // inside the session request and are never written to the machine's disk.
 func resolveSecret(ref, root string) (string, error) { return config.ResolveRef(ref, root) }
+
+// Prewarm runs argv remotely in repo's root like a proxied command (image,
+// machine lease and start, source sync, build slot), labelled
+// purpose=prewarm, but never falls back to local execution: an error
+// before the remote start is returned as is. progress receives the
+// daemon's preparation messages.
+func Prewarm(ctx context.Context, repo *config.Repo, argv []string, progress io.Writer) (int, error) {
+	if len(argv) == 0 {
+		return 0, errors.New("prewarm: empty command")
+	}
+	progressOut = progress
+	l := labels.Merge(labels.Detect(repo.Root, "", os.Getenv), map[string]string{labels.Purpose: labels.PurposePrewarm})
+	rec := &events.Run{Time: time.Now(), Repo: repo.Root, Cwd: repo.Root, Tool: argv[0], Args: argv[1:],
+		Mode: events.Remote, Why: "cloudsourced prewarm", Labels: labels.Clean(l)}
+	code, err := runRemote(ctx, repo, config.Tool{}, argv[0], argv[1:], repo.Root, rec)
+	var fb *fallback
+	if errors.As(err, &fb) {
+		return 0, fb.err
+	}
+	return code, err
+}
