@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -73,6 +74,54 @@ memory = "8G"
 		"[providers.a]\ntype = \"aws-ec2\"\n[providers.a.volume]\nsize = \"1T\"\n",
 		"[providers.a]\ntype = \"aws-ec2\"\n[providers.a.profile.ram]\niops = 1\n",
 		"[providers.a]\ntype = \"aws-ec2\"\n[providers.a.profile.volume]\nattach = \"quick\"\n",
+	} {
+		if _, err := loadUserFrom(t, bad); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}
+
+func TestSizeStack(t *testing.T) {
+	u, err := loadUserFrom(t, `
+[providers.aws]
+type = "aws-ec2"
+[[providers.aws.size]]
+name = "lvs"
+cpu = 4
+memory = "8G"
+stack = ["local", "volume", "store"]
+[[providers.aws.size]]
+name = "v"
+cpu = 4
+memory = "8G"
+medium = "volume"
+[[providers.aws.size]]
+name = "l"
+cpu = 4
+memory = "8G"
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"local", "volume", "store"}, {"volume", "store"}, {"local", "store"}}
+	for i, sz := range u.Pool.Sizes {
+		if got := sz.TierStack(); !slices.Equal(got, want[i]) {
+			t.Errorf("size %s: stack %v, want %v", sz.Name, got, want[i])
+		}
+		if sz.HasVolume() != (i < 2) {
+			t.Errorf("size %s: volume %v", sz.Name, sz.HasVolume())
+		}
+	}
+	size := "[providers.a]\ntype = \"aws-ec2\"\n[[providers.a.size]]\nname = \"x\"\ncpu = 1\nmemory = \"1G\"\n"
+	for _, bad := range []string{
+		size + "stack = [\"volume\", \"local\", \"store\"]\n",
+		size + "stack = [\"local\", \"volume\"]\n",
+		size + "stack = [\"store\"]\n",
+		size + "stack = [\"local\", \"local\", \"store\"]\n",
+		size + "stack = [\"ram\", \"store\"]\n",
+		size + "medium = \"volume\"\nstack = [\"local\", \"store\"]\n",
+		size + "medium = \"local\"\nstack = [\"local\", \"volume\", \"store\"]\n",
+		"[providers.s]\ntype = \"static\"\nhosts = [\"h\"]\n[[providers.s.size]]\nname = \"x\"\ncpu = 1\nmemory = \"1G\"\nstack = [\"local\", \"volume\", \"store\"]\n",
 	} {
 		if _, err := loadUserFrom(t, bad); err == nil {
 			t.Errorf("accepted %q", bad)

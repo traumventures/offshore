@@ -10,7 +10,7 @@ import (
 
 func volumeSizes(keep bool) []scheduler.Size {
 	return []scheduler.Size{{Provider: "p", Name: "v", Capacity: scheduler.Resources{CPU: 4, Memory: 8 * gib}, PricePerHour: 1,
-		Medium: medium.Volume, Stack: medium.Stack{Hot: medium.Default("aws-ec2", medium.Volume), Store: medium.Default("aws-ec2", medium.Store)},
+		Medium: medium.Volume, Stack: scheduler.StackOf(0, medium.Default("aws-ec2", medium.Volume), medium.Default("aws-ec2", medium.Store)),
 		Volume: scheduler.VolumePolicy{Min: 100 * gib, Step: 50 * gib, KeepDetached: keep, TTL: 24 * time.Hour}}}
 }
 

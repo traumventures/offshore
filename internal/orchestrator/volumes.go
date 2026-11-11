@@ -148,7 +148,7 @@ func (o *Orchestrator) acquireVolume(ctx context.Context, id string, size schedu
 		return nil, o.provErr(size.Provider, "create_volume", err)
 	}
 	v := &VolumeState{ID: pvol.ID, Provider: size.Provider, Name: pvol.Name, Zone: pvol.Zone, Bytes: pvol.Bytes,
-		Machine: id, PricePerGBMonth: size.Stack.Hot.PricePerGBMonth, Policy: pol, CreatedAt: now}
+		Machine: id, PricePerGBMonth: scheduler.SlotMedium(size.Stack).PricePerGBMonth, Policy: pol, CreatedAt: now}
 	o.mu.Lock()
 	o.volumes[v.ID] = v
 	ev := o.volumeEventLocked(events.VolumeCreate, v)
@@ -337,7 +337,7 @@ func (o *Orchestrator) poolVolumesLocked(f *scheduler.Pool) {
 			if sm.Zone == "" {
 				sm.Zone = v.Zone
 			}
-			if cd := sm.Stack.Hot.ResizeCooldown; cd > 0 && !v.ResizedAt.IsZero() {
+			if cd := scheduler.SlotMedium(sm.Stack).ResizeCooldown; cd > 0 && !v.ResizedAt.IsZero() {
 				sm.ResizableAt = v.ResizedAt.Add(cd)
 			}
 			if p, ok := o.provs[sm.Provider]; ok && provider.Split(p).Volumes != nil {
@@ -437,11 +437,11 @@ func (o *Orchestrator) resolveLocalDisks(ctx context.Context) {
 			continue
 		}
 		sizes[i].Capacity.Disk = n
+		nvme := medium.Default(o.provs[s.Provider].Name(), medium.LocalNVMe)
 		if prof != nil {
-			sizes[i].Stack.Hot = prof(s.Provider, medium.LocalNVMe)
-		} else {
-			sizes[i].Stack.Hot = medium.Default(o.provs[s.Provider].Name(), medium.LocalNVMe)
+			nvme = prof(s.Provider, medium.LocalNVMe)
 		}
+		sizes[i].Stack = scheduler.WithTop(s.Stack, nvme, n)
 		changed = true
 		o.log.Info("size caches on its instance store", "size", s.Name, "bytes", n)
 	}

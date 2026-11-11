@@ -116,6 +116,7 @@ Sizes are `[[providers.NAME.size]]` tables:
 | `arch` | `amd64` (local-docker: the host) | `amd64` or `arm64`; repositories pick it with `resources.arch` |
 | `instance_types` | aws-ec2: the size name; oci: `VM.Standard.E5.Flex` / `VM.Standard.A1.Flex` | provider machine types tried in order on capacity errors (aws-ec2, oci only) |
 | `medium` | `local` | where the cache lives: `local` (root disk, or the instance-store NVMe disk of instance types that have one, formatted on every boot; aws-ec2 takes `disk` from the instance type then) or `volume` (an attachable volume, `[providers.NAME.volume]`; aws-ec2, oci, local-docker) |
+| `stack` | from `medium`: `["local", "store"]` or `["volume", "store"]` | cache tier stack (anyfs), top first: an ordered subset of `local`, `volume`, `store` ending in `store`, e.g. `["local", "volume", "store"]` (local disk caching a cache volume over the store). A stack with `volume` gets cache volumes (`medium` may be omitted; if set it must agree). The scheduler composes the tiers' profiles to estimate lazy restores (working set page-in), thrashing (working set beyond the top tier) and storage cost |
 
 A provider without sizes gets one size `default` of `pool.machine_cpu` and
 `pool.machine_memory`.
