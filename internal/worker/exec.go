@@ -180,6 +180,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	}
 	defer unregister()
 
+	s.noteGrant(req.RepoID, req.Store)
 	ttl := s.cfg.BuildTTL
 	if d, err := time.ParseDuration(req.SlotTTL); err == nil && d > 0 && d < ttl {
 		ttl = d

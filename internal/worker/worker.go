@@ -53,13 +53,9 @@ type Config struct {
 	// HostStatus is a file the server publishes machine.HostStatus to for
 	// the supervisor (CLOUDSOURCED_HOST_STATUS; empty: none).
 	HostStatus string
-	// SccacheEndpoint replaces the built-in compiler cache endpoint with an
-	// external blobcache (CLOUDSOURCED_SCCACHE_ENDPOINT, set by a host
-	// agent). SccacheDir is the built-in cache's directory
-	// (CLOUDSOURCED_SCCACHE_DIR, default <deps dir>/sccache: the dependency
-	// volume is shared by the owner's machines, the cache volume is not).
-	SccacheEndpoint string
-	SccacheDir      string
+	// SccacheDir is the local tier of the result caches
+	// (CLOUDSOURCED_SCCACHE_DIR, default <deps dir>/sccache).
+	SccacheDir string
 	// Clock is the time of idle, expiry and build slot decisions
 	// ($CLOUDSOURCED_TEST_CLOCK; nil: real time).
 	Clock clock.Clock
@@ -83,7 +79,6 @@ func ConfigFromEnv() (Config, error) {
 		BuildTTL:   24 * time.Hour,
 		HostStatus: os.Getenv(machine.HostStatusEnv),
 	}
-	c.SccacheEndpoint = os.Getenv("CLOUDSOURCED_SCCACHE_ENDPOINT")
 	c.SccacheDir = envOr("CLOUDSOURCED_SCCACHE_DIR", filepath.Join(c.DepsDir, "sccache"))
 	clk, err := clock.FromEnv()
 	if err != nil {
@@ -157,7 +152,9 @@ type Worker struct {
 	self  string
 	env   []string // base environment for sessions
 
-	ccEndpoint string // compiler cache WebDAV endpoint for sessions ("" = off)
+	ccEndpoint string       // compiler cache WebDAV endpoint for sessions ("" = off)
+	rcStore    *tieredStore // its store
+	grants     grantCache   // latest store grants per repository
 
 	mu       sync.Mutex
 	mounts   map[string]*sourcefs.Projection

@@ -14,11 +14,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
 	"github.com/traumventures/cloudsourced/internal/supervisor"
 )
 
@@ -27,9 +25,6 @@ const (
 	paramRegion   = "region"
 	paramSecret   = "secret_parameter" // SSM SecureString with the secret server environment
 	paramRegistry = "registry"         // ECR registry of the environment image
-	paramSccache  = "sccache_s3"       // bucket/prefix of the compiler cache
-	// sccachePort is the host's compiler cache port on the Docker bridge.
-	sccachePort = 7480
 )
 
 func init() {
@@ -106,20 +101,6 @@ func (h *host) Prepare(ctx context.Context, docker supervisor.Runner) error {
 	_, pass, _ := strings.Cut(string(raw), ":")
 	_, err = docker(ctx, nil, []byte(pass), "login", "--username", "AWS", "--password-stdin", registry)
 	return err
-}
-
-// CompilerCacheStore keeps compiler cache objects in the stack's bucket
-// below cache/ (deleted after a day by the bucket's lifecycle rule).
-func (h *host) CompilerCacheStore(ctx context.Context) (blobcache.Store, error) {
-	loc := h.spec.Params[paramSccache]
-	if loc == "" {
-		return nil, nil
-	}
-	bucket, prefix, err := blobcache.ParseS3Location(loc)
-	if err != nil {
-		return nil, err
-	}
-	return blobcache.NewS3Store(s3.NewFromConfig(h.cfg), bucket, prefix, blobcache.MaxTTL), nil
 }
 
 // StopSelf stops this instance (the instance role may stop machines only).

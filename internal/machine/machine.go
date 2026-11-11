@@ -18,9 +18,12 @@ import (
 
 // Paths inside the machine container.
 const (
-	BinaryPath    = "/opt/cloudsourced/bin/cloudsourced"
-	CacheDir      = "/cache"
-	DepsDir       = "/deps"
+	BinaryPath = "/opt/cloudsourced/bin/cloudsourced"
+	CacheDir   = "/cache"
+	DepsDir    = "/deps"
+	// StoreDir is where a directory store shared by the machines appears
+	// (local-docker's native store).
+	StoreDir      = "/store"
 	HostStatusDir = "/run/cloudsourced-supervisor"
 	// HostStatusEnv names the file the server publishes its status to for
 	// the supervisor (see HostStatus).
@@ -40,6 +43,7 @@ type Layout struct {
 	Publish     string             `json:"publish"` // docker -p value for the server port
 	CacheVolume string             `json:"cache_volume"`
 	DepsVolume  string             `json:"deps_volume"`
+	StoreVolume string             `json:"store_volume,omitempty"`   // shared directory store (empty: none)
 	StatusDir   string             `json:"status_dir,omitempty"`     // host directory for the status file (empty: none)
 	CPU         float64            `json:"cpu,omitempty"`            // container CPU limit (0: none)
 	Memory      int64              `json:"memory,omitempty"`         // container memory limit (0: none)
@@ -98,6 +102,9 @@ func (l Layout) Containers(secret map[string]string, mode Secrets) []Container {
 		"-v", l.CacheVolume+":"+CacheDir,
 		"-v", l.DepsVolume+":"+DepsDir,
 	)
+	if l.StoreVolume != "" {
+		args = append(args, "-v", l.StoreVolume+":"+StoreDir)
+	}
 	env := map[string]string{}
 	for k, v := range l.Env {
 		env[k] = v

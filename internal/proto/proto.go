@@ -13,6 +13,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/metrics"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/cloudsourced/internal/store"
 )
 
 // ALPN is the TLS application protocol of cloudsourced.
@@ -94,6 +95,9 @@ type SlotOp struct {
 	TargetBytes int64 `json:"target_bytes,omitempty"`
 	// Snapshot is the snapshot to restore.
 	Snapshot *SnapshotInfo `json:"snapshot,omitempty"`
+	// Store grants access to the repository's store prefix (save and
+	// restore; nil: the last grant of a session of the repository).
+	Store *store.Grant `json:"store,omitempty"`
 }
 
 // SlotResult answers a SlotOp.
@@ -176,6 +180,9 @@ type Exec struct {
 	SlotTTL string   `json:"slot_ttl"` // effective slot TTL, e.g. "24h"
 	Eager   []string `json:"eager"`    // output globs relative to Repo
 	Lease   string   `json:"lease,omitempty"`
+	// Store grants access to the store prefixes of the repository and the
+	// environment (lease's store grant; nil: no store).
+	Store *store.Grant `json:"store,omitempty"`
 	// Linker is the repository's environment.linker ("", "mold", "lld").
 	Linker string `json:"linker,omitempty"`
 	// Toolchain relocates the image's Rust toolchain to the client's

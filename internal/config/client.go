@@ -34,6 +34,7 @@ type rawFile struct {
 		Setup []ProvisionStep `toml:"setup"`
 	} `toml:"machine"`
 	Providers map[string]map[string]any `toml:"providers"`
+	Storage   Storage                   `toml:"storage"`
 	Telemetry Telemetry                 `toml:"telemetry"`
 }
 
@@ -232,5 +233,5 @@ func clientSections(top map[string]bool) []string {
 	return sections(top, "control_plane", "user")
 }
 func poolSections(top map[string]bool) []string {
-	return sections(top, "pool", "scheduler", "machine", "providers")
+	return sections(top, "pool", "scheduler", "machine", "providers", "storage")
 }
