@@ -1,10 +1,14 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,5 +87,83 @@ func TestHeadsPersistAndDedupe(t *testing.T) {
 	ss := o2.heads["r"].Heads
 	if len(ss) != headsKeep || !ss[0].At.Equal(at.Add(5*time.Minute)) || len(o2.heads["r"].Chains) != headsKeep {
 		t.Fatalf("got %+v", o2.heads["r"])
+	}
+}
+
+// A failing environment image must not make waiting requests create a
+// machine per placement loop: one create, then a backoff per env and
+// provider that doubles up to the cap.
+func TestFailedImageBacksOffCreates(t *testing.T) {
+	f := newFake()
+	o := newTestOrch(t, f, nil)
+	var mu sync.Mutex
+	prepares := 0
+	o.PrepareImage = func(context.Context, string, provider.Provider, string, string) (string, error) {
+		mu.Lock()
+		prepares++
+		mu.Unlock()
+		return "", errors.New("environment image on fake: docker login: no space left on device")
+	}
+	var wg sync.WaitGroup
+	var out bytes.Buffer
+	var outMu sync.Mutex
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			defer cancel()
+			var b bytes.Buffer
+			if _, err := o.Acquire(ctx, req(fmt.Sprint("r", i)), &b); err == nil {
+				t.Error("lease without a machine")
+			}
+			outMu.Lock()
+			out.Write(b.Bytes())
+			outMu.Unlock()
+		}(i)
+	}
+	wg.Wait()
+	mu.Lock()
+	n := prepares
+	mu.Unlock()
+	// One plan may create up to MaxMachines (3) machines at once; each
+	// fails once, then the backoff holds.
+	if n < 1 || n > 3 || f.created != 0 {
+		t.Fatalf("%d image prepares, %d creates, want 1..3 and 0", n, f.created)
+	}
+	if !strings.Contains(out.String(), "no space left on device (retrying in ") {
+		t.Fatalf("waiting requests not told about the failure:\n%s", out.String())
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	key := scheduler.CreateKey(req("r").EnvHash, "fake")
+	if b := o.createFail[key]; b.delay < baseCreateBackoff || !b.until.After(o.now()) {
+		t.Fatalf("backoff %+v", b)
+	}
+	if acts := o.planLocked(); len(acts) != 0 {
+		t.Fatalf("planned %v during backoff", acts)
+	}
+	for i := 0; i < 10; i++ {
+		o.createFailedLocked(req("r").EnvHash, "fake", errors.New("x"))
+	}
+	if b := o.createFail[key]; b.delay != maxCreateBackoff {
+		t.Fatalf("backoff not capped: %v", b.delay)
+	}
+}
+
+// The scheduler skips sizes of a provider blocked for the environment.
+func TestCreateBlockedSizes(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	f := scheduler.Pool{Now: now, Sizes: []scheduler.Size{{Provider: "a", Name: "s"}, {Provider: "b", Name: "s"}},
+		CreateBlocked: map[string]time.Time{scheduler.CreateKey("e", "a"): now.Add(time.Second)}}
+	if s := f.SizesFor("e"); len(s) != 1 || s[0].Provider != "b" {
+		t.Fatalf("sizes %v", s)
+	}
+	if s := f.SizesFor("other"); len(s) != 2 {
+		t.Fatalf("other env blocked: %v", s)
+	}
+	f.Now = now.Add(time.Second)
+	if !f.CanCreate("e", "a") {
+		t.Fatal("still blocked after the backoff")
 	}
 }

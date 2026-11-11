@@ -269,14 +269,28 @@ type Pool struct {
 	// provider ("" = all providers): refaulted bytes per byte of working
 	// set beyond the local capacity (see RefetchOf; nil: DefaultRefetch).
 	Refetch map[string]float64
+	// CreateBlocked holds environment/provider pairs (CreateKey) whose
+	// last create failed (e.g. the environment image could not be
+	// prepared): no machines of the environment are created on the
+	// provider before the time (backoff).
+	CreateBlocked map[string]time.Time
+}
+
+// CreateKey is the CreateBlocked key of an environment on a provider.
+func CreateKey(env, prov string) string { return env + "/" + prov }
+
+// CanCreate reports whether machines of env may be created on prov now.
+func (f Pool) CanCreate(env, prov string) bool {
+	return !providerDown(f, prov) && !f.Now.Before(f.CreateBlocked[CreateKey(env, prov)])
 }
 
 // SizesFor returns the sizes that can be created for env now: those of
-// its architecture whose provider is not in a capacity cooldown.
+// its architecture whose provider is not in a capacity cooldown and not
+// blocked for env after a failed create.
 func (f Pool) SizesFor(env string) []Size {
 	var out []Size
 	for _, s := range f.ArchSizes(env) {
-		if !providerDown(f, s.Provider) {
+		if f.CanCreate(env, s.Provider) {
 			out = append(out, s)
 		}
 	}
