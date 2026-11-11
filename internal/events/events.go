@@ -65,6 +65,19 @@ const (
 	VolumeDetach = "volume_detach"
 	VolumeResize = "volume_resize"
 	VolumeDelete = "volume_delete"
+	// Cache file system (anyfs) events in virtual memory terms, reported
+	// per machine (Machine, Repo, Slot, Pages, Bytes, Seconds): a page
+	// fault (content not resident, fetched from a lower tier), page-in
+	// and page-out (pages moved between tiers), writeback (dirty pages,
+	// e.g. a committed layer, written to the store), reclaim (resident
+	// pages dropped) and thrash (working set larger than the local
+	// capacity: the scheduler should pick a bigger disk or machine).
+	PageFault = "page_fault"
+	PageIn    = "page_in"
+	PageOut   = "page_out"
+	Writeback = "writeback"
+	Reclaim   = "reclaim"
+	Thrash    = "thrash"
 	// ProviderDown: a provider reported no capacity or quota; it gets no
 	// new machines for Seconds (cooldown with backoff).
 	ProviderDown = "provider_down"
@@ -119,6 +132,11 @@ type Event struct {
 	Chunks    int64   `json:"chunks,omitempty"`
 	NewChunks int64   `json:"new_chunks,omitempty"`
 	Seconds   float64 `json:"seconds,omitempty"`
+	// Pages is the page count of a cache file system event.
+	Pages int64 `json:"pages,omitempty"`
+	// VM is the cache file system state of a machine (MachineSample,
+	// Thrash).
+	VM *scheduler.VM `json:"vm,omitempty"`
 
 	// Volume fields.
 	Volume string  `json:"volume,omitempty"`

@@ -133,6 +133,16 @@ type Pressure struct {
 }
 
 // Machine is the scheduler's view of one machine.
+// VM is a machine's cache file system state (zero: unknown).
+type VM struct {
+	Capacity   int64   // local tier capacity in bytes
+	Resident   int64   // resident bytes
+	Dirty      int64   // dirty bytes awaiting writeback
+	WorkingSet int64   // bytes touched in the working set window
+	FaultRate  float64 // page faults per second
+	Thrashing  bool    // working set > capacity with refaults
+}
+
 type Machine struct {
 	ID        string
 	Provider  string
@@ -174,6 +184,9 @@ type Machine struct {
 	Zone        string
 	Volume      string
 	Stack       medium.Stack
+	// VM is the machine's cache file system (anyfs) in virtual memory
+	// terms: working set vs. local capacity, fault rate, thrashing.
+	VM VM
 	ResizableAt time.Time
 }
 

@@ -343,6 +343,10 @@ type Status struct {
 	WarmRepos   []string `json:"warm_repos,omitempty"` // repo IDs with unexpired build slots
 	// Disk is the machine disk usage (nil: not measured).
 	Disk *DiskStatus `json:"disk,omitempty"`
+	// VM is the cache file system's virtual memory view (anyfs): resident,
+	// dirty and working set bytes, faults and reclaim, thrashing (nil:
+	// no cache file system).
+	VM *VMStats `json:"vm,omitempty"`
 	// Snapshots are build slot snapshots the server saved on its own (e.g.
 	// on drain or stop), so the orchestrator knows where they are.
 	Snapshots []SnapshotInfo `json:"snapshots,omitempty"`
@@ -363,6 +367,32 @@ type DiskStatus struct {
 	// SlotBytes is the size of each repository's build slot (repo id ->
 	// bytes).
 	SlotBytes map[string]int64 `json:"slot_bytes,omitempty"`
+}
+
+// VMStats is a machine's cache file system in virtual memory terms (see
+// internal/anyfs): the local disk is RAM, lower tiers swap, the store the
+// backing store. Counters are cumulative since the worker started.
+type VMStats struct {
+	// Capacity is the bytes the local tier may hold; ResidentBytes what it
+	// holds (pages and materialized files), DirtyBytes not yet written
+	// back, PinnedBytes never reclaimed.
+	Capacity      int64 `json:"capacity,omitempty"`
+	ResidentBytes int64 `json:"resident_bytes"`
+	DirtyBytes    int64 `json:"dirty_bytes"`
+	PinnedBytes   int64 `json:"pinned_bytes,omitempty"`
+	// WorkingSetBytes is the bytes touched in the working set window.
+	WorkingSetBytes int64 `json:"working_set_bytes"`
+	Faults          int64 `json:"faults"`
+	PageInBytes     int64 `json:"page_in_bytes"`
+	WritebackBytes  int64 `json:"writeback_bytes"`
+	ReclaimBytes    int64 `json:"reclaim_bytes"`
+	// FaultRate is page faults per second (exponentially weighted).
+	FaultRate float64 `json:"fault_rate"`
+	// Thrashing: the working set exceeds the capacity and reclaimed pages
+	// fault back in (the scheduler prefers a bigger disk or machine).
+	Thrashing bool `json:"thrashing,omitempty"`
+	// Stack is the tier stack, e.g. "local>store".
+	Stack string `json:"stack,omitempty"`
 }
 
 // SnapshotInfo describes a saved build slot snapshot.
