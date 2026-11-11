@@ -79,21 +79,21 @@ type EC2 struct {
 	// writeback share it; production sessions ran at 0.15-0.4 cores).
 	diskIOPS       int32
 	diskThroughput int32
-	amis        map[string]string // optional fixed AMI per architecture
-	docker      []string
-	binaries    map[string]string // server binary per architecture
-	subnet      string
-	cfg         aws.Config
-	ec2         *ec2.Client
-	api         ec2API // e.ec2 (fakes in tests)
-	ecr         *ecr.Client
-	s3          *s3.Client
-	cf          *cloudformation.Client
-	ssm         *ssm.Client
-	infraMu     sync.Mutex
-	infra       *infra
-	binMu       sync.Mutex
-	binKeys     map[string]string // architecture -> uploaded binary key
+	amis           map[string]string // optional fixed AMI per architecture
+	docker         []string
+	binaries       map[string]string // server binary per architecture
+	subnet         string
+	cfg            aws.Config
+	ec2            *ec2.Client
+	api            ec2API // e.ec2 (fakes in tests)
+	ecr            *ecr.Client
+	s3             *s3.Client
+	cf             *cloudformation.Client
+	ssm            *ssm.Client
+	infraMu        sync.Mutex
+	infra          *infra
+	binMu          sync.Mutex
+	binKeys        map[string]string // architecture -> uploaded binary key
 
 	builderOnce sync.Once
 	builder     *image.DockerBuilder

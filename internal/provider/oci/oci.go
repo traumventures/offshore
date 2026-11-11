@@ -71,15 +71,15 @@ type OCI struct {
 	// diskVPUs are the boot volume's performance units per GB (10
 	// balanced, 20 higher performance, 30-120 ultra high): throughput
 	// and IOPS grow with VPUs and size, builds are disk bound below.
-	diskVPUs int64
-	docker      []string
-	binaries    map[string]string // server binary per architecture
-	bucket      string
-	repository  string
-	registry    string // OCIR host
-	iam         bool   // create the dynamic group and policy
-	pollEvery   time.Duration
-	log         *slog.Logger
+	diskVPUs   int64
+	docker     []string
+	binaries   map[string]string // server binary per architecture
+	bucket     string
+	repository string
+	registry   string // OCIR host
+	iam        bool   // create the dynamic group and policy
+	pollEvery  time.Duration
+	log        *slog.Logger
 
 	initMu    sync.Mutex
 	initErr   error
@@ -610,7 +610,7 @@ func (o *OCI) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 			FreeformTags: freeform()},
 		SourceDetails: core.InstanceSourceViaImageDetails{ImageId: common.String(img), BootVolumeSizeInGBs: common.Int64(o.diskGB),
 			BootVolumeVpusPerGB: common.Int64(o.diskVPUs)},
-		Metadata:      map[string]string{"user_data": base64.StdEncoding.EncodeToString([]byte(ud))},
+		Metadata: map[string]string{"user_data": base64.StdEncoding.EncodeToString([]byte(ud))},
 		// Metadata service v2 only (requests need the Authorization
 		// header; containers are cut off from it, see userData).
 		InstanceOptions: &core.InstanceOptions{AreLegacyImdsEndpointsDisabled: common.Bool(true)},
