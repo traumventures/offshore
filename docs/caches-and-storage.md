@@ -75,7 +75,7 @@ machines restore them instead of running the install.
 Slots are pruned against two budgets: per slot the sum of the slot caches'
 `max_size` (unset: unbounded) after every session, per machine
 90 % of the cache file system (the worker variable
-`CLOUDSOURCED_DISK_BUDGET`, in bytes, overrides it; no pool key sets it). The worker tracks reads per
+`OFFSHORE_DISK_BUDGET`, in bytes, overrides it; no pool key sets it). The worker tracks reads per
 session: after a run it records for every slot file the last run (session
 number of the slot) that read or wrote it, using the atime (relatime
 re-armed by resetting the atime of read files to their mtime; on `noatime`
@@ -107,14 +107,14 @@ the Store part of every provider:
 ```toml
 [storage]
 endpoint   = "https://<account>.r2.cloudflarestorage.com"   # "" = AWS S3
-bucket     = "cloudsourced-cache"
+bucket     = "offshore-cache"
 region     = "auto"
 prefix     = "cache/team"           # default "cache/<pool id>"
 access_key = "env:R2_ACCESS_KEY_ID" # env:/file:/cmd: references
 secret_key = "env:R2_SECRET_ACCESS_KEY"
 # role_arn   = "arn:aws:iam::123:role/cache"  # STS: per-repository credentials
 # path_style = true                            # MinIO, OCI
-# dir        = "/srv/cloudsourced-store"       # a directory every machine mounts (instead of bucket)
+# dir        = "/srv/offshore-store"       # a directory every machine mounts (instead of bucket)
 ```
 
 | key | |
@@ -153,31 +153,31 @@ so toolchains never mix. A `ttl` below 24h lowers the age of reused entries.
 
 * `sccache`: the pinned static sccache release (checksum verified,
   downloaded once on the client into the user cache directory,
-  `CLOUDSOURCED_TOOL_CACHE` overrides) is added to the environment image.
+  `OFFSHORE_TOOL_CACHE` overrides) is added to the environment image.
   Each session gets its own sccache server on a unix socket inside the
   session sandbox (`SCCACHE_SERVER_UDS`, `SCCACHE_DIR` in a private
   temporary directory); `RUSTC_WRAPPER` is set unless the user set it. The
   backend is WebDAV (`SCCACHE_WEBDAV_ENDPOINT`) served by the worker on
   `127.0.0.1` (`internal/blobcache`) from `<deps dir>/sccache`
-  (`CLOUDSOURCED_SCCACHE_DIR`) backed by the store.
+  (`OFFSHORE_SCCACHE_DIR`) backed by the store.
 * `ccache`: installs the Debian package and points `CCACHE_REMOTE_STORAGE`
   at the endpoint (local `CCACHE_DIR` on the machine disk).
-* `go`: sets `GOCACHEPROG` to `cloudsourced gocacheprog`, which keeps
+* `go`: sets `GOCACHEPROG` to `offshore gocacheprog`, which keeps
   outputs on the machine disk (go reads them from there) and shares them
   through the endpoint.
 
 sccache cannot cache incremental compilations, which cargo uses for
 workspace crates in dev profiles; dependencies are cached regardless. Set
 `CARGO_INCREMENTAL=0` in `[environment.env]` to make them cacheable. With
-`CLOUDSOURCED_VERBOSE=1` the proxy prints the run's statistics
+`OFFSHORE_VERBOSE=1` the proxy prints the run's statistics
 (`sccache: 3 hits / 1 misses (...)`); they are also part of the session's
-exit message (`proto.Exit.Cache`) and shown by `cloudsourced why`.
+exit message (`proto.Exit.Cache`) and shown by `offshore why`.
 
 ### Linker
 
 `[environment] linker = "mold"` installs the pinned static mold release
 (`lld` installs the distribution's `lld` package, Debian based images) and a
-driver `/usr/local/bin/cloudsourced-cc-<linker>` (`cc ... -fuse-ld=<linker>`,
+driver `/usr/local/bin/offshore-cc-<linker>` (`cc ... -fuse-ld=<linker>`,
 last so it beats rustc's own `-fuse-ld=lld` for its bundled rust-lld), which
 sessions use as `CARGO_TARGET_<host triple>_LINKER` unless set (with
 `[outputs] mode = "fuse"` through a `cc` on `PATH` instead, see
@@ -252,7 +252,7 @@ machine:
    and `--rw=write --bs=1M` for sequential throughput.
 3. Builds: run the same `cargo build` cold, with warm sccache and warm slot
    on each, and compare `task_end.usage` (`wall`, `cpu_stall_seconds`) with
-   `cloudsourced report`.
+   `offshore report`.
 4. Restore: `test/bench/snapshot.sh` with `BENCH_STORE` on the machine
    measures save and fill against each disk.
 

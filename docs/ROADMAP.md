@@ -5,7 +5,7 @@ section 0 of [PLAN.md](PLAN.md).
 
 ## Done
 
-* Transparent proxy (shims, `cloudsourced run`), PTY, signals, stdin, exit
+* Transparent proxy (shims, `offshore run`), PTY, signals, stdin, exit
   codes, local fallback, one retry on machine loss.
 * Source projection over FUSE at the same path, barrier per run, write-back
   with conflict detection, `watch`/`immutable`/`hidden` rules.
@@ -17,7 +17,7 @@ section 0 of [PLAN.md](PLAN.md).
   with remote install) and global scope (sccache, ccache, Go); pruning; the
   object store (`[storage]`, scoped worker grants); snapshots with lazy
   restore; disk growth on aws-ec2.
-* Outputs: eager globs, `cloudsourced fetch`, writable output overlay with
+* Outputs: eager globs, `offshore fetch`, writable output overlay with
   cargo freshness; rust-analyzer `local` and `lsp-remote`.
 * Tool adapters (cargo, go, node, generic); tests built remotely and run
   locally (`cargo test`, `cargo nextest run`, `go test`).

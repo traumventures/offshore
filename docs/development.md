@@ -1,7 +1,7 @@
 # Development
 
-Go module `github.com/traumventures/cloudsourced` (Go 1.26), one static
-binary (`CGO_ENABLED=0`). Layout: `cmd/cloudsourced` (CLI), `internal/*`
+Go module `github.com/traumventures/offshore` (Go 1.26), one static
+binary (`CGO_ENABLED=0`). Layout: `cmd/offshore` (CLI), `internal/*`
 (proxy, daemon, orchestrator, scheduler, worker, supervisor, providers,
 adapters, caches, snapshots, ...), `deploy/` (control plane image and AWS
 templates), `test/` (end-to-end tests and benchmarks). The design plan
@@ -10,7 +10,7 @@ templates), `test/` (end-to-end tests and benchmarks). The design plan
 ## Build and unit tests
 
 ```sh
-make build      # bin/cloudsourced plus bin/cloudsourced-linux-<arch> for the other machine architecture
+make build      # bin/offshore plus bin/offshore-linux-<arch> for the other machine architecture
 make test       # go test ./...: unit and property tests
 make vet
 gofmt -l .      # must print nothing
@@ -30,13 +30,13 @@ E2E_PARALLEL=1 E2E_DOCKER="sudo -n docker" ./test/e2e/run.sh    # parts concurre
 E2E_REMOTE=1 E2E_DOCKER="sudo -n docker" ./test/e2e/run.sh      # against a control plane
 ```
 
-Requirements: Docker, `/dev/fuse`, a static build at `bin/cloudsourced`.
+Requirements: Docker, `/dev/fuse`, a static build at `bin/offshore`.
 The test is split into parts (`test/e2e/parts`: `core` without compiling,
 `rust`, `lifecycle`), selectable with `E2E_PARTS`; each part has its own
 owner, daemon, ports and test clock. Idle stop and lifetime expiry use the
-test clock (`CLOUDSOURCED_TEST_CLOCK=offset:FILE`, moved with the hidden
-`cloudsourced debug clock advance DURATION`) and a fast reconcile loop
-(`CLOUDSOURCED_RECONCILE_INTERVAL`), so they take seconds. In remote mode
+test clock (`OFFSHORE_TEST_CLOCK=offset:FILE`, moved with the hidden
+`offshore debug clock advance DURATION`) and a fast reconcile loop
+(`OFFSHORE_RECONCILE_INTERVAL`), so they take seconds. In remote mode
 only `core` runs unless `E2E_FULL=1`. The environment image is reused across
 runs (`E2E_CLEAN_IMAGES=1` removes the images a run built; `E2E_KEEP=1`
 keeps the work directories with state and logs).
@@ -61,7 +61,7 @@ Cloud tests are opt-in and create real resources; clean up afterwards.
   ./internal/orchestrator`, cleanup with `-run TestOCICleanup`.
 * AWS: configure an aws-ec2 pool ([guides/aws.md](guides/aws.md)) and build
   a small crate (e.g. one depending on serde) with
-  `CLOUDSOURCED_REQUIRE_REMOTE=1`; `cloudsourced down` afterwards.
+  `OFFSHORE_REQUIRE_REMOTE=1`; `offshore down` afterwards.
 
 ## Benchmarks
 
@@ -72,6 +72,6 @@ Cloud tests are opt-in and create real resources; clean up afterwards.
 
 ## Operator tools
 
-`cloudsourced debug token|probe` mints and tests machine tokens;
-`cloudsourced sim` replays traces against policies
+`offshore debug token|probe` mints and tests machine tokens;
+`offshore sim` replays traces against policies
 ([scheduling.md](scheduling.md#simulator)).

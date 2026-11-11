@@ -2,14 +2,14 @@
 
 ## Shims and the proxy
 
-`cloudsourced shim install [tools...]` creates symlinks in
-`~/.cloudsourced/bin` (`$CLOUDSOURCED_SHIM_DIR`); without arguments it
+`offshore shim install [tools...]` creates symlinks in
+`~/.offshore/bin` (`$OFFSHORE_SHIM_DIR`); without arguments it
 installs the tools of the current repository's `[tool.*]` sections. With
 that directory first in `PATH`, plain `cargo build`, `go test` or `bun
-install` in a repository with a `.cloudsourced.toml` go through
-cloudsourced, for people, scripts and coding agents alike. `cloudsourced
+install` in a repository with a `.offshore.toml` go through
+offshore, for people, scripts and coding agents alike. `offshore
 shim status` exits 1 when a shim is missing from `PATH` or shadowed by an
-earlier entry. `cloudsourced run <tool> ...` is the explicit form without
+earlier entry. `offshore run <tool> ...` is the explicit form without
 shims. Outside a repository with a configuration, and for tools without a
 shim, the local tool runs unchanged.
 
@@ -27,14 +27,14 @@ A run goes through these steps:
   and are written back after the run, unless the local file changed
   meanwhile.
 * **Outputs**: `[tool.X] eager` globs are copied back after every run;
-  `cloudsourced fetch <glob>...` copies others from the latest remote build
+  `offshore fetch <glob>...` copies others from the latest remote build
   (zstd compressed); the [output overlay](#output-overlay) shows the whole
   build directory.
 
-Escape hatches: `CLOUDSOURCED_DISABLE=1` (always local),
-`CLOUDSOURCED_REQUIRE_REMOTE=1` (fail instead of falling back),
-`CLOUDSOURCED_STDIN=always|never`, `CLOUDSOURCED_VERBOSE=1`,
-`CLOUDSOURCED_SPLIT=0`, `CLOUDSOURCED_NO_RETRY=1`. When no machine can be
+Escape hatches: `OFFSHORE_DISABLE=1` (always local),
+`OFFSHORE_REQUIRE_REMOTE=1` (fail instead of falling back),
+`OFFSHORE_STDIN=always|never`, `OFFSHORE_VERBOSE=1`,
+`OFFSHORE_SPLIT=0`, `OFFSHORE_NO_RETRY=1`. When no machine can be
 provisioned (or a secret cannot be resolved) before anything ran remotely,
 the proxy falls back to the local tool. If the machine is lost during a run,
 the proxy retries once on another machine ([operations.md](operations.md#machine-loss)).
@@ -47,7 +47,7 @@ Every proxied command goes through the adapter of its tool
 produces with their cache scope, and what a local phase needs.
 `[tool.X] adapter` picks the adapter; by default it follows the tool name
 (`cargo`; `go`; `bun`, `bunx`, `npm`, `npx`, `pnpm`, `yarn` are `node`;
-anything else `generic`). `cloudsourced why` shows the adapter and the
+anything else `generic`). `offshore why` shows the adapter and the
 phases of a run.
 
 | adapter | remote as typed | split: remote build, local run | default caches (`init`) |
@@ -60,7 +60,7 @@ phases of a run.
 Local platform checks (OS, architecture, C library family and version,
 dynamic loader, shared libraries) use `internal/platform`, which also feeds
 the environment image hash and the key of machine caches (OS/arch/libc
-without version). `CLOUDSOURCED_PLATFORM=linux/amd64/glibc-2.39` overrides
+without version). `OFFSHORE_PLATFORM=linux/amd64/glibc-2.39` overrides
 the detection.
 
 ## Tests: remote build, local run
@@ -96,7 +96,7 @@ local run.
   directories with the test flags as `-test.*` (`-run`, `-v`, `-count`,
   `-timeout`, ..., `-args`), printing go test's `ok`/`FAIL`/`?` lines and
   exiting 1 on failure. The binaries travel in the first slot-scope cache
-  directory (`init` proposes `[cache.go-out] paths = [".cloudsourced-build"]`).
+  directory (`init` proposes `[cache.go-out] paths = [".offshore-build"]`).
 
 Commands that do not run tests (`--no-run`, `--doc`, `--message-format`,
 `nextest list`, `nextest archive`, reuse options such as `--archive-file`;
@@ -111,7 +111,7 @@ test binaries outside the slot-scope cache paths.
 
 `[tool.X] split` lists what is split (cargo: `["test", "nextest"]`, go:
 `["test"]`, both the default); `split = []` turns it off for a tool,
-`CLOUDSOURCED_SPLIT=0` for one run. Transport: with `[outputs] mode =
+`OFFSHORE_SPLIT=0` for one run. Transport: with `[outputs] mode =
 "fuse"` the binaries appear through the output overlay
 (`daemon.EnsureOutputs` after the build's release, nothing is copied);
 otherwise they are fetched over the session that built them, zstd
@@ -125,12 +125,12 @@ run --archive-file` does locally).
 
 ## Output overlay
 
-By default only `eager` outputs come back after a run; `cloudsourced fetch`
+By default only `eager` outputs come back after a run; `offshore fetch`
 copies others on request. With the output overlay the remote build
 directories (the `paths` of slot-scope caches, e.g. `target/`) appear at
 their local path as if they had been built locally: local `cargo run`,
 `cargo test`, `cargo nextest` use the remote artifacts without rebuilding
-and without `cloudsourced fetch`.
+and without `offshore fetch`.
 
 ```toml
 [outputs]
@@ -138,13 +138,13 @@ mode = "fuse"      # mounted by the daemon for this repository
 ```
 
 ```sh
-cloudsourced outputs mount      # mount by hand (also without mode = "fuse")
-cloudsourced outputs status     # mount points, upper layers, generation
-cloudsourced outputs unmount    # unmount and discard local writes
+offshore outputs mount      # mount by hand (also without mode = "fuse")
+offshore outputs status     # mount points, upper layers, generation
+offshore outputs unmount    # unmount and discard local writes
 ```
 
 - The mount (owned by the daemon, `fusermount3`, file system type
-  `fuse.cloudsourced-outputs`) is a writable union implemented with go-fuse
+  `fuse.offshore-outputs`) is a writable union implemented with go-fuse
   (`internal/outputfs`). Lower layer: the build slot of the latest remote
   build of the repository. Upper layer: `$STATE/outputs/upper/<hash>`, a
   local directory next to the client state, never in the repository; every
@@ -179,8 +179,8 @@ cloudsourced outputs unmount    # unmount and discard local writes
 - Go API: `daemon.EnsureOutputs(ctx, root)` mounts the overlay of a
   repository (starting the daemon) and returns its status.
 
-`$STATE` is the daemon state directory (`$CLOUDSOURCED_STATE_DIR`, else
-`$XDG_STATE_HOME/cloudsourced` or `~/.local/state/cloudsourced`).
+`$STATE` is the daemon state directory (`$OFFSHORE_STATE_DIR`, else
+`$XDG_STATE_HOME/offshore` or `~/.local/state/offshore`).
 
 ### Cargo freshness
 
@@ -226,7 +226,7 @@ different local toolchain version.
 ## Port forwarding
 
 While a remote session runs, the proxy listens on `127.0.0.1:<local>` for
-every port of `[tool.X] ports` (or `CLOUDSOURCED_PORTS=8080,3000:3001`,
+every port of `[tool.X] ports` (or `OFFSHORE_PORTS=8080,3000:3001`,
 which replaces the configured list) and carries each connection over its
 own QUIC stream to `127.0.0.1:<remote>` in the machine's network namespace,
 which sessions and service containers share. Connections end with the
@@ -234,7 +234,7 @@ session. A busy local port is reported and skipped; the command still runs.
 
 ## rust-analyzer
 
-`cloudsourced editor [--mode local|lsp-remote] vscode|zed|neovim` prints
+`offshore editor [--mode local|lsp-remote] vscode|zed|neovim` prints
 settings that run flycheck and build scripts through the proxy.
 rust-analyzer stays local; because paths are identical, diagnostics need no
 rewriting. Proc-macro libraries and build script outputs must be available
@@ -252,15 +252,15 @@ locally:
 
 ## Environment image prebuild
 
-When the environment of a repository changes (`.cloudsourced.toml`, the
+When the environment of a repository changes (`.offshore.toml`, the
 toolchain file, setup `inputs`, the Dockerfile directory: anything that
-changes `cloudsourced env hash`), the daemon builds the new image in the
+changes `offshore env hash`), the daemon builds the new image in the
 background right away: on the file watcher event (debounced 2 s) and, when
 no event was seen, at the next request. The build goes to every provider
 and platform of the pool, including pushes to remote registries (ECR, OCIR)
 that would otherwise wait for the first machine; with a shared control
 plane the daemon uploads the context and the control plane builds detached
 from the request. A run that needs the image meanwhile joins the running
-build. `cloudsourced env build [--wait]` starts it explicitly,
-`cloudsourced env status [--json]` shows where the image exists and the
+build. `offshore env build [--wait]` starts it explicitly,
+`offshore env status [--json]` shows where the image exists and the
 last background build; failures are in the daemon log and `env-build.log`.

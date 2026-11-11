@@ -1,16 +1,16 @@
-# cloudsourced
+# offshore
 
 Run build and test commands on cloud machines as if they ran locally.
 
 ```console
-$ cargo build          # ~/.cloudsourced/bin/cargo -> cloudsourced
+$ cargo build          # ~/.offshore/bin/cargo -> offshore
    Compiling hello v0.1.0 (/home/me/hello)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.61s
 $ ./target/debug/hello # the binary was copied back
 ```
 
-`cloudsourced` is a single static Go binary. Invoked as `cargo`, `go`,
-`bun`, `npm`, ... through a shim (or as `cloudsourced run <tool> ...`), it
+`offshore` is a single static Go binary. Invoked as `cargo`, `go`,
+`bun`, `npm`, ... through a shim (or as `offshore run <tool> ...`), it
 decides whether the command runs locally or on a build machine and then
 behaves exactly like the local process: output, terminal, stdin, signals and
 exit code. Sources are projected onto the machine at the same absolute path,
@@ -36,7 +36,7 @@ flowchart LR
 
 | Component | Runs on | Does |
 |---|---|---|
-| proxy | laptop | Invoked through a shim or `cloudsourced run`. The tool adapter splits the command into phases (local or remote); the proxy runs the remote session and copies outputs back. |
+| proxy | laptop | Invoked through a shim or `offshore run`. The tool adapter splits the command into phases (local or remote); the proxy runs the remote session and copies outputs back. |
 | daemon | laptop | Watches sources, keeps versioned manifests, builds environment images, talks to machines, and runs the embedded orchestrator unless a control plane is configured. |
 | orchestrator | laptop (embedded) or control plane | Places sessions, scales the pool, stops idle machines, destroys expired ones. |
 | worker | machine | Projects the sources over FUSE at the same path, runs sessions in their own mount namespace and cgroup, keeps build slots and caches, writes changed sources back. |
@@ -47,21 +47,21 @@ flowchart LR
 Requirements: Linux, Docker, `/dev/fuse`, Go 1.26.
 
 ```sh
-make build                                     # static binary in bin/cloudsourced
-bin/cloudsourced shim install cargo
-export PATH="$HOME/.cloudsourced/bin:$PATH"    # in ~/.profile or ~/.zshrc
-bin/cloudsourced shim status                   # checks that the shims are first in PATH
+make build                                     # static binary in bin/offshore
+bin/offshore shim install cargo
+export PATH="$HOME/.offshore/bin:$PATH"    # in ~/.profile or ~/.zshrc
+bin/offshore shim status                   # checks that the shims are first in PATH
 
 cd ~/src/my-crate
-cloudsourced init --write                      # writes .cloudsourced.toml
-cloudsourced doctor                            # checks installation and configuration
+offshore init --write                      # writes .offshore.toml
+offshore doctor                            # checks installation and configuration
 cargo build                                    # runs on a local-docker machine
-cloudsourced why                               # where and why it ran
+offshore why                               # where and why it ran
 ```
 
 Without any client configuration the daemon embeds the orchestrator and
 uses one local-docker provider (machines are Docker containers on this
-host; set `CLOUDSOURCED_DOCKER="sudo -n docker"` if your user cannot talk to
+host; set `OFFSHORE_DOCKER="sudo -n docker"` if your user cannot talk to
 Docker). For cloud machines follow the [AWS](docs/guides/aws.md) or
 [OCI](docs/guides/oci.md) guide; for a team, run a
 [shared control plane](docs/control-plane.md).

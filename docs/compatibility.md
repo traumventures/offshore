@@ -30,7 +30,7 @@ Output identical to a local run.
 ## Limited
 
 * rust-analyzer stays local; flycheck and build scripts run remotely
-  (`cloudsourced editor`). Proc-macro dylibs come back as eager outputs or
+  (`offshore editor`). Proc-macro dylibs come back as eager outputs or
   through the output overlay (`lsp-remote`); a full LSP bridge does not
   exist.
 * Local cargo on remote artifacts (`[outputs] mode = "fuse"`) needs the
@@ -49,12 +49,12 @@ Output identical to a local run.
 ## Local only
 
 * flashing and debugging hardware (`probe-rs`, `espflash`, `cargo embed`):
-  build remotely, flash locally (`cloudsourced fetch` or outputs).
+  build remotely, flash locally (`offshore fetch` or outputs).
 * dev servers (`trunk serve`, `tauri dev`, `vite`) can run remotely with
   port forwarding (`[tool.X] ports`); anything that opens local windows or
   devices runs locally.
 * macOS, iOS and Windows-native targets (other than `xwin` builds) need the
   respective host.
 
-Only tools with an installed shim are proxied; `CLOUDSOURCED_DISABLE=1`
+Only tools with an installed shim are proxied; `OFFSHORE_DISABLE=1`
 always runs locally.

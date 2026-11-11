@@ -1,13 +1,13 @@
 # Configuration
 
-cloudsourced reads three kinds of TOML files. Every file is decoded
+offshore reads three kinds of TOML files. Every file is decoded
 strictly: unknown keys are errors, there are no aliases or legacy keys.
 
 | File | Role | Read by |
 |---|---|---|
-| client: `~/.config/cloudsourced/config.toml` (`$CLOUDSOURCED_CONFIG`) | where the orchestrator runs (`[control_plane]`, absent = embedded), `user`, `[telemetry]` of proxy and daemon | CLI, daemon |
-| pool: `$CLOUDSOURCED_POOL_CONFIG`, `controlplane --config FILE`; default: the client file | `[pool]`, `[scheduler]`, `[[machine.setup]]`, `[providers.*]`, `[storage]`, `[telemetry]` | the orchestrator: daemon in embedded mode, control plane |
-| repository: `.cloudsourced.toml` at the repository root (plus an optional, not checked in `.cloudsourced.local.toml` that overrides it) | environment, resources, caches, tools, services, secrets | proxy and daemon; sent with every request |
+| client: `~/.config/offshore/config.toml` (`$OFFSHORE_CONFIG`) | where the orchestrator runs (`[control_plane]`, absent = embedded), `user`, `[telemetry]` of proxy and daemon | CLI, daemon |
+| pool: `$OFFSHORE_POOL_CONFIG`, `controlplane --config FILE`; default: the client file | `[pool]`, `[scheduler]`, `[[machine.setup]]`, `[providers.*]`, `[storage]`, `[telemetry]` | the orchestrator: daemon in embedded mode, control plane |
+| repository: `.offshore.toml` at the repository root (plus an optional, not checked in `.offshore.local.toml` that overrides it) | environment, resources, caches, tools, services, secrets | proxy and daemon; sent with every request |
 
 In embedded mode one file may hold the client and the pool sections. With a
 `[control_plane]` the pool sections of the client file have no effect (the
@@ -15,16 +15,16 @@ client warns); the control plane ignores `[control_plane]` and `user` in its
 pool file.
 
 Pool settings change only by reload: the daemon applies a changed pool file
-on the next request and on `cloudsourced reconcile`; the control plane when
+on the next request and on `offshore reconcile`; the control plane when
 the file changes (checked before each lease and every 15 s), on `SIGHUP` and
 on `reconcile`. `pool.id`, the providers and `scheduler.estimator` apply
 only after a restart. Repository settings travel with each request, so
 repositories with different settings share one pool.
 
 ```sh
-cloudsourced config check               # validate the files of this mode, name their roles
-cloudsourced config show                # effective configuration, secrets redacted
-cloudsourced config check --pool FILE   # only a pool file, as the control plane reads it
+offshore config check               # validate the files of this mode, name their roles
+offshore config show                # effective configuration, secrets redacted
+offshore config check --pool FILE   # only a pool file, as the control plane reads it
 ```
 
 Values: sizes are `512M`, `16G`, `1T` or bytes; durations are Go durations
@@ -39,7 +39,7 @@ user = "alice"                           # salts repository ids (default $USER)
 [control_plane]                          # absent: the daemon embeds the orchestrator
 url         = "https://10.0.0.5:7443"    # or https://cs.example.com
 fingerprint = "0b91…"                    # only for a self-signed certificate
-api_key     = "env:CLOUDSOURCED_API_KEY" # reference: env:, file:, cmd:
+api_key     = "env:OFFSHORE_API_KEY" # reference: env:, file:, cmd:
 client_cert = "client.pem"               # only with controlplane --client-ca
 client_key  = "client-key.pem"           # relative to this file
 
@@ -47,14 +47,14 @@ client_key  = "client-key.pem"           # relative to this file
 endpoint = "https://otel.example.com:4318"
 ```
 
-`cloudsourced controlplane client-config` prints the `[control_plane]`
+`offshore controlplane client-config` prints the `[control_plane]`
 block, see [control-plane.md](control-plane.md).
 
 ## Pool configuration
 
 ```toml
 [pool]
-id             = "alice"   # labels machines and volumes (cloudsourced.pool); default $USER
+id             = "alice"   # labels machines and volumes (offshore.pool); default $USER
 machine_cpu    = 8         # size of the implicit "default" size
 machine_memory = "16G"
 min_machines   = 0         # warm machines per recently used environment
@@ -89,7 +89,7 @@ price_per_hour = 0.1
 | `max_machines` | 4 | upper bound of the pool (also for starting stopped machines) |
 | `idle_stop` | `"20m"` | idle machines stop; disks and warm slots survive |
 | `max_lifetime` | `"24h"` | machines are destroyed at this age; caps the slot TTL |
-| `queue_timeout` | `"2m"` | requests that cannot be placed within this time fail; the proxy then runs the command locally (unless `CLOUDSOURCED_REQUIRE_REMOTE=1`) |
+| `queue_timeout` | `"2m"` | requests that cannot be placed within this time fail; the proxy then runs the command locally (unless `OFFSHORE_REQUIRE_REMOTE=1`) |
 
 `[scheduler]` and `[[scheduler.warm_pool]]` are documented in
 [scheduling.md](scheduling.md), `[storage]` in
@@ -101,7 +101,7 @@ price_per_hour = 0.1
 Every `[providers.NAME]` table is one provider instance; `type` selects the
 backend, `max_machines` caps the machines of this provider, every other key
 is a provider option. Without `[providers]` the pool has one local-docker
-provider `local` (command `$CLOUDSOURCED_DOCKER`, default `docker`).
+provider `local` (command `$OFFSHORE_DOCKER`, default `docker`).
 
 Sizes are `[[providers.NAME.size]]` tables:
 
@@ -135,13 +135,13 @@ See the [AWS guide](guides/aws.md) for IAM, quotas and costs.
 |---|---|---|
 | `profile` | default credential chain | `~/.aws/config` profile |
 | `region` | the profile's region, else `eu-central-1` | |
-| `stack` | `cloudsourced` | name of the shared CloudFormation stack |
+| `stack` | `offshore` | name of the shared CloudFormation stack |
 | `allow_cidrs` | own public IP (checkip.amazonaws.com) | who may reach machines (UDP 7443) |
 | `subnet` | default VPC | subnet of the machines |
 | `disk_gb` | 100 | gp3 root volume |
 | `docker_command` | `["docker"]` | builds and pushes environment images |
 | `ami`, `ami_arm64` | newest Amazon Linux 2023 | AMI override per architecture |
-| `binary`, `binary_amd64`, `binary_arm64` | this executable, `cloudsourced-linux-<arch>` next to it | worker binaries uploaded for the machines |
+| `binary`, `binary_amd64`, `binary_arm64` | this executable, `offshore-linux-<arch>` next to it | worker binaries uploaded for the machines |
 
 #### `oci`
 
@@ -152,12 +152,12 @@ See the [OCI guide](guides/oci.md).
 | `profile` | `DEFAULT` | `~/.oci/config` profile |
 | `config_file` | `~/.oci/config` | |
 | `region` | the profile's region | |
-| `compartment` | `cloudsourced` | name below the tenancy root (created) or an OCID |
+| `compartment` | `offshore` | name below the tenancy root (created) or an OCID |
 | `allow_cidrs` | own public IP | who may reach machines (UDP 7443) |
 | `subnet`, `availability_domain` | created VCN / first AD | |
 | `image`, `image_arm64` | newest Oracle Linux 9 platform image | |
-| `bucket` | `cloudsourced` | Object Storage bucket (binaries, machine secrets) |
-| `repository`, `registry` | `cloudsourced-env`, the region's OCIR | environment image repository |
+| `bucket` | `offshore` | Object Storage bucket (binaries, machine secrets) |
+| `repository`, `registry` | `offshore-env`, the region's OCIR | environment image repository |
 | `iam` | `true` | create the dynamic group and policy; `false` when the API user may not |
 | `disk_gb` | 100 (minimum 50) | boot volume |
 | `docker_command` | `["docker"]` | |
@@ -167,14 +167,14 @@ See the [OCI guide](guides/oci.md).
 
 Machines you already run (bare metal, reserved instances) with sshd, Docker
 and systemd. One machine per host; the orchestrator drives the host over
-SSH and runs the supervisor there (`cloudsourced supervisor static
+SSH and runs the supervisor there (`offshore supervisor static
 apply|start|stop|destroy|status`).
 
 ```toml
 [providers.lab]
 type        = "static"
-registry    = "registry.lab:5000/cloudsourced-env"  # required: hosts pull environment images from here
-ssh_key     = "file:~/.ssh/cloudsourced"            # default file:~/.ssh/id_ed25519
+registry    = "registry.lab:5000/offshore-env"  # required: hosts pull environment images from here
+ssh_key     = "file:~/.ssh/offshore"            # default file:~/.ssh/id_ed25519
 known_hosts = "~/.ssh/known_hosts"                  # host keys are verified
 hosts = [
   { name = "build1", ssh = "root@10.0.0.5", cpu = 32, memory = "128G" },
@@ -194,7 +194,7 @@ memory = "64G"
 | `ssh_key` | `file:~/.ssh/id_ed25519` | reference to the private key |
 | `known_hosts` | `~/.ssh/known_hosts` | |
 | `docker` | `["docker"]` | local Docker CLI that builds and pushes images |
-| `binary` | this executable | uploaded once to `/var/lib/cloudsourced/bin/` |
+| `binary` | this executable | uploaded once to `/var/lib/offshore/bin/` |
 
 The orchestrator places a machine on the first free host with enough CPU
 and memory. At the end of a machine's lifetime the supervisor removes the
@@ -204,7 +204,7 @@ snapshots and shared result caches.
 
 ## Repository configuration
 
-`cloudsourced init` generates a commented `.cloudsourced.toml` from what the
+`offshore init` generates a commented `.offshore.toml` from what the
 repository declares (Cargo workspaces, `go.mod`, `package.json`, GitHub
 Actions, Dockerfiles); see [cli.md](cli.md#init). A complete example:
 
@@ -298,7 +298,7 @@ run = ["cargo", "check", "--workspace", "--tests"]
 
 ### `[environment]`
 
-The environment image is content addressed: `cloudsourced env hash` prints
+The environment image is content addressed: `offshore env hash` prints
 its hash, which covers the base image or Dockerfile directory, packages,
 toolchain file, setup steps with their `inputs`, environment variables,
 linker, services and the platform. When it changes, the daemon builds the
@@ -347,7 +347,7 @@ Every table is one cache; names match `[a-z0-9_-]+`. Full semantics in
 ### `[tool.<name>]`
 
 Per-tool configuration. A tool is proxied only when it has a shim (or runs
-through `cloudsourced run`).
+through `offshore run`).
 
 | key | default | |
 |---|---|---|
@@ -374,7 +374,7 @@ machines are shared only by repositories with the same services.
 
 `NAME = "env:VAR" | "file:PATH" | "cmd:COMMAND"`. Resolved on the laptop
 for each run and passed to the session as environment variable `NAME`;
-never written to disk remotely. `cloudsourced doctor` resolves every
+never written to disk remotely. `offshore doctor` resolves every
 secret without printing it.
 
 ### `[outputs]`, `[editor]`, `[prewarm]`
@@ -383,4 +383,4 @@ secret without printing it.
 |---|---|---|
 | `outputs.mode` | `"eager"` | `eager`: only `[tool.X] eager` outputs come back; `fuse`: the slot cache directories are mounted locally as a writable overlay ([tools.md](tools.md#output-overlay)); needs a slot cache |
 | `editor.rust_analyzer` | `"local"` | `local` or `lsp-remote` ([tools.md](tools.md#rust-analyzer)) |
-| `prewarm.run` | none | warm-up command of `cloudsourced prewarm` ([operations.md](operations.md#prewarm)) |
+| `prewarm.run` | none | warm-up command of `offshore prewarm` ([operations.md](operations.md#prewarm)) |

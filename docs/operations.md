@@ -3,25 +3,25 @@
 ## Status, why and doctor
 
 ```sh
-cloudsourced status [--json]     # machines, sessions (with labels), cost today
-cloudsourced why [N|last|list]   # last run: local/remote and why, adapter and phases, machine,
+offshore status [--json]     # machines, sessions (with labels), cost today
+offshore why [N|last|list]   # last run: local/remote and why, adapter and phases, machine,
                                  # placement, timings, usage, cache counters, labels (--json)
-cloudsourced doctor [--json]     # installation, configuration and connectivity
-cloudsourced top                 # live view
-cloudsourced report --since 7d   # cost, utilisation, queue wait, caches, estimator accuracy
-cloudsourced metrics             # Prometheus text
+offshore doctor [--json]     # installation, configuration and connectivity
+offshore top                 # live view
+offshore report --since 7d   # cost, utilisation, queue wait, caches, estimator accuracy
+offshore metrics             # Prometheus text
 ```
 
-`cloudsourced why` reads the last 50 runs from `<state>/runs.jsonl`. The
+`offshore why` reads the last 50 runs from `<state>/runs.jsonl`. The
 `cache` field carries counters of cache integrations (e.g. sccache hits).
-`cloudsourced status` estimates today's cost (since local midnight) per
+`offshore status` estimates today's cost (since local midnight) per
 machine size as `price_per_hour` times the uptime the orchestrator observed
 (starting or running). Machines first seen up count from their creation
 time; restarts and removals that happened while the daemon or control plane
 was not running are not visible, and provider billing granularity is
 ignored.
 
-`cloudsourced doctor [--json]` checks and explains: `cloudsourced` in PATH
+`offshore doctor [--json]` checks and explains: `offshore` in PATH
 and the shims first in PATH for their tools, the client configuration, the
 control plane (reachable, certificate fingerprint, API key accepted, clock
 skew from its `Date` header) or the embedded pool configuration, the daemon,
@@ -43,7 +43,7 @@ status, so the lost attempt has applied nothing. There is no retry when the
 write-back had begun, standard input had been forwarded (it cannot be
 replayed), the user signalled the command, the session had not started yet
 (that falls back as before), the worker reported an error, the machine still
-answers, after a second loss, or with `CLOUDSOURCED_NO_RETRY=1`. Output the
+answers, after a second loss, or with `OFFSHORE_NO_RETRY=1`. Output the
 first attempt already printed stays on the terminal.
 
 ## Metrics
@@ -52,45 +52,45 @@ All components export Prometheus text format (no extra
 dependencies; `internal/metrics`):
 
 * Control plane: `GET /metrics` on the API port (API key required) and,
-  with `--metrics-listen 127.0.0.1:9090` (`$CLOUDSOURCED_METRICS_LISTEN`),
+  with `--metrics-listen 127.0.0.1:9090` (`$OFFSHORE_METRICS_LISTEN`),
   without authentication on a separate plain HTTP listener for a local
-  scraper. Pool metrics: `cloudsourced_machines{provider,size,state}`,
-  `cloudsourced_queue_length`, `cloudsourced_acquire_wait_seconds{result}`,
-  `cloudsourced_placements_total{kind}` (assign, queue, reject, timeout),
-  `cloudsourced_pool_actions_total{action}`,
-  `cloudsourced_provider_errors_total{provider,op}`,
-  `cloudsourced_image_builds_total{provider,result}`,
-  `cloudsourced_image_build_seconds{provider}`,
-  `cloudsourced_reconcile_duration_seconds{result}`,
-  `cloudsourced_cost_per_hour{provider}`, `cloudsourced_environments_recent`,
-  `cloudsourced_http_requests_total{path,result}`,
-  `cloudsourced_http_request_duration_seconds{path}`.
+  scraper. Pool metrics: `offshore_machines{provider,size,state}`,
+  `offshore_queue_length`, `offshore_acquire_wait_seconds{result}`,
+  `offshore_placements_total{kind}` (assign, queue, reject, timeout),
+  `offshore_pool_actions_total{action}`,
+  `offshore_provider_errors_total{provider,op}`,
+  `offshore_image_builds_total{provider,result}`,
+  `offshore_image_build_seconds{provider}`,
+  `offshore_reconcile_duration_seconds{result}`,
+  `offshore_cost_per_hour{provider}`, `offshore_environments_recent`,
+  `offshore_http_requests_total{path,result}`,
+  `offshore_http_request_duration_seconds{path}`.
 * Machines report their metrics in the status stream the orchestrator
   already probes (scope `probe`, no extra port), and the orchestrator
   republishes them with `machine`, `provider` and `size` labels:
-  `cloudsourced_worker_sessions_running`,
-  `cloudsourced_worker_session_duration_seconds`,
-  `cloudsourced_worker_session_exits_total{code}`,
-  `cloudsourced_worker_oom_kills_total`,
-  `cloudsourced_worker_sessions_rejected_total{reason}`,
-  `cloudsourced_worker_pressure{resource}`,
-  `cloudsourced_worker_reserved{resource}`,
-  `cloudsourced_worker_memory_used_bytes`,
-  `cloudsourced_worker_compiler_cache_total{counter}` (sccache counters),
-  `cloudsourced_worker_transfer_bytes_total{direction}` (fetch, writeback,
-  output), `cloudsourced_worker_ready`, `_draining`, `_warm_repos`. Machine
+  `offshore_worker_sessions_running`,
+  `offshore_worker_session_duration_seconds`,
+  `offshore_worker_session_exits_total{code}`,
+  `offshore_worker_oom_kills_total`,
+  `offshore_worker_sessions_rejected_total{reason}`,
+  `offshore_worker_pressure{resource}`,
+  `offshore_worker_reserved{resource}`,
+  `offshore_worker_memory_used_bytes`,
+  `offshore_worker_compiler_cache_total{counter}` (sccache counters),
+  `offshore_worker_transfer_bytes_total{direction}` (fetch, writeback,
+  output), `offshore_worker_ready`, `_draining`, `_warm_repos`. Machine
   counters restart with the worker.
-* `cloudsourced metrics` prints the daemon's metrics
-  (`cloudsourced_daemon_requests_total{op,result}`,
-  `cloudsourced_daemon_prepare_seconds{result}`,
-  `cloudsourced_daemon_runs_total{tool,mode}`, `cloudsourced_daemon_roots`,
-  `cloudsourced_daemon_machine_connections`) with the embedded
+* `offshore metrics` prints the daemon's metrics
+  (`offshore_daemon_requests_total{op,result}`,
+  `offshore_daemon_prepare_seconds{result}`,
+  `offshore_daemon_runs_total{tool,mode}`, `offshore_daemon_roots`,
+  `offshore_daemon_machine_connections`) with the embedded
   orchestrator's (embedded mode) or the control plane's (remote mode).
 
 ## Logs
 
-`CLOUDSOURCED_LOG_FORMAT=json` (default `text`) and
-`CLOUDSOURCED_LOG_LEVEL=debug|info|warn|error` apply to the daemon
+`OFFSHORE_LOG_FORMAT=json` (default `text`) and
+`OFFSHORE_LOG_LEVEL=debug|info|warn|error` apply to the daemon
 (`<state>/daemon.log`), the control plane and workers; the
 orchestrator passes both to the machines it creates. The control plane logs
 every API request with a `request_id` (the client's `X-Request-Id` when
@@ -98,8 +98,8 @@ well formed, returned in the response header), and acquisitions with
 lease, machine and placement reason.
 The daemon log is `<state>/daemon.log`, background prewarms log to
 `<state>/prewarm.log` and environment image builds to `env-build.log`
-(`<state>` is the daemon state directory, `~/.local/state/cloudsourced` by
-default). `CLOUDSOURCED_DEBUG=1` is a shortcut for the debug level.
+(`<state>` is the daemon state directory, `~/.local/state/offshore` by
+default). `OFFSHORE_DEBUG=1` is a shortcut for the debug level.
 
 ## Tracing
 
@@ -121,17 +121,17 @@ machine_endpoint = "http://10.0.0.5:4318"   # pool file: the collector as seen b
 Spans are exported as OTLP/HTTP with JSON encoding (accepted by the
 OpenTelemetry Collector and OTLP backends on `/v1/traces`; OTLP/gRPC is not
 supported, which keeps gRPC and protobuf out of the static binary). Default
-service names: `cloudsourced-proxy`, `-daemon`, `-controlplane`, `-worker`,
+service names: `offshore-proxy`, `-daemon`, `-controlplane`, `-worker`,
 `-supervisor`. The orchestrator forwards the exporter settings to the machines it
 creates (headers as secrets; `machine_endpoint` or
-`$CLOUDSOURCED_OTEL_MACHINE_ENDPOINT` overrides the endpoint), workers do
+`$OFFSHORE_OTEL_MACHINE_ENDPOINT` overrides the endpoint), workers do
 not pass `OTEL_*` on to sessions, and `console` writes to stderr or to
-`$CLOUDSOURCED_OTEL_CONSOLE_FILE`. One tool run is one trace, propagated as
+`$OFFSHORE_OTEL_CONSOLE_FILE`. One tool run is one trace, propagated as
 W3C `traceparent` (daemon RPC field, control plane HTTP header, optional
 `traceparent` field of the QUIC `Hello` and `Exec` frames):
 
 ```
-cloudsourced.run (proxy: tool, subcommand, flag names, repo id, decision, reason, exit code)
+offshore.run (proxy: tool, subcommand, flag names, repo id, decision, reason, exit code)
 ├─ proxy.prepare
 │  └─ daemon.prepare (repo id, env hash, usage key, estimate, lease, machine)
 │     ├─ daemon.env_resolve, daemon.image_ensure, daemon.manifest_refresh, daemon.estimate
@@ -158,20 +158,20 @@ worktree), `repo` (name of the main repository, shared by its worktrees),
 proxy (git metadata is read from `.git` files, git is not run), travel with
 the session to the daemon, the orchestrator and the worker, and are recorded
 in the event log (`labels` of `task_placed`/`task_end`) and the run log.
-`cloudsourced why`, `status`, `top` and `report` show them.
+`offshore why`, `status`, `top` and `report` show them.
 
-`agent` is `CLOUDSOURCED_AGENT` if set, otherwise detected from the first
+`agent` is `OFFSHORE_AGENT` if set, otherwise detected from the first
 present variable: `CODEX_THREAD_ID` (codex, the thread id also becomes
 `agent_session`), `CODEX_SANDBOX`, `CODEX_MANAGED_BY_NPM` (codex),
 `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT` (claude-code), `CURSOR_AGENT`
 (cursor), `GEMINI_CLI` (gemini-cli), `OPENCODE` (opencode), `AIDER_MODEL`
 (aider), `AMP_THREAD_ID` (amp, also `agent_session`). Only these names and
-ids are read, never other environment values. `CLOUDSOURCED_LABELS="task=WP-7,team=infra"`
+ids are read, never other environment values. `OFFSHORE_LABELS="task=WP-7,team=infra"`
 adds free labels. Keys are `[a-z0-9_.-]{1,32}`, values at most 200
 characters, at most 16 labels; workers clean labels again on receipt.
 Labels never influence placement.
 
-`cloudsourced report` groups cost (attributed by reserved share, as per
+`offshore report` groups cost (attributed by reserved share, as per
 repository), session-hours, CPU-hours, requests and failures, queue wait
 p50/p95/max and contention (share of wall time stalled on CPU/memory) by
 agent and by worktree; `--by agent|worktree|branch|repo|user` (comma
@@ -180,7 +180,7 @@ the repository id; sessions without an agent count as `(human)`.
 
 ## Prewarm
 
-`cloudsourced prewarm` starts the remote environment of the
+`offshore prewarm` starts the remote environment of the
 current repository in the background (log `<state>/prewarm.log`): image
 ensure, machine lease and start, source sync and the build slot, then an
 optional warm-up command from the repository configuration:
@@ -196,18 +196,18 @@ build slot of the repository and (with `run`) the warm-up succeeded for the
 same commit, environment and command within 12 hours. Only one prewarm per
 repository runs at a time. Prewarm sessions are labelled `purpose=prewarm`
 (shown in `why` and `report`), never fall back to local execution and are
-not counted as user runs in the daemon metrics. `cloudsourced hooks install`
+not counted as user runs in the daemon metrics. `offshore hooks install`
 installs a git `post-checkout` hook into the repository's hooks directory
 (shared by all worktrees, honours `core.hooksPath`) that calls
-`cloudsourced prewarm --quiet` after branch checkouts, which includes `git
+`offshore prewarm --quiet` after branch checkouts, which includes `git
 worktree add`. An existing hook is chained (renamed to
-`post-checkout.cloudsourced-chain`, runs first, its exit status is kept);
-install is idempotent and `cloudsourced hooks uninstall` restores the
+`post-checkout.offshore-chain`, runs first, its exit status is kept);
+install is idempotent and `offshore hooks uninstall` restores the
 previous hook.
 
 ## Top
 
-`cloudsourced top` is a full-screen view in the style of zenith:
+`offshore top` is a full-screen view in the style of zenith:
 history graphs of the pool (busy cores, session memory, sessions plus queue,
 cost per hour; seeded from the `machine_sample` events and extended by the
 2 s status polls, kept in memory for 3 h), one line per machine (busy-core
@@ -216,7 +216,7 @@ bar and history, memory bar, PSI, sessions, price), a sortable session table
 used/reserved memory, command) and the queue. Keys: ↑/↓ PgUp/PgDn select,
 `e c m a w n` sort by elapsed, CPU, memory, agent, worktree, machine (again:
 reverse), `r` reverse, `+`/`-` zoom the graph window (1m..3h), `q` quit.
-`cloudsourced top --once [--width N] [--window 10m]` prints one plain text
+`offshore top --once [--width N] [--window 10m]` prints one plain text
 frame without colors, for agents and scripts. Busy cores per session come
 from the session's cgroup CPU time between polls (`Status.Sessions[]
 cpu_seconds`, `used_memory`).
@@ -226,9 +226,9 @@ cpu_seconds`, `used_memory`).
 Independent of tracing, the orchestrator writes
 an analysis event log (`events-YYYY-MM-DD.jsonl` in its state directory,
 `[telemetry] events_retention_days`, default 30) of task and machine events.
-`cloudsourced report [--since 7d] [--by agent,worktree] [--json]` shows cost per day, repository
+`offshore report [--since 7d] [--by agent,worktree] [--json]` shows cost per day, repository
 and size, per agent/worktree/branch/repo/user, utilisation and overprovisioning, queue wait p50/p95, warm vs.
-cold caches and estimator accuracy; `cloudsourced sim export --since 7d -o
+cold caches and estimator accuracy; `offshore sim export --since 7d -o
 trace.json` converts the real runs into a simulator trace (both work
 embedded and remote, via the control plane's `POST /v1/events`, API key
 protected). See [scheduling.md](scheduling.md#calibrating-the-simulator-from-real-runs).
@@ -241,10 +241,10 @@ protected). See [scheduling.md](scheduling.md#calibrating-the-simulator-from-rea
 | build slots | slot cache `ttl` (default 24h), capped by `max_lifetime` | worker garbage collection and pruning; die with the machine's cache volume |
 | global caches (sccache, ccache, go), snapshots | 24h | never served when older; aws-ec2 bucket lifecycle on `cache/` deletes after 1 day; snapshot chunks older than 12 h are uploaded again |
 | machine caches | `ttl` of `scope = "machine"` caches (default 7 days) | volume expiry label, orchestrator reaps volumes |
-| machine secrets (AWS SSM) | until the supervisor reads them | supervisor deletes after reading; reaper deletes parameters under `/cloudsourced/<stack>/machines/` without a live machine (after 15 min) |
+| machine secrets (AWS SSM) | until the supervisor reads them | supervisor deletes after reading; reaper deletes parameters under `/offshore/<stack>/machines/` without a live machine (after 15 min) |
 | worker binaries (S3 `bin/`) | 30 days | bucket lifecycle |
 | environment images (ECR) | 30 days | repository lifecycle |
 
-`cloudsourced down` destroys all machines and caches of the pool;
-`cloudsourced reconcile` reloads the pool configuration and applies the
+`offshore down` destroys all machines and caches of the pool;
+`offshore reconcile` reloads the pool configuration and applies the
 policy immediately.

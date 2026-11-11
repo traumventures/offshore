@@ -14,19 +14,19 @@
   key (HKDF-SHA256 over the machine id; the certificate is deterministic in
   id and expiry), so clients pin a fingerprint the orchestrator can always
   recompute and provider labels need not be trusted. A machine only
-  receives the seed of its own key (`CLOUDSOURCED_TLS_SEED`, secret) and the
-  control plane's public key (`CLOUDSOURCED_SIGNER_PUB`).
+  receives the seed of its own key (`OFFSHORE_TLS_SEED`, secret) and the
+  control plane's public key (`OFFSHORE_SIGNER_PUB`).
 * **Tokens.** Every stream carries a token signed by the control plane
   (Ed25519): claims `scope`, `machine`, `lease`, `exp`, `iat`. Sessions,
   source sync and output fetch need a `session` token, which is minted per
   lease, valid until the machine expires and only for that lease's
   sessions; status needs a `probe` token (minted per probe, two minutes);
   `admin` allows everything (slot prune, save, restore). There is no shared
-  per-machine secret. `cloudsourced debug token|probe` mints and tests
+  per-machine secret. `offshore debug token|probe` mints and tests
   tokens for operators.
 * **Master key.** `<state>/master.key` of the control plane (or the embedded
   daemon) is the root of all machine identities and tokens. Protect it like
-  a CA key; replicas import it with `CLOUDSOURCED_MASTER_KEY(_FILE)`.
+  a CA key; replicas import it with `OFFSHORE_MASTER_KEY(_FILE)`.
 
 ## Machine secrets
 
@@ -36,12 +36,12 @@ provider's secret channel and is read once by the supervisor:
 
 | provider | secret channel |
 |---|---|
-| aws-ec2 | SSM SecureString `/cloudsourced/<stack>/machines/<id>`, read with the instance role and deleted; the reaper deletes orphans after 15 min |
+| aws-ec2 | SSM SecureString `/offshore/<stack>/machines/<id>`, read with the instance role and deleted; the reaper deletes orphans after 15 min |
 | oci | object `secrets/<id>.json` in the bucket, read with the instance principal and deleted |
 | static | written by `supervisor static apply` over SSH, root-only, read once |
 | local-docker | container environment variables (visible to `docker inspect` on the host) |
 
-The worker removes all `CLOUDSOURCED_*` variables from its environment
+The worker removes all `OFFSHORE_*` variables from its environment
 before it starts sessions.
 
 ## Sessions
@@ -72,9 +72,9 @@ before it starts sessions.
 
 * AWS: `deploy/aws/iam.yaml` creates least-privilege operator policies
   limited to stacks named `StackPrefix*`, instances tagged
-  `project=cloudsourced` launched with IMDSv2 and hop limit 1, the
-  `cloudsourced*` bucket and repository and SSM parameters under
-  `/cloudsourced/`. Do not use root or admin credentials. See the
+  `project=offshore` launched with IMDSv2 and hop limit 1, the
+  `offshore*` bucket and repository and SSM parameters under
+  `/offshore/`. Do not use root or admin credentials. See the
   [AWS guide](guides/aws.md).
 * OCI: a compartment of its own, a dynamic group of its instances and a
   policy that only allows instance and volume management in the
