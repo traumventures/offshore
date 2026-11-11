@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/daemon"
 	"github.com/traumventures/cloudsourced/internal/events"
@@ -85,7 +86,13 @@ func mainRun(tr *runTrace, tool string, args []string) int {
 		return local(why)
 	}
 	rec.Mode, rec.Why = events.Remote, "[tool."+tool+"] allows remote execution"
-	code, err := runRemote(tr.ctx, repo, profile, tool, args, cwd, rec)
+	var code int
+	if plan := planSplit(profile, tool, args); plan != nil {
+		rec.Why = "[tool." + tool + "] split: remote build, local test run"
+		code, err = runSplit(tr.ctx, repo, profile, tool, args, cwd, rec, plan)
+	} else {
+		code, err = runRemote(tr.ctx, repo, profile, tool, args, cwd, rec, remoteRun{})
+	}
 	if err != nil {
 		var fb *fallback
 		if errors.As(err, &fb) {
@@ -215,7 +222,30 @@ func allowedEnv(patterns []string) map[string]string {
 	return out
 }
 
-func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, tool string, args []string, cwd string, rec *events.Run) (code int, err error) {
+// remoteRun adjusts one remote execution. The zero value runs the
+// command as typed, attached to the local terminal.
+type remoteRun struct {
+	argv   []string          // command line instead of tool and args
+	stdout io.Writer         // instead of os.Stdout
+	stderr io.Writer         // instead of os.Stderr
+	noTTY  bool              // never allocate a remote terminal
+	stdin  bool              // with noTTY: still forward stdin by the usual policy
+	env    map[string]string // additional environment
+	// after runs once the remote command exited and its outputs arrived,
+	// while the lease is still held; code is the remote exit code.
+	after func(ctx context.Context, s *session, code int) error
+}
+
+// session is a finished remote session whose connection and lease are
+// still open.
+type session struct {
+	conn   *quic.Conn
+	token  string
+	repoID string
+	root   string
+}
+
+func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, tool string, args []string, cwd string, rec *events.Run, opt remoteRun) (code int, err error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	// Ctrl+C during preparation aborts cleanly.
@@ -276,6 +306,9 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 	rec.Ports = fwd.forwarded()
 
 	env := allowedEnv(profile.Env)
+	for k, v := range opt.env {
+		env[k] = v
+	}
 	for name, ref := range repo.Secrets {
 		v, err := resolveSecret(ref, repo.Root)
 		if err != nil {
@@ -283,10 +316,14 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 		}
 		env[name] = v
 	}
-	useTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	useTTY := !opt.noTTY && term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	argv := opt.argv
+	if argv == nil {
+		argv = append([]string{tool}, args...)
+	}
 	req := proto.Exec{
 		Repo: repo.Root, RepoID: prep.RepoID, Roots: prep.Roots,
-		Argv: append([]string{tool}, args...), Cwd: cwd, Env: env,
+		Argv: argv, Cwd: cwd, Env: env,
 		Grant: prep.Grant, MemoryOvercommit: prep.MemoryOvercommit,
 		Build: repo.Cache.Build.Paths, BuildTTL: prep.BuildTTL, Deps: repo.Cache.Deps.Paths,
 		Eager: profile.Eager, Lease: prep.Lease,
@@ -345,7 +382,14 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 		}
 	}
 	_, xspan := tracing.Start(ctx, "proxy.exec")
-	exit, err := stream(pc, useTTY)
+	stdout, stderr := opt.stdout, opt.stderr
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	exit, err := stream(pc, useTTY, opt.noTTY && !opt.stdin, stdout, stderr)
 	code = exit.Code
 	execAttrs(xspan, exit)
 	tracing.End(xspan, err)
@@ -385,6 +429,11 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 	if err := pc.Expect(proto.TDone, nil); err != nil {
 		return code, err
 	}
+	if opt.after != nil {
+		if err := opt.after(ctx, &session{conn: conn, token: prep.Token, repoID: prep.RepoID, root: repo.Root}, code); err != nil {
+			return code, err
+		}
+	}
 	if verbose {
 		warn("exit %d (run %s, write back and outputs %s)", code, t2.Sub(t1).Round(time.Millisecond), time.Since(t2).Round(time.Millisecond))
 		if line := FormatCompilerCache(exit.Cache); line != "" {
@@ -412,7 +461,8 @@ func FormatCompilerCache(c map[string]int64) string {
 }
 
 // stream forwards stdio, terminal and signals until the remote exits.
-func stream(pc *proto.Conn, useTTY bool) (proto.Exit, error) {
+// noStdin closes the remote stdin right away.
+func stream(pc *proto.Conn, useTTY, noStdin bool, stdout, stderr io.Writer) (proto.Exit, error) {
 	if useTTY {
 		if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
 			defer term.Restore(int(os.Stdin.Fd()), old)
@@ -433,7 +483,7 @@ func stream(pc *proto.Conn, useTTY bool) (proto.Exit, error) {
 			pc.Send(proto.TSignal, proto.Signal{Sig: int(sig)})
 		}
 	}()
-	if !forwardStdin(useTTY) {
+	if noStdin || !forwardStdin(useTTY) {
 		pc.Write(proto.TStdinEOF, nil)
 	} else {
 		go copyStdin(pc)
@@ -445,9 +495,9 @@ func stream(pc *proto.Conn, useTTY bool) (proto.Exit, error) {
 		}
 		switch t {
 		case proto.TStdout:
-			os.Stdout.Write(p)
+			stdout.Write(p)
 		case proto.TStderr:
-			os.Stderr.Write(p)
+			stderr.Write(p)
 		case proto.TExit:
 			var ex proto.Exit
 			if err := json.Unmarshal(p, &ex); err != nil {

@@ -27,7 +27,6 @@ import (
 	"github.com/traumventures/cloudsourced/internal/labels"
 	"github.com/traumventures/cloudsourced/internal/logs"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
-	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/proxy"
 	"github.com/traumventures/cloudsourced/internal/sandbox"
@@ -44,6 +43,7 @@ const usage = `cloudsourced - run builds on cloud machines as if they ran locall
 Usage:
   cloudsourced run [--] <tool> [args...]   run a command through the proxy
   cloudsourced shim install [tools...]     install proxies into ~/.cloudsourced/bin
+  cloudsourced shim status                 are the proxies first in PATH (exit 1 if not)
   cloudsourced shim uninstall              remove proxies
   cloudsourced status [--json]             show machines, sessions and cost today
   cloudsourced why [N|last|list] [--json]  explain a recent run (placement, timings, labels)
@@ -88,6 +88,7 @@ Environment:
   CLOUDSOURCED_AGENT=NAME         agent label of sessions (default: detected, see README)
   CLOUDSOURCED_LABELS=k=v,k=v     extra session labels (status, top, why, report --by)
   CLOUDSOURCED_VERBOSE=1          print the machine used for each run
+  CLOUDSOURCED_SPLIT=0            run cargo test / nextest entirely remotely (no local test run)
   CLOUDSOURCED_PORTS=8080,3000:3001  forward local ports into the session
   CLOUDSOURCED_CONFIG=FILE        client configuration (default ~/.config/cloudsourced/config.toml)
   CLOUDSOURCED_POOL_CONFIG=FILE  pool configuration (default: the client configuration file)
@@ -425,13 +426,15 @@ func ShimDir() string {
 
 func shimCmd(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: cloudsourced shim install [tools...] | uninstall | path")
+		return errors.New("usage: cloudsourced shim install [tools...] | status | uninstall | path")
 	}
 	dir := ShimDir()
 	switch args[0] {
 	case "path":
 		fmt.Println(dir)
 		return nil
+	case "status":
+		return shimStatus()
 	case "install":
 		tools := args[1:]
 		if len(tools) == 0 {
@@ -462,9 +465,9 @@ func shimCmd(args []string) error {
 			}
 			fmt.Println("installed", link)
 		}
-		if !strings.Contains(":"+os.Getenv("PATH")+":", ":"+dir+":") {
-			fmt.Printf("\nAdd the shims to the front of your PATH:\n  export PATH=%q:$PATH\n", dir)
-		}
+		fmt.Println()
+		r := inspectShims(dir, os.Getenv("PATH"), self)
+		r.print(os.Stdout)
 		return nil
 	case "uninstall":
 		des, _ := os.ReadDir(dir)
@@ -479,7 +482,7 @@ func shimCmd(args []string) error {
 		}
 		return nil
 	}
-	return errors.New("usage: cloudsourced shim install [tools...] | uninstall | path")
+	return errors.New("usage: cloudsourced shim install [tools...] | status | uninstall | path")
 }
 
 func envCmd(args []string) error {
@@ -535,27 +538,14 @@ func fetch(globs []string) error {
 		return err
 	}
 	defer conn.CloseWithError(0, "")
-	_, pc, err := transport.OpenStream(ctx, conn, prep.Token, proto.KindFetch)
+	files, err := proxy.FetchOutputs(ctx, conn, prep.Token, prep.RepoID, root, globs)
 	if err != nil {
 		return err
 	}
-	if err := pc.Send(proto.TFetch, proto.Fetch{RepoID: prep.RepoID, Repo: root, Paths: globs}); err != nil {
-		return err
-	}
-	var outs proto.Outputs
-	if err := pc.Expect(proto.TOutputs, &outs); err != nil {
-		return err
-	}
-	if err := proxy.ReceiveFiles(pc, root, outs.Files); err != nil {
-		return err
-	}
-	if err := pc.Write(proto.TDone, nil); err != nil {
-		return err
-	}
-	for _, f := range outs.Files {
+	for _, f := range files {
 		fmt.Println(filepath.Join(root, f.Path))
 	}
-	if len(outs.Files) == 0 {
+	if len(files) == 0 {
 		return errors.New("no matching outputs on the machine")
 	}
 	return nil

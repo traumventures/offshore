@@ -145,3 +145,32 @@ incremental = false
 		t.Fatal(err)
 	}
 }
+
+func TestToolSplit(t *testing.T) {
+	if got := (Tool{}).SplitSubcommands("cargo"); len(got) != 2 {
+		t.Fatalf("cargo default %v", got)
+	}
+	if got := (Tool{}).SplitSubcommands("npm"); got != nil {
+		t.Fatalf("npm default %v", got)
+	}
+	dir := t.TempDir()
+	write := func(s string) error {
+		if err := os.WriteFile(filepath.Join(dir, RepoFileName), []byte("version = 1\n[environment]\nimage = \"rust:1\"\n"+s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := LoadRepo(dir)
+		return err
+	}
+	if err := write("[tool.cargo]\nsplit = []\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := write("[tool.cargo]\nsplit = [\"nextest\"]\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := write("[tool.cargo]\nsplit = [\"build\"]\n"); err == nil {
+		t.Fatal("split = [build] accepted")
+	}
+	if err := write("[tool.npm]\nsplit = [\"test\"]\n"); err == nil {
+		t.Fatal("tool.npm.split accepted")
+	}
+}
