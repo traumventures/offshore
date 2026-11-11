@@ -175,6 +175,8 @@ type Machine struct {
 	StatusAt time.Time
 	// sampledAt is when the last machine_sample event was written.
 	sampledAt time.Time
+	// thrashing is the last reported thrash state (events on change).
+	thrashing bool
 	Draining  bool
 	// PricePerHour comes from the pool size of the machine (0: unknown).
 	PricePerHour float64
@@ -321,7 +323,8 @@ type Orchestrator struct {
 
 	health         map[string]provHealth // provider instance -> health and latencies
 	leases         map[string]leaseInfo  // lease id -> expected session end
-	snapshots      map[string][]scheduler.Snapshot
+	heads          map[string]*repoLayers // build slot heads and layers (layers.go)
+	layersGC       time.Time
 	volumes        map[string]*VolumeState // managed cache volumes by id
 	localDisksOnce sync.Once
 	startBlocked   map[string]time.Time // machine -> no start before
@@ -364,10 +367,10 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		queued: map[string]repoParams{}, waiting: map[string]QueuedTask{}, envParams: map[string]repoParams{},
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
 		ProbeFunc: Probe, Clock: clk,
-		health: map[string]provHealth{}, leases: map[string]leaseInfo{}, snapshots: map[string][]scheduler.Snapshot{},
+		health: map[string]provHealth{}, leases: map[string]leaseInfo{}, heads: map[string]*repoLayers{},
 		volumes: map[string]*VolumeState{}, startBlocked: map[string]time.Time{}, forecast: scheduler.NewForecast(),
 	}
-	o.loadSnapshots()
+	o.loadHeads()
 	o.loadVolumes()
 	o.metrics = newOrchMetrics(o)
 	o.obs = newObserver(stateDir, cfg.EventRetention)
@@ -516,6 +519,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	go o.GCLayers(context.WithoutCancel(ctx), false)
 	type probe struct {
 		id     string
 		status *proto.Status
@@ -603,7 +607,8 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		}
 		m.Status = r.status
 		m.StatusAt = time.Now()
-		o.statusSnapshotsLocked(m)
+		o.statusHeadsLocked(r.id, m)
+		o.statusVMLocked(r.id, m)
 		o.statusVolumeLocked(m)
 		o.sampleLocked(r.id, m)
 	}
@@ -630,7 +635,32 @@ func (o *Orchestrator) sampleLocked(id string, m *Machine) {
 	if d := st.Disk; d != nil {
 		ev.Disk = &events.Disk{Total: d.Total, Used: d.Used, Slots: d.Slots, MachineCaches: d.MachineCaches}
 	}
+	if st.VM != nil {
+		vm := vmOf(st.VM)
+		ev.VM = &vm
+	}
 	o.obs.log.Append(ev)
+}
+
+// vmOf maps a worker's cache file system state to the scheduler's view.
+func vmOf(v *proto.VMStats) scheduler.VM {
+	return scheduler.VM{Capacity: v.Capacity, Resident: v.ResidentBytes, Dirty: v.DirtyBytes, WorkingSet: v.WorkingSetBytes,
+		FaultRate: v.FaultRate, Thrashing: v.Thrashing}
+}
+
+// statusVMLocked logs a thrash event when a machine starts thrashing.
+func (o *Orchestrator) statusVMLocked(id string, m *Machine) {
+	if m.Status == nil || m.Status.VM == nil {
+		return
+	}
+	t := m.Status.VM.Thrashing
+	if t && !m.thrashing {
+		vm := vmOf(m.Status.VM)
+		ev := o.machineEventLocked(events.Thrash, id)
+		ev.VM, ev.Bytes = &vm, vm.WorkingSet
+		o.obs.log.Append(ev)
+	}
+	m.thrashing = t
 }
 
 // Sample probes the running machines (no provider listing) to refresh
@@ -674,7 +704,8 @@ func (o *Orchestrator) Sample(ctx context.Context) {
 		}
 		st := r.st
 		m.Status, m.StatusAt = &st, time.Now()
-		o.statusSnapshotsLocked(m)
+		o.statusHeadsLocked(r.id, m)
+		o.statusVMLocked(r.id, m)
 		o.statusVolumeLocked(m)
 		o.sampleLocked(r.id, m)
 	}
@@ -790,6 +821,9 @@ func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
 			sm.WarmRepos = st.WarmRepos
 			if d := st.Disk; d != nil {
 				sm.DiskTotal, sm.DiskUsed, sm.SlotBytes, sm.DiskBudget = d.Total, d.Used, d.SlotBytes, d.Budget
+			}
+			if st.VM != nil {
+				sm.VM = vmOf(st.VM)
 			}
 			sm.Draining = sm.Draining || st.Draining
 			if st.IdleSince > 0 {

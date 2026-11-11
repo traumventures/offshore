@@ -176,7 +176,8 @@ type pruneResult struct {
 // pruneSlot prunes a slot (which the caller has acquired) to target bytes
 // (0: the policy prune, removing units unread for unreadRuns runs).
 // allowCold permits removing the whole slot data in the last stage.
-func pruneSlot(slot string, meta slotMeta, target int64, unreadRuns int64, allowCold bool) pruneResult {
+// rm deletes the slot directory (unmounting it).
+func pruneSlot(slot string, meta slotMeta, target int64, unreadRuns int64, allowCold bool, rm func(string)) pruneResult {
 	data := filepath.Join(slot, "data")
 	size := treeSize(data)
 	res := pruneResult{}
@@ -271,7 +272,7 @@ func pruneSlot(slot string, meta slotMeta, target int64, unreadRuns int64, allow
 	}
 	if target > 0 && !fits() && allowCold {
 		// Stage 3: cold (the next session starts a new slot).
-		os.RemoveAll(slot)
+		rm(slot)
 		res.Freed += size
 		res.Cold = true
 		size = 0
@@ -386,7 +387,7 @@ func (s *Worker) enforceBudgets(slot string) {
 	defer s.pruneMu.Unlock()
 	if m, err := readMeta(slot); err == nil {
 		if b := slotBudget(m); b > 0 && m.Bytes > b && s.slots.acquire(slot) {
-			r := pruneSlot(slot, m, b, defaultUnreadRuns, false)
+			r := pruneSlot(slot, m, b, defaultUnreadRuns, false, s.slots.removeDir)
 			s.slots.releaseMaint(slot, r.BytesLeft)
 			s.log.Info("pruned build slot over its budget", "slot", slot, "freed", r.Freed, "left", r.BytesLeft)
 		}
@@ -394,8 +395,9 @@ func (s *Worker) enforceBudgets(slot string) {
 	s.enforceDiskBudget()
 }
 
-// enforceDiskBudget frees disk while it is above the machine budget: the
-// policy prune of the least recently used slots first, then cold slots.
+// enforceDiskBudget frees disk while it is above the machine budget:
+// reclaim of resident slot data (refetched on use) first, then the policy
+// prune of the least recently used slots, then cold slots.
 func (s *Worker) enforceDiskBudget() {
 	budget := s.diskBudget()
 	if budget <= 0 {
@@ -405,7 +407,7 @@ func (s *Worker) enforceDiskBudget() {
 		_, used, _ := fsUsage(s.cfg.CacheDir)
 		return used - budget
 	}
-	if over() <= 0 {
+	if over() <= 0 || s.reclaimSlots(over) <= 0 {
 		return
 	}
 	refs := s.slots.list()
@@ -420,9 +422,9 @@ func (s *Worker) enforceDiskBudget() {
 			}
 			var res pruneResult
 			if cold {
-				res = coldSlot(r.Path)
+				res = coldSlot(r.Path, s.slots.removeDir)
 			} else {
-				res = pruneSlot(r.Path, r.Meta, 0, defaultUnreadRuns, false)
+				res = pruneSlot(r.Path, r.Meta, 0, defaultUnreadRuns, false, s.slots.removeDir)
 			}
 			s.slots.releaseMaint(r.Path, res.BytesLeft)
 			if res.Freed > 0 {
@@ -460,12 +462,12 @@ func (s *Worker) pruneRepo(repo string, target int64) (int64, error) {
 		var res pruneResult
 		switch {
 		case target == 0:
-			res = pruneSlot(r.Path, r.Meta, 0, defaultUnreadRuns, false)
+			res = pruneSlot(r.Path, r.Meta, 0, defaultUnreadRuns, false, s.slots.removeDir)
 		case total <= target:
 		case i > 0:
-			res = coldSlot(r.Path)
+			res = coldSlot(r.Path, s.slots.removeDir)
 		default:
-			res = pruneSlot(r.Path, r.Meta, max(1, target-(total-r.Meta.Bytes)), defaultUnreadRuns, true)
+			res = pruneSlot(r.Path, r.Meta, max(1, target-(total-r.Meta.Bytes)), defaultUnreadRuns, true, s.slots.removeDir)
 		}
 		s.slots.releaseMaint(r.Path, res.BytesLeft)
 		total -= res.Freed
@@ -475,8 +477,8 @@ func (s *Worker) pruneRepo(repo string, target int64) (int64, error) {
 }
 
 // coldSlot removes a slot (stage 3 directly).
-func coldSlot(slot string) pruneResult {
+func coldSlot(slot string, rm func(string)) pruneResult {
 	n := treeSize(filepath.Join(slot, "data"))
-	os.RemoveAll(slot) // the next session starts a new slot
+	rm(slot) // the next session starts a new slot
 	return pruneResult{Freed: n, Cold: true}
 }

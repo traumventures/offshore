@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 
+	"github.com/traumventures/offshore/internal/proto"
 	"github.com/traumventures/offshore/internal/scheduler"
 )
 
@@ -22,8 +23,10 @@ type SlotOps interface {
 	// PruneSlot shrinks repo's build slot on the machine to at most
 	// targetBytes (0: the cache's prune policy) and returns the bytes freed.
 	PruneSlot(ctx context.Context, t SlotTarget, repo string, targetBytes int64) (int64, error)
-	// SaveSlot snapshots repo's build slot to the object store.
-	SaveSlot(ctx context.Context, t SlotTarget, repo string) (scheduler.Snapshot, error)
-	// RestoreSlot restores a snapshot into repo's build slot on the machine.
+	// SaveSlot commits repo's build slot and flushes it to the object
+	// store; it returns the head.
+	SaveSlot(ctx context.Context, t SlotTarget, repo string) (proto.LayerHead, error)
+	// RestoreSlot mounts a head as repo's build slot on the machine
+	// (contents are faulted in lazily).
 	RestoreSlot(ctx context.Context, t SlotTarget, repo string, s scheduler.Snapshot) error
 }

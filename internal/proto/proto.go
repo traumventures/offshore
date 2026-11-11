@@ -93,8 +93,8 @@ type SlotOp struct {
 	Repo string `json:"repo"` // repository id
 	// TargetBytes is the prune target (0: the caches' prune policy).
 	TargetBytes int64 `json:"target_bytes,omitempty"`
-	// Snapshot is the snapshot to restore.
-	Snapshot *SnapshotInfo `json:"snapshot,omitempty"`
+	// Head is the committed layer to mount (restore).
+	Head *LayerHead `json:"head,omitempty"`
 	// Store grants access to the repository's store prefix (save and
 	// restore; nil: the last grant of a session of the repository).
 	Store *store.Grant `json:"store,omitempty"`
@@ -103,10 +103,11 @@ type SlotOp struct {
 // SlotResult answers a SlotOp.
 type SlotResult struct {
 	Freed    int64         `json:"freed,omitempty"`    // prune
-	Snapshot *SnapshotInfo `json:"snapshot,omitempty"` // save
-	// Chunks, NewChunks and Seconds describe a save or restore.
-	Chunks    int64   `json:"chunks,omitempty"`
-	NewChunks int64   `json:"new_chunks,omitempty"`
+	Head  *LayerHead `json:"head,omitempty"` // save: the flushed head
+	// Pages and PageBytes are the pages a save wrote back; Seconds the
+	// duration of the operation.
+	Pages     int64   `json:"pages,omitempty"`
+	PageBytes int64   `json:"page_bytes,omitempty"`
 	Seconds   float64 `json:"seconds,omitempty"`
 	Err       string  `json:"err,omitempty"`
 }
@@ -347,9 +348,10 @@ type Status struct {
 	// dirty and working set bytes, faults and reclaim, thrashing (nil:
 	// no cache file system).
 	VM *VMStats `json:"vm,omitempty"`
-	// Snapshots are build slot snapshots the server saved on its own (e.g.
-	// on drain or stop), so the orchestrator knows where they are.
-	Snapshots []SnapshotInfo `json:"snapshots,omitempty"`
+	// Heads are the committed build slot heads the worker flushed to
+	// the store (commits after sessions, on drain): restorable on other
+	// machines.
+	Heads []LayerHead `json:"heads,omitempty"`
 	// Metrics is the server's metrics snapshot; the orchestrator republishes
 	// it with machine labels (no extra port or scope on the machine).
 	Metrics []metrics.Family `json:"metrics,omitempty"`
@@ -395,13 +397,26 @@ type VMStats struct {
 	Stack string `json:"stack,omitempty"`
 }
 
-// SnapshotInfo describes a saved build slot snapshot.
-type SnapshotInfo struct {
+// LayerHead is a repository's build slot head in an object store: the
+// top layer of a committed chain (internal/anyfs). Restoring it mounts the
+// chain lazily.
+type LayerHead struct {
 	Repo     string `json:"repo"`
 	Store    string `json:"store"`
-	Provider string `json:"provider"`
-	Bytes    int64  `json:"bytes"`
-	At       int64  `json:"at"` // unix seconds
+	Provider string `json:"provider,omitempty"`
+	Layer    string `json:"layer"`
+	// Chain are the layer ids of the chain, bottom (a base) first.
+	Chain []string `json:"chain,omitempty"`
+	Bytes int64    `json:"bytes"`           // tree bytes
+	Delta int64    `json:"delta,omitempty"` // bytes of the top layer's changed files
+	// Created is the unix time of the oldest data (slot TTL), At of the
+	// commit.
+	Created int64 `json:"created,omitempty"`
+	At      int64 `json:"at"`
+	// Pages, PageBytes and Seconds describe the writeback of the commit.
+	Pages     int64   `json:"pages,omitempty"`
+	PageBytes int64   `json:"page_bytes,omitempty"`
+	Seconds   float64 `json:"seconds,omitempty"`
 }
 
 // Session is a running remote process.

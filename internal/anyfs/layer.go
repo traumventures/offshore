@@ -49,7 +49,8 @@ func NewLayerID(now time.Time) string {
 // ErrNoLayer means a layer or head is missing (or expired).
 var ErrNoLayer = errors.New("anyfs: no such layer")
 
-func layerObject(id string) string  { return "layers/" + id + ".json.gz" }
+// LayerObject is the object key of a layer.
+func LayerObject(id string) string { return "layers/" + id + ".json.gz" }
 func headObject(name string) string { return "heads/" + name }
 
 // SaveLayer writes a layer object.
@@ -59,12 +60,12 @@ func SaveLayer(ctx context.Context, st blobcache.Store, l *Layer) error {
 	if err := Encode(&buf, l); err != nil {
 		return err
 	}
-	return st.Put(ctx, layerObject(l.ID), bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	return st.Put(ctx, LayerObject(l.ID), bytes.NewReader(buf.Bytes()), int64(buf.Len()))
 }
 
 // LoadLayer reads a layer object.
 func LoadLayer(ctx context.Context, st blobcache.Store, id string) (*Layer, error) {
-	rc, _, err := st.Get(ctx, layerObject(id))
+	rc, _, err := st.Get(ctx, LayerObject(id))
 	if err != nil {
 		if errors.Is(err, blobcache.ErrNotFound) {
 			return nil, fmt.Errorf("layer %s: %w", id, ErrNoLayer)
@@ -84,7 +85,7 @@ func LoadLayer(ctx context.Context, st blobcache.Store, id string) (*Layer, erro
 
 // DeleteLayer removes a layer object (pages expire with the store TTL).
 func DeleteLayer(ctx context.Context, st blobcache.Store, id string) error {
-	return st.Delete(ctx, layerObject(id))
+	return st.Delete(ctx, LayerObject(id))
 }
 
 // SetHead points a named head (e.g. a repository's slot lineage) at a

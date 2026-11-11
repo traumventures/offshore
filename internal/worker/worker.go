@@ -61,6 +61,15 @@ type Config struct {
 	// Clock is the time of idle, expiry and build slot decisions
 	// ($OFFSHORE_TEST_CLOCK; nil: real time).
 	Clock clock.Clock
+	// DirtyRatio and DirtyExpire are the build slot writeback thresholds
+	// ([writeback] of the pool: OFFSHORE_WRITEBACK_DIRTY_RATIO, a fraction
+	// of the disk budget a session may grow a slot by before it is
+	// committed at once, default 0.1; OFFSHORE_WRITEBACK_DIRTY_EXPIRE, how
+	// long a slot stays idle before its commit, default 30s).
+	DirtyRatio  float64
+	DirtyExpire time.Duration
+	// SlotMode forces the build slot mount mode (tests; nil: probe).
+	SlotMode *fsMode
 }
 
 func (c Config) now() time.Time {
@@ -129,6 +138,20 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.DiskBudget = b
 	}
+	if s := os.Getenv("OFFSHORE_WRITEBACK_DIRTY_RATIO"); s != "" {
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil || f <= 0 || f > 1 {
+			return c, fmt.Errorf("server: OFFSHORE_WRITEBACK_DIRTY_RATIO %q: want 0 < ratio <= 1", s)
+		}
+		c.DirtyRatio = f
+	}
+	if s := os.Getenv("OFFSHORE_WRITEBACK_DIRTY_EXPIRE"); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil || d <= 0 {
+			return c, fmt.Errorf("server: OFFSHORE_WRITEBACK_DIRTY_EXPIRE %q: want a positive duration", s)
+		}
+		c.DirtyExpire = d
+	}
 	if s := os.Getenv("OFFSHORE_PROVISION"); s != "" {
 		if err := json.Unmarshal([]byte(s), &c.Provision); err != nil {
 			return c, fmt.Errorf("server: OFFSHORE_PROVISION: %w", err)
@@ -157,8 +180,8 @@ type Worker struct {
 	ccEndpoint string       // compiler cache WebDAV endpoint for sessions ("" = off)
 	rcStore    *tieredStore // its store
 	grants     grantCache   // latest store grants per repository
-	fills      fills        // lazy restores in progress
-	snapshots  []proto.SnapshotInfo
+	cfs        *cacheFS     // build slot file system (anyfs)
+	maintMu    sync.Mutex   // one slot maintenance pass at a time
 
 	mu       sync.Mutex
 	mounts   map[string]*sourcefs.Projection
@@ -208,6 +231,11 @@ func New(cfg Config, log *slog.Logger) (*Worker, error) {
 		return nil, err
 	}
 	sl.clock = cfg.Clock
+	cfs, err := newWorkerCacheFS(cfg, log)
+	if err != nil {
+		return nil, err
+	}
+	sl.remove = cfs.removeSlot
 	var env []string
 	for _, kv := range os.Environ() {
 		// Neither pool secrets nor the server's tracing setup (whose
@@ -217,7 +245,7 @@ func New(cfg Config, log *slog.Logger) (*Worker, error) {
 		}
 	}
 	s := &Worker{
-		cfg: cfg, log: log, store: store, slots: sl, self: self, env: env,
+		cfg: cfg, log: log, store: store, slots: sl, cfs: cfs, self: self, env: env,
 		mounts: map[string]*sourcefs.Projection{}, sources: map[string]*quic.Conn{},
 		sessions: map[string]*session{}, idleSince: cfg.now(), lastProbe: cfg.now(), inflight: map[string]*fetchCall{},
 	}
@@ -231,6 +259,9 @@ func (s *Worker) Run(parent context.Context) error {
 	defer cancel()
 	s.cg = setupCgroups(s.log)
 	s.startCompilerCache(ctx)
+	for _, r := range s.slots.list() {
+		s.cfs.unmount(r.Path) // mounts of a previous process are dead
+	}
 	if n := s.slots.gc(s.cfg.BuildTTL); n > 0 {
 		s.log.Info("removed expired build slots", "count", n)
 	}
@@ -272,12 +303,13 @@ func (s *Worker) Run(parent context.Context) error {
 		return errors.New("provisioning failed")
 	}
 	if parent.Err() != nil {
-		// SIGTERM (machine stop): save what changed since the last
-		// snapshot. The container's stop timeout bounds this
+		// SIGTERM (machine stop): commit and write back what changed
+		// since the last flush. The container's stop timeout bounds this
 		// (machine.StopTimeout); the orchestrator normally saved before
 		// stopping, so this is incremental or nothing.
-		s.saveChanged(time.Duration(machine.StopTimeout-10)*time.Second, "stop")
+		s.writebackChanged(time.Duration(machine.StopTimeout-10)*time.Second, "stop")
 	}
+	s.cfs.unmountAll()
 	return nil
 }
 
@@ -316,6 +348,7 @@ func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
 			return
 		case <-t.C:
 		}
+		go s.maintainSlots(ctx)
 		if time.Since(lastGC) > 5*time.Minute {
 			s.slots.gc(s.cfg.BuildTTL)
 			s.gcDigests(time.Now())
@@ -334,7 +367,7 @@ func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
 		s.mu.Lock()
 		if !s.draining {
 			s.log.Info("machine lifetime reached, draining")
-			go s.saveOnDrain()
+			go s.writebackChanged(8*time.Minute, "drain")
 		}
 		s.draining = true
 		if s.drainReason == "" {
@@ -364,11 +397,6 @@ func (s *Worker) shutdown() {
 	for _, p := range mounts {
 		p.Unmount()
 	}
-	s.fills.mu.Lock()
-	for _, fl := range s.fills.m {
-		fl.unmount()
-	}
-	s.fills.mu.Unlock()
 }
 
 func (s *Worker) serveConn(ctx context.Context, conn *quic.Conn) {
@@ -539,7 +567,10 @@ func (s *Worker) statusOnly() proto.Status {
 	}
 	st.WarmRepos = s.slots.warmRepos(s.cfg.BuildTTL)
 	st.Disk = s.diskStatus()
-	st.Snapshots = append([]proto.SnapshotInfo(nil), s.snapshots...)
+	if s.cfs != nil {
+		st.Heads = s.cfs.flushedHeads()
+		st.VM = s.cfs.vm()
+	}
 	return st
 }
 
@@ -677,4 +708,18 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.n += int64(n)
 	return n, err
+}
+
+// newWorkerCacheFS opens the build slot file system below the cache
+// directory with the writeback thresholds of the configuration: each
+// repository's local page tier may hold half the disk budget.
+func newWorkerCacheFS(cfg Config, log *slog.Logger) (*cacheFS, error) {
+	total, _, _ := fsUsage(cfg.CacheDir)
+	budget := budgetBytes(cfg.DiskBudget, total)
+	ratio := cfg.DirtyRatio
+	if ratio <= 0 {
+		ratio = 0.1
+	}
+	return newCacheFS(filepath.Join(cfg.CacheDir, "anyfs"), cacheFSOptions{Mode: cfg.SlotMode, Capacity: budget / 2,
+		Idle: cfg.DirtyExpire, DirtyBytes: int64(float64(budget) * ratio), Log: log, Now: cfg.now})
 }

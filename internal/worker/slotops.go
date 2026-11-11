@@ -27,12 +27,12 @@ func (s *Worker) slotOp(ctx context.Context, op proto.SlotOp) proto.SlotResult {
 	case proto.SlotPrune:
 		res.Freed, err = s.pruneRepo(op.Repo, op.TargetBytes)
 	case proto.SlotSave:
-		res, err = s.saveSlot(ctx, op.Repo)
+		res, err = s.saveSlot(ctx, op.Repo, op.Store)
 	case proto.SlotRestore:
-		if op.Snapshot == nil {
-			err = fmt.Errorf("restore: no snapshot")
+		if op.Head == nil {
+			err = fmt.Errorf("restore: no head")
 		} else {
-			res, err = s.restoreSlot(ctx, op.Repo, *op.Snapshot)
+			res, err = s.restoreSlot(ctx, op.Repo, *op.Head, op.Store)
 		}
 	default:
 		err = fmt.Errorf("unknown slot operation %q", op.Op)

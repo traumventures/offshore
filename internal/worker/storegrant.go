@@ -13,7 +13,7 @@ import (
 )
 
 // grantCache keeps the latest store grant per repository (sessions and
-// slot operations bring them; snapshots on drain use them).
+// slot operations bring them; build slot writebacks use them).
 type grantCache struct {
 	mu sync.Mutex
 	m  map[string]store.Grant
@@ -49,6 +49,13 @@ func (s *Worker) noteGrant(repo string, gr *store.Grant) {
 		return
 	}
 	s.grants.put(repo, *gr)
+	if s.cfs != nil && repo != "" {
+		if g, ok := s.grants.get(repo, 0); ok {
+			if err := s.cfs.setGrant(repo, g); err != nil {
+				s.log.Warn("build slot store", "repo", repo, "err", err)
+			}
+		}
+	}
 	if s.rcStore != nil && s.cfg.EnvHash != "" && gr.Allows(store.EnvScope(s.cfg.EnvHash)) {
 		s.rcStore.setRemote(*gr, store.EnvScope(s.cfg.EnvHash))
 	}

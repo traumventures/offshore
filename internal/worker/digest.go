@@ -18,11 +18,11 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/zeebo/blake3"
 
+	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/blobcache"
 	"github.com/traumventures/offshore/internal/platform"
 	"github.com/traumventures/offshore/internal/proto"
 	"github.com/traumventures/offshore/internal/sandbox"
-	"github.com/traumventures/offshore/internal/snapshot"
 	"github.com/traumventures/offshore/internal/store"
 )
 
@@ -173,13 +173,15 @@ func (s *Worker) ensureDigest(req proto.Exec, c proto.Cache, env []string, store
 	}
 	restored := false
 	if envStore != nil {
-		if m, err := snapshot.Load(context.Background(), subStore{envStore, digestScope}, 0); err == nil {
-			f := snapshot.NewFiller(m, filepath.Join(tmp, "content"), subStore{envStore, digestScope}, filepath.Join(tmp, "chunks"))
-			if err := f.Skeleton(); err == nil && f.FillAll(context.Background(), 16) == nil {
-				restored = true
-				fmt.Fprintf(out, "offshore: cache %s: restored from the store\n", c.Name)
+		if err := loadDigest(context.Background(), subStore{envStore, digestScope}, filepath.Join(tmp, "content")); err == nil {
+			restored = true
+			fmt.Fprintf(out, "offshore: cache %s: restored from the store\n", c.Name)
+		} else {
+			for i := range c.Paths { // start the install from empty paths
+				d := filepath.Join(tmp, "content", fmt.Sprint(i))
+				os.RemoveAll(d)
+				os.MkdirAll(d, 0o755)
 			}
-			f.Close()
 		}
 	}
 	if !restored {
@@ -205,8 +207,8 @@ func (s *Worker) ensureDigest(req proto.Exec, c proto.Cache, env []string, store
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 			defer cancel()
-			if _, _, err := snapshot.Save(ctx, filepath.Join(store_, "content"), subStore{envStore, digestScope}, snapshot.Options{}); err != nil {
-				s.log.Warn("snapshot of machine cache", "cache", c.Name, "err", err)
+			if err := saveDigest(ctx, subStore{envStore, digestScope}, filepath.Join(store_, "content")); err != nil {
+				s.log.Warn("machine cache to the store", "cache", c.Name, "err", err)
 			}
 		}()
 	}
@@ -272,6 +274,39 @@ func (s *Worker) gcDigests(now time.Time) (removed int) {
 		}
 	}
 	return removed
+}
+
+// digestHead names the layer of a digest's content in its store prefix.
+const digestHead = "content"
+
+// saveDigest writes a digest's (immutable) content to the store as one
+// base layer with its pages.
+func saveDigest(ctx context.Context, st blobcache.Store, dir string) error {
+	pages := anyfs.NewStore(st, anyfs.StoreMedium())
+	tree, _, err := anyfs.Scan(dir, anyfs.ScanOptions{Sink: func(k anyfs.Key, b []byte) error {
+		return pages.Put(ctx, k, b, anyfs.Dirty)
+	}})
+	if err != nil {
+		return err
+	}
+	l := anyfs.Commit(nil, nil, tree, time.Now(), nil)
+	if err := anyfs.SaveLayer(ctx, st, l); err != nil {
+		return err
+	}
+	return anyfs.SetHead(ctx, st, digestHead, l.ID)
+}
+
+// loadDigest extracts a digest's content saved by saveDigest into dir.
+func loadDigest(ctx context.Context, st blobcache.Store, dir string) error {
+	id, err := anyfs.Head(ctx, st, digestHead)
+	if err != nil {
+		return err
+	}
+	ch, err := anyfs.LoadChain(ctx, st, id)
+	if err != nil {
+		return err
+	}
+	return anyfs.Extract(ctx, anyfs.NewStore(st, anyfs.StoreMedium()), ch.Tree(), dir)
 }
 
 // subStore is a store below a key prefix.

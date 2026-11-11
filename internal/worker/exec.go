@@ -185,8 +185,13 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	if d, err := time.ParseDuration(req.SlotTTL); err == nil && d > 0 && d < ttl {
 		ttl = d
 	}
-	slot, warm, err := s.slots.lease(req.RepoID, ttl)
+	slot, _, err := s.slots.lease(req.RepoID, ttl)
 	if err != nil {
+		return prepErr(fmt.Errorf("build slot: %w", err))
+	}
+	warm, err := s.cfs.prepare(ctx, s.slots, slot, req.RepoID, ttl)
+	if err != nil {
+		s.slots.release(slot)
 		return prepErr(fmt.Errorf("build slot: %w", err))
 	}
 	data := filepath.Join(slot, "data")
@@ -200,7 +205,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	s.slots.update(slot, func(m *slotMeta) { m.Caches = slotCaches(req) })
 	defer func() {
 		s.slots.releaseSized(slot, slotAfter)
-		go s.finishFill(slot)
+		go s.slotReleased(slot, req.RepoID)
 		go s.enforceBudgets(slot)
 	}()
 
@@ -651,6 +656,7 @@ func (s *Worker) serveFetch(ctx context.Context, pc *proto.Conn) error {
 	if err != nil {
 		return pc.SendError("fetch", err)
 	}
+	s.mountSlot(slot, req.RepoID)
 	// Build directories are the top-level directories of the slot.
 	var build []string
 	des, _ := os.ReadDir(filepath.Join(slot, "data"))

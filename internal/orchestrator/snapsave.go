@@ -14,33 +14,34 @@ import (
 // saveTimeout bounds one slot save before a machine stops.
 const saveTimeout = 10 * time.Minute
 
-// saveSlotLogged saves repo's slot on a machine through the worker, records
-// the snapshot with the machine's provider (cache affinity of the
-// scheduler) and logs a snapshot_save event.
+// saveSlotLogged commits and flushes repo's slot on a machine through the
+// worker, records the head with the machine's provider (cache affinity of
+// the scheduler) and logs a snapshot_save event.
 func (o *Orchestrator) saveSlotLogged(ctx context.Context, slots SlotOps, t SlotTarget, prov, repo, why string) (scheduler.Snapshot, error) {
 	start := time.Now()
-	snap, err := slots.SaveSlot(ctx, t, repo)
+	h, err := slots.SaveSlot(ctx, t, repo)
 	ev := o.machineEvent(events.SnapshotSave, t.Machine)
 	ev.Repo, ev.Reason, ev.Seconds = repo, why, time.Since(start).Seconds()
 	if err != nil {
 		ev.Error = err.Error()
 		o.obs.log.Append(ev)
-		return snap, err
+		return scheduler.Snapshot{}, err
 	}
-	snap.Provider = prov
-	if snap.Repo == "" {
-		snap.Repo = repo
+	h.Provider = prov
+	if h.Repo == "" {
+		h.Repo = repo
 	}
-	ev.Store, ev.Bytes = snap.Store, snap.Bytes
+	snap := SnapshotFromHead(h)
+	ev.Store, ev.Bytes, ev.Pages = snap.Store, snap.Bytes, h.Pages
 	o.obs.log.Append(ev)
 	o.mu.Lock()
-	o.addSnapshotLocked(snap)
+	o.addHeadLocked(snap, h.Chain, time.Unix(h.Created, 0))
 	o.mu.Unlock()
 	return snap, nil
 }
 
 // unsavedSlots returns the repositories with a build slot on the machine
-// that changed since the worker's last snapshot of them.
+// that changed since the worker last flushed a head of them.
 func unsavedSlots(m *Machine) []string {
 	st := m.Status
 	if st == nil || st.Disk == nil {
@@ -56,7 +57,7 @@ func unsavedSlots(m *Machine) []string {
 			continue
 		}
 		saved := false
-		for _, s := range st.Snapshots {
+		for _, s := range st.Heads {
 			if s.Repo == repo && idle > 0 && s.At >= idle {
 				saved = true
 			}
