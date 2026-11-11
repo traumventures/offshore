@@ -44,7 +44,7 @@ type Config struct {
 	// DiskPricePerGBHour prices extra disk of a resize (0 = default).
 	DiskPricePerGBHour float64
 	// ConsolidateHold: no consolidation within this time after the pool
-	// scaled an environment up (default 5m; default variant only).
+	// scaled an environment up (default 2m; default variant only).
 	ConsolidateHold time.Duration
 	// Overcommit factors: reservations may exceed physical capacity by this
 	// factor. CPU overcommit only slows tasks down. Memory overcommit relies

@@ -32,13 +32,13 @@ import (
 const (
 	DefaultCostOptimization = 0.5
 	DefaultTail             = 0.0 // idle tail charged to a new machine, as a fraction of idle_stop
-	DefaultBoot        = 90 * time.Second
-	DefaultStart       = 30 * time.Second
-	DefaultPrune       = 20 * time.Second
-	DefaultResize      = 60 * time.Second
-	DefaultBandwidth   = 200 << 20 // bytes/s between a provider and its own store
-	DefaultCrossBW     = 50 << 20  // bytes/s between a provider and another store
-	DefaultCrossEgress = 0.09      // price per GB leaving a store for another provider
+	DefaultBoot             = 90 * time.Second
+	DefaultStart            = 30 * time.Second
+	DefaultPrune            = 20 * time.Second
+	DefaultResize           = 60 * time.Second
+	DefaultBandwidth        = 200 << 20 // bytes/s between a provider and its own store
+	DefaultCrossBW          = 50 << 20  // bytes/s between a provider and another store
+	DefaultCrossEgress      = 0.09      // price per GB leaving a store for another provider
 	// DefaultDiskPrice is the price of one GB of machine disk per hour
 	// (~0.08 per GB-month, EBS gp3).
 	DefaultDiskPrice = 0.08 / 730
@@ -240,6 +240,27 @@ func prunable(m Machine, t Task) int64 {
 	return n
 }
 
+// slotsToPrune is how many other repositories' slots a prune of missing
+// bytes removes (largest first).
+func slotsToPrune(m Machine, t Task, missing int64) int {
+	var bs []int64
+	for repo, b := range m.SlotBytes {
+		if repo != t.RepoID {
+			bs = append(bs, b)
+		}
+	}
+	sort.Slice(bs, func(i, j int) bool { return bs[i] > bs[j] })
+	n := 0
+	for _, b := range bs {
+		if missing <= 0 {
+			break
+		}
+		missing -= b
+		n++
+	}
+	return n
+}
+
 // prepare adds the slot handling a run needs on m when the disk is too
 // full (prune or resize), choosing by score. ok is false when neither can
 // make room.
@@ -256,7 +277,8 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) (r
 	consider := func(c runChoice) { cs = append(cs, c) }
 	if prunable(m, t) >= missing {
 		c := rc
-		c.run += DefaultPrune
+		// Pruning other repositories' slots makes their next builds cold.
+		c.run += DefaultPrune + time.Duration(slotsToPrune(m, t, missing))*time.Duration(float64(DefaultRun)*DefaultColdPenalty)
 		c.slot = SlotAction{Kind: SlotPrune, Repo: t.RepoID, Bytes: missing}
 		c.reason += ", prune slots"
 		consider(c)

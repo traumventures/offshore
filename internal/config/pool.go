@@ -69,7 +69,7 @@ type Pool struct {
 // overcommitting memory needs soft limits and swap, otherwise tasks may be
 // OOM killed.
 type Scheduler struct {
-	Policy            string  `toml:"policy"`    // "default" (cost model) | "binpack" | "classic"
+	Policy string `toml:"policy"` // "default" (cost model) | "binpack" | "classic"
 	// CostOptimization is the cost model's knob, 0..1 (default 0.5): 1
 	// optimises purely for cost, 0 purely for time to result.
 	CostOptimization *float64 `toml:"cost_optimization"`
@@ -79,14 +79,14 @@ type Scheduler struct {
 	Egress []Egress `toml:"egress"`
 	// DiskPricePerGBMonth prices extra disk of a resize (default 0.08).
 	DiskPricePerGBMonth float64 `toml:"disk_price_per_gb_month"`
-	Estimator         string  `toml:"estimator"` // "history" (learn from runs) | "static" (repo config)
-	CPUOvercommit     float64 `toml:"cpu_overcommit"`
-	MemoryOvercommit  float64 `toml:"memory_overcommit"`
-	MaxCPUPressure    float64 `toml:"max_cpu_pressure"`    // 0..1, PSI some avg10; 0 = off
-	MaxMemoryPressure float64 `toml:"max_memory_pressure"` // 0..1; 0 = off
-	SoftLimit         float64 `toml:"soft_limit"`          // memory.high = need * soft_limit; 0 = off
-	Swap              bool    `toml:"swap"`
-	LimitJobs         bool    `toml:"limit_jobs"` // pass reserved CPU as build parallelism
+	Estimator           string  `toml:"estimator"` // "history" (learn from runs) | "static" (repo config)
+	CPUOvercommit       float64 `toml:"cpu_overcommit"`
+	MemoryOvercommit    float64 `toml:"memory_overcommit"`
+	MaxCPUPressure      float64 `toml:"max_cpu_pressure"`    // 0..1, PSI some avg10; 0 = off
+	MaxMemoryPressure   float64 `toml:"max_memory_pressure"` // 0..1; 0 = off
+	SoftLimit           float64 `toml:"soft_limit"`          // memory.high = need * soft_limit; 0 = off
+	Swap                bool    `toml:"swap"`
+	LimitJobs           bool    `toml:"limit_jobs"` // pass reserved CPU as build parallelism
 	// ConsolidateBelow drains the least loaded machine of an environment
 	// when its machines are reserved below this fraction (default 0.5,
 	// 0 = off). ConsolidateTarget caps the share the others may reach.

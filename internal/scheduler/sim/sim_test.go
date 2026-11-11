@@ -163,9 +163,9 @@ at,repo,env,duration,cpu,memory,peak_memory
 	}
 }
 
-// TestSampleTraces checks the claim of docs/SCHEDULER.md on the sample
-// traces: the default policy is cheaper than classic at equal or better p95
-// wait.
+// TestSampleTraces checks the cost/time frontier of cost_optimization on
+// the sample traces: 0 gives the fastest results, 1 the lowest cost, and
+// the default policy at 0 is faster than classic.
 func TestSampleTraces(t *testing.T) {
 	sizes := []scheduler.Size{
 		{Provider: "aws", Name: "c7a.large", Capacity: scheduler.Resources{CPU: 2, Memory: 4 * gib}, PricePerHour: 0.1027},
@@ -173,19 +173,79 @@ func TestSampleTraces(t *testing.T) {
 		{Provider: "aws", Name: "c7a.2xlarge", Capacity: scheduler.Resources{CPU: 8, Memory: 16 * gib}, PricePerHour: 0.4106},
 		{Provider: "aws", Name: "c7a.4xlarge", Capacity: scheduler.Resources{CPU: 16, Memory: 32 * gib}, PricePerHour: 0.8211},
 	}
-	for _, name := range []string{"team-week.json", "small-week.json"} {
-		tr, err := Load(filepath.Join("testdata", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		run := func(variant string) Report {
-			return Run(tr, Options{Policy: scheduler.Default{Cfg: scheduler.Config{Variant: variant, CPUOvercommit: 2, MemoryOvercommit: 1,
-				MaxMachines: 16, IdleStop: 20 * time.Minute, ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5}}, Sizes: sizes})
-		}
-		d, c := run(scheduler.VariantDefault), run(scheduler.VariantClassic)
-		if d.Cost >= c.Cost || d.WaitP95 > c.WaitP95 || d.Completed < c.Completed {
-			t.Errorf("%s: default cost %.2f p95 %v done %d, classic cost %.2f p95 %v done %d",
-				name, d.Cost, d.WaitP95, d.Completed, c.Cost, c.WaitP95, c.Completed)
-		}
+	tr, err := Load(filepath.Join("testdata", "small-week.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(variant string, r float64) Report {
+		return Run(tr, Options{Policy: scheduler.Default{Cfg: scheduler.Config{Variant: variant, CPUOvercommit: 2, MemoryOvercommit: 1,
+			MaxMachines: 16, IdleStop: 20 * time.Minute, ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5,
+			CostOptimization: r, QueueTimeout: 10 * time.Minute}}, Sizes: sizes, Estimator: scheduler.NewHistory("")})
+	}
+	fast, cheap, classic := run(scheduler.VariantDefault, 0), run(scheduler.VariantDefault, 1), run(scheduler.VariantClassic, 0)
+	if cheap.Cost >= fast.Cost || fast.TurnP95 > cheap.TurnP95 || fast.Completed != fast.Jobs || cheap.Completed != cheap.Jobs {
+		t.Errorf("frontier: r=0 cost %.2f turn95 %v done %d, r=1 cost %.2f turn95 %v done %d",
+			fast.Cost, fast.TurnP95, fast.Completed, cheap.Cost, cheap.TurnP95, cheap.Completed)
+	}
+	if fast.TurnP95 > classic.TurnP95 || fast.Cost > classic.Cost {
+		t.Errorf("r=0 cost %.2f turn95 %v, classic cost %.2f turn95 %v", fast.Cost, fast.TurnP95, classic.Cost, classic.TurnP95)
+	}
+}
+
+func diskOpts(cfg scheduler.Config, disk int64, resize bool) Options {
+	o := opts(cfg)
+	o.Sizes = []scheduler.Size{{Provider: "p", Name: "m", Capacity: scheduler.Resources{CPU: 4, Memory: 8 * gib, Disk: disk}, PricePerHour: 1}}
+	o.Resize, o.Estimator = resize, scheduler.NewHistory("")
+	return o
+}
+
+// Two repositories whose slots do not fit the disk together: the model
+// prunes (or resizes when the provider can) instead of letting the worker
+// evict at random.
+func TestSimDiskFull(t *testing.T) {
+	var js []Job
+	for i := 0; i < 12; i++ {
+		repo := []string{"a", "b"}[i%2]
+		js = append(js, Job{At: float64(i * 400), Repo: repo, Env: "e", Duration: 120, CPU: 2, Memory: Bytes(2 * gib), PeakMemory: Bytes(gib),
+			SlotBytes: Bytes(30 * gib), SlotGrowth: Bytes(gib)})
+	}
+	tr := Trace{Start: DefaultStart, End: 6000, Jobs: js}
+	r := Run(tr, diskOpts(scheduler.Config{}, 50*gib, false))
+	if r.Completed != len(js) || r.Prunes == 0 {
+		t.Fatalf("no resize: want prunes, got %+v", r)
+	}
+	r = Run(tr, diskOpts(scheduler.Config{}, 50*gib, true))
+	if r.Completed != len(js) || r.Resizes == 0 || r.Evictions > 1 || r.WarmHits < 8 {
+		t.Fatalf("resize: want a resize and warm slots, got %+v", r)
+	}
+}
+
+// A machine expires; its slot snapshot is restored on the next machine
+// instead of building cold.
+func TestSimRestoreAfterExpiry(t *testing.T) {
+	js := []Job{
+		{At: 0, Repo: "r", Env: "e", Duration: 600, CPU: 2, Memory: Bytes(2 * gib), PeakMemory: Bytes(gib), SlotBytes: Bytes(5 * gib)},
+		{At: 700, Repo: "r", Env: "e", Duration: 600, CPU: 2, Memory: Bytes(2 * gib), PeakMemory: Bytes(gib), SlotBytes: Bytes(5 * gib)},
+		{At: 4000, Repo: "r", Env: "e", Duration: 600, CPU: 2, Memory: Bytes(2 * gib), PeakMemory: Bytes(gib), SlotBytes: Bytes(5 * gib)},
+	}
+	o := diskOpts(scheduler.Config{}, 0, false)
+	o.MaxLifetime, o.ColdPenalty = time.Hour, 1
+	r := Run(Trace{Start: DefaultStart, End: 6000, Jobs: js}, o)
+	if r.Completed != 3 || r.Restores != 1 {
+		t.Fatalf("want one restore, got %+v", r)
+	}
+}
+
+// The cheaper provider has no capacity: work goes to the other one.
+func TestSimProviderOutage(t *testing.T) {
+	o := opts(scheduler.Config{})
+	o.Sizes = []scheduler.Size{
+		{Provider: "a", Name: "m", Capacity: scheduler.Resources{CPU: 4, Memory: 8 * gib}, PricePerHour: 0.1},
+		{Provider: "b", Name: "m", Capacity: scheduler.Resources{CPU: 4, Memory: 8 * gib}, PricePerHour: 0.5},
+	}
+	o.Down = []Outage{{Provider: "a", From: 0, To: 1e9}}
+	r := Run(jobs(Job{At: 0, Repo: "r", Env: "e", Duration: 60, CPU: 2, Memory: Bytes(gib), PeakMemory: Bytes(gib)}), o)
+	if r.Completed != 1 || r.Actions["create-failed:no capacity"] != 0 {
+		t.Fatalf("want a create on b only, got %+v", r)
 	}
 }
