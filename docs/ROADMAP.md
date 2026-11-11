@@ -60,13 +60,22 @@ Numbers and the bugs found on the way are in [PLAN.md](PLAN.md) section 0
 
 ## Open
 
-* **Store head of large fresh slots**: after a cold build of a large
-  workspace the session commit (hashing 10 GB on a gp3 root) takes minutes;
-  the 30 s head deadline only starts after it. Commit during the session or
-  use faster media.
+* **Store head of large fresh slots**: written files are now hashed in
+  the background during the session (fanotify close_write → anyfs.Hasher,
+  identity cache dev/ino/size/mtime/ctime, ephemeral classes skipped, pages
+  written back by class during the session), the commit reads the rest with
+  parallel workers and streams early-class pages to the store while
+  reading. Not yet measured live on gp3 (synthetic baseline on a
+  125 MB/s-throttled disk: 4 GB fresh slot = 44 s commit + 34 s flush);
+  open: reflink page files (FICLONERANGE) instead of a second write, live
+  numbers for app.
 * **Restore on slow root disks**: on gp3 roots (125 MB/s) the cost model
   prefers cold builds for big slots; learned cold times underestimate cold
-  builds on fresh machines (empty compiler cache in the store).
+  builds on fresh machines (empty compiler cache in the store). Planned:
+  cold duration conditioned on compiler-cache state (global cache hit
+  ratio per key/provider, fresh machine) and restore time from the
+  measured aggregate page-in bandwidth per medium instead of nominal gp3;
+  restored runs' warm samples include their page-in time.
 * **Output overlay**: freshness needs the same cargo configuration locally
   and remotely (`[env]` of `$CARGO_HOME/config.toml` is not aligned, only
   rustflags); the first local run over a cold overlay fetches metadata;

@@ -174,6 +174,9 @@ type readTracker struct {
 	data  string
 	self  uint32
 	watch *anyfs.AccessWatch
+	// onWrite receives the files written (closed after writing on the
+	// kernel overlay, opened for writing on the userspace overlay).
+	onWrite func(rel string)
 
 	mu      sync.Mutex
 	binds   []sandbox.Bind  // the current session's binds below data
@@ -198,7 +201,13 @@ func (t *readTracker) watchKernel() error {
 // onOpen is the userspace overlay's open callback. FUSE reports the
 // opening thread: threads of this process are its own accesses.
 func (t *readTracker) onOpen(rel string, write bool, pid uint32) {
-	if write || pid == t.self || ownThread(pid) {
+	if pid == t.self || ownThread(pid) {
+		return
+	}
+	if write {
+		if t.onWrite != nil && rel != "" && rel != "." {
+			t.onWrite(rel) // hashed once it settled (opened, not closed: the hasher waits)
+		}
 		return
 	}
 	t.note(rel)
@@ -229,14 +238,26 @@ func (t *readTracker) note(rel string) {
 }
 
 // notePath maps a path seen by fanotify (the slot's mount or a session's
-// bind of a part of it) to the slot path.
+// bind of a part of it) to the slot path: reads are noted, writes go to
+// onWrite (background hashing).
 func (t *readTracker) notePath(p string, write bool) {
-	if write {
+	rel, ok := t.slotPath(p)
+	if !ok {
 		return
 	}
-	if rel, ok := under(p, t.data); ok {
-		t.note(rel)
+	if write {
+		if t.onWrite != nil && rel != "" {
+			t.onWrite(rel)
+		}
 		return
+	}
+	t.note(rel)
+}
+
+// slotPath maps a path seen by fanotify to the slot path.
+func (t *readTracker) slotPath(p string) (string, bool) {
+	if rel, ok := under(p, t.data); ok {
+		return rel, true
 	}
 	t.mu.Lock()
 	binds := t.binds
@@ -244,11 +265,11 @@ func (t *readTracker) notePath(p string, write bool) {
 	for _, b := range binds {
 		if rest, ok := under(p, b.Dst); ok {
 			if base, ok := under(b.Src, t.data); ok {
-				t.note(strings.TrimPrefix(base+"/"+rest, "/"))
-				return
+				return strings.TrimPrefix(base+"/"+rest, "/"), true
 			}
 		}
 	}
+	return "", false
 }
 
 // under returns p relative to dir if it is below it.

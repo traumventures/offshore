@@ -6,6 +6,7 @@
 //	anyfsbench pack   -src DIR -store DIR            # commit DIR as a base layer
 //	anyfsbench mount  -store DIR -cache DIR -mnt DIR [-latency 5ms -bw 200e6] [-prefetch 65536] [-warm] -stats FILE
 //	anyfsbench commit -store DIR -cache DIR -dir MERGED   # commit the merged view as a layer
+//	anyfsbench slotcommit -mode before|after ...          # commit of a fresh slot (slotcommit.go)
 //
 // mount writes its counters to -stats on SIGUSR1 and on exit; commit
 // prints one JSON line.
@@ -37,6 +38,10 @@ func main() {
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
+	if cmd == "slotcommit" {
+		slotCommit(args)
+		return
+	}
 	fl := flag.NewFlagSet(cmd, flag.ExitOnError)
 	src := fl.String("src", "", "pack: source dir")
 	storeDir := fl.String("store", "", "directory store")

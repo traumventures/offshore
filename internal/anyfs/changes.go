@@ -148,6 +148,32 @@ func (cs *ChangeSet) Capture(snap string, source func(rel string) string) error 
 	return nil
 }
 
+// Resolve sets digest and pages of the files to read that known can
+// supply without reading them (e.g. hashed in the background while they
+// were written, Hasher.Lookup) and takes them off the read list. It
+// returns their paths.
+func (cs *ChangeSet) Resolve(known func(n *Node) bool) []string {
+	if len(cs.Read) == 0 {
+		return nil
+	}
+	idx := make(map[string]int, len(cs.Nodes))
+	for i := range cs.Nodes {
+		idx[cs.Nodes[i].Path] = i
+	}
+	var kept, resolved []string
+	for _, p := range cs.Read {
+		if i, ok := idx[p]; ok && cs.Nodes[i].Kind == File && known(&cs.Nodes[i]) {
+			resolved = append(resolved, p)
+			cs.Stats.Known++
+			cs.Stats.KnownRead += cs.Nodes[i].Size
+			continue
+		}
+		kept = append(kept, p)
+	}
+	cs.Read = kept
+	return resolved
+}
+
 // Tree reads the plan's changed files below dir (the scanned directory or
 // a snapshot made by Capture; pages go to opt.Sink) and returns the tree.
 func (cs *ChangeSet) Tree(dir string, opt ScanOptions) (*Tree, ScanStats, error) {
