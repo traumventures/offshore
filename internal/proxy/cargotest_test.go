@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"github.com/traumventures/cloudsourced/internal/platform"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -113,7 +114,7 @@ func TestCargoTestRunnerMatchesCargo(t *testing.T) {
 			if len(rest) > 0 {
 				t.Fatalf("non-JSON output %q", rest)
 			}
-			if why := checkLocalExec(b.exes); why != "" {
+			if why := platform.CheckRun(b.exes); why != "" {
 				t.Fatalf("locally built binaries rejected: %s", why)
 			}
 			var gotOut, gotErr bytes.Buffer
