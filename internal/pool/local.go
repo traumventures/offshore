@@ -74,6 +74,7 @@ func NewLocal(u *config.PoolConfig, stateDir string, log *slog.Logger) (*Local, 
 		envs: map[string]Env{}, waiters: map[string]map[*syncWriter]bool{},
 	}
 	orch.PrepareImage = l.prepareImage
+	orch.Slots = orchestrator.WorkerSlotOps{}
 	return l, nil
 }
 

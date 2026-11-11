@@ -83,6 +83,9 @@ func TestAuthorize(t *testing.T) {
 		{proto.KindFetch, auth.ScopeSession, true},
 		{proto.KindFetch, auth.ScopeProbe, false},
 		{proto.KindFetch, auth.ScopeAdmin, true},
+		{proto.KindSlot, auth.ScopeAdmin, true},
+		{proto.KindSlot, auth.ScopeSession, false},
+		{proto.KindSlot, auth.ScopeProbe, false},
 		{"bogus", auth.ScopeAdmin, false},
 	}
 	for _, c := range cases {

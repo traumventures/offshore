@@ -47,6 +47,9 @@ type Config struct {
 	CacheDir  string
 	DepsDir   string
 	BuildTTL  time.Duration // upper bound for build cache age
+	// DiskBudget is the bytes the cache disk may use before slots are
+	// pruned (CLOUDSOURCED_DISK_BUDGET; 0: 90% of the filesystem).
+	DiskBudget int64
 	// HostStatus is a file the server publishes machine.HostStatus to for
 	// the supervisor (CLOUDSOURCED_HOST_STATUS; empty: none).
 	HostStatus string
@@ -122,6 +125,13 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.BuildTTL = d
 	}
+	if s := os.Getenv("CLOUDSOURCED_DISK_BUDGET"); s != "" {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return c, fmt.Errorf("server: CLOUDSOURCED_DISK_BUDGET: %w", err)
+		}
+		c.DiskBudget = n
+	}
 	if s := os.Getenv("CLOUDSOURCED_PROVISION"); s != "" {
 		if err := json.Unmarshal([]byte(s), &c.Provision); err != nil {
 			return c, fmt.Errorf("server: CLOUDSOURCED_PROVISION: %w", err)
@@ -173,6 +183,7 @@ type Worker struct {
 	// machineCacheBytes is the size of the machine caches, measured by
 	// the periodic gc.
 	machineCacheBytes atomic.Int64
+	pruneMu           sync.Mutex // one prune at a time
 }
 
 type fetchCall struct {
@@ -299,6 +310,11 @@ func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
 		if time.Since(lastGC) > 5*time.Minute {
 			s.slots.gc(s.cfg.BuildTTL)
 			go s.measureMachineCaches()
+			go func() {
+				s.pruneMu.Lock()
+				defer s.pruneMu.Unlock()
+				s.enforceDiskBudget()
+			}()
 			lastGC = time.Now()
 		}
 		if s.cfg.ExpiresAt.IsZero() || s.cfg.now().Before(s.cfg.ExpiresAt) {
@@ -383,6 +399,8 @@ func (s *Worker) serveStream(ctx context.Context, conn *quic.Conn, st *quic.Stre
 		err = s.serveOutputs(ctx, pc)
 	case proto.KindForward:
 		err = s.serveForward(ctx, pc, st, claims)
+	case proto.KindSlot:
+		err = s.serveSlot(ctx, pc)
 	}
 	if err != nil && !errors.Is(err, io.EOF) && ctx.Err() == nil {
 		s.log.Debug("stream ended", "kind", hello.Kind, "err", err)
@@ -431,6 +449,8 @@ func authorize(kind string, c auth.Claims) error {
 		need = auth.ScopeSession
 	case proto.KindStatus:
 		need = auth.ScopeProbe
+	case proto.KindSlot:
+		need = auth.ScopeAdmin
 	default:
 		return fmt.Errorf("unknown stream kind %q", kind)
 	}
