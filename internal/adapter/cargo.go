@@ -32,10 +32,12 @@ func (Cargo) Detect(root string) bool { return fileExists(filepath.Join(root, "C
 // machine (keyed by Cargo.lock) and sccache as global compiler cache.
 func (Cargo) DefaultCaches(root string) []Cache {
 	return []Cache{
-		{Name: "target", Scope: ScopeSlot, Paths: []string{"target"}, Comment: "build directory, stays on the machine (24 h)"},
-		{Name: "cargo-registry", Scope: ScopeMachine, Paths: []string{"$CARGO_HOME/registry", "$CARGO_HOME/git"}, Digest: []string{"Cargo.lock"},
-			Comment: "downloaded crates, shared by builds with the same Cargo.lock"},
-		{Name: "sccache", Scope: ScopeGlobal, Tool: "sccache", Comment: "compiler results shared across machines"},
+		{config.Cache{Name: "target", Scope: ScopeSlot, Paths: []string{"target"}, Prune: config.PruneRust},
+			"build directory: stays on the machine (24 h), never synchronised"},
+		{config.Cache{Name: "deps", Scope: ScopeMachine, Paths: []string{"$CARGO_HOME/registry", "$CARGO_HOME/git"}},
+			"downloaded crates, shared by all sessions of a machine"},
+		{config.Cache{Name: "sccache", Scope: ScopeGlobal, Tool: config.CacheToolSccache},
+			"compiler results shared across machines"},
 	}
 }
 

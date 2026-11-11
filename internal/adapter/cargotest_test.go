@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"bytes"
-	"github.com/traumventures/cloudsourced/internal/platform"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,6 +68,7 @@ func TestCargoTestRunnerMatchesCargo(t *testing.T) {
 	t.Setenv("CARGO_TERM_COLOR", "never")
 	t.Setenv("RUST_BACKTRACE", "0")
 	t.Setenv("RUST_TEST_THREADS", "1")
+	t.Setenv("SPLIT_FORCED", "outer")
 	cases := []struct {
 		name, dir, args string
 		fail            bool
@@ -76,6 +76,7 @@ func TestCargoTestRunnerMatchesCargo(t *testing.T) {
 		{name: "workspace", dir: ".", args: "--lib --bins --tests -- --nocapture"},
 		{name: "filter", dir: ".", args: "--tests lib_env -- --nocapture"},
 		{name: "package dir", dir: "a", args: "--tests"},
+		{name: "build script and config env", dir: ".", args: "-p b --lib -- --nocapture b_env"},
 		{name: "quiet", dir: ".", args: "-q --tests"},
 		{name: "failure stops", dir: ".", args: "--tests", fail: true},
 		{name: "failure no-fail-fast", dir: ".", args: "--tests --no-fail-fast", fail: true},
@@ -114,11 +115,11 @@ func TestCargoTestRunnerMatchesCargo(t *testing.T) {
 			if len(rest) > 0 {
 				t.Fatalf("non-JSON output %q", rest)
 			}
-			if why := platform.CheckRun(b.exes); why != "" {
+			if why := platformCheck(b.exes); why != "" {
 				t.Fatalf("locally built binaries rejected: %s", why)
 			}
 			var gotOut, gotErr bytes.Buffer
-			r := &testRunner{t: pt, cwd: cwd, color: false, current: currentManifest(cwd, ""), out: &gotErr, stdout: &gotOut}
+			r := &testRunner{t: pt, cwd: cwd, color: false, current: currentManifest(cwd, ""), out: &gotErr, stdout: &gotOut, configEnv: cargoConfigEnv(cwd, os.Getenv)}
 			failed, _ := r.run(b)
 			gotCode := 0
 			if len(failed) > 0 {

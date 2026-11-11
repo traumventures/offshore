@@ -38,12 +38,12 @@ const (
 	Remote Where = "remote"
 )
 
-// Cache scopes of artifacts (see [cache.<name>] scope).
+// Cache scopes of artifacts: those of [cache.<name>] scope plus local.
 const (
-	ScopeSlot    = "slot"    // build slot: per repository, exclusive per session, <= 24 h
-	ScopeMachine = "machine" // machine cache, keyed by a content digest
-	ScopeGlobal  = "global"  // shared result cache across machines (sccache, GOCACHE)
-	ScopeLocal   = "local"   // transferred to this machine for a local phase
+	ScopeSlot    = config.ScopeSlot    // build slot: per repository, exclusive per session, <= 24 h
+	ScopeMachine = config.ScopeMachine // machine cache, keyed by a content digest
+	ScopeGlobal  = config.ScopeGlobal  // shared result cache across machines (sccache, GOCACHE)
+	ScopeLocal   = "local"             // transferred to this machine for a local phase
 )
 
 // Artifact is something a phase produces.
@@ -137,13 +137,8 @@ func (c Command) host() platform.Platform {
 // Cache is a cache an adapter proposes for `cloudsourced init`
 // ([cache.<Name>]; fields as in the repository configuration).
 type Cache struct {
-	Name    string
-	Scope   string
-	Paths   []string
-	Digest  []string
-	Install string
-	Tool    string
-	Comment string
+	config.Cache
+	Comment string // why, rendered as a comment
 }
 
 // Adapter knows one tool ecosystem.
@@ -319,6 +314,10 @@ func insideDirs(root string, dirs []string, abs string) (string, bool) {
 	}
 	return "", false
 }
+
+// platformCheck returns why the executables cannot run here ("" = they
+// can); tests replace it.
+var platformCheck = platform.CheckRun
 
 // fileExists reports a regular file or directory at p.
 func fileExists(p string) bool {

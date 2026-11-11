@@ -10,29 +10,6 @@ import (
 	"github.com/traumventures/cloudsourced/internal/transport"
 )
 
-// artifacts makes files of the remote build directories available at
-// their local path after a build. Test splitting depends only on this
-// interface, so the transport can change (fetch over the session today,
-// the target overlay later) without changing what users see.
-type artifacts interface {
-	// Fetch makes the files at the given repository-relative paths
-	// available locally. Paths are literal, not globs.
-	Fetch(ctx context.Context, s *session, paths []string) error
-}
-
-// fetchArtifacts copies the files over the session's connection from the
-// latest build slot of the repository (the one the session just used).
-type fetchArtifacts struct{}
-
-func (fetchArtifacts) Fetch(ctx context.Context, s *session, paths []string) error {
-	globs := make([]string, len(paths))
-	for i, p := range paths {
-		globs[i] = escapeGlob(p)
-	}
-	_, err := FetchOutputs(ctx, s.conn, s.token, s.repoID, s.root, globs, proto.CompressZstd)
-	return err
-}
-
 // escapeGlob quotes the glob metacharacters of a literal path.
 func escapeGlob(p string) string {
 	var b strings.Builder

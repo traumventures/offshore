@@ -3,10 +3,10 @@ package proxy
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/traumventures/cloudsourced/internal/platform"
 	"github.com/traumventures/cloudsourced/internal/proto"
 )
 
@@ -30,7 +30,7 @@ func clientToolchain() *proto.Toolchain {
 // hostTriple is the Rust host triple of this machine (Linux only, like the
 // build machines).
 func hostTriple() string {
-	if runtime.GOARCH == "arm64" {
+	if platform.Local().Arch == "arm64" {
 		return "aarch64-unknown-linux-gnu"
 	}
 	return "x86_64-unknown-linux-gnu"

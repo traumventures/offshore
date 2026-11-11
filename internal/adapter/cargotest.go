@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/traumventures/cloudsourced/internal/platform"
 	"io"
 	"net/url"
 	"os"
@@ -280,7 +279,7 @@ func runCargoTest(ctx context.Context, rt Runtime, args []string, t cargoTest) (
 	if outside != "" {
 		return runTestsRemotely(ctx, rt, fmt.Sprintf("test binary %s is outside the build directories", outside))
 	}
-	if why := platform.CheckRun(build.exes); why != "" {
+	if why := platformCheck(build.exes); why != "" {
 		return runTestsRemotely(ctx, rt, why)
 	}
 	// Package metadata for the test environment (CARGO_PKG_*).

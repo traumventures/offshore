@@ -153,10 +153,3 @@ func (s *sniffer) found() string {
 func colorTerminal() bool {
 	return term.IsTerminal(int(os.Stderr.Fd())) && os.Getenv("NO_COLOR") == ""
 }
-
-var _ = exec.Command
-var _ = signal.Ignore
-var _ = syscall.SIGINT
-var _ = regexp.MustCompile
-var _ = strings.HasPrefix
-var _ = fmt.Sprint

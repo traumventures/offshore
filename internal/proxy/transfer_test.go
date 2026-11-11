@@ -41,3 +41,10 @@ func TestReceiveBlobsZstd(t *testing.T) {
 		t.Fatalf("staged content wrong: %v", err)
 	}
 }
+
+func TestArtifactGlobs(t *testing.T) {
+	got := artifactGlobs([]string{"target/a[1]*?{x}", "target/debug/build/x-1/out/**"})
+	if got[0] != `target/a\[1\]\*\?\{x\}` || got[1] != "target/debug/build/x-1/out/**" {
+		t.Fatal(got)
+	}
+}
