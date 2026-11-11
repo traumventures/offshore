@@ -226,6 +226,12 @@ func TestUserData(t *testing.T) {
 			t.Errorf("user data lacks %q", want)
 		}
 	}
+	// Containers resolve names through the VCN resolver on 169.254.169.254:53:
+	// DNS is accepted before the link-local reject (inserted later = first).
+	rej, dns := strings.Index(ud, "iptables -I DOCKER-USER -d 169.254.0.0/16 -j REJECT"), strings.Index(ud, "-d 169.254.169.254/32 -p $p --dport 53 -j ACCEPT; done")
+	if rej < 0 || dns < rej {
+		t.Errorf("DNS to the VCN resolver must be accepted ahead of the link-local reject:\n%s", ud)
+	}
 	line := ud[strings.Index(ud, "echo ")+5:]
 	line = line[:strings.Index(line, " ")]
 	raw, err := base64.StdEncoding.DecodeString(line)

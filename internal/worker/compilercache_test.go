@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/traumventures/offshore/internal/store"
 	"io"
@@ -14,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/traumventures/offshore/internal/blobcache"
+	"github.com/traumventures/offshore/internal/config"
 	"github.com/traumventures/offshore/internal/proto"
 )
 
@@ -168,5 +171,71 @@ func TestBuiltinCompilerCacheEndpoint(t *testing.T) {
 	}
 	if got, ok := s2.grants.get("r", time.Minute); !ok || got.Store != "local" {
 		t.Fatal("grant not remembered")
+	}
+}
+
+// failingStore fails every operation like a store the machine cannot
+// reach (DNS, network).
+type failingStore struct{ calls int }
+
+func (f *failingStore) Get(context.Context, string) (io.ReadCloser, blobcache.Info, error) {
+	f.calls++
+	return nil, blobcache.Info{}, errors.New("dial tcp: lookup store: connection refused")
+}
+func (f *failingStore) Stat(context.Context, string) (blobcache.Info, error) {
+	f.calls++
+	return blobcache.Info{}, errors.New("dial tcp: connection refused")
+}
+func (f *failingStore) Put(context.Context, string, io.Reader, int64) error {
+	f.calls++
+	return errors.New("dial tcp: connection refused")
+}
+func (f *failingStore) Delete(context.Context, string) error {
+	f.calls++
+	return errors.New("dial tcp: connection refused")
+}
+
+// A failing store degrades the result cache to the machine's local cache:
+// misses stay misses, writes succeed locally, and the store is skipped
+// for a while after the first failure.
+func TestTieredStoreDegradesOnRemoteFailure(t *testing.T) {
+	local, err := blobcache.NewDirStore(t.TempDir(), blobcache.MaxTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := &failingStore{}
+	ts := &tieredStore{local: local, remote: bad}
+	ctx := context.Background()
+	if _, _, err := ts.Get(ctx, "ns/a"); !errors.Is(err, blobcache.ErrNotFound) {
+		t.Fatalf("get with a failing store: %v, want a miss", err)
+	}
+	if _, err := ts.Stat(ctx, "ns/a"); !errors.Is(err, blobcache.ErrNotFound) {
+		t.Fatalf("stat: %v", err)
+	}
+	if err := ts.Put(ctx, "ns/b", strings.NewReader("x"), 1); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if rc, _, err := ts.Get(ctx, "ns/b"); err != nil {
+		t.Fatalf("local copy: %v", err)
+	} else {
+		rc.Close()
+	}
+	if err := ts.Delete(ctx, "ns/b"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if bad.calls != 1 {
+		t.Fatalf("store called %d times after failing, want 1 (skipped during the backoff)", bad.calls)
+	}
+}
+
+func TestSccacheIgnoresServerErrors(t *testing.T) {
+	s := &Worker{ccEndpoint: "http://127.0.0.1:1/"}
+	req := proto.Exec{Caches: []proto.Cache{{Scope: "global", Tool: config.CacheToolSccache}}}
+	env := map[string]string{}
+	for _, kv := range s.compilerCacheEnv(req, "s1", func(string) bool { return false }) {
+		env[kv[0]] = kv[1]
+	}
+	if env["SCCACHE_IGNORE_SERVER_IO_ERROR"] != "1" || env["RUSTC_WRAPPER"] != "sccache" {
+		t.Fatalf("env %v", env)
 	}
 }

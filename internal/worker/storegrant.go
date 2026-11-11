@@ -72,6 +72,29 @@ type tieredStore struct {
 	mu      sync.Mutex
 	remote  blobcache.Store
 	expires int64 // grant expiry of remote (0: never)
+	// broken: the remote failed (network, DNS, credentials); it is
+	// skipped until then, so a failing store makes the cache local-only
+	// instead of failing or stalling compiles.
+	broken time.Time
+}
+
+// remoteBackoff is how long a failing remote is skipped.
+var remoteBackoff = time.Minute
+
+// remoteFailed records a remote error (not a miss) and returns true when
+// err is one.
+func (t *tieredStore) remoteFailed(op, key string, err error) bool {
+	if err == nil || errors.Is(err, blobcache.ErrNotFound) {
+		return false
+	}
+	t.mu.Lock()
+	first := !time.Now().Before(t.broken)
+	t.broken = time.Now().Add(remoteBackoff)
+	t.mu.Unlock()
+	if first && t.log != nil {
+		t.log.Warn("result cache store failing, using the machine cache only", "op", op, "key", key, "retry_in", remoteBackoff, "err", err)
+	}
+	return true
 }
 
 func (t *tieredStore) setRemote(g store.Grant, scope string) {
@@ -93,7 +116,7 @@ func (t *tieredStore) setRemote(g store.Grant, scope string) {
 func (t *tieredStore) backend() blobcache.Store {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.remote == nil || (t.expires != 0 && time.Now().Unix() >= t.expires) {
+	if t.remote == nil || (t.expires != 0 && time.Now().Unix() >= t.expires) || time.Now().Before(t.broken) {
 		return nil
 	}
 	return t.remote
@@ -110,6 +133,9 @@ func (t *tieredStore) Get(ctx context.Context, key string) (io.ReadCloser, blobc
 		return nil, blobcache.Info{}, err
 	}
 	rrc, rinfo, rerr := r.Get(ctx, key)
+	if t.remoteFailed("get", key, rerr) {
+		return nil, blobcache.Info{}, err // a miss
+	}
 	if rerr != nil {
 		return nil, blobcache.Info{}, rerr
 	}
@@ -128,7 +154,10 @@ func (t *tieredStore) Stat(ctx context.Context, key string) (blobcache.Info, err
 		return info, err
 	}
 	if r := t.backend(); r != nil {
-		return r.Stat(ctx, key)
+		rinfo, rerr := r.Stat(ctx, key)
+		if !t.remoteFailed("stat", key, rerr) {
+			return rinfo, rerr
+		}
 	}
 	return info, err
 }
@@ -147,9 +176,7 @@ func (t *tieredStore) Put(ctx context.Context, key string, body io.Reader, size 
 		return err
 	}
 	defer rc.Close()
-	if err := r.Put(ctx, key, rc, info.Size); err != nil && t.log != nil {
-		t.log.Warn("result cache upload", "key", key, "err", err) // local copy stays
-	}
+	t.remoteFailed("put", key, r.Put(ctx, key, rc, info.Size)) // the local copy stays
 	return nil
 }
 
@@ -157,9 +184,7 @@ func (t *tieredStore) Put(ctx context.Context, key string, body io.Reader, size 
 func (t *tieredStore) Delete(ctx context.Context, key string) error {
 	err := t.local.Delete(ctx, key)
 	if r := t.backend(); r != nil {
-		if rerr := r.Delete(ctx, key); rerr != nil && !errors.Is(rerr, blobcache.ErrNotFound) {
-			return rerr
-		}
+		t.remoteFailed("delete", key, r.Delete(ctx, key))
 	}
 	return err
 }
