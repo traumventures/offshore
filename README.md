@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/cover.jpg" alt="offshore: an oil rig at sea doing the heavy lifting, connected to the mainland" width="100%"></p>
+
 # offshore
 
 Run build and test commands on cloud machines as if they ran locally.
