@@ -29,6 +29,24 @@ type ec2API interface {
 	DeleteVolume(ctx context.Context, in *ec2.DeleteVolumeInput, opts ...func(*ec2.Options)) (*ec2.DeleteVolumeOutput, error)
 	CreateTags(ctx context.Context, in *ec2.CreateTagsInput, opts ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error)
 	DeleteTags(ctx context.Context, in *ec2.DeleteTagsInput, opts ...func(*ec2.Options)) (*ec2.DeleteTagsOutput, error)
+	DescribeInstanceTypes(ctx context.Context, in *ec2.DescribeInstanceTypesInput, opts ...func(*ec2.Options)) (*ec2.DescribeInstanceTypesOutput, error)
+}
+
+var _ provider.LocalDisks = (*EC2)(nil)
+
+// InstanceStorage implements provider.LocalDisks: the instance-store
+// capacity of an instance type (m6id, c6id, i4i, ...).
+func (e *EC2) InstanceStorage(ctx context.Context, instanceType string) (int64, error) {
+	out, err := e.api.DescribeInstanceTypes(ctx, &ec2.DescribeInstanceTypesInput{InstanceTypes: []ec2types.InstanceType{ec2types.InstanceType(instanceType)}})
+	if err != nil {
+		return 0, fmt.Errorf("aws-ec2: describe instance type %s: %w", instanceType, err)
+	}
+	for _, it := range out.InstanceTypes {
+		if it.InstanceStorageSupported != nil && *it.InstanceStorageSupported && it.InstanceStorageInfo != nil {
+			return aws.ToInt64(it.InstanceStorageInfo.TotalSizeInGB) * 1e9, nil
+		}
+	}
+	return 0, nil
 }
 
 var _ provider.Volumes = (*EC2)(nil)

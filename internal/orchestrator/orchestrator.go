@@ -47,6 +47,9 @@ type Config struct {
 	Policy       scheduler.Config
 	// EventRetention bounds the analysis event log (0 = 30 days).
 	EventRetention time.Duration
+	// Profile resolves a provider's medium profile (instance-store sizes
+	// get medium.LocalNVMe once their disk is known; nil: defaults).
+	Profile func(provider, med string) medium.Profile `json:"-"`
 }
 
 // Default repository cache lifetimes of requests that carry none (older
@@ -316,12 +319,13 @@ type Orchestrator struct {
 	// (durations, slot sizes) for the cost model; nil = unknown.
 	Profile func(key string) scheduler.Profile
 
-	health       map[string]provHealth // provider instance -> health and latencies
-	leases       map[string]leaseInfo  // lease id -> expected session end
-	snapshots    map[string][]scheduler.Snapshot
-	volumes      map[string]*VolumeState // managed cache volumes by id
-	startBlocked map[string]time.Time    // machine -> no start before
-	forecast     *scheduler.Forecast
+	health         map[string]provHealth // provider instance -> health and latencies
+	leases         map[string]leaseInfo  // lease id -> expected session end
+	snapshots      map[string][]scheduler.Snapshot
+	volumes        map[string]*VolumeState // managed cache volumes by id
+	localDisksOnce sync.Once
+	startBlocked   map[string]time.Time // machine -> no start before
+	forecast       *scheduler.Forecast
 
 	// Slots performs build slot operations on workers (prune, snapshot
 	// save and restore); nil disables slot moves and prunes.
@@ -383,6 +387,7 @@ func (o *Orchestrator) SetConfig(cfg Config) {
 		o.policy = scheduler.Default{Cfg: cfg.Policy}
 	}
 	o.cfg = cfg
+	o.localDisksOnce = sync.Once{} // sizes are new: resolve their disks again
 }
 
 // Config returns the pool configuration in effect.
@@ -1447,6 +1452,7 @@ func (o *Orchestrator) removeLocked(id string) {
 // destroyed, expiring busy machines drain, orphaned volumes are deleted)
 // and executes the policy's pool plan.
 func (o *Orchestrator) Reconcile(ctx context.Context) error {
+	o.localDisksOnce.Do(func() { o.resolveLocalDisks(ctx) })
 	start := time.Now()
 	ctx, span := tracing.Start(ctx, "orchestrator.reconcile")
 	err := o.reconcile(ctx)

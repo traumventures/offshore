@@ -407,3 +407,47 @@ func (o *Orchestrator) waitingRepoLocked(env string) string {
 	}
 	return best.RepoID
 }
+
+// resolveLocalDisks sets the disk of local-medium sizes without one from
+// their instance type's instance store (and its profile), once.
+func (o *Orchestrator) resolveLocalDisks(ctx context.Context) {
+	o.mu.Lock()
+	sizes := append([]scheduler.Size(nil), o.cfg.Sizes...)
+	prof := o.cfg.Profile
+	o.mu.Unlock()
+	changed := false
+	for i, s := range sizes {
+		if s.Medium == medium.Volume || s.Capacity.Disk > 0 {
+			continue
+		}
+		ld, ok := o.provs[s.Provider].(provider.LocalDisks)
+		if !ok {
+			continue
+		}
+		typ := s.Name
+		if len(s.InstanceTypes) > 0 {
+			typ = s.InstanceTypes[0]
+		}
+		n, err := ld.InstanceStorage(ctx, typ)
+		if err != nil {
+			o.log.Warn("instance storage of a size", "size", s.Name, "err", err)
+			continue
+		}
+		if n <= 0 {
+			continue
+		}
+		sizes[i].Capacity.Disk = n
+		if prof != nil {
+			sizes[i].Stack.Hot = prof(s.Provider, medium.LocalNVMe)
+		} else {
+			sizes[i].Stack.Hot = medium.Default(o.provs[s.Provider].Name(), medium.LocalNVMe)
+		}
+		changed = true
+		o.log.Info("size caches on its instance store", "size", s.Name, "bytes", n)
+	}
+	if changed {
+		o.mu.Lock()
+		o.cfg.Sizes = sizes
+		o.mu.Unlock()
+	}
+}

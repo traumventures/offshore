@@ -302,3 +302,21 @@ func TestCacheSpec(t *testing.T) {
 		t.Fatalf("%+v", c)
 	}
 }
+
+func (f *fakeEC2) DescribeInstanceTypes(_ context.Context, in *ec2.DescribeInstanceTypesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstanceTypesOutput, error) {
+	it := ec2types.InstanceTypeInfo{InstanceType: in.InstanceTypes[0], InstanceStorageSupported: aws.Bool(false)}
+	if in.InstanceTypes[0] == "m6id.xlarge" {
+		it.InstanceStorageSupported, it.InstanceStorageInfo = aws.Bool(true), &ec2types.InstanceStorageInfo{TotalSizeInGB: aws.Int64(237)}
+	}
+	return &ec2.DescribeInstanceTypesOutput{InstanceTypes: []ec2types.InstanceTypeInfo{it}}, nil
+}
+
+func TestInstanceStorage(t *testing.T) {
+	e := &EC2{api: newFake()}
+	if n, err := e.InstanceStorage(context.Background(), "m6id.xlarge"); err != nil || n != 237e9 {
+		t.Fatalf("%d %v", n, err)
+	}
+	if n, _ := e.InstanceStorage(context.Background(), "c7a.xlarge"); n != 0 {
+		t.Fatalf("no instance store: %d", n)
+	}
+}

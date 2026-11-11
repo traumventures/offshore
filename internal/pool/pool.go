@@ -85,7 +85,8 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 	}
 	f := u.Pool
 	c := orchestrator.Config{
-		Owner: f.ID, Sizes: sizes, MaxLifetime: lifetime, QueueTimeout: queue,
+		Profile: u.Profile,
+		Owner:   f.ID, Sizes: sizes, MaxLifetime: lifetime, QueueTimeout: queue,
 		Provision: provision, Swap: f.Swap,
 		Policy: scheduler.Config{
 			CPUOvercommit: f.CPUOvercommit, MemoryOvercommit: f.MemoryOvercommit,
