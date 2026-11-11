@@ -15,7 +15,6 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/core"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
 	"github.com/traumventures/cloudsourced/internal/supervisor"
 )
 
@@ -26,9 +25,6 @@ const (
 	paramBucket    = "bucket"        // bucket of secrets and compiler cache
 	paramSecret    = "secret_object" // object with the secret server environment
 	paramRegistry  = "registry"      // OCIR host of the environment image
-	paramCache     = "cache_prefix"  // object prefix of the compiler cache
-	// sccachePort is the host's compiler cache port on the Docker bridge.
-	sccachePort = 7480
 	// metadataURL is the instance metadata service (v2 only).
 	metadataURL = "http://169.254.169.254/opc/v2/"
 )
@@ -124,16 +120,6 @@ func (h *host) Prepare(ctx context.Context, docker supervisor.Runner) error {
 	}
 	_, err = docker(ctx, nil, []byte(tok), "login", "--username", "BEARER_TOKEN", "--password-stdin", registry)
 	return err
-}
-
-// CompilerCacheStore keeps compiler cache objects in the bucket below the
-// pool's cache/ prefix.
-func (h *host) CompilerCacheStore(ctx context.Context) (blobcache.Store, error) {
-	prefix := h.spec.Params[paramCache]
-	if prefix == "" {
-		return nil, nil
-	}
-	return newObjectStore(h.objects, h.spec.Params[paramNamespace], h.spec.Params[paramBucket], prefix, blobcache.MaxTTL), nil
 }
 
 // StopSelf stops this instance, keeping its boot volume.

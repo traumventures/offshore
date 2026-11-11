@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -30,13 +31,16 @@ type Repo struct {
 	Resources   Resources          `toml:"resources"`
 	Environment Environment        `toml:"environment"`
 	Source      Source             `toml:"source"`
-	Cache       Cache              `toml:"cache"`
+	CacheTable  map[string]Cache   `toml:"cache"`
 	Tools       map[string]Tool    `toml:"tool"`
 	Secrets     map[string]string  `toml:"secrets"`
 	Services    map[string]Service `toml:"services"`
 	Outputs     Outputs            `toml:"outputs"`
 	Editor      Editor             `toml:"editor"`
 	Prewarm     Prewarm            `toml:"prewarm"`
+
+	// Caches are the [cache.<name>] tables, sorted by name.
+	Caches []Cache `toml:"-"`
 
 	// Root is the absolute directory containing the configuration file.
 	Root string `toml:"-"`
@@ -115,37 +119,6 @@ type ExtraRoot struct {
 	Mode string `toml:"mode"`
 }
 
-// Cache configures worker side caches.
-type Cache struct {
-	Build    CacheClass    `toml:"build"`
-	Deps     CacheClass    `toml:"deps"`
-	Compiler CompilerCache `toml:"compiler"`
-}
-
-// CompilerCache configures a shared compiler cache ([cache.compiler]).
-type CompilerCache struct {
-	Tool string `toml:"tool"` // "" (off) or "sccache"
-	// TTL lowers the maximum age of reused cache entries (at most 24h, the
-	// cache's own limit).
-	TTL string `toml:"ttl"`
-	// Incremental = false sets CARGO_INCREMENTAL=0 in sessions, so that
-	// workspace crates are cacheable too (sccache cannot cache incremental
-	// compilations). Unset leaves cargo's default.
-	Incremental *bool `toml:"incremental"`
-}
-
-// CompilerCacheSccache is the only supported compiler cache tool.
-const CompilerCacheSccache = "sccache"
-
-// MaxCompilerCacheTTL bounds cache.compiler.ttl.
-const MaxCompilerCacheTTL = 24 * time.Hour
-
-// CacheClass is a class of cached paths with a time to live.
-type CacheClass struct {
-	Paths []string `toml:"paths"`
-	TTL   string   `toml:"ttl"`
-}
-
 // Tool is the profile of a proxied tool.
 type Tool struct {
 	Remote []string `toml:"remote"` // subcommands executed remotely; empty means all not listed in Local
@@ -155,17 +128,53 @@ type Tool struct {
 	// Ports are forwarded from 127.0.0.1 locally into the session while
 	// it runs: 8080 or "local:remote" (e.g. "3000:3001").
 	Ports []any `toml:"ports"`
+	// Adapter selects the tool adapter (internal/adapter): "cargo", "go",
+	// "node" or "generic". Unset: by tool name (cargo; go; bun, npm,
+	// pnpm, yarn, npx, bunx; anything else generic).
+	Adapter string `toml:"adapter"`
 	// Split lists test subcommands that are split into a remote build and
-	// a local test run (only cargo: "test", "nextest"). Unset means both
-	// for cargo; an empty list runs tests remotely like any command.
+	// a local test run (adapter cargo: "test", "nextest"; go: "test").
+	// Unset means all the adapter supports; an empty list runs tests
+	// remotely like any command.
 	Split *[]string `toml:"split"`
 }
 
-// Split test subcommands of cargo.
+// Adapter names.
+const (
+	AdapterCargo   = "cargo"
+	AdapterGo      = "go"
+	AdapterNode    = "node"
+	AdapterGeneric = "generic"
+)
+
+// Split test subcommands.
 const (
 	SplitCargoTest    = "test"    // cargo test
 	SplitCargoNextest = "nextest" // cargo nextest run
+	SplitGoTest       = "test"    // go test
 )
+
+// splitSupported lists the split subcommands per adapter.
+var splitSupported = map[string][]string{
+	AdapterCargo: {SplitCargoTest, SplitCargoNextest},
+	AdapterGo:    {SplitGoTest},
+}
+
+// AdapterName returns the adapter of a tool: Adapter, else by tool name.
+func (t Tool) AdapterName(tool string) string {
+	if t.Adapter != "" {
+		return t.Adapter
+	}
+	switch tool {
+	case "cargo":
+		return AdapterCargo
+	case "go":
+		return AdapterGo
+	case "bun", "bunx", "npm", "npx", "pnpm", "yarn":
+		return AdapterNode
+	}
+	return AdapterGeneric
+}
 
 // SplitSubcommands returns the subcommands of tool split into a remote
 // build and a local test run.
@@ -173,10 +182,7 @@ func (t Tool) SplitSubcommands(tool string) []string {
 	if t.Split != nil {
 		return *t.Split
 	}
-	if tool == "cargo" {
-		return []string{SplitCargoTest, SplitCargoNextest}
-	}
-	return nil
+	return splitSupported[t.AdapterName(tool)]
 }
 
 // Service is an auxiliary container started next to every machine of the
@@ -193,7 +199,7 @@ type Service struct {
 type Outputs struct {
 	// Mode "eager" (default) copies only the tools' eager outputs back
 	// after every run. "fuse" additionally mounts the build directories
-	// ([cache.build] paths) at their local path as a writable overlay
+	// (slot-scope cache paths) at their local path as a writable overlay
 	// (internal/outputfs): the latest remote build below, local writes in
 	// the client state above, content fetched from the machine of the
 	// latest build on first access. Cargo sessions then run with the
@@ -330,12 +336,7 @@ func (r *Repo) applyDefaults() {
 		t := true
 		r.Source.RespectGitignore = &t
 	}
-	if r.Cache.Build.TTL == "" {
-		r.Cache.Build.TTL = "24h"
-	}
-	if r.Cache.Deps.TTL == "" {
-		r.Cache.Deps.TTL = "7d"
-	}
+	r.buildCaches()
 	if r.Tools == nil {
 		r.Tools = map[string]Tool{}
 	}
@@ -412,22 +413,12 @@ func (r *Repo) Validate() error {
 			errs = append(errs, fmt.Sprintf("source.extra_root[%d].mode: unsupported %q", i, er.Mode))
 		}
 	}
-	for _, p := range r.Cache.Build.Paths {
-		if filepath.IsAbs(p) || strings.HasPrefix(filepath.Clean(p), "..") || strings.ContainsAny(p, "*?[") {
-			errs = append(errs, fmt.Sprintf("cache.build.paths: %q must be a plain directory inside the repository", p))
-		}
-	}
-	if _, err := ParseDuration(r.Cache.Build.TTL); err != nil {
-		errs = append(errs, "cache.build.ttl: "+err.Error())
-	}
-	if _, err := ParseDuration(r.Cache.Deps.TTL); err != nil {
-		errs = append(errs, "cache.deps.ttl: "+err.Error())
-	}
+	errs = r.validateCaches(errs)
 	if r.Outputs.Mode != OutputsEager && r.Outputs.Mode != OutputsFuse {
 		errs = append(errs, fmt.Sprintf("outputs.mode: unsupported %q (eager, fuse)", r.Outputs.Mode))
 	}
-	if r.Outputs.Mode == OutputsFuse && len(r.Cache.Build.Paths) == 0 {
-		errs = append(errs, "outputs.mode: \"fuse\" needs [cache.build] paths")
+	if r.Outputs.Mode == OutputsFuse && len(r.SlotPaths()) == 0 {
+		errs = append(errs, "outputs.mode: \"fuse\" needs a slot-scope cache (e.g. [cache.target] paths = [\"target\"])")
 	}
 	if r.Editor.RustAnalyzer != RustAnalyzerLocal && r.Editor.RustAnalyzer != RustAnalyzerLSPRemote {
 		errs = append(errs, fmt.Sprintf("editor.rust_analyzer: unsupported %q (local, lsp-remote)", r.Editor.RustAnalyzer))
@@ -437,31 +428,20 @@ func (r *Repo) Validate() error {
 	default:
 		errs = append(errs, fmt.Sprintf("environment.linker: unsupported %q (mold, lld)", r.Environment.Linker))
 	}
-	cc := r.Cache.Compiler
-	switch cc.Tool {
-	case "":
-		if cc.TTL != "" || cc.Incremental != nil {
-			errs = append(errs, "cache.compiler: ttl and incremental require tool = \"sccache\"")
-		}
-	case CompilerCacheSccache:
-	default:
-		errs = append(errs, fmt.Sprintf("cache.compiler.tool: unsupported %q (sccache)", cc.Tool))
-	}
-	if cc.TTL != "" {
-		if d, err := ParseDuration(cc.TTL); err != nil {
-			errs = append(errs, "cache.compiler.ttl: "+err.Error())
-		} else if d < time.Second || d > MaxCompilerCacheTTL {
-			errs = append(errs, fmt.Sprintf("cache.compiler.ttl: %q must be between 1s and 24h", cc.TTL))
-		}
-	}
 	for name, t := range r.Tools {
 		if _, err := ParsePorts(t.Ports); err != nil {
 			errs = append(errs, fmt.Sprintf("tool.%s.ports: %v", name, err))
 		}
+		switch t.Adapter {
+		case "", AdapterCargo, AdapterGo, AdapterNode, AdapterGeneric:
+		default:
+			errs = append(errs, fmt.Sprintf("tool.%s.adapter: unsupported %q (cargo, go, node, generic)", name, t.Adapter))
+		}
 		if t.Split != nil {
+			supported := splitSupported[t.AdapterName(name)]
 			for _, s := range *t.Split {
-				if name != "cargo" || (s != SplitCargoTest && s != SplitCargoNextest) {
-					errs = append(errs, fmt.Sprintf("tool.%s.split: unsupported %q (only tool.cargo: %q, %q)", name, s, SplitCargoTest, SplitCargoNextest))
+				if !slices.Contains(supported, s) {
+					errs = append(errs, fmt.Sprintf("tool.%s.split: unsupported %q (adapter %s supports %v)", name, s, t.AdapterName(name), supported))
 				}
 			}
 		}
@@ -509,24 +489,6 @@ func (r *Repo) ExtraRootPaths() []string {
 		out = append(out, filepath.Clean(p))
 	}
 	return out
-}
-
-// CacheTTLs returns cache.build.ttl and cache.deps.ttl. They are repository
-// settings that travel with every request; the pool caps them by its
-// max_lifetime.
-func (r *Repo) CacheTTLs() (build, deps time.Duration) {
-	build, _ = ParseDuration(r.Cache.Build.TTL)
-	deps, _ = ParseDuration(r.Cache.Deps.TTL)
-	return build, deps
-}
-
-// CompilerCacheTTL returns cache.compiler.ttl (0 = not set).
-func (r *Repo) CompilerCacheTTL() time.Duration {
-	if r.Cache.Compiler.TTL == "" {
-		return 0
-	}
-	d, _ := ParseDuration(r.Cache.Compiler.TTL)
-	return d
 }
 
 // MemoryBytes returns the requested session memory in bytes.

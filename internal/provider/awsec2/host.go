@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -14,11 +15,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
 	"github.com/traumventures/cloudsourced/internal/supervisor"
 )
 
@@ -27,9 +26,6 @@ const (
 	paramRegion   = "region"
 	paramSecret   = "secret_parameter" // SSM SecureString with the secret server environment
 	paramRegistry = "registry"         // ECR registry of the environment image
-	paramSccache  = "sccache_s3"       // bucket/prefix of the compiler cache
-	// sccachePort is the host's compiler cache port on the Docker bridge.
-	sccachePort = 7480
 )
 
 func init() {
@@ -108,20 +104,6 @@ func (h *host) Prepare(ctx context.Context, docker supervisor.Runner) error {
 	return err
 }
 
-// CompilerCacheStore keeps compiler cache objects in the stack's bucket
-// below cache/ (deleted after a day by the bucket's lifecycle rule).
-func (h *host) CompilerCacheStore(ctx context.Context) (blobcache.Store, error) {
-	loc := h.spec.Params[paramSccache]
-	if loc == "" {
-		return nil, nil
-	}
-	bucket, prefix, err := blobcache.ParseS3Location(loc)
-	if err != nil {
-		return nil, err
-	}
-	return blobcache.NewS3Store(s3.NewFromConfig(h.cfg), bucket, prefix, blobcache.MaxTTL), nil
-}
-
 // StopSelf stops this instance (the instance role may stop machines only).
 func (h *host) StopSelf(ctx context.Context) error {
 	md, err := h.imds.GetMetadata(ctx, &imds.GetMetadataInput{Path: "instance-id"})
@@ -135,4 +117,66 @@ func (h *host) StopSelf(ctx context.Context) error {
 	}
 	_, err = h.ec2.StopInstances(ctx, &ec2.StopInstancesInput{InstanceIds: []string{strings.TrimSpace(string(b))}})
 	return err
+}
+
+// growCmd runs a command on the host (variable for tests).
+var growCmd = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+// GrowDisk implements supervisor.DiskGrower: after ResizeDisk enlarged
+// the root volume, grow its partition and file system (no-ops otherwise).
+func (h *host) GrowDisk(ctx context.Context) error {
+	src, err := growCmd(ctx, "findmnt", "-n", "-o", "SOURCE,FSTYPE", "/")
+	if err != nil {
+		return fmt.Errorf("findmnt: %v: %s", err, src)
+	}
+	f := strings.Fields(string(src))
+	if len(f) != 2 {
+		return fmt.Errorf("findmnt: unexpected %q", src)
+	}
+	dev, fstype := f[0], f[1]
+	disk, part := splitPartition(dev)
+	if part == "" {
+		return nil
+	}
+	// growpart exits 1 with NOCHANGE when the partition fills the disk.
+	if out, err := growCmd(ctx, "growpart", disk, part); err != nil && !strings.Contains(string(out), "NOCHANGE") {
+		return fmt.Errorf("growpart: %v: %s", err, out)
+	} else if err != nil {
+		return nil
+	}
+	var out []byte
+	switch fstype {
+	case "xfs":
+		out, err = growCmd(ctx, "xfs_growfs", "-d", "/")
+	case "ext4":
+		out, err = growCmd(ctx, "resize2fs", dev)
+	default:
+		return fmt.Errorf("cannot grow %s file systems", fstype)
+	}
+	if err != nil {
+		return fmt.Errorf("grow %s: %v: %s", fstype, err, out)
+	}
+	return nil
+}
+
+// splitPartition splits /dev/nvme0n1p1 into /dev/nvme0n1 and 1 (also
+// /dev/xvda1).
+func splitPartition(dev string) (disk, part string) {
+	i := len(dev)
+	for i > 0 && dev[i-1] >= '0' && dev[i-1] <= '9' {
+		i--
+	}
+	if i == len(dev) || i == 0 {
+		return dev, ""
+	}
+	disk, part = dev[:i], dev[i:]
+	if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
+		if !strings.HasSuffix(disk, "p") {
+			return dev, "" // a whole disk such as /dev/nvme0n1
+		}
+		disk = strings.TrimSuffix(disk, "p")
+	}
+	return disk, part
 }

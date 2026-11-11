@@ -48,16 +48,16 @@ cargo build ──► proxy ──► daemon ── QUIC ────► server
   into a content addressed store.
 * **Writes** to sources (e.g. `Cargo.lock`, `cargo fmt`) go to an overlay and
   are written back after the run, unless the local file changed meanwhile.
-* **Build caches.** Worker-local directories (`target/`) are bind-mounted from
+* **Caches** (`[cache.<name>]`, see [Caches](#caches)) have a scope:
+  `slot` caches (`target/`) are worker-local directories bind-mounted from
   build slots. A session leases a slot exclusively, so parallel builds of one
   repository never block each other; slots are reused warm and never older
-  than the repository's build TTL (`cache.build.ttl`, default 24 h, recorded
-  per slot, so repositories with different TTLs share machines). Machines
-  themselves live at most `max_lifetime`, which also caps the build TTL.
-* **Compiler cache.** With `[cache.compiler] tool = "sccache"` sessions run
-  cargo with `RUSTC_WRAPPER=sccache` against a WebDAV cache (see below), so a
-  fresh machine reuses compiled dependencies. Entries are never served after
-  24 h.
+  than the cache's `ttl` (default 24 h, recorded per slot, so repositories
+  with different TTLs share machines). `machine` caches (cargo registry,
+  `node_modules` per lockfile digest) are shared by the sessions of a
+  machine, `global` caches (sccache, ccache, Go) by all machines of the
+  pool; their entries are never served after 24 h. Machines themselves live
+  at most `max_lifetime`, which also caps the slot TTL.
 * **Placement** prefers machines that already hold a warm slot for the
   repository, then rendezvous hashing; memory is never overcommitted, CPU is
   (`cpu_overcommit`). Several sessions share one machine; more machines are
@@ -90,6 +90,10 @@ repository (git top level) and `cloudsourced init --write` writes it
 (`--force` replaces an existing one). It is derived from what the repository
 already declares, with a comment explaining every detected item:
 
+* the ecosystems (tool adapters: cargo, go via `go.mod`/`go.work`, node via
+  `package.json`) and their default caches as `[cache.<name>]` (see "Tool
+  adapters"), plus `[tool.go]`/`[tool.<package manager>]` sections and a
+  `golang:<go directive>` or bun/node image when there is no Rust;
 * the Cargo workspace (repository root or a subdirectory such as `app/`),
   its `rust-toolchain(.toml)`, the build cache `<workspace>/target`;
 * from the GitHub Actions jobs that build the workspace (including local
@@ -153,7 +157,7 @@ remote mode pool sections in the client file have no effect (the client warns);
 the control plane ignores `[control_plane]` and `user`. `user` (default `$USER`)
 salts repository ids; `pool.id` (default `$USER`) names the pool and is the
 `cloudsourced.pool` label of its machines and volumes. Repository settings
-such as `cache.build.ttl`/`cache.deps.ttl` travel in each request, so
+such as the cache TTLs travel in each request, so
 repositories with different settings share one pool without affecting each
 other. Pool settings change only by reload: the daemon applies a changed pool
 file on the next request and on `cloudsourced reconcile`; the control plane
@@ -380,18 +384,28 @@ run = "cargo install --locked cargo-nextest"
 paths = ["vendor/**"]
 mode  = "immutable"         # watch (default) | immutable | hidden
 
-[cache.build]
-paths = ["target"]          # worker-local, never synchronised
-ttl   = "24h"               # per build slot, capped by the pool's max_lifetime
+[cache.target]
+scope    = "slot"           # worker-local build slot, never synchronised
+paths    = ["target"]
+ttl      = "24h"            # per build slot, capped by the pool's max_lifetime
+max_size = "100G"           # slot budget, enforced by pruning
+prune    = "rust"           # rust | lru (default) | none
 
 [cache.deps]
+scope = "machine"           # shared by the sessions of a machine
 paths = ["$CARGO_HOME/registry", "$CARGO_HOME/git"]
-ttl   = "7d"                # lifetime of a dependency volume a new machine starts
+ttl   = "7d"                # lifetime of the machine cache a new machine starts
 
-[cache.compiler]            # optional shared compiler cache
-tool = "sccache"            # installs a pinned sccache into the image
-ttl  = "12h"                # optional, at most 24h
-# incremental = false       # CARGO_INCREMENTAL=0: workspace crates cacheable too
+[cache.node]
+scope   = "machine"
+paths   = ["web/node_modules"]     # generated remotely, hidden from the projection
+digest  = ["web/bun.lock"]         # immutable per content hash (+ platform)
+install = "cd web && bun install --frozen-lockfile"
+
+[cache.sccache]             # shared compiler cache across machines
+scope = "global"
+tool  = "sccache"           # sccache | ccache | go; installs the tool if needed
+ttl   = "12h"               # optional, at most 24h
 
 [services.postgres]         # sidecar, reachable on localhost in sessions
 image = "postgres:17"
@@ -406,6 +420,7 @@ local = ["publish", "login", "install", "new", "init", "add", "remove"]
 eager = ["target/debug/myapp"]              # copied back after every run
 env   = ["RUSTFLAGS", "CARGO_TERM_*", "RUST_LOG", "RUST_BACKTRACE"]
 # split = ["test", "nextest"]               # default: remote build, local test run
+# adapter = "cargo"                         # default from the tool name
 
 [tool.npm]
 ports = [8080, "3000:3001"]  # forward 127.0.0.1:local -> session port while it runs
@@ -508,6 +523,41 @@ tried in order; "Out of host capacity", service limit and unavailable-shape
 errors move on to the next shape. A live smoke
 test is in `internal/orchestrator/ocismoke_test.go` (build tag `ocismoke`).
 
+### Static hosts
+
+`type = "static"` uses machines you already run (bare metal, a homelab,
+reserved instances) with sshd, Docker and systemd:
+
+```toml
+[providers.lab]
+type        = "static"
+registry    = "registry.lab:5000/cloudsourced-env"  # hosts pull environment images from here
+ssh_key     = "file:~/.ssh/cloudsourced"            # default file:~/.ssh/id_ed25519
+known_hosts = "~/.ssh/known_hosts"                  # host keys are verified
+hosts = [
+  { name = "build1", ssh = "root@10.0.0.5", cpu = 32, memory = "128G" },
+  { name = "build2", ssh = "root@10.0.0.6:2222", addr = "10.0.0.6:7443", cpu = 16, memory = "64G", arch = "arm64" },
+]
+
+[[providers.lab.size]]
+name = "lab"
+cpu = 16
+memory = "64G"
+```
+
+The orchestrator places one machine per host (the first free host with
+enough CPU and memory) and drives it over SSH: it uploads its own binary to
+`/var/lib/cloudsourced/bin/` once, then runs `<binary> supervisor static
+apply|start|stop|destroy|status`. `apply` writes the public machine spec,
+the secret environment (root-only, read once by the supervisor, which is
+the static provider's secret channel) and the `cloudsourced-supervisor`
+unit; the supervisor starts the containers as on a VM. At the end of a
+machine's lifetime the supervisor removes the machine instead of powering
+the host off; `destroy` does the same on request. Hosts must be logged in
+to `registry` (images are built locally and pushed there) and reachable
+on UDP 7443. Static hosts have no native object store: configure
+`[storage]` for snapshots and the shared result cache.
+
 ### Output overlay (output FUSE)
 
 By default only `eager` outputs come back after a run; `cloudsourced fetch`
@@ -604,14 +654,195 @@ the upper layer).
 Known gaps (cargo rebuilds the affected units locally, which is correct but
 slower): environment variables that differ locally and are tracked by
 `env!`/`option_env!` or a build script's `rerun-if-env-changed` (e.g. `CC`
-from a local `[env]` section); `incremental = false` in `[cache.compiler]`
-(set `CARGO_INCREMENTAL=0` locally too); other settings of the local
+from a local `[env]` section); `CARGO_INCREMENTAL=0` set only remotely
+(set it locally too); other settings of the local
 `$CARGO_HOME/config.toml` that cargo fingerprints (`target.<triple>.linker`,
 `[profile]` overrides); a different local toolchain version.
 
+### Caches
+
+Every `[cache.<name>]` table of the repository configuration is one cache
+with a `scope`:
+
+| scope | lives | keys |
+| --- | --- | --- |
+| `slot` | in the session's exclusive build slot on the machine, reused warm by the next session of the repository | `paths` (plain directories inside the repository), `ttl` (default 24h), `max_size`, `prune` |
+| `machine` | in the machine cache directory, shared by all sessions of the machine | `paths` (`$VAR`, `~`, absolute or inside the repository), `ttl` (default 7d), `max_size`, `prune`; with `digest` + `install`: generated per lockfile |
+| `global` | in the pool's store, shared by all machines | `tool` (`sccache`, `ccache`, `go`), `ttl` (at most 24h) |
+
+Without `scope`, a table with `tool` is global, otherwise slot. Slot and
+machine paths are hidden from the source projection (they never come from
+the laptop).
+
+Global caches use the result-cache endpoint of the machine (see
+[Compiler cache and linker](#compiler-cache-and-linker)): `sccache` sets
+`RUSTC_WRAPPER`, `ccache` installs the Debian package and points
+`CCACHE_REMOTE_STORAGE` at the endpoint (local `CCACHE_DIR` on the machine
+disk), `go` sets `GOCACHEPROG` to `cloudsourced gocacheprog`, which keeps
+outputs on the machine disk (go reads them from there) and shares them through
+the endpoint. A `ttl` below 24h lowers the age of reused entries.
+
+#### Machine caches per digest (`node_modules`)
+
+A machine cache with `digest` and `install` is immutable per content hash:
+the digest covers the matching files (globs, e.g. the lockfile), the
+cache's name, paths and install command, and the environment's platform
+(`os/arch/libc`). The first session that needs a digest runs `install`
+remotely (sandboxed, with the session's environment and the cache paths
+bound to a fresh directory; its output appears on stderr) and stores the
+result in the machine store `<deps dir>/digest/<name>/<digest>`. Every slot
+gets a copy linked from the store on the same disk: reflinks where the
+filesystem supports them (writable), otherwise hard links mounted
+read-only, so sessions can never change the store. The copy is refreshed
+when the digest changes. The paths are hidden from the source projection,
+so a local `node_modules` (e.g. for another platform) never reaches the
+machine. Digests unused for the cache's `ttl` are removed, and per cache
+the least recently used ones beyond `max_size` (the newest stays). Plain
+machine caches with `max_size` are pruned by least recent access while the
+machine is idle.
+
+#### Pruning
+
+Slots are pruned against two budgets: per slot the sum of the slot caches'
+`max_size` (unset: unbounded) after every session, per machine
+`CLOUDSOURCED_DISK_BUDGET` bytes of the cache filesystem (default 90%).
+The worker tracks reads per session: after a run it records for every slot
+file the last run (session number of the slot) that read or wrote it, using
+the atime (relatime re-armed by resetting the atime of read files to their
+mtime; on `noatime` mounts only writes count). Pruning runs in stages until
+the slot fits:
+
+1. `prune = "rust"`: old incremental compilation sessions (all but the
+   newest per crate in `target/*/incremental/`);
+2. units not read for 5 runs, the stalest first (`rust`: all files of one
+   compilation unit, i.e. `deps/*-<hash>.*`, `.fingerprint/<unit>/`,
+   `build/<unit>/`; `lru`: single files); with a size target also more
+   recently read ones, never those of the latest run;
+3. the whole slot (cold; the next session starts a new one).
+
+Over the machine budget the least recently used slots get the policy prune
+(stages 1 and 2) first, then go cold. The orchestrator can prune a
+repository's slots on demand through the worker's slot stream
+(`proto.KindSlot`, admin token; `orchestrator.WorkerSlotOps.PruneSlot`):
+older duplicate slots go cold first, then the newest is pruned in stages to
+the requested size.
+
+### Object store (`[storage]`) and provider parts
+
+Internally a provider has four parts: **Compute** (machines), **Registry**
+(environment images), **Store** (an S3-compatible object store for slot
+snapshots and global caches) and **Secrets** (the channel that hands a new
+machine its secret environment). The pool's `[storage]` section replaces
+the Store part of every provider:
+
+```toml
+[storage]
+endpoint   = "https://<account>.r2.cloudflarestorage.com"   # "" = AWS S3
+bucket     = "cloudsourced-cache"
+region     = "auto"
+prefix     = "cache/team"           # default "cache/<pool id>"
+access_key = "env:R2_ACCESS_KEY_ID" # env:/file:/cmd: references
+secret_key = "env:R2_SECRET_ACCESS_KEY"
+# role_arn   = "arn:aws:iam::123:role/cache"  # STS: per-repository credentials
+# path_style = true                            # MinIO
+# dir        = "/srv/cloudsourced-store"       # a directory every machine mounts
+```
+
+Native stores: `aws-ec2` uses the stack's bucket below `cache/<pool>/`
+(one-day lifecycle) and the stack's `StoreRole`; `local-docker` a volume
+`cs-store-<pool>` shared by its containers (`/store`); `oci` has none (use
+`[storage]`; OCI customer secret keys cannot be scoped per repository).
+
+The control plane never moves cache data. With every lease (and every slot
+save or restore) it hands the worker a **grant**: credentials scoped to the
+repository's prefix (`repos/<repo id>/`) and the environment's
+(`envs/<env hash>/`), at most 12 h. With `role_arn` (and on `aws-ec2`) they
+come from STS AssumeRole with a session policy limited to those prefixes;
+otherwise the configured keys are handed out as they are, so give them only
+the bucket (or prefix) they need. Objects are build caches and never served
+after 24 h.
+
+Global result caches (sccache, ccache, Go) use a tiered store in the
+worker: a directory on the machine disk, backed by the grant's environment
+prefix, so a fresh machine reuses what earlier machines compiled. Without a
+store they stay machine-local.
+
+### Snapshots and lazy restore
+
+A build slot (and a machine cache per digest) can move between machines
+through the store. `internal/snapshot` saves a directory as content
+addressed chunks (BLAKE3; small files packed into ~8 MB chunks with
+content-defined boundaries, large files split) plus a manifest with every
+file's mode, size, mtime and chunk ranges (`repos/<repo>/snapshots/<unix>.json.gz`,
+newest named by `snapshots/latest`). A save reuses the chunk ranges of the
+slot's previous save for files whose size and mtime did not change, so it
+reads and uploads only what changed; chunks older than 12 h are uploaded
+again, so a snapshot stays restorable although the store expires objects
+after 24 h.
+
+A restore creates a new slot at once: directories, symlinks and sparse
+placeholders with the final sizes and the original mtimes (cargo compares
+mtimes, so a restored `target/` is fresh). File contents are filled on
+first access through a FUSE fill layer mounted on the slot's data
+directory (a loopback over the local directory that fetches a file before
+it is opened, truncated or renamed) and by a background fill; once
+complete and not in use, the mount is replaced by the filled directory. The
+live cache is always on local disk. Without FUSE the restore fills
+everything before it returns. The slot keeps its original creation time,
+so the 24 h bound holds across machines.
+
+The scheduler decides when (`orchestrator.SlotOps`): `SaveSlot` and
+`RestoreSlot` call the worker's slot stream with a fresh grant; the first
+session on a restored slot reports `usage.restored` and
+`usage.restore_seconds`. A worker draining at the end of its lifetime saves
+the slots of every repository it holds a grant for and lists them in
+`Status.Snapshots`. Machine caches with a digest are saved to
+`envs/<env>/digests/<name>/<digest>/` after their install, and other
+machines restore them instead of running the install.
+
+Measured with `test/bench/snapshot.sh` (this host, local directory store,
+small crate with serde, serde_json, itoa, libc):
+
+| step | result |
+| --- | --- |
+| `target/` | 125.7 MB, 189 files, 24 chunks |
+| cold build (sccache filling) | 8.36 s |
+| snapshot save, first / incremental (one crate changed) | 0.18 s / 0.02 s (24 / 1 chunks uploaded) |
+| restore: skeleton / first file / full fill | 0.00 s / 0.00 s / 0.09 s |
+| units rebuilt by `cargo build` after the restore | 0 |
+| rebuild from scratch with the warm sccache | 3.29 s |
+
+With a remote store the fill is bounded by download bandwidth (about 1 s per
+125 MB at 1 Gbit/s); point `BENCH_STORE` at a mounted bucket to measure it.
+
+#### Disks: growing, gp3 versus local NVMe
+
+`aws-ec2` implements `provider.DiskResizer`: the scheduler can grow a full
+machine's gp3 root volume (`ec2:ModifyVolume`, once per six hours, never
+shrinking) and the supervisor grows partition and file system
+(`growpart`, `xfs_growfs`/`resize2fs`) on its next check.
+
+Machines use gp3 root volumes (`disk_gb`, default 100; 3000 IOPS and
+125 MB/s baseline). Instance types with local NVMe (`c6id`, `m6id`, `c7gd`)
+are faster for target directories but lose their content on stop, so their
+warm state only survives through snapshots. To compare on a real machine
+(no cloud run is part of the tests):
+
+1. Start one machine per disk type (e.g. sizes on `c6i.2xlarge` and
+   `c6id.2xlarge`); for NVMe mount the instance store at the cache dir.
+2. Raw disk: `fio --name=rand --rw=randrw --bs=16k --size=4G --numjobs=8
+   --iodepth=32 --direct=1 --runtime=60 --group_reporting --filename=/cache/fio`
+   and `--rw=write --bs=1M` for sequential throughput.
+3. Builds: run the same `cargo build` cold, with warm sccache and warm slot
+   on each, and compare `task_end.usage` (`wall`, `cpu_stall_seconds`)
+   with `cloudsourced report --by size`.
+4. Restore: `test/bench/snapshot.sh` with `BENCH_STORE` on the machine
+   measures save and fill against each disk; gp3 throughput (125 MB/s
+   unless provisioned higher) bounds the fill of large slots.
+
 ### Compiler cache and linker
 
-`[cache.compiler] tool = "sccache"` adds the pinned static sccache release
+A global cache with `tool = "sccache"` adds the pinned static sccache release
 (checksum verified, downloaded once on the client into the user cache
 directory, `CLOUDSOURCED_TOOL_CACHE` overrides) to the environment image.
 Each session gets its own sccache server on a unix socket inside the session
@@ -619,23 +850,16 @@ sandbox (`SCCACHE_SERVER_UDS`, `SCCACHE_DIR` in a private temporary
 directory); it ends with the session. The cache backend is WebDAV
 (`SCCACHE_WEBDAV_ENDPOINT`), served by `internal/blobcache`:
 
-* By default the worker serves it on `127.0.0.1` from a directory
-  store under `<deps dir>/sccache` (`CLOUDSOURCED_SCCACHE_DIR`). The
-  dependency volume is shared by the pool's machines, so a new machine gets
-  hits for everything an earlier one compiled. Keys are prefixed with the
-  environment hash, so toolchains never mix.
-* On AWS the supervisor serves the cache itself on the Docker bridge
-  gateway (port 7480, reachable from sessions, not from outside the host)
-  from the stack's bucket with the instance role (`s3://<bucket>/cache/<owner>/sccache/`,
-  deleted after a day by the bucket lifecycle rule), and passes
-  `CLOUDSOURCED_SCCACHE_ENDPOINT` to the worker; the worker appends
-  the environment hash to that URL (`blobcache.Handler` without a fixed
-  namespace). `blobcache.S3StoreFromEnv` (`CLOUDSOURCED_SCCACHE_S3=bucket/prefix`)
-  offers the same store to other hosts.
+The worker serves it on `127.0.0.1` from a tiered store: a directory under
+`<deps dir>/sccache` (`CLOUDSOURCED_SCCACHE_DIR`) backed by the pool's
+object store under the environment's prefix (see
+[Object store](#object-store-storage-and-provider-parts)), so a new machine
+gets hits for everything an earlier one compiled. Keys are prefixed with
+the environment hash, so toolchains never mix.
 
 sccache cannot cache incremental compilations, which cargo uses for
 workspace crates in dev profiles; dependencies are cached regardless.
-`incremental = false` sets `CARGO_INCREMENTAL=0` unless the run sets it.
+Set `CARGO_INCREMENTAL=0` in `[environment.env]` to make them cacheable.
 User settings of `RUSTC_WRAPPER` win. With `CLOUDSOURCED_VERBOSE=1` the proxy
 prints the run's statistics (`sccache: 3 hits / 1 misses (...)`); they are
 also part of the session's exit message (`proto.Exit.Cache`: `sccache_requests`, `_hits`, `_misses`, `_not_cacheable`, `_errors`; shown by `cloudsourced why`).
@@ -666,46 +890,90 @@ libraries and build script outputs must be available locally:
   (`rust-toolchain.toml`), otherwise rust-analyzer's proc-macro server
   rejects the libraries.
 
+### Tool adapters
+
+Every proxied command goes through the adapter of its tool
+(`internal/adapter`): it classifies the command line into phases — `deps`,
+`build`, `run` — each `local` or `remote`, names the artifacts a phase
+produces with their cache scope (slot, machine, global, or transferred
+here for a local phase) and what a local phase needs. `[tool.X]` stays the
+per-tool configuration (`local`, `remote`, `env`, `eager`, `ports`,
+`split`); `adapter = "cargo" | "go" | "node" | "generic"` picks the
+adapter, by default from the tool name (cargo; go; bun, bunx, npm, npx,
+pnpm, yarn; anything else generic). `cloudsourced why` shows the adapter
+and the phases of a run (`adapter`, `phases` in `runs.jsonl`).
+
+| adapter | remote as typed | split: remote build, local run | default caches (`init`) |
+|---|---|---|---|
+| cargo | build, check, clippy, run, ... | `cargo test`, `cargo nextest run` | `target` slot (prune rust), `deps` machine, `sccache` global |
+| go | build, vet, run, mod, ... | `go test` | `go-build` global (GOCACHEPROG), `go-mod` machine, `go-out` slot |
+| node | install/ci/add (deps), scripts, tests | — (`local = ["test", "run dev"]` runs them here) | `node-modules` machine, digest of the lockfile, install command |
+| generic | everything not in `local` | — | — |
+
+Local platform checks (OS, architecture, C library family and version,
+dynamic loader, shared libraries) use `internal/platform`, which also feeds
+the environment image hash (`platform=linux/<arch>`) and the cache key of
+machine caches (`Platform.CacheKey()`: OS/arch/libc without version).
+`CLOUDSOURCED_PLATFORM=linux/amd64/glibc-2.39` overrides the detection.
+
 ### Tests: remote build, local run
 
-`cargo test` and `cargo nextest run` are split: the test binaries are built
-remotely and run on this machine, with the local environment and local
-services (e.g. the developer's Postgres via `APP_TEST_DATABASE_URL`). Type
-the command as usual (`cargo nextest run -p app-store foo`, `cargo test foo
--- --nocapture`); output and exit code are those of a local run.
+`cargo test`, `cargo nextest run` and `go test` are split: the test
+binaries are built remotely and run on this machine, with the local
+environment and local services (e.g. the developer's Postgres via
+`APP_TEST_DATABASE_URL`). Type the command as usual (`cargo nextest run
+-p app-store foo`, `cargo test foo -- --nocapture`, `go test -run X
+./...`); output and exit code are those of a local run.
 
 * **cargo test**: the remote phase runs `cargo test --no-run
   --message-format=json-render-diagnostics` with the build options; the
   executables it reports are transferred and run in cargo's order with
   cargo's working directory (package root), environment (`CARGO_MANIFEST_DIR`,
-  `CARGO_PKG_*`, `CARGO_BIN_EXE_*`), arguments (test name, `--quiet` with
-  `-q`, everything after `--`), status lines and `error: test failed, to
-  rerun pass ...` messages, `--no-fail-fast` summary and exit code 101.
-  Doc tests are compiled while they run, so they run remotely afterwards
-  (`cargo test --doc` with the same options), as cargo runs them last.
+  `CARGO_PKG_*`, `CARGO_BIN_EXE_*`, cargo `[env]` configuration including
+  `force` and `relative`, the build script's `rustc-env` values and
+  `OUT_DIR`, whose files are transferred too), arguments (test name,
+  `--quiet` with `-q`, everything after `--`), status lines and `error: test
+  failed, to rerun pass ...` messages, `--no-fail-fast` summary and exit
+  code 101. Doc tests are compiled while they run, so they run remotely
+  afterwards (`cargo test --doc` with the same options), as cargo runs them
+  last.
 * **nextest**: the remote phase runs `cargo nextest archive` with the cargo
   build options (`-p`, `--workspace`, features, `--cargo-profile`, ...); the
   zstd archive is transferred and `cargo nextest run --archive-file ...`
   runs locally with the filters, runner and reporter options, `-P`/
   `--profile`, `-- args` and `NEXTEST_*` variables. Configuration options
   (`--config-file`, `-P`) go to both.
+* **go test**: the remote phase lists the packages and runs `go test -c`
+  per package with the build flags (`-race`, `-tags`, ...; results come
+  from the global go cache); the binaries run locally in their package
+  directories with the test flags as `-test.*` (`-run`, `-v`, `-count`,
+  `-timeout`, ..., `-args`), printing go test's `ok`/`FAIL`/`?` lines and
+  exiting 1 on failure. The binaries travel in the first slot-scope cache
+  directory (`init` proposes `[cache.go-out] paths = [".cloudsourced-build"]`).
 
 Commands that do not run tests (`--no-run`, `--doc`, `--message-format`,
-`nextest list`, `nextest archive`, reuse options such as `--archive-file`)
-and unknown options run remotely as typed. The tests run remotely instead,
+`nextest list`, `nextest archive`, reuse options such as `--archive-file`;
+`go test -json`, `-c`, `-o`, `-cover*`, profiles, `-fuzz`, `-list`) and
+unknown options run remotely as typed. The tests run remotely instead,
 with one line saying why, when this machine cannot execute the binaries:
-another OS or architecture, an older glibc than the environment image, a
-missing shared library or dynamic loader (checked on the ELF files), no
-local `cargo-nextest`, nextest failing to list the tests locally (exit 104),
-or test binaries outside the `[cache.build]` paths.
+another OS or architecture, another C library or an older glibc than the
+environment image, a missing shared library or dynamic loader (checked on
+the ELF files), no local `cargo-nextest`, no `cargo-nextest` in the
+environment image, nextest failing to list the tests locally (exit 104),
+or test binaries outside the slot-scope cache paths.
 
-`[tool.cargo] split = ["test", "nextest"]` is the default; `split = []`
-turns it off for a repository, `CLOUDSOURCED_SPLIT=0` for one run.
-Binaries are transferred over the session that built them (only files whose
-content changed); the transport sits behind one interface so the target
-overlay can replace it. Not reproduced locally: cargo `[env]` configuration
-and build-script `rustc-env` values at test run time, and files a test reads
-from `OUT_DIR` at run time.
+`split` lists what is split (cargo: `["test", "nextest"]`, go: `["test"]`,
+both the default); `split = []` turns it off for a tool,
+`CLOUDSOURCED_SPLIT=0` for one run. Transport: with `[outputs] mode =
+"fuse"` the binaries appear through the output overlay
+(`daemon.EnsureOutputs` after the build's release, nothing is copied);
+otherwise they are fetched over the session that built them, zstd
+compressed, only files whose content changed (`cloudsourced fetch` uses
+zstd too). Not reproduced locally: files a test reads at run time from
+outside `OUT_DIR` and the build directories (e.g. generated next to the
+sources by a remote build script), cargo `[env]` set by `--config` on the
+command line, and nextest's own handling of build-script values (whatever
+`cargo nextest run --archive-file` does locally).
 
 ## Compatibility
 
@@ -948,7 +1216,7 @@ protected). See [docs/SCHEDULER.md](docs/SCHEDULER.md#calibrating-the-simulator-
 | machines | `max_lifetime` (default 24h) | server drains and exits at expiry; orchestrator destroys; AWS: instance shuts down (terminate on shutdown), reaper Lambda terminates 5 min after `expires-at` every 10 min |
 | build slots | build TTL ≤ 24h ≤ `max_lifetime` | server garbage collection; die with the machine's cache volume |
 | compiler cache | 24h | blobcache never serves older entries; S3 lifecycle `cache/` 1 day |
-| dependency caches | `[cache.deps] ttl` (default 7 days) | volume expiry label, orchestrator reaps volumes |
+| machine caches | `ttl` of `scope = "machine"` caches (default 7 days) | volume expiry label, orchestrator reaps volumes |
 | machine secrets (AWS SSM) | until the supervisor reads them | agent deletes after reading; reaper deletes parameters under `/cloudsourced/<stack>/machines/` without a live machine (after 15 min) |
 | server binaries (S3 `bin/`) | 30 days | bucket lifecycle |
 | environment images (ECR) | 30 days | repository lifecycle |

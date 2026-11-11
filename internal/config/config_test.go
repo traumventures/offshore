@@ -29,7 +29,7 @@ eager = ["target/debug/app"]
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Resources.CPU != 16 || r.Resources.Memory != "4G" || r.Cache.Build.TTL != "24h" || r.Environment.Base != "image" {
+	if r.Resources.CPU != 16 || r.Resources.Memory != "4G" || len(r.Caches) != 0 || r.Environment.Base != "image" {
 		t.Fatalf("unexpected defaults/override: %+v", r)
 	}
 	sub := filepath.Join(dir, "a", "b")
@@ -47,7 +47,7 @@ base = "image"
 [[source.rule]]
 paths = ["x"]
 mode = "sometimes"
-[cache.build]
+[cache.target]
 paths = ["../outside"]
 ttl = "soon"
 `)
@@ -55,7 +55,7 @@ ttl = "soon"
 	if err == nil {
 		t.Fatal("expected validation errors")
 	}
-	for _, want := range []string{"environment.image", "source.rule[0].mode", "cache.build.paths", "cache.build.ttl"} {
+	for _, want := range []string{"environment.image", "source.rule[0].mode", "cache.target.paths", "cache.target.ttl"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %s:\n%v", want, err)
 		}
@@ -91,45 +91,84 @@ func TestOutputsAndEditorModes(t *testing.T) {
 	if r.Outputs.Mode != OutputsEager || r.Editor.RustAnalyzer != RustAnalyzerLocal {
 		t.Fatalf("defaults: %+v %+v", r.Outputs, r.Editor)
 	}
-	r, err = LoadRepo(writeRepo(t, "version = 1\n[environment]\nimage = \"rust:1\"\n[cache.build]\npaths = [\"target\"]\n[outputs]\nmode = \"fuse\"\n[editor]\nrust_analyzer = \"lsp-remote\"\n"))
+	r, err = LoadRepo(writeRepo(t, "version = 1\n[environment]\nimage = \"rust:1\"\n[cache.target]\npaths = [\"target\"]\n[outputs]\nmode = \"fuse\"\n[editor]\nrust_analyzer = \"lsp-remote\"\n"))
 	if err != nil || r.Outputs.Mode != OutputsFuse || r.Editor.RustAnalyzer != RustAnalyzerLSPRemote {
 		t.Fatalf("fuse/lsp-remote: %v", err)
 	}
 	_, err = LoadRepo(writeRepo(t, "version = 1\n[environment]\nimage = \"rust:1\"\n[outputs]\nmode = \"fuse\"\n[editor]\nrust_analyzer = \"remote\"\n"))
-	if err == nil || !strings.Contains(err.Error(), "needs [cache.build] paths") || !strings.Contains(err.Error(), "editor.rust_analyzer") {
+	if err == nil || !strings.Contains(err.Error(), "needs a slot-scope cache") || !strings.Contains(err.Error(), "editor.rust_analyzer") {
 		t.Fatalf("validation: %v", err)
 	}
 }
 
-func TestCompilerCacheAndLinker(t *testing.T) {
+func TestCachesAndLinker(t *testing.T) {
 	dir := writeRepo(t, `
 version = 1
 [environment]
 image = "rust:1"
 linker = "mold"
-[cache.compiler]
+[cache.target]
+paths = ["target"]
+max_size = "100G"
+prune = "rust"
+[cache.registry]
+scope = "machine"
+paths = ["$CARGO_HOME/registry"]
+ttl = "3d"
+[cache.node]
+scope = "machine"
+paths = ["web/node_modules"]
+digest = ["web/bun.lock"]
+install = "cd web && bun install --frozen-lockfile"
+[cache.sccache]
 tool = "sccache"
 ttl = "12h"
-incremental = false
 `)
 	r, err := LoadRepo(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Cache.Compiler.Tool != CompilerCacheSccache || r.CompilerCacheTTL() != 12*time.Hour || r.Environment.Linker != LinkerMold {
-		t.Fatalf("unexpected: %+v %+v", r.Cache.Compiler, r.Environment)
+	if len(r.Caches) != 4 || r.Caches[0].Name != "node" || r.Environment.Linker != LinkerMold {
+		t.Fatalf("caches %+v", r.Caches)
 	}
-	if r.Cache.Compiler.Incremental == nil || *r.Cache.Compiler.Incremental {
-		t.Fatal("incremental = false not parsed")
+	sc, ok := r.GlobalCache(CacheToolSccache)
+	if !ok || sc.Scope != ScopeGlobal || sc.TTLDuration() != 12*time.Hour {
+		t.Fatalf("sccache %+v", sc)
+	}
+	tg := r.CachesByScope(ScopeSlot)[0]
+	if tg.MaxBytes() != 100<<30 || tg.Prune != PruneRust || tg.TTL != "24h" {
+		t.Fatalf("target %+v", tg)
+	}
+	if got := r.SlotPaths(); len(got) != 1 || got[0] != "target" {
+		t.Fatalf("slot paths %v", got)
+	}
+	if got := r.DigestPaths(); len(got) != 1 || got[0] != "web/node_modules" {
+		t.Fatalf("digest paths %v", got)
+	}
+	if slot, machine := r.CacheTTLs(); slot != 24*time.Hour || machine != 7*24*time.Hour {
+		t.Fatalf("ttls %v %v", slot, machine)
+	}
+	if n := r.CachesByScope(ScopeMachine); n[0].Prune != PruneNone || n[1].Prune != PruneLRU {
+		t.Fatalf("machine prune defaults %+v", n)
 	}
 	for name, tc := range map[string]struct{ body, want string }{
-		"unknown tool":        {"[cache.compiler]\ntool = \"ccache\"\n", "cache.compiler.tool"},
-		"ttl too long":        {"[cache.compiler]\ntool = \"sccache\"\nttl = \"2d\"\n", "cache.compiler.ttl"},
-		"ttl invalid":         {"[cache.compiler]\ntool = \"sccache\"\nttl = \"soon\"\n", "cache.compiler.ttl"},
-		"ttl without tool":    {"[cache.compiler]\nttl = \"1h\"\n", "require tool"},
-		"incremental only":    {"[cache.compiler]\nincremental = true\n", "require tool"},
+		"unknown tool":        {"[cache.c]\ntool = \"bazel\"\n", "cache.c.tool"},
+		"ttl too long":        {"[cache.c]\ntool = \"sccache\"\nttl = \"2d\"\n", "cache.c.ttl"},
+		"ttl invalid":         {"[cache.c]\npaths = [\"t\"]\nttl = \"soon\"\n", "cache.c.ttl"},
+		"global no tool":      {"[cache.c]\nscope = \"global\"\n", "cache.c.tool"},
+		"duplicate tool":      {"[cache.a]\ntool = \"go\"\n[cache.b]\ntool = \"go\"\n", "also used by"},
+		"slot outside":        {"[cache.c]\npaths = [\"/abs\"]\n", "cache.c.paths"},
+		"slot no paths":       {"[cache.c]\nscope = \"slot\"\n", "required for scope"},
+		"slot duplicate":      {"[cache.a]\npaths = [\"t\"]\n[cache.b]\npaths = [\"t/\"]\n", "also in cache.a"},
+		"digest no install":   {"[cache.c]\nscope = \"machine\"\npaths = [\"n\"]\ndigest = [\"l\"]\n", "install: required"},
+		"install no digest":   {"[cache.c]\nscope = \"machine\"\npaths = [\"n\"]\ninstall = \"x\"\n", "requires digest"},
+		"digest abs path":     {"[cache.c]\nscope = \"machine\"\npaths = [\"$HOME/n\"]\ndigest = [\"l\"]\ninstall = \"x\"\n", "digest caches"},
+		"bad scope":           {"[cache.c]\nscope = \"cluster\"\npaths = [\"t\"]\n", "cache.c.scope"},
+		"bad prune":           {"[cache.c]\npaths = [\"t\"]\nprune = \"often\"\n", "cache.c.prune"},
+		"bad size":            {"[cache.c]\npaths = [\"t\"]\nmax_size = \"lots\"\n", "cache.c.max_size"},
+		"bad name":            {"[cache.C]\npaths = [\"t\"]\n", "name must match"},
 		"unknown linker":      {"[environment]\nimage = \"x\"\nlinker = \"gold\"\n", "environment.linker"},
-		"unknown cache field": {"[cache.compiler]\ntool = \"sccache\"\nsize = 1\n", "size"},
+		"unknown cache field": {"[cache.c]\ntool = \"sccache\"\nsize = 1\n", "size"},
 	} {
 		body := "version = 1\n" + tc.body
 		if !strings.Contains(tc.body, "[environment]") {
@@ -139,10 +178,6 @@ incremental = false
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: want error mentioning %q, got %v", name, tc.want, err)
 		}
-	}
-	// lld and the defaults are accepted.
-	if _, err := LoadRepo(writeRepo(t, "version = 1\n[environment]\nimage = \"x\"\nlinker = \"lld\"\n[cache.compiler]\ntool = \"sccache\"\n")); err != nil {
-		t.Fatal(err)
 	}
 }
 

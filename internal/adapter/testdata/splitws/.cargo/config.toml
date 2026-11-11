@@ -1,0 +1,4 @@
+[env]
+SPLIT_CONFIG = "from-config"
+SPLIT_REL = { value = "data", relative = true }
+SPLIT_FORCED = { value = "forced", force = true }

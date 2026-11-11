@@ -13,6 +13,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/metrics"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/cloudsourced/internal/store"
 )
 
 // ALPN is the TLS application protocol of cloudsourced.
@@ -56,6 +57,8 @@ const (
 	TOutDir
 	TOutRead
 	TForward
+	TSlotOp
+	TSlotResult
 )
 
 // Stream kinds sent in Hello.
@@ -72,7 +75,41 @@ const (
 	// network namespace: TForward, then TAck (or TError), then raw bytes
 	// in both directions until either side closes.
 	KindForward = "forward"
+	// KindSlot carries one build slot operation of the orchestrator
+	// (TSlotOp, answered by TSlotResult); it needs an admin token.
+	KindSlot = "slot"
 )
+
+// Build slot operations (SlotOp.Op).
+const (
+	SlotPrune   = "prune"
+	SlotSave    = "save"
+	SlotRestore = "restore"
+)
+
+// SlotOp asks a worker to prune, save or restore a repository's build slot.
+type SlotOp struct {
+	Op   string `json:"op"`
+	Repo string `json:"repo"` // repository id
+	// TargetBytes is the prune target (0: the caches' prune policy).
+	TargetBytes int64 `json:"target_bytes,omitempty"`
+	// Snapshot is the snapshot to restore.
+	Snapshot *SnapshotInfo `json:"snapshot,omitempty"`
+	// Store grants access to the repository's store prefix (save and
+	// restore; nil: the last grant of a session of the repository).
+	Store *store.Grant `json:"store,omitempty"`
+}
+
+// SlotResult answers a SlotOp.
+type SlotResult struct {
+	Freed    int64         `json:"freed,omitempty"`    // prune
+	Snapshot *SnapshotInfo `json:"snapshot,omitempty"` // save
+	// Chunks, NewChunks and Seconds describe a save or restore.
+	Chunks    int64   `json:"chunks,omitempty"`
+	NewChunks int64   `json:"new_chunks,omitempty"`
+	Seconds   float64 `json:"seconds,omitempty"`
+	Err       string  `json:"err,omitempty"`
+}
 
 // Hello opens every stream.
 type Hello struct {
@@ -137,15 +174,15 @@ type Exec struct {
 	Grant scheduler.Grant `json:"grant"`
 	// MemoryOvercommit bounds the sum of memory reservations on the
 	// machine (server side safety net for the scheduler).
-	MemoryOvercommit float64  `json:"memory_overcommit"`
-	Build            []string `json:"build"`     // worker-local dirs relative to Repo
-	BuildTTL         string   `json:"build_ttl"` // e.g. "24h"
-	Deps             []string `json:"deps"`      // shared dependency cache paths
-	Eager            []string `json:"eager"`     // output globs relative to Repo
-	Lease            string   `json:"lease,omitempty"`
-	// CompilerCache enables a compiler cache in the session (repository
-	// [cache.compiler]); nil means off.
-	CompilerCache *CompilerCache `json:"compiler_cache,omitempty"`
+	MemoryOvercommit float64 `json:"memory_overcommit"`
+	// Caches are the repository's [cache.<name>] tables.
+	Caches  []Cache  `json:"caches,omitempty"`
+	SlotTTL string   `json:"slot_ttl"` // effective slot TTL, e.g. "24h"
+	Eager   []string `json:"eager"`    // output globs relative to Repo
+	Lease   string   `json:"lease,omitempty"`
+	// Store grants access to the store prefixes of the repository and the
+	// environment (lease's store grant; nil: no store).
+	Store *store.Grant `json:"store,omitempty"`
 	// Linker is the repository's environment.linker ("", "mold", "lld").
 	Linker string `json:"linker,omitempty"`
 	// Toolchain relocates the image's Rust toolchain to the client's
@@ -160,13 +197,38 @@ type Exec struct {
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
-// CompilerCache is the session's compiler cache configuration.
-type CompilerCache struct {
-	Tool string `json:"tool"` // "sccache"
-	// TTLSeconds lowers the maximum age of reused entries (0 = cache limit).
-	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
-	// Incremental false sets CARGO_INCREMENTAL=0; nil keeps cargo's default.
-	Incremental *bool `json:"incremental,omitempty"`
+// Cache is a repository cache (config.Cache with parsed sizes).
+type Cache struct {
+	Name       string   `json:"name"`
+	Scope      string   `json:"scope"` // slot, machine, global
+	Paths      []string `json:"paths,omitempty"`
+	Digest     []string `json:"digest,omitempty"`
+	Install    string   `json:"install,omitempty"`
+	Tool       string   `json:"tool,omitempty"`
+	MaxBytes   int64    `json:"max_bytes,omitempty"`
+	Prune      string   `json:"prune,omitempty"`
+	TTLSeconds int64    `json:"ttl_seconds,omitempty"`
+}
+
+// SlotPaths returns the paths of the slot-scope caches.
+func (e Exec) SlotPaths() []string {
+	var out []string
+	for _, c := range e.Caches {
+		if c.Scope == "slot" {
+			out = append(out, c.Paths...)
+		}
+	}
+	return out
+}
+
+// GlobalCache returns the global cache of tool, if any.
+func (e Exec) GlobalCache(tool string) *Cache {
+	for i, c := range e.Caches {
+		if c.Scope == "global" && c.Tool == tool {
+			return &e.Caches[i]
+		}
+	}
+	return nil
 }
 
 // Toolchain holds the client's toolchain locations. Cargo hashes the
@@ -234,7 +296,13 @@ type Writeback struct {
 // Need requests blobs by hash.
 type Need struct {
 	Hashes []string `json:"hashes"`
+	// Compress asks the sender to compress every blob's data frames
+	// ("" or CompressZstd). BlobHeader.Size stays the uncompressed size.
+	Compress string `json:"compress,omitempty"`
 }
+
+// CompressZstd compresses blob data with zstd.
+const CompressZstd = "zstd"
 
 // BlobHeader precedes TData frames of one blob, terminated by TDataEnd.
 type BlobHeader struct {

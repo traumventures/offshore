@@ -20,7 +20,9 @@ import (
 	_ "github.com/traumventures/cloudsourced/internal/provider/awsec2"
 	_ "github.com/traumventures/cloudsourced/internal/provider/localdocker"
 	_ "github.com/traumventures/cloudsourced/internal/provider/oci"
+	_ "github.com/traumventures/cloudsourced/internal/provider/static"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/cloudsourced/internal/store"
 )
 
 // Local runs the orchestrator in this process over the configured providers.
@@ -74,6 +76,15 @@ func NewLocal(u *config.PoolConfig, stateDir string, log *slog.Logger) (*Local, 
 		envs: map[string]Env{}, waiters: map[string]map[*syncWriter]bool{},
 	}
 	orch.PrepareImage = l.prepareImage
+	orch.Stores = &orchestrator.StoreSet{Pool: u.Pool.ID, Provs: provs}
+	if u.Storage.Configured() {
+		sc, err := StorageConfig(u)
+		if err != nil {
+			return nil, err
+		}
+		orch.Stores.Override = &sc
+	}
+	orch.Slots = orchestrator.WorkerSlotOps{Grant: orch.SlotGrant}
 	return l, nil
 }
 
@@ -92,6 +103,9 @@ func (l *Local) Reconfigure(u *config.PoolConfig) (warnings []string) {
 		}
 		if !reflect.DeepEqual(old.Providers, u.Providers) {
 			warnings = append(warnings, "providers changed: restart to apply")
+		}
+		if old.Storage != u.Storage {
+			warnings = append(warnings, "storage changed: restart to apply")
 		}
 		if old.Pool.Estimator != u.Pool.Estimator {
 			warnings = append(warnings, "pool.estimator changed: restart to apply")
@@ -407,3 +421,21 @@ func (l *Local) Status(ctx context.Context) ([]orchestrator.Machine, error) {
 func (l *Local) Reconcile(ctx context.Context) error { return l.orch.Reconcile(ctx) }
 
 func (l *Local) DestroyAll(ctx context.Context) error { return l.orch.DestroyAll(ctx) }
+
+// StorageConfig resolves the pool's [storage] section.
+func StorageConfig(u *config.PoolConfig) (store.Config, error) {
+	st := u.Storage
+	c := store.Config{Name: config.StorageName, Endpoint: st.Endpoint, Bucket: st.Bucket, Region: st.Region,
+		Prefix: st.Prefix, RoleARN: st.RoleARN, PathStyle: st.PathStyle, Dir: st.Dir}
+	dir := filepath.Dir(u.Path)
+	var err error
+	if st.AccessKey != "" {
+		if c.AccessKeyID, err = config.ResolveRef(st.AccessKey, dir); err != nil {
+			return c, fmt.Errorf("storage.access_key: %w", err)
+		}
+		if c.SecretAccessKey, err = config.ResolveRef(st.SecretKey, dir); err != nil {
+			return c, fmt.Errorf("storage.secret_key: %w", err)
+		}
+	}
+	return c, nil
+}

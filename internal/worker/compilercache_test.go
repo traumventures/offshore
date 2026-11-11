@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"github.com/traumventures/cloudsourced/internal/store"
 	"io"
 	"log/slog"
 	"maps"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/traumventures/cloudsourced/internal/proto"
 )
@@ -25,12 +27,15 @@ func envMap(env []string) map[string]string {
 }
 
 func TestSessionEnvCompilerCache(t *testing.T) {
-	s := &Worker{env: []string{"PATH=/usr/bin", "RUSTFLAGS=-Dwarnings"}, ccEndpoint: "http://127.0.0.1:1234/"}
-	off := false
+	s := &Worker{env: []string{"PATH=/usr/bin", "RUSTFLAGS=-Dwarnings"}, ccEndpoint: "http://127.0.0.1:1234/", self: "/bin/cs", cfg: Config{CacheDir: "/cache"}}
 	req := proto.Exec{
 		Cwd: "/r", Env: map[string]string{"FOO": "1"},
-		CompilerCache: &proto.CompilerCache{Tool: "sccache", TTLSeconds: 3600, Incremental: &off},
-		Linker:        "mold",
+		Caches: []proto.Cache{
+			{Name: "sc", Scope: "global", Tool: "sccache", TTLSeconds: 3600},
+			{Name: "cc", Scope: "global", Tool: "ccache"},
+			{Name: "go", Scope: "global", Tool: "go", TTLSeconds: 7200},
+		},
+		Linker: "mold",
 	}
 	m := envMap(s.sessionEnv(req, "abc"))
 	want := map[string]string{
@@ -40,7 +45,9 @@ func TestSessionEnvCompilerCache(t *testing.T) {
 		"SCCACHE_SERVER_UDS":                       sccacheDir("abc") + "/server.sock",
 		"SCCACHE_DIR":                              sccacheDir("abc"),
 		"SCCACHE_IDLE_TIMEOUT":                     "0",
-		"CARGO_INCREMENTAL":                        "0",
+		"CCACHE_REMOTE_STORAGE":                    "http://127.0.0.1:1234/ccache|layout=subdirs",
+		"CCACHE_DIR":                               "/cache/ccache",
+		"GOCACHEPROG":                              "/bin/cs gocacheprog /cache/gocache http://127.0.0.1:1234/_ttl/7200/",
 		"CARGO_TARGET_" + hostTriple() + "_LINKER": "/usr/local/bin/cloudsourced-cc-mold",
 		"RUSTFLAGS":                                "-Dwarnings", // untouched
 		"FOO":                                      "1",
@@ -52,14 +59,10 @@ func TestSessionEnvCompilerCache(t *testing.T) {
 	}
 	// User settings win; incremental stays cargo's default when unset.
 	req.Env = map[string]string{"RUSTC_WRAPPER": "/my/wrapper", "CARGO_TARGET_" + hostTriple() + "_LINKER": "clang"}
-	req.CompilerCache.Incremental = nil
-	req.CompilerCache.TTLSeconds = 0
+	req.Caches[0].TTLSeconds = 0
 	m = envMap(s.sessionEnv(req, "abc"))
 	if m["RUSTC_WRAPPER"] != "/my/wrapper" || m["CARGO_TARGET_"+hostTriple()+"_LINKER"] != "clang" {
 		t.Errorf("user settings overridden: %v", m)
-	}
-	if _, ok := m["CARGO_INCREMENTAL"]; ok {
-		t.Error("CARGO_INCREMENTAL forced without incremental = false")
 	}
 	if _, ok := m["SCCACHE_WEBDAV_KEY_PREFIX"]; ok {
 		t.Error("key prefix without ttl")
@@ -73,7 +76,7 @@ func TestSessionEnvCompilerCache(t *testing.T) {
 	}
 	// Without an endpoint the cache is off.
 	s.ccEndpoint = ""
-	m = envMap(s.sessionEnv(proto.Exec{Cwd: "/r", CompilerCache: &proto.CompilerCache{Tool: "sccache"}}, "abc"))
+	m = envMap(s.sessionEnv(proto.Exec{Cwd: "/r", Caches: []proto.Cache{{Scope: "global", Tool: "sccache"}}}, "abc"))
 	if _, ok := m["RUSTC_WRAPPER"]; ok {
 		t.Error("wrapper set without endpoint")
 	}
@@ -138,10 +141,32 @@ func TestBuiltinCompilerCacheEndpoint(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "abc123", "a", "b")); err != nil {
 		t.Fatalf("not stored under the environment hash: %v", err)
 	}
-	// External endpoint: namespace appended.
-	s2 := &Worker{cfg: Config{EnvHash: "abc123", SccacheEndpoint: "http://172.17.0.1:9000/cache/"}, log: s.log}
+	// A store grant for the environment backs the cache: objects are
+	// uploaded, and a machine with an empty local tier reads them.
+	storeDir := t.TempDir()
+	g, _ := store.NewGranter(ctx, store.Config{Name: "local", Dir: storeDir, Prefix: "cache"})
+	gr, _ := g.Grant(ctx, []string{store.RepoScope("r"), store.EnvScope("abc123")}, time.Hour)
+	s.noteGrant("r", &gr)
+	req, _ = http.NewRequest("PUT", s.ccEndpoint+"c/d", strings.NewReader("y"))
+	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != 201 {
+		t.Fatalf("PUT: %v %v", resp, err)
+	}
+	if _, err := os.Stat(filepath.Join(storeDir, "cache", "envs", "abc123", "abc123", "c", "d")); err != nil {
+		t.Fatalf("not uploaded to the store: %v", err)
+	}
+	s2 := &Worker{cfg: Config{EnvHash: "abc123", SccacheDir: t.TempDir()}, log: s.log}
 	s2.startCompilerCache(ctx)
-	if s2.ccEndpoint != "http://172.17.0.1:9000/cache/abc123/" {
-		t.Fatalf("external endpoint %q", s2.ccEndpoint)
+	s2.noteGrant("r", &gr)
+	resp, err = http.Get(s2.ccEndpoint + "c/d")
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("GET from the store: %v %v", resp, err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(b) != "y" {
+		t.Fatalf("content %q", b)
+	}
+	if got, ok := s2.grants.get("r", time.Minute); !ok || got.Store != "local" {
+		t.Fatal("grant not remembered")
 	}
 }

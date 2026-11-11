@@ -19,46 +19,42 @@ import (
 	"github.com/traumventures/cloudsourced/internal/proto"
 )
 
-// Compiler cache (sccache) support.
+// Result caches (global [cache.<name>] tables: sccache, ccache, go).
 //
-// By default the worker serves a blobcache WebDAV endpoint on
-// 127.0.0.1 (sessions share the machine's network namespace) backed by a
-// directory store with a 24 h TTL. Its namespace is fixed to the machine's
-// environment hash, so toolchains never mix and sessions cannot reach
-// other environments. CLOUDSOURCED_SCCACHE_ENDPOINT (set by a supervisor)
-// replaces it with an external blobcache in namespace-from-path mode; the
-// environment hash is appended to its URL.
+// The worker serves a blobcache WebDAV endpoint on 127.0.0.1 (sessions
+// share the machine's network namespace). Its namespace is fixed to the
+// machine's environment hash, so toolchains never mix and sessions cannot
+// reach other environments. Objects live in a tiered store: a directory
+// on the machine disk (24 h TTL), backed by the pool's store under the
+// environment's prefix once a session brings a store grant for it, so a
+// fresh machine reuses what earlier machines compiled.
 //
 // Every session runs its own sccache server on a unix socket in a private
 // directory, so concurrent sessions do not share (or kill) each other's
 // server and the server's statistics are exactly the session's.
 
-// startCompilerCache determines the endpoint sessions use.
+// startCompilerCache starts the endpoint sessions use.
 func (s *Worker) startCompilerCache(ctx context.Context) {
 	ns := s.cfg.EnvHash
 	if ns == "" {
 		ns = "default"
 	}
-	if ep := s.cfg.SccacheEndpoint; ep != "" {
-		s.ccEndpoint = strings.TrimSuffix(ep, "/") + "/" + ns + "/"
-		s.log.Info("compiler cache", "endpoint", s.ccEndpoint)
-		return
-	}
-	store, err := blobcache.NewDirStore(s.cfg.SccacheDir, blobcache.MaxTTL)
+	local, err := blobcache.NewDirStore(s.cfg.SccacheDir, blobcache.MaxTTL)
 	if err != nil {
 		s.log.Warn("compiler cache disabled", "err", err)
 		return
 	}
-	if n := store.Sweep(); n > 0 {
+	if n := local.Sweep(); n > 0 {
 		s.log.Info("removed expired compiler cache entries", "count", n)
 	}
+	s.rcStore = &tieredStore{local: local, log: s.log}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		s.log.Warn("compiler cache disabled", "err", err)
 		return
 	}
 	srv := &http.Server{
-		Handler:           &blobcache.Handler{Store: store, Namespace: ns, Log: s.log},
+		Handler:           &blobcache.Handler{Store: s.rcStore, Namespace: ns, Log: s.log},
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	go func() {
@@ -66,7 +62,7 @@ func (s *Worker) startCompilerCache(ctx context.Context) {
 			s.log.Warn("compiler cache server", "err", err)
 		}
 	}()
-	go store.SweepEvery(ctx, 30*time.Minute)
+	go local.SweepEvery(ctx, 30*time.Minute)
 	go func() {
 		<-ctx.Done()
 		srv.Close()
@@ -85,7 +81,7 @@ func sccacheDir(session string) string {
 // image or the request) and must not be overridden.
 func (s *Worker) compilerCacheEnv(req proto.Exec, session string, has func(string) bool) [][2]string {
 	var out [][2]string
-	if cc := req.CompilerCache; cc != nil && cc.Tool == config.CompilerCacheSccache && s.ccEndpoint != "" {
+	if cc := req.GlobalCache(config.CacheToolSccache); cc != nil && s.ccEndpoint != "" {
 		dir := sccacheDir(session)
 		if !has("RUSTC_WRAPPER") {
 			out = append(out, [2]string{"RUSTC_WRAPPER", "sccache"})
@@ -96,15 +92,24 @@ func (s *Worker) compilerCacheEnv(req proto.Exec, session string, has func(strin
 			[2]string{"SCCACHE_SERVER_UDS", filepath.Join(dir, "server.sock")},
 			[2]string{"SCCACHE_IDLE_TIMEOUT", "0"}, // lives as long as the session
 		)
-		if cc.TTLSeconds > 0 {
-			out = append(out, [2]string{"SCCACHE_WEBDAV_KEY_PREFIX", fmt.Sprintf("_ttl/%d", cc.TTLSeconds)})
+		if p := ttlPrefix(cc); p != "" {
+			out = append(out, [2]string{"SCCACHE_WEBDAV_KEY_PREFIX", strings.TrimSuffix(p, "/")})
 		}
-		// sccache cannot cache incremental compilations (cargo's default
-		// for workspace crates in dev profiles); dependencies are cached
-		// either way. Only an explicit incremental = false turns it off.
-		if cc.Incremental != nil && !*cc.Incremental && !has("CARGO_INCREMENTAL") {
-			out = append(out, [2]string{"CARGO_INCREMENTAL", "0"})
+	}
+	if cc := req.GlobalCache(config.CacheToolCcache); cc != nil && s.ccEndpoint != "" {
+		// ccache's http remote storage on the same endpoint; the local
+		// ccache directory is the machine's.
+		if !has("CCACHE_REMOTE_STORAGE") {
+			out = append(out, [2]string{"CCACHE_REMOTE_STORAGE", s.ccEndpoint + ttlPrefix(cc) + "ccache|layout=subdirs"})
 		}
+		if !has("CCACHE_DIR") {
+			out = append(out, [2]string{"CCACHE_DIR", filepath.Join(s.cfg.CacheDir, "ccache")})
+		}
+	}
+	if cc := req.GlobalCache(config.CacheToolGo); cc != nil && s.ccEndpoint != "" && s.self != "" && !has("GOCACHEPROG") {
+		// cloudsourced gocacheprog: outputs on the machine's disk, shared
+		// through the endpoint.
+		out = append(out, [2]string{"GOCACHEPROG", fmt.Sprintf("%s gocacheprog %s %s", s.self, filepath.Join(s.cfg.CacheDir, "gocache"), s.ccEndpoint+ttlPrefix(cc))})
 	}
 	if l := req.Linker; l != "" && req.Toolchain == nil {
 		// With a relocated toolchain the linker comes from a "cc" on PATH
@@ -247,4 +252,13 @@ func runSccache(env []string, args ...string) ([]byte, error) {
 	cmd.Env = env
 	cmd.Dir = "/"
 	return cmd.Output()
+}
+
+// ttlPrefix is the endpoint path prefix that lowers the maximum age of
+// reused entries to the cache's TTL ("" for the store's own limit).
+func ttlPrefix(c *proto.Cache) string {
+	if c.TTLSeconds <= 0 || c.TTLSeconds >= int64(blobcache.MaxTTL/time.Second) {
+		return ""
+	}
+	return fmt.Sprintf("_ttl/%d/", c.TTLSeconds)
 }

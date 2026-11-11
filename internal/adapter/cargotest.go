@@ -1,4 +1,4 @@
-package proxy
+package adapter
 
 import (
 	"bufio"
@@ -15,8 +15,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/events"
 	"golang.org/x/term"
 )
 
@@ -35,11 +33,15 @@ type cargoArtifact struct {
 		Test bool `json:"test"`
 	} `json:"profile"`
 	Executable *string `json:"executable"`
+	// build-script-executed
+	Env    [][2]string `json:"env"`
+	OutDir string      `json:"out_dir"`
 }
 
 // testUnit is one test binary cargo test would run.
 type testUnit struct {
 	pkg      packageInfo
+	pkgID    string // cargo package id
 	kind     string // lib, bin, test, bench, example
 	name     string
 	srcPath  string
@@ -69,6 +71,26 @@ type testBuild struct {
 	bins     map[string]map[string]string // manifest path -> bin name -> executable
 	exes     []string                     // every executable, absolute
 	doctests bool                         // a selected package has a library with doc tests
+	scripts  map[string]buildScript       // package id -> its build script's results
+}
+
+// buildScript is what a package's build script reported.
+type buildScript struct {
+	env    [][2]string // cargo:rustc-env values, also set for its test binaries
+	outDir string
+}
+
+// outDirs returns the OUT_DIRs of the build scripts of tested packages.
+func (b testBuild) outDirs() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, u := range b.units {
+		if s, ok := b.scripts[u.pkgID]; ok && s.outDir != "" && !seen[s.outDir] {
+			seen[s.outDir] = true
+			out = append(out, s.outDir)
+		}
+	}
+	return out
 }
 
 // kindOrder sorts targets like cargo's TargetKind.
@@ -88,7 +110,7 @@ func targetKind(kinds []string) string {
 // parseTestBuild reads the JSON messages of `cargo test --no-run`. Lines
 // that are not JSON messages are returned unchanged.
 func parseTestBuild(r io.Reader, meta map[string]packageInfo) (testBuild, []byte) {
-	b := testBuild{bins: map[string]map[string]string{}}
+	b := testBuild{bins: map[string]map[string]string{}, scripts: map[string]buildScript{}}
 	docLibs := map[string]bool{} // manifests of libraries with doc tests
 	var other bytes.Buffer
 	sc := bufio.NewScanner(r)
@@ -99,6 +121,10 @@ func parseTestBuild(r io.Reader, meta map[string]packageInfo) (testBuild, []byte
 		if len(line) == 0 || line[0] != '{' || json.Unmarshal(line, &m) != nil || m.Reason == "" {
 			other.Write(line)
 			other.WriteByte('\n')
+			continue
+		}
+		if m.Reason == "build-script-executed" {
+			b.scripts[m.PackageID] = buildScript{env: m.Env, outDir: m.OutDir}
 			continue
 		}
 		if m.Reason != "compiler-artifact" {
@@ -126,7 +152,7 @@ func parseTestBuild(r io.Reader, meta map[string]packageInfo) (testBuild, []byte
 		if !ok {
 			pkg = packageFromID(m.PackageID, m.ManifestPath)
 		}
-		b.units = append(b.units, testUnit{pkg: pkg, kind: kind, name: m.Target.Name, srcPath: m.Target.SrcPath, exe: exe, manifest: m.ManifestPath})
+		b.units = append(b.units, testUnit{pkg: pkg, pkgID: m.PackageID, kind: kind, name: m.Target.Name, srcPath: m.Target.SrcPath, exe: exe, manifest: m.ManifestPath})
 	}
 	// Doc tests run for the selected packages (those with test units)
 	// that have a library with doc tests; path dependencies outside the
@@ -205,36 +231,41 @@ func cargoMetadata(cwd string, t cargoTest) map[string]packageInfo {
 	return m
 }
 
-func splitCargoTestRun(ctx context.Context, repo *config.Repo, profile config.Tool, args []string, cwd string, rec *events.Run, t cargoTest) (int, error) {
+func runCargoTest(ctx context.Context, rt Runtime, args []string, t cargoTest) (int, error) {
+	if len(rt.BuildDirs()) == 0 {
+		return runTestsRemotely(ctx, rt, "no build directory ([cache.build] paths): test binaries cannot be transferred")
+	}
+	root, cwd := rt.Root(), rt.Cwd()
 	var stdout bytes.Buffer
 	stderr := newLineFilter(os.Stderr, "Executable ")
 	var build testBuild
 	var outside string
-	code, err := runRemote(ctx, repo, profile, "cargo", t.buildArgs(), cwd, rec, remoteRun{
-		noTTY: true, stdout: &stdout, stderr: stderr, env: buildEnv(),
-		after: func(ctx context.Context, s *session, code int) error {
+	code, err := rt.Remote(ctx, append([]string{"cargo"}, t.buildArgs()...), RemoteOptions{
+		NoTTY: true, Stdout: &stdout, Stderr: stderr, Env: buildEnv(),
+		Collect: func(code int) ([]string, error) {
 			if code != 0 {
-				return nil
+				return nil, nil
 			}
 			var rest []byte
 			build, rest = parseTestBuild(bytes.NewReader(stdout.Bytes()), nil)
 			os.Stdout.Write(rest)
 			var rels []string
 			for _, exe := range build.exes {
-				rel, ok := insideBuildPaths(repo.Root, repo.Cache.Build.Paths, exe)
+				rel, ok := insideDirs(root, rt.BuildDirs(), exe)
 				if !ok {
 					outside = exe
-					return nil
+					return nil, nil
 				}
 				rels = append(rels, rel)
 			}
-			if len(rels) == 0 {
-				return nil
+			// Files build scripts generated for the tested packages:
+			// tests may read them at run time.
+			for _, dir := range build.outDirs() {
+				if rel, ok := insideDirs(root, rt.BuildDirs(), dir); ok {
+					rels = append(rels, rel+"/**")
+				}
 			}
-			if err := splitArtifacts.Fetch(ctx, s, rels); err != nil {
-				return fmt.Errorf("fetch test binaries: %w", err)
-			}
-			return nil
+			return rels, nil
 		},
 	})
 	stderr.Flush()
@@ -246,10 +277,10 @@ func splitCargoTestRun(ctx context.Context, repo *config.Repo, profile config.To
 		return code, err
 	}
 	if outside != "" {
-		return runTestsRemotely(ctx, repo, profile, "cargo", args, cwd, rec, fmt.Sprintf("test binary %s is outside the [cache.build] paths", outside))
+		return runTestsRemotely(ctx, rt, fmt.Sprintf("test binary %s is outside the build directories", outside))
 	}
-	if why := checkLocalExec(build.exes); why != "" {
-		return runTestsRemotely(ctx, repo, profile, "cargo", args, cwd, rec, why)
+	if why := platformCheck(build.exes); why != "" {
+		return runTestsRemotely(ctx, rt, why)
 	}
 	// Package metadata for the test environment (CARGO_PKG_*).
 	if meta := cargoMetadata(cwd, t); meta != nil {
@@ -259,7 +290,8 @@ func splitCargoTestRun(ctx context.Context, repo *config.Repo, profile config.To
 			}
 		}
 	}
-	r := &testRunner{t: t, cwd: cwd, color: cargoColor(t.Color), current: currentManifest(cwd, t.Manifest), out: os.Stderr, stdout: os.Stdout}
+	r := &testRunner{t: t, cwd: cwd, color: cargoColor(t.Color), current: currentManifest(cwd, t.Manifest), out: os.Stderr, stdout: os.Stdout,
+		configEnv: cargoConfigEnv(cwd, os.Getenv)}
 	failed, interrupted := r.run(build)
 	if interrupted {
 		return 130, nil // Ctrl+C: cargo stops as well
@@ -269,10 +301,10 @@ func splitCargoTestRun(ctx context.Context, repo *config.Repo, profile config.To
 	}
 	docCode := 0
 	if t.DocTests && build.doctests {
-		drec := *rec
 		docErr := newLineFilter(os.Stderr, "Finished ")
 		var derr error
-		docCode, derr = runRemote(ctx, repo, profile, "cargo", t.docArgs(), cwd, &drec, remoteRun{noTTY: true, stdin: true, stderr: docErr, env: buildEnv()})
+		docCode, derr = rt.Remote(ctx, append([]string{"cargo"}, t.docArgs()...), RemoteOptions{NoTTY: true, Stdin: true, Stderr: docErr, Env: buildEnv(),
+			Why: "[tool.cargo] split: doc tests run remotely"})
 		docErr.Flush()
 		if derr != nil {
 			return docCode, derr
@@ -337,6 +369,8 @@ type testRunner struct {
 	current string    // manifest of the current package
 	out     io.Writer // cargo's stderr: status lines, errors, test binaries' stderr
 	stdout  io.Writer // test binaries' stdout
+	// configEnv is cargo's [env] configuration for the working directory.
+	configEnv []configEnvVar
 }
 
 func (r *testRunner) status(verb, msg string) {
@@ -405,7 +439,7 @@ func (r *testRunner) run(b testBuild) (failed []string, interrupted bool) {
 		r.status("Running", desc)
 		cmd := exec.Command(u.exe, args...)
 		cmd.Dir = filepath.Dir(u.manifest)
-		cmd.Env = testEnv(u, b.bins[u.manifest])
+		cmd.Env = testEnv(u, b.bins[u.manifest], b.scripts[u.pkgID], r.configEnv)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, r.stdout, r.out
 		code := runChild(cmd)
 		if code == 0 {
@@ -441,10 +475,17 @@ func (r *testRunner) summary(failed []string) {
 	r.errorf("%d targets failed:\n%s", len(failed), strings.Join(lines, "\n"))
 }
 
-// testEnv is the environment cargo gives a test binary.
-func testEnv(u testUnit, bins map[string]string) []string {
+// testEnv is the environment cargo gives a test binary: [env]
+// configuration, package metadata, binaries of the package, its build
+// script's rustc-env values and library paths.
+func testEnv(u testUnit, bins map[string]string, script buildScript, config []configEnvVar) []string {
 	env := os.Environ()
 	set := func(k, v string) { env = append(env, k+"="+v) }
+	for _, v := range config {
+		if _, exists := os.LookupEnv(v.key); v.force || !exists {
+			set(v.key, v.value)
+		}
+	}
 	if c, err := RealBinary("cargo"); err == nil {
 		set("CARGO", c)
 	}
@@ -481,6 +522,12 @@ func testEnv(u testUnit, bins map[string]string) []string {
 		for name, exe := range bins {
 			set("CARGO_BIN_EXE_"+name, exe)
 		}
+	}
+	for _, kv := range script.env {
+		set(kv[0], kv[1])
+	}
+	if script.outDir != "" {
+		set("OUT_DIR", script.outDir)
 	}
 	// Dynamic libraries next to the binaries (dylib crates).
 	deps := filepath.Dir(u.exe)

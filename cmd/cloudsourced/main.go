@@ -22,11 +22,13 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/traumventures/cloudsourced/internal/blobcache"
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/daemon"
 	"github.com/traumventures/cloudsourced/internal/labels"
 	"github.com/traumventures/cloudsourced/internal/logs"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
+	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/proxy"
 	"github.com/traumventures/cloudsourced/internal/sandbox"
@@ -169,6 +171,17 @@ func run(cmd string, args []string) error {
 		return s.Run(ctx)
 	case "supervisor":
 		return supervisorCmd(args)
+	case "gocacheprog":
+		// GOCACHEPROG helper of global [cache.<name>] tool = "go" caches
+		// (set by the worker): gocacheprog DIR [ENDPOINT].
+		if len(args) < 1 {
+			return errors.New("usage: cloudsourced gocacheprog DIR [ENDPOINT]")
+		}
+		g := &blobcache.GoCacheProg{Dir: args[0]}
+		if len(args) > 1 {
+			g.Endpoint = args[1]
+		}
+		return g.Serve(context.Background(), os.Stdin, os.Stdout)
 	case "sandbox-init":
 		err := sandbox.Init()
 		fmt.Fprintln(os.Stderr, err)
@@ -639,7 +652,7 @@ func fetch(globs []string) error {
 		return err
 	}
 	defer conn.CloseWithError(0, "")
-	files, err := proxy.FetchOutputs(ctx, conn, prep.Token, prep.RepoID, root, globs)
+	files, err := proxy.FetchOutputs(ctx, conn, prep.Token, prep.RepoID, root, globs, proto.CompressZstd)
 	if err != nil {
 		return err
 	}
@@ -654,6 +667,9 @@ func fetch(globs []string) error {
 
 // supervisorCmd runs the supervisor of a VM machine.
 func supervisorCmd(args []string) error {
+	if len(args) > 0 && args[0] == "static" {
+		return staticHostCmd(args[1:])
+	}
 	fs := flag.NewFlagSet("supervisor", flag.ContinueOnError)
 	specPath := fs.String("spec", supervisor.SpecPath, "public machine spec")
 	stateDir := fs.String("state", supervisor.StateDir, "root-only agent state")
@@ -684,4 +700,36 @@ func supervisorCmd(args []string) error {
 		Shutdown: func() error { return exec.Command("shutdown", "-h", "now").Run() },
 	}
 	return a.Run(ctx)
+}
+
+// staticHostCmd is the host side of the static provider, run over SSH:
+// supervisor static apply|start|stop|destroy|status (apply reads a
+// supervisor.StaticPayload from stdin, status prints StaticStatus).
+func staticHostCmd(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: cloudsourced supervisor static apply|start|stop|destroy|status")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	h := supervisor.NewStaticHost(self)
+	ctx := context.Background()
+	switch args[0] {
+	case "apply":
+		var p supervisor.StaticPayload
+		if err := json.NewDecoder(os.Stdin).Decode(&p); err != nil {
+			return err
+		}
+		return h.Apply(ctx, p)
+	case "start":
+		return h.Start(ctx)
+	case "stop":
+		return h.Stop(ctx)
+	case "destroy":
+		return h.Destroy(ctx)
+	case "status":
+		return json.NewEncoder(os.Stdout).Encode(h.Status(ctx))
+	}
+	return fmt.Errorf("unknown static operation %q", args[0])
 }

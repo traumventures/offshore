@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/traumventures/cloudsourced/internal/cas"
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/daemon"
@@ -49,7 +50,8 @@ func localState(p string) (state string, hash string) {
 }
 
 // receiveBlobs requests hashes and stores them in a staging directory.
-func receiveBlobs(pc *proto.Conn, hashes []string) (map[string]string, func(), error) {
+// compress ("" or proto.CompressZstd) asks for compressed transfer.
+func receiveBlobs(pc *proto.Conn, hashes []string, compress string) (map[string]string, func(), error) {
 	staged := map[string]string{}
 	dir, err := os.MkdirTemp(daemon.StateDir(), "staging-")
 	cleanup := func() { os.RemoveAll(dir) }
@@ -60,7 +62,7 @@ func receiveBlobs(pc *proto.Conn, hashes []string) (map[string]string, func(), e
 			return nil, func() {}, err
 		}
 	}
-	if err := pc.Send(proto.TNeed, proto.Need{Hashes: hashes}); err != nil {
+	if err := pc.Send(proto.TNeed, proto.Need{Hashes: hashes, Compress: compress}); err != nil {
 		return nil, cleanup, err
 	}
 	for range hashes {
@@ -74,7 +76,20 @@ func receiveBlobs(pc *proto.Conn, hashes []string) (map[string]string, func(), e
 		}
 		pr, pw := io.Pipe()
 		go func() { pw.CloseWithError(pc.ReadData(pw)) }()
-		got, _, err := manifest.HashReader(io.TeeReader(pr, f))
+		var data io.Reader = pr
+		var dec *zstd.Decoder
+		if compress == proto.CompressZstd {
+			if dec, err = zstd.NewReader(pr, zstd.WithDecoderConcurrency(1)); err != nil {
+				f.Close()
+				return nil, cleanup, err
+			}
+			data = dec
+		}
+		got, _, err := manifest.HashReader(io.TeeReader(data, f))
+		if dec != nil {
+			dec.Close()
+			io.Copy(io.Discard, pr) // the end-of-data frame
+		}
 		f.Close()
 		if err != nil {
 			return nil, cleanup, err
@@ -182,7 +197,7 @@ func receiveWriteback(pc *proto.Conn, repo *config.Repo) ([]string, error) {
 			need = append(need, c.Hash)
 		}
 	}
-	staged, cleanup, err := receiveBlobs(pc, need)
+	staged, cleanup, err := receiveBlobs(pc, need, "")
 	defer cleanup()
 	if err != nil {
 		return nil, err
@@ -233,14 +248,15 @@ func receiveOutputs(pc *proto.Conn, repoRoot string) error {
 	if err := pc.Expect(proto.TOutputs, &outs); err != nil {
 		return err
 	}
-	return ReceiveFiles(pc, repoRoot, outs.Files)
+	return ReceiveFiles(pc, repoRoot, outs.Files, "")
 }
 
 // ReceiveFiles requests the files whose local content differs and installs
 // them below root. Files inside a mounted output directory (output FUSE)
 // cannot be written there; they go into the outputs content cache and the
-// daemon is told, so the mount serves them without the machine.
-func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry) error {
+// daemon is told, so the mount serves them without the machine. compress
+// ("" or proto.CompressZstd) selects the transfer encoding.
+func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry, compress string) error {
 	type planned struct {
 		e   manifest.Entry
 		dst string
@@ -280,7 +296,7 @@ func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry) error {
 			need = append(need, e.Hash)
 		}
 	}
-	staged, cleanup, err := receiveBlobs(pc, need)
+	staged, cleanup, err := receiveBlobs(pc, need, compress)
 	defer cleanup()
 	if err != nil {
 		return err

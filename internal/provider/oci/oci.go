@@ -871,3 +871,24 @@ func (o *OCI) List(ctx context.Context, owner string) ([]provider.Machine, error
 func (o *OCI) Volumes(context.Context, string) ([]provider.Volume, error) { return nil, nil }
 
 func (o *OCI) DeleteVolume(context.Context, string) error { return nil }
+
+var _ provider.SecretChannel = (*OCI)(nil)
+
+// PutSecrets implements provider.SecretChannel: an object in the pool's
+// bucket that the supervisor reads once and deletes.
+func (o *OCI) PutSecrets(ctx context.Context, machineID string, env map[string]string) error {
+	in, err := o.ensureInfra(ctx)
+	if err != nil {
+		return err
+	}
+	return o.putSecrets(ctx, in, provider.MachineSpec{ID: machineID, SecretEnv: env})
+}
+
+// DeleteSecrets implements provider.SecretChannel.
+func (o *OCI) DeleteSecrets(ctx context.Context, machineID string) error {
+	in, err := o.ensureInfra(ctx)
+	if err != nil {
+		return err
+	}
+	return o.deleteSecrets(ctx, in, machineID)
+}

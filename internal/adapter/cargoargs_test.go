@@ -1,12 +1,10 @@
-package proxy
+package adapter
 
 import (
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/traumventures/cloudsourced/internal/config"
 )
 
 func split(s string) []string { return strings.Fields(s) }
@@ -131,36 +129,6 @@ func TestParseNextest(t *testing.T) {
 	}
 }
 
-func TestPlanSplit(t *testing.T) {
-	cargo := config.Tool{}
-	if p := planSplit(cargo, "cargo", split("test -p a")); p == nil || p.kind != splitCargoTest {
-		t.Fatalf("cargo test: %+v", p)
-	}
-	if p := planSplit(cargo, "cargo", split("nextest run -p a foo")); p == nil || p.kind != splitNextest {
-		t.Fatalf("nextest: %+v", p)
-	}
-	for _, args := range []string{"build", "test --no-run", "nextest list", "nextest run --no-run", "check --tests"} {
-		if p := planSplit(cargo, "cargo", split(args)); p != nil {
-			t.Errorf("%q split", args)
-		}
-	}
-	if p := planSplit(cargo, "npm", split("test")); p != nil {
-		t.Error("npm test split")
-	}
-	only := []string{"nextest"}
-	if p := planSplit(config.Tool{Split: &only}, "cargo", split("test")); p != nil {
-		t.Error("cargo test split although only nextest is enabled")
-	}
-	none := []string{}
-	if p := planSplit(config.Tool{Split: &none}, "cargo", split("nextest run")); p != nil {
-		t.Error("split = [] still splits")
-	}
-	t.Setenv("CLOUDSOURCED_SPLIT", "0")
-	if p := planSplit(cargo, "cargo", split("test")); p != nil {
-		t.Error("CLOUDSOURCED_SPLIT=0 still splits")
-	}
-}
-
 func TestLineFilter(t *testing.T) {
 	var b strings.Builder
 	f := newLineFilter(&b, "Archiving ", "Archived ")
@@ -183,13 +151,10 @@ func TestInsideBuildPaths(t *testing.T) {
 		{"/r/src/x", "", false},
 		{"/elsewhere/target/x", "", false},
 	} {
-		rel, ok := insideBuildPaths("/r", []string{"target", "app/target/"}, c.abs)
+		rel, ok := insideDirs("/r", []string{"target", "app/target/"}, c.abs)
 		if rel != c.rel || ok != c.ok {
 			t.Errorf("%s: %q %v", c.abs, rel, ok)
 		}
-	}
-	if escapeGlob("target/a[1]*?{x}") != `target/a\[1\]\*\?\{x\}` {
-		t.Fatal(escapeGlob("target/a[1]*?{x}"))
 	}
 }
 

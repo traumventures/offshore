@@ -28,6 +28,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/cloudsourced/internal/store"
 	"github.com/traumventures/cloudsourced/internal/tracing"
 	"github.com/traumventures/cloudsourced/internal/transport"
 )
@@ -64,13 +65,13 @@ type Request struct {
 	Need     scheduler.Resources // estimated need
 	Limit    scheduler.Resources // hard ceiling (0 = none)
 	// BuildTTL bounds the age of the session's build slot data
-	// (cache.build.ttl; 0 = DefaultBuildTTL). The effective value, capped
+	// (shortest slot-scope cache ttl; 0 = DefaultBuildTTL). The effective value, capped
 	// by max_lifetime, is returned in Lease.BuildTTL and enforced per slot
 	// by the worker, so repositories with different TTLs can share
 	// a machine.
 	BuildTTL time.Duration `json:",omitempty"`
 	// DepsTTL is the lifetime of the shared dependency cache volume a new
-	// machine created for this request starts (cache.deps.ttl; 0 =
+	// machine created for this request starts (longest machine-scope cache ttl; 0 =
 	// DefaultDepsTTL). Existing machines keep the volume they have.
 	DepsTTL time.Duration `json:",omitempty"`
 	// Arch is the machine architecture the environment image is built for
@@ -157,6 +158,9 @@ type Lease struct {
 	// BuildTTL is the effective build slot TTL of the session (the
 	// request's, capped by max_lifetime).
 	BuildTTL time.Duration `json:",omitempty"`
+	// Store grants the session's worker access to the repository's and
+	// environment's prefixes of the machine's store (nil: no store).
+	Store *store.Grant `json:",omitempty"`
 }
 
 // Machine is the orchestrator view of a machine.
@@ -308,6 +312,8 @@ type Orchestrator struct {
 	// Slots performs build slot operations on workers (prune, snapshot
 	// save and restore); nil disables slot moves and prunes.
 	Slots SlotOps
+	// Stores mints worker store grants per provider (nil: no stores).
+	Stores *StoreSet
 
 	metrics *orchMetrics
 	obs     *observer
@@ -876,7 +882,9 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 				BuildTTL: req.buildTTL(o.cfg.MaxLifetime),
 			}
 			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: o.now().Add(2 * time.Minute)}
+			env := m.EnvHash
 			o.mu.Unlock()
+			lease.Store = o.storeGrant(ctx, lease.Provider, req.RepoID, env)
 			return lease, nil
 		case scheduler.Reject:
 			o.mu.Unlock()

@@ -87,17 +87,30 @@ func (d *Detection) Render() string {
 			w("# git dependencies: %s\n", strings.Join(d.GitDeps, ", "))
 		}
 	}
-	if len(d.BuildCache) > 0 {
-		w("\n[cache.build]\n")
-		w("paths = %s        # stays on the machine (24 h), never synchronised\n", list(d.BuildCache, 0))
+	if len(d.Adapters) > 0 {
+		w("\n# Ecosystems: %s (tool adapters; [tool.X] adapter overrides the choice).\n", strings.Join(d.Adapters, ", "))
 	}
-	if len(d.DepsCache) > 0 {
-		w("\n[cache.deps]\n")
-		w("paths = %s\n", list(d.DepsCache, 0))
+	for _, c := range d.Caches {
+		w("\n[cache.%s]\n", key(c.Name))
+		comment(c.Comment)
+		w("scope = %s\n", quote(c.Scope))
+		if len(c.Paths) > 0 {
+			w("paths = %s\n", list(c.Paths, 0))
+		}
+		if len(c.Digest) > 0 {
+			w("digest = %s\n", list(c.Digest, 0))
+		}
+		if c.Install != "" {
+			w("install = %s\n", quote(c.Install))
+		}
+		if c.Tool != "" {
+			w("tool = %s\n", quote(c.Tool))
+		}
+		if c.Prune != "" {
+			w("prune = %s\n", quote(c.Prune))
+		}
 	}
 	if d.Rust {
-		w("\n[cache.compiler]               # shared compiler cache across machines\n")
-		w("tool = \"sccache\"\n")
 		w("\n[tool.cargo]\n")
 		w("# subcommands that only touch the local checkout or your account run locally\n")
 		w("local = %s\n", list(d.CargoLocal, 0))
@@ -106,6 +119,16 @@ func (d *Detection) Render() string {
 			w(" (%s)", d.EnvWhy)
 		}
 		w("\nenv = %s\n", list(d.CargoEnv, 6))
+	}
+	for _, t := range d.Tools {
+		w("\n[tool.%s]\n", key(t.Name))
+		comment(t.Comment)
+		if len(t.Local) > 0 {
+			w("local = %s\n", list(t.Local, 0))
+		}
+		if len(t.Env) > 0 {
+			w("env = %s\n", list(t.Env, 6))
+		}
 	}
 	if len(d.Notes) > 0 {
 		w("\n# Detected but not adopted:\n")

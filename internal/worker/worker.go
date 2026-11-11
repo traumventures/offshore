@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -46,16 +47,15 @@ type Config struct {
 	CacheDir  string
 	DepsDir   string
 	BuildTTL  time.Duration // upper bound for build cache age
+	// DiskBudget is the bytes the cache disk may use before slots are
+	// pruned (CLOUDSOURCED_DISK_BUDGET; 0: 90% of the filesystem).
+	DiskBudget int64
 	// HostStatus is a file the server publishes machine.HostStatus to for
 	// the supervisor (CLOUDSOURCED_HOST_STATUS; empty: none).
 	HostStatus string
-	// SccacheEndpoint replaces the built-in compiler cache endpoint with an
-	// external blobcache (CLOUDSOURCED_SCCACHE_ENDPOINT, set by a host
-	// agent). SccacheDir is the built-in cache's directory
-	// (CLOUDSOURCED_SCCACHE_DIR, default <deps dir>/sccache: the dependency
-	// volume is shared by the owner's machines, the cache volume is not).
-	SccacheEndpoint string
-	SccacheDir      string
+	// SccacheDir is the local tier of the result caches
+	// (CLOUDSOURCED_SCCACHE_DIR, default <deps dir>/sccache).
+	SccacheDir string
 	// Clock is the time of idle, expiry and build slot decisions
 	// ($CLOUDSOURCED_TEST_CLOCK; nil: real time).
 	Clock clock.Clock
@@ -79,7 +79,6 @@ func ConfigFromEnv() (Config, error) {
 		BuildTTL:   24 * time.Hour,
 		HostStatus: os.Getenv(machine.HostStatusEnv),
 	}
-	c.SccacheEndpoint = os.Getenv("CLOUDSOURCED_SCCACHE_ENDPOINT")
 	c.SccacheDir = envOr("CLOUDSOURCED_SCCACHE_DIR", filepath.Join(c.DepsDir, "sccache"))
 	clk, err := clock.FromEnv()
 	if err != nil {
@@ -121,6 +120,13 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.BuildTTL = d
 	}
+	if s := os.Getenv("CLOUDSOURCED_DISK_BUDGET"); s != "" {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return c, fmt.Errorf("server: CLOUDSOURCED_DISK_BUDGET: %w", err)
+		}
+		c.DiskBudget = n
+	}
 	if s := os.Getenv("CLOUDSOURCED_PROVISION"); s != "" {
 		if err := json.Unmarshal([]byte(s), &c.Provision); err != nil {
 			return c, fmt.Errorf("server: CLOUDSOURCED_PROVISION: %w", err)
@@ -146,7 +152,11 @@ type Worker struct {
 	self  string
 	env   []string // base environment for sessions
 
-	ccEndpoint string // compiler cache WebDAV endpoint for sessions ("" = off)
+	ccEndpoint string       // compiler cache WebDAV endpoint for sessions ("" = off)
+	rcStore    *tieredStore // its store
+	grants     grantCache   // latest store grants per repository
+	fills      fills        // lazy restores in progress
+	snapshots  []proto.SnapshotInfo
 
 	mu       sync.Mutex
 	mounts   map[string]*sourcefs.Projection
@@ -168,6 +178,12 @@ type Worker struct {
 	inflight map[string]*fetchCall
 
 	metrics *serverMetrics
+
+	// machineCacheBytes is the size of the machine caches, measured by
+	// the periodic gc.
+	machineCacheBytes atomic.Int64
+	pruneMu           sync.Mutex // one prune at a time
+	machineBudgets    machineCacheBudgets
 }
 
 type fetchCall struct {
@@ -216,6 +232,7 @@ func (s *Worker) Run(ctx context.Context) error {
 	if n := s.slots.gc(s.cfg.BuildTTL); n > 0 {
 		s.log.Info("removed expired build slots", "count", n)
 	}
+	go s.measureMachineCaches()
 	ln, err := transport.Listen(s.cfg.Listen, &s.cfg.Identity)
 	if err != nil {
 		return err
@@ -292,6 +309,14 @@ func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
 		}
 		if time.Since(lastGC) > 5*time.Minute {
 			s.slots.gc(s.cfg.BuildTTL)
+			s.gcDigests(time.Now())
+			go s.measureMachineCaches()
+			go func() {
+				s.pruneMu.Lock()
+				defer s.pruneMu.Unlock()
+				s.pruneMachineCaches()
+				s.enforceDiskBudget()
+			}()
 			lastGC = time.Now()
 		}
 		if s.cfg.ExpiresAt.IsZero() || s.cfg.now().Before(s.cfg.ExpiresAt) {
@@ -300,6 +325,7 @@ func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
 		s.mu.Lock()
 		if !s.draining {
 			s.log.Info("machine lifetime reached, draining")
+			go s.saveOnDrain()
 		}
 		s.draining = true
 		if s.drainReason == "" {
@@ -329,6 +355,11 @@ func (s *Worker) shutdown() {
 	for _, p := range mounts {
 		p.Unmount()
 	}
+	s.fills.mu.Lock()
+	for _, fl := range s.fills.m {
+		fl.unmount()
+	}
+	s.fills.mu.Unlock()
 }
 
 func (s *Worker) serveConn(ctx context.Context, conn *quic.Conn) {
@@ -376,6 +407,8 @@ func (s *Worker) serveStream(ctx context.Context, conn *quic.Conn, st *quic.Stre
 		err = s.serveOutputs(ctx, pc)
 	case proto.KindForward:
 		err = s.serveForward(ctx, pc, st, claims)
+	case proto.KindSlot:
+		err = s.serveSlot(ctx, pc)
 	}
 	if err != nil && !errors.Is(err, io.EOF) && ctx.Err() == nil {
 		s.log.Debug("stream ended", "kind", hello.Kind, "err", err)
@@ -424,6 +457,8 @@ func authorize(kind string, c auth.Claims) error {
 		need = auth.ScopeSession
 	case proto.KindStatus:
 		need = auth.ScopeProbe
+	case proto.KindSlot:
+		need = auth.ScopeAdmin
 	default:
 		return fmt.Errorf("unknown stream kind %q", kind)
 	}
@@ -494,6 +529,8 @@ func (s *Worker) statusOnly() proto.Status {
 		st.Mounts = append(st.Mounts, r)
 	}
 	st.WarmRepos = s.slots.warmRepos(s.cfg.BuildTTL)
+	st.Disk = s.diskStatus()
+	st.Snapshots = append([]proto.SnapshotInfo(nil), s.snapshots...)
 	return st
 }
 

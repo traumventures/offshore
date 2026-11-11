@@ -20,8 +20,10 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/creack/pty"
+	"github.com/klauspost/compress/zstd"
 	"github.com/quic-go/quic-go"
 	"github.com/traumventures/cloudsourced/internal/auth"
+	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/sandbox"
@@ -178,19 +180,32 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	}
 	defer unregister()
 
+	s.noteGrant(req.RepoID, req.Store)
 	ttl := s.cfg.BuildTTL
-	if d, err := time.ParseDuration(req.BuildTTL); err == nil && d > 0 && d < ttl {
+	if d, err := time.ParseDuration(req.SlotTTL); err == nil && d > 0 && d < ttl {
 		ttl = d
 	}
 	slot, warm, err := s.slots.lease(req.RepoID, ttl)
 	if err != nil {
 		return prepErr(fmt.Errorf("build slot: %w", err))
 	}
-	defer s.slots.release(slot)
 	data := filepath.Join(slot, "data")
+	var restored bool
+	var restoreSecs float64
+	if m, err := readMeta(slot); err == nil {
+		restored, restoreSecs = restoreUsage(m)
+	}
+	slotBefore := s.slots.size(slot)
+	slotAfter := int64(-1)
+	s.slots.update(slot, func(m *slotMeta) { m.Caches = slotCaches(req) })
+	defer func() {
+		s.slots.releaseSized(slot, slotAfter)
+		go s.finishFill(slot)
+		go s.enforceBudgets(slot)
+	}()
 
 	env := s.sessionEnv(req, se.id)
-	sccache := req.CompilerCache != nil && s.ccEndpoint != ""
+	sccache := req.GlobalCache(config.CacheToolSccache) != nil && s.ccEndpoint != ""
 	if sccache {
 		if err := os.MkdirAll(sccacheDir(se.id), 0o700); err != nil {
 			return prepErr(fmt.Errorf("compiler cache: %w", err))
@@ -199,18 +214,11 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	}
 	// Toolchain first: dependency caches ($CARGO_HOME/registry) nest in it.
 	binds := s.relocation(req).binds
-	for _, b := range req.Build {
-		b = filepath.Clean(b)
-		binds = append(binds, sandbox.Bind{Src: filepath.Join(data, b), Dst: filepath.Join(req.Repo, b)})
+	cb, err := s.cacheBinds(req, slot, env, binds, frameWriter{pc, proto.TStderr})
+	if err != nil {
+		return prepErr(err)
 	}
-	for _, d := range req.Deps {
-		dst := expandPath(d, env)
-		if !filepath.IsAbs(dst) {
-			continue
-		}
-		src := filepath.Join(s.cfg.DepsDir, strings.ReplaceAll(strings.Trim(dst, "/"), "/", "__"))
-		binds = append(binds, sandbox.Bind{Src: src, Dst: dst})
-	}
+	binds = append(binds, cb...)
 	cgDir, err := s.cg.create(se.id, req.Grant)
 	if err != nil {
 		s.log.Warn("session cgroup", "err", err)
@@ -351,6 +359,9 @@ loop:
 	exit.Usage.PeakMemory, exit.Usage.CPUSeconds = s.cg.usage(cgDir)
 	exit.Usage.CPUStall, exit.Usage.MemoryStall = s.cg.stall(cgDir)
 	exit.Usage.Warm = warm
+	slotAfter = s.recordSlotRun(slot, se.started)
+	exit.Usage.SlotBytesBefore, exit.Usage.SlotBytesAfter = slotBefore, slotAfter
+	exit.Usage.Restored, exit.Usage.RestoreSeconds = restored, restoreSecs
 	exit.Usage.ExitCode = exit.Code
 	if s.cg.oomKilled(cgDir) {
 		exit.Usage.OOM = true
@@ -373,7 +384,7 @@ loop:
 		return err
 	}
 	_, ospan := tracing.Start(ctx, "worker.outputs")
-	err = s.sendOutputs(pc, frames, req.Repo, data, req.Build, req.Eager)
+	err = s.sendOutputs(pc, frames, req.Repo, data, req.SlotPaths(), req.Eager)
 	tracing.End(ospan, err)
 	if err != nil {
 		return err
@@ -547,7 +558,7 @@ func (s *Worker) sendNeeded(pc *proto.Conn, frames chan frame, blobs map[string]
 			return pc.SendError("transfer", err)
 		}
 		fi, _ := f.Stat()
-		err = pc.SendBlob(h, fi.Size(), f)
+		err = sendBlob(pc, h, fi.Size(), f, need.Compress)
 		f.Close()
 		if err != nil {
 			return err
@@ -555,6 +566,30 @@ func (s *Worker) sendNeeded(pc *proto.Conn, frames chan frame, blobs map[string]
 		s.countBytes(float64(fi.Size()), direction)
 	}
 	return nil
+}
+
+// sendBlob sends one blob, compressed when the receiver asked for it.
+func sendBlob(pc *proto.Conn, hash string, size int64, r io.Reader, compress string) error {
+	if compress != proto.CompressZstd {
+		return pc.SendBlob(hash, size, r)
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		enc, err := zstd.NewWriter(pw, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1))
+		if err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		if _, err := io.Copy(enc, r); err != nil {
+			enc.Close()
+			pw.CloseWithError(err)
+			return
+		}
+		pw.CloseWithError(enc.Close())
+	}()
+	err := pc.SendBlob(hash, size, pr)
+	pr.Close()
+	return err
 }
 
 // collectOutputs resolves output globs inside worker-local build directories.

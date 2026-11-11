@@ -22,6 +22,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/image"
 	"github.com/traumventures/cloudsourced/internal/machine"
 	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/cloudsourced/internal/store"
 )
 
 var serverPort = machine.ServerPortSpec()
@@ -140,6 +141,11 @@ func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provide
 	if err != nil {
 		return provider.Machine{}, err
 	}
+	// The pool's directory store: one volume shared by all machines, not
+	// a cache volume (no pool label, never reaped; objects expire in it).
+	if err := d.run(ctx, nil, "volume", "create", "--label", provider.LabelKind+"=store", storeVolume(spec.Owner)); err != nil {
+		return provider.Machine{}, err
+	}
 	mLabels := map[string]string{
 		provider.LabelKind:    "machine",
 		provider.LabelEnvHash: spec.EnvHash,
@@ -158,7 +164,7 @@ func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provide
 	l := machine.Layout{
 		ID: spec.ID, Image: spec.Image, Binary: d.Binary,
 		Publish:     d.Host + "::" + serverPort,
-		CacheVolume: cacheVol, DepsVolume: depsVol,
+		CacheVolume: cacheVol, DepsVolume: depsVol, StoreVolume: storeVolume(spec.Owner),
 		CPU: spec.CPU, Memory: spec.Memory, Swap: spec.Swap,
 		Labels: mLabels, SvcLabels: svcLabels,
 		Env: spec.Env, SecretKeys: provider.SortedKeys(spec.SecretEnv), Services: spec.Services,
@@ -414,4 +420,14 @@ func (d *Docker) DeleteVolume(ctx context.Context, name string) error {
 		return errors.New("volume in use")
 	}
 	return err
+}
+
+func storeVolume(pool string) string { return "cs-store-" + sanitize(pool) }
+
+var _ provider.StoreSource = (*Docker)(nil)
+
+// NativeStore implements provider.StoreSource: a volume shared by the
+// pool's machines, mounted at machine.StoreDir.
+func (d *Docker) NativeStore(_ context.Context, pool string) (store.Config, bool, error) {
+	return store.Config{Name: d.Name(), Dir: machine.StoreDir, Prefix: "cache"}, true, nil
 }

@@ -26,6 +26,8 @@ type PoolConfig struct {
 	// [providers.oci] with type = "oci".
 	// Every other key of the table is passed to the provider as an option.
 	Providers map[string]map[string]any `toml:"providers"`
+	// Storage overrides the providers' native object stores.
+	Storage Storage `toml:"storage"`
 	// Telemetry configures tracing of the orchestrator (control plane or
 	// embedded) and, forwarded, of its machines; and the event log.
 	Telemetry Telemetry `toml:"telemetry"`
@@ -34,7 +36,7 @@ type PoolConfig struct {
 }
 
 // Backends known to the configuration.
-var Backends = []string{"local-docker", "aws-ec2", "oci"}
+var Backends = []string{"local-docker", "aws-ec2", "oci", "static"}
 
 // cloudBackend reports whether a provider type launches cloud instances
 // with instance types (shapes).
@@ -208,7 +210,7 @@ func PoolConfigPath() string {
 //	[scheduler]             policy, estimator, overcommit, pressure, consolidation
 //	[[scheduler.warm_pool]] scheduled warm machines
 //	[[machine.setup]]       run = "..." once per machine
-//	[providers.NAME]        type = "local-docker" | "aws-ec2" | "oci", options
+//	[providers.NAME]        type = "local-docker" | "aws-ec2" | "oci" | "static", options
 //	[[providers.NAME.size]] machine types of that provider
 //	[telemetry]
 func LoadPool(path string) (*PoolConfig, error) {
@@ -219,7 +221,7 @@ func LoadPool(path string) (*PoolConfig, error) {
 		if err := decodeStrict(data, &raw); err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
-		f.Pool, f.Telemetry = raw.Pool, raw.Telemetry
+		f.Pool, f.Telemetry, f.Storage = raw.Pool, raw.Telemetry, raw.Storage
 		f.Pool.Scheduler = raw.Scheduler
 		f.Pool.Provision = raw.Machine.Setup
 		if f.Providers, f.Pool.Sizes, err = splitProviders(raw.Providers); err != nil {
@@ -275,6 +277,9 @@ func (u *PoolConfig) applyDefaults() {
 	f := &u.Pool
 	if f.ID == "" {
 		f.ID = sanitizeID(defaultUser())
+	}
+	if u.Storage.Configured() && u.Storage.Prefix == "" {
+		u.Storage.Prefix = "cache/" + f.ID
 	}
 	if f.MachineCPU == 0 {
 		f.MachineCPU = 8
@@ -365,6 +370,7 @@ func (u *PoolConfig) Validate() error {
 	if !validID(u.Pool.ID) {
 		errs = append(errs, fmt.Sprintf("pool.id: %q must be 1-63 characters of letters, digits, '.', '_' and '-'", u.Pool.ID))
 	}
+	errs = u.Storage.validate(errs)
 	f := u.Pool
 	for _, name := range u.ProviderNames() {
 		b := u.ProviderType(name)
@@ -489,6 +495,13 @@ func (u *PoolConfig) Document() (map[string]any, error) {
 		return nil, err
 	}
 	doc := map[string]any{"pool": pool, "scheduler": sched, "telemetry": tel}
+	if u.Storage.Configured() {
+		st, err := section(u.Storage)
+		if err != nil {
+			return nil, err
+		}
+		doc["storage"] = st
+	}
 	if len(u.Pool.Provision) > 0 {
 		setup := make([]any, len(u.Pool.Provision))
 		for i, p := range u.Pool.Provision {

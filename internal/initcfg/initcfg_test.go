@@ -3,6 +3,7 @@ package initcfg
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -68,9 +69,7 @@ func TestAppMatchesReference(t *testing.T) {
 	check("toolchain", got.Environment.Toolchains.Rust, ref.Environment.Toolchains.Rust)
 	check("apt", sorted(got.Environment.Packages.Apt), sorted(ref.Environment.Packages.Apt))
 	check("cpu", got.Resources.CPU, ref.Resources.CPU)
-	check("build cache", got.Cache.Build.Paths, ref.Cache.Build.Paths)
-	check("deps cache", got.Cache.Deps.Paths, ref.Cache.Deps.Paths)
-	check("compiler cache", got.Cache.Compiler.Tool, ref.Cache.Compiler.Tool)
+	check("caches", got.Caches, ref.Caches)
 	check("secrets", got.Secrets, ref.Secrets)
 	check("cargo local", got.Tools["cargo"].Local, ref.Tools["cargo"].Local)
 	check("git fetch env", got.Environment.Env["CARGO_NET_GIT_FETCH_WITH_CLI"], "true")
@@ -115,7 +114,7 @@ func equal(a, b any) bool {
 		}
 		return true
 	}
-	return a == b
+	return reflect.DeepEqual(a, b)
 }
 
 // norm makes shell scripts comparable: whitespace and line continuations
@@ -139,8 +138,8 @@ func TestDockerfileFallback(t *testing.T) {
 	if !slices.Equal(sorted(repo.Environment.Packages.Apt), []string{"libpq-dev", "protobuf-compiler"}) {
 		t.Errorf("apt %v", repo.Environment.Packages.Apt)
 	}
-	if repo.Cache.Build.Paths[0] != "target" || len(repo.Secrets) != 0 {
-		t.Errorf("cache %v secrets %v", repo.Cache.Build.Paths, repo.Secrets)
+	if repo.SlotPaths()[0] != "target" || len(repo.Secrets) != 0 {
+		t.Errorf("cache %v secrets %v", repo.SlotPaths(), repo.Secrets)
 	}
 }
 
@@ -208,5 +207,34 @@ func TestEnvPatterns(t *testing.T) {
 	got := envPatterns([]string{"APP_TEST_PROFILE", "APP_TEST_PG_BIN", "DATABASE_URL", "FOO_BAR_BAZ"})
 	if !slices.Equal(got, []string{"APP_TEST_*", "DATABASE_URL", "FOO_BAR_BAZ"}) {
 		t.Errorf("%v", got)
+	}
+}
+
+func TestGoAndBunRepository(t *testing.T) {
+	d, repo, out := generate(t, "gobun")
+	if strings.Join(d.Adapters, ",") != "go,node" {
+		t.Fatalf("adapters %v", d.Adapters)
+	}
+	if repo.Environment.Image != "golang:1.26-trixie" {
+		t.Errorf("image %q", repo.Environment.Image)
+	}
+	byName := map[string]config.Cache{}
+	for _, c := range repo.Caches {
+		byName[c.Name] = c
+	}
+	if c := byName["go-build"]; c.Scope != config.ScopeGlobal || c.Tool != config.CacheToolGo {
+		t.Errorf("go-build %+v", c)
+	}
+	if c := byName["go-mod"]; c.Scope != config.ScopeMachine {
+		t.Errorf("go-mod %+v", c)
+	}
+	if c := byName["node-modules"]; c.Scope != config.ScopeMachine || c.Install != "bun install --frozen-lockfile" || len(c.Digest) != 2 {
+		t.Errorf("node-modules %+v", c)
+	}
+	if _, ok := repo.Tools["go"]; !ok {
+		t.Errorf("no [tool.go]\n%s", out)
+	}
+	if _, ok := repo.Tools["bun"]; !ok {
+		t.Errorf("no [tool.bun]\n%s", out)
 	}
 }

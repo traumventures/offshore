@@ -20,6 +20,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/image"
 	"github.com/traumventures/cloudsourced/internal/manifest"
+	"github.com/traumventures/cloudsourced/internal/platform"
 	"github.com/traumventures/cloudsourced/internal/provider"
 )
 
@@ -47,7 +48,7 @@ func Resolve(r *config.Repo) (*Plan, error) {
 	add := func(s string) { hashParts = append(hashParts, s) }
 	add("generator=" + generatorVersion)
 	add(fmt.Sprintf("schema=%d", config.SchemaVersion))
-	add("arch=" + r.Resources.Arch)
+	add("platform=" + platform.Target(r.Resources.Arch).String())
 	envJSON, _ := json.Marshal(env)
 	add("env=" + string(envJSON))
 
@@ -74,6 +75,9 @@ func Resolve(r *config.Repo) (*Plan, error) {
 	}
 	df.WriteString("SHELL [\"/bin/sh\", \"-ec\"]\n")
 	pk := append([]string{}, env.Packages.Apt...)
+	if _, ok := r.GlobalCache(config.CacheToolCcache); ok && !slices.Contains(pk, "ccache") {
+		pk = append(pk, "ccache")
+	}
 	if env.Linker == config.LinkerLLD && !slices.Contains(pk, "lld") {
 		pk = append(pk, "lld")
 	}
@@ -175,9 +179,9 @@ func (p *Plan) addTools(r *config.Repo, add func(string), out *strings.Builder) 
 		fmt.Fprintf(&df, "COPY tools/%s /usr/local/bin/%s\n", name, name)
 		return nil
 	}
-	if r.Cache.Compiler.Tool == config.CompilerCacheSccache {
+	if c, ok := r.GlobalCache(config.CacheToolSccache); ok {
 		if err := install("sccache"); err != nil {
-			return fmt.Errorf("cache.compiler: %w", err)
+			return fmt.Errorf("cache.%s: %w", c.Name, err)
 		}
 	}
 	switch l := r.Environment.Linker; l {

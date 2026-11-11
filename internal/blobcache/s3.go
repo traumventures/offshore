@@ -11,18 +11,8 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
-)
-
-// S3Env enables the S3 store for a supervisor: "bucket/prefix". The prefix
-// should start with "cache/", where the aws-ec2 stack's lifecycle rule
-// deletes objects after one day (the store itself never serves objects
-// older than its TTL). S3TTLEnv optionally lowers the TTL (Go duration).
-const (
-	S3Env    = "CLOUDSOURCED_SCCACHE_S3"
-	S3TTLEnv = "CLOUDSOURCED_SCCACHE_TTL"
 )
 
 // S3API is the subset of the S3 client used by S3Store.
@@ -63,31 +53,6 @@ func ParseS3Location(s string) (bucket, prefix string, err error) {
 		return "", "", fmt.Errorf("blobcache: invalid S3 location %q (want bucket/prefix)", s)
 	}
 	return bucket, strings.Trim(prefix, "/"), nil
-}
-
-// S3StoreFromEnv builds the store configured by CLOUDSOURCED_SCCACHE_S3
-// with the default AWS credential chain (instance role on a VM host). It
-// returns nil, nil if the variable is unset.
-func S3StoreFromEnv(ctx context.Context) (*S3Store, error) {
-	loc := os.Getenv(S3Env)
-	if loc == "" {
-		return nil, nil
-	}
-	bucket, prefix, err := ParseS3Location(loc)
-	if err != nil {
-		return nil, err
-	}
-	ttl := MaxTTL
-	if s := os.Getenv(S3TTLEnv); s != "" {
-		if ttl, err = time.ParseDuration(s); err != nil {
-			return nil, fmt.Errorf("%s: %w", S3TTLEnv, err)
-		}
-	}
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return NewS3Store(s3.NewFromConfig(cfg), bucket, prefix, ttl), nil
 }
 
 func (s *S3Store) objectKey(key string) (string, error) {

@@ -225,7 +225,7 @@ func TestUserData(t *testing.T) {
 		t.Fatal(err)
 	}
 	if hs.Provider != "oci" || hs.Params[paramSecret] != "secrets/m1.json" || hs.Params[paramRegistry] != "ocir.eu-frankfurt-1.oci.oraclecloud.com" ||
-		hs.Params[paramCache] != "cache/my-pool/sccache" || hs.Layout.SecretKeys[0] != "CLOUDSOURCED_TOKEN" {
+		hs.Layout.SecretKeys[0] != "CLOUDSOURCED_TOKEN" {
 		t.Errorf("host spec %+v", hs)
 	}
 }
@@ -375,9 +375,6 @@ func TestHost(t *testing.T) {
 	c.actions = nil
 	if err := h.TerminateSelf(ctx); err != nil || strings.Join(c.actions, ",") != "TERMINATE" {
 		t.Errorf("terminate: %v %v", c.actions, err)
-	}
-	if st, err := h.CompilerCacheStore(ctx); err != nil || st == nil {
-		t.Errorf("cache store %v %v", st, err)
 	}
 }
 

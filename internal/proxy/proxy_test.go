@@ -3,54 +3,10 @@ package proxy
 import (
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/traumventures/cloudsourced/internal/config"
 )
-
-func TestRemoteAllowed(t *testing.T) {
-	p := config.Tool{Local: []string{"publish", "login"}}
-	cases := map[string]bool{
-		"build":          true,
-		"+nightly build": true,
-		"publish":        false,
-		"-v login":       false,
-		"":               true,
-	}
-	for args, want := range cases {
-		var a []string
-		if args != "" {
-			a = splitArgs(args)
-		}
-		if _, got := remoteAllowed(p, "cargo", a); got != want {
-			t.Errorf("remoteAllowed(%q) = %v, want %v", args, got, want)
-		}
-	}
-	only := config.Tool{Remote: []string{"build", "test"}}
-	why, ok := remoteAllowed(only, "cargo", []string{"run"})
-	if _, ok2 := remoteAllowed(only, "cargo", []string{"test"}); ok || !ok2 {
-		t.Error("remote allowlist not honoured")
-	}
-	if why != `subcommand "run" is not listed in [tool.cargo] remote` {
-		t.Errorf("reason %q", why)
-	}
-}
-
-func splitArgs(s string) []string {
-	var out []string
-	cur := ""
-	for _, r := range s {
-		if r == ' ' {
-			out = append(out, cur)
-			cur = ""
-			continue
-		}
-		cur += string(r)
-	}
-	return append(out, cur)
-}
 
 func TestSafeJoin(t *testing.T) {
 	for _, bad := range []string{"../x", "a/../../x", "/etc/passwd", "", "."} {
@@ -60,25 +16,6 @@ func TestSafeJoin(t *testing.T) {
 	}
 	if p, err := safeJoin("/repo", "src/main.rs"); err != nil || p != "/repo/src/main.rs" {
 		t.Errorf("got %q, %v", p, err)
-	}
-}
-
-func TestRealBinarySkipsShims(t *testing.T) {
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	shims := t.TempDir()
-	real := t.TempDir()
-	os.Symlink(self, filepath.Join(shims, "mytool"))
-	os.WriteFile(filepath.Join(real, "mytool"), []byte("#!/bin/sh\n"), 0o755)
-	t.Setenv("PATH", shims+string(os.PathListSeparator)+real)
-	got, err := RealBinary("mytool")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != filepath.Join(real, "mytool") {
-		t.Fatalf("got %s", got)
 	}
 }
 
