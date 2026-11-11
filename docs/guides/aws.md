@@ -247,6 +247,7 @@ on deletion.
 | `VcpuLimitExceeded` | vCPU quota (step 2); lower `max_machines` or request more |
 | `InsufficientInstanceCapacity`, `Unsupported` | list more `instance_types` for the size; the provider is put on cooldown when all fail |
 | run hangs at connect, then falls back locally | UDP 7443 blocked, or the client's address is not in `allow_cidrs`. A shared control plane requires `allow_cidrs` (it will not start without it) and reconciles the security group to exactly that list; an embedded orchestrator without it adds its own public IP when it starts and keeps other rules |
+| `store grant failed … AssumeRole` | the orchestrator assumes `StoreRole` with the provider's `profile` credentials; root credentials cannot assume roles, use the operator user or role |
 | `ssm:PutParameter` denied | the machine secret channel needs SSM under `/offshore/`; use the operator role |
 | arm64 image build fails with `exec format error` | install QEMU binfmt handlers or build on an arm64 host |
 | stack in `ROLLBACK_COMPLETE` | delete it (`aws cloudformation delete-stack --stack-name offshore`) and retry; the events show the missing permission |

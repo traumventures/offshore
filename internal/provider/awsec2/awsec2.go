@@ -66,25 +66,28 @@ func init() {
 
 // EC2 is the aws-ec2 provider.
 type EC2 struct {
-	region   string
-	stack    string
-	ingress  provider.Ingress // allow_cidrs
-	diskGB   int32
-	amis     map[string]string // optional fixed AMI per architecture
-	docker   []string
-	binaries map[string]string // server binary per architecture
-	subnet   string
-	cfg      aws.Config
-	ec2      *ec2.Client
-	api      ec2API // e.ec2 (fakes in tests)
-	ecr      *ecr.Client
-	s3       *s3.Client
-	cf       *cloudformation.Client
-	ssm      *ssm.Client
-	infraMu  sync.Mutex
-	infra    *infra
-	binMu    sync.Mutex
-	binKeys  map[string]string // architecture -> uploaded binary key
+	region string
+	// credProfile is the shared config profile of the provider's
+	// credentials (option profile; the store grants use it too).
+	credProfile string
+	stack       string
+	ingress     provider.Ingress // allow_cidrs
+	diskGB      int32
+	amis        map[string]string // optional fixed AMI per architecture
+	docker      []string
+	binaries    map[string]string // server binary per architecture
+	subnet      string
+	cfg         aws.Config
+	ec2         *ec2.Client
+	api         ec2API // e.ec2 (fakes in tests)
+	ecr         *ecr.Client
+	s3          *s3.Client
+	cf          *cloudformation.Client
+	ssm         *ssm.Client
+	infraMu     sync.Mutex
+	infra       *infra
+	binMu       sync.Mutex
+	binKeys     map[string]string // architecture -> uploaded binary key
 
 	builderOnce sync.Once
 	builder     *image.DockerBuilder
@@ -131,6 +134,7 @@ func open(opts map[string]any) (provider.Provider, error) {
 	var lopts []func(*awsconfig.LoadOptions) error
 	if p := provider.String(opts, "profile", ""); p != "" {
 		lopts = append(lopts, awsconfig.WithSharedConfigProfile(p))
+		e.credProfile = p
 	}
 	if e.region != "" {
 		lopts = append(lopts, awsconfig.WithRegion(e.region))
@@ -744,7 +748,7 @@ func (e *EC2) NativeStore(ctx context.Context, pool string) (store.Config, bool,
 	if err != nil {
 		return store.Config{}, false, err
 	}
-	return store.Config{Name: e.Name(), Bucket: in.bucket, Region: e.region, Prefix: "cache/" + pool, RoleARN: in.storeRole}, true, nil
+	return store.Config{Name: e.Name(), Bucket: in.bucket, Region: e.region, Prefix: "cache/" + pool, RoleARN: in.storeRole, Profile: e.credProfile}, true, nil
 }
 
 var _ provider.DiskResizer = (*EC2)(nil)

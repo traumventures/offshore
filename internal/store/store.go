@@ -40,6 +40,10 @@ type Config struct {
 	// control plane ("" = default AWS credential chain).
 	AccessKeyID     string
 	SecretAccessKey string
+	// Profile is the shared AWS config profile of the control plane's
+	// credentials when no keys are given ("" = default credential chain),
+	// e.g. the aws-ec2 provider's profile.
+	Profile string
 	// RoleARN is assumed (STS) for scoped worker grants. Without it the
 	// configured credentials themselves are handed to workers.
 	RoleARN   string

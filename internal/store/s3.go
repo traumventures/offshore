@@ -64,6 +64,8 @@ func newS3Granter(ctx context.Context, c Config) (*s3Granter, error) {
 	}
 	if c.AccessKeyID != "" {
 		opts = append(opts, awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(c.AccessKeyID, c.SecretAccessKey, "")))
+	} else if c.Profile != "" {
+		opts = append(opts, awsconfig.WithSharedConfigProfile(c.Profile))
 	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
