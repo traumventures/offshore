@@ -79,4 +79,3 @@ func (w WorkerSlotOps) RestoreSlot(ctx context.Context, t SlotTarget, repo strin
 func SnapshotFromInfo(i proto.SnapshotInfo) scheduler.Snapshot {
 	return scheduler.Snapshot{Repo: i.Repo, Provider: i.Provider, Store: i.Store, Bytes: i.Bytes, At: time.Unix(i.At, 0)}
 }
-
