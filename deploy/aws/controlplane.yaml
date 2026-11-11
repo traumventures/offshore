@@ -33,7 +33,7 @@ Metadata:
       - Label: { default: Control plane }
         Parameters: [InstanceType, ImageUri, StateVolumeSize, LatestAmiId]
       - Label: { default: Build pool }
-        Parameters: [PoolStackName, PoolId, MachineInstanceType, MachineCpu, MachineMemory, MaxMachines]
+        Parameters: [PoolStackName, PoolId, MachineInstanceType, MachineCpu, MachineMemory]
 
 Parameters:
   VpcId:
@@ -104,10 +104,6 @@ Parameters:
   MachineMemory:
     Type: String
     Default: 7G
-  MaxMachines:
-    Type: Number
-    Default: 1
-    MinValue: 1
 
 Conditions:
   HasHostname: !Not [!Equals [!Ref Hostname, ""]]
@@ -456,7 +452,6 @@ Resources:
             cat > /var/lib/offshore/config.toml <<'CFG'
           [pool]
           id = "${PoolId}"
-          max_machines = ${MaxMachines}
 
           [providers.aws]
           type = "aws-ec2"

@@ -21,7 +21,7 @@ func TestPlanAttachesWarmDetachedVolume(t *testing.T) {
 	vol := Volume{ID: "vol-1", Provider: "aws", Zone: "eu-central-1b", Bytes: 150 * gib, SlotBytes: map[string]int64{"r": 30 * gib}, ExpiresAt: now.Add(time.Hour)}
 	f := Pool{Now: now, Sizes: []Size{volSize()}, Queue: []Task{tk}, Volumes: []Volume{vol}}
 	for _, r := range []float64{0, 0.5, 1} {
-		acts := createActs(Default{Cfg: Config{CostOptimization: r, MaxMachines: 4, CPUOvercommit: 1, MemoryOvercommit: 1}}.Plan(f))
+		acts := createActs(Default{Cfg: Config{CostOptimization: r, CPUOvercommit: 1, MemoryOvercommit: 1}}.Plan(f))
 		if len(acts) != 1 || acts[0].Volume != "vol-1" {
 			t.Fatalf("r=%v: want a create on the warm volume, got %+v", r, acts)
 		}
@@ -33,7 +33,7 @@ func TestPlanAttachesWarmDetachedVolume(t *testing.T) {
 		{ID: "vol-4", Provider: "aws", SlotBytes: map[string]int64{"other": gib}},
 	} {
 		f.Volumes = []Volume{v}
-		acts := createActs(Default{Cfg: Config{MaxMachines: 4, CPUOvercommit: 1, MemoryOvercommit: 1}}.Plan(f))
+		acts := createActs(Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1}}.Plan(f))
 		if len(acts) != 1 || acts[0].Volume != "" {
 			t.Fatalf("%s: want a fresh volume, got %+v", v.ID, acts)
 		}
@@ -42,7 +42,7 @@ func TestPlanAttachesWarmDetachedVolume(t *testing.T) {
 	ls := volSize()
 	ls.Medium = medium.Local
 	f.Sizes, f.Volumes = []Size{ls}, []Volume{vol}
-	if acts := createActs(Default{Cfg: Config{MaxMachines: 4, CPUOvercommit: 1, MemoryOvercommit: 1}}.Plan(f)); len(acts) != 1 || acts[0].Volume != "" {
+	if acts := createActs(Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1}}.Plan(f)); len(acts) != 1 || acts[0].Volume != "" {
 		t.Fatalf("local size: %+v", acts)
 	}
 }

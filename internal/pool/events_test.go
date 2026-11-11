@@ -25,7 +25,7 @@ import (
 // client span, and the release reaches the event log; /v1/events returns it.
 func TestControlPlaneTracePropagation(t *testing.T) {
 	rec := tracingtest.Record(t)
-	u := &config.PoolConfig{Pool: config.Pool{ID: "t", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s", MaxMachines: 1,
+	u := &config.PoolConfig{Pool: config.Pool{ID: "t", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s",
 		Scheduler: config.Scheduler{Estimator: "static", CPUOvercommit: 1, MemoryOvercommit: 1}},
 		Providers: map[string]map[string]any{"img": {"type": "test-img"}}, Telemetry: config.Telemetry{EventsRetentionDays: 7}}
 	state := t.TempDir()

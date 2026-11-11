@@ -22,7 +22,7 @@ user = "alice"
 
 [pool]
 id = "team-a"
-max_machines = 2
+min_machines = 2
 
 [providers.local]
 type = "local-docker"
@@ -46,7 +46,7 @@ type = "local-docker"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.Pool.ID != "team-a" || f.Pool.MaxMachines != 2 || f.ProviderNames()[0] != "local" {
+	if f.Pool.ID != "team-a" || f.Pool.MinMachines != 2 || f.ProviderNames()[0] != "local" {
 		t.Fatalf("pool %+v", f.Pool)
 	}
 	if !hasWarning(f.Warnings, "user ignored by the pool") {
@@ -60,7 +60,7 @@ func TestRemoteClientWarnsAboutPoolSections(t *testing.T) {
 url = "https://cs.example.com"
 
 [pool]
-max_machines = 9
+min_machines = 9
 `)
 	t.Setenv("OFFSHORE_CONFIG", p)
 	c, err := LoadClient()
@@ -81,7 +81,7 @@ max_machines = 9
 }
 
 func TestSeparatePoolFile(t *testing.T) {
-	client := writeFile(t, "[pool]\nmax_machines = 9\n")
+	client := writeFile(t, "[pool]\nmin_machines = 9\n")
 	t.Setenv("OFFSHORE_CONFIG", client)
 	t.Setenv("OFFSHORE_POOL_CONFIG", writeFile(t, "[pool]\nid = \"f\"\n"))
 	c, err := LoadClient()
@@ -92,7 +92,7 @@ func TestSeparatePoolFile(t *testing.T) {
 		t.Fatalf("warnings %v", c.Warnings)
 	}
 	f, err := LoadPool(PoolConfigPath())
-	if err != nil || f.Pool.ID != "f" || f.Pool.MaxMachines != 4 {
+	if err != nil || f.Pool.ID != "f" || f.Pool.MinMachines != 0 {
 		t.Fatalf("%+v %v", f, err)
 	}
 }
@@ -107,7 +107,7 @@ func TestPoolDefaults(t *testing.T) {
 		t.Fatalf("id %q warnings %v", f.Pool.ID, f.Warnings)
 	}
 	// An absent file means defaults.
-	if f, err := LoadPool(t.TempDir() + "/missing.toml"); err != nil || f.Pool.MaxMachines != 4 {
+	if f, err := LoadPool(t.TempDir() + "/missing.toml"); err != nil || f.Pool.IdleStop != "20m" {
 		t.Fatalf("%v", err)
 	}
 }

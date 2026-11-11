@@ -108,13 +108,13 @@ func TestPlanSkipsProviderInCooldown(t *testing.T) {
 	sizes := []Size{{Provider: "a", Name: "m", Capacity: res(8, 16), PricePerHour: 0.1}, {Provider: "b", Name: "m", Capacity: res(8, 16), PricePerHour: 0.3}}
 	f := Pool{Now: now, Sizes: sizes, Queue: queue(task(2, 4)), Providers: map[string]ProviderState{"a": {Down: now.Add(time.Minute)}}}
 	for _, v := range []string{VariantDefault, VariantBinpack, VariantClassic} {
-		acts := Default{Cfg: Config{Variant: v, MaxMachines: 4}}.Plan(f)
+		acts := Default{Cfg: Config{Variant: v}}.Plan(f)
 		if len(acts) != 1 || acts[0].Kind != Create || acts[0].Size.Provider != "b" {
 			t.Fatalf("%s: want create on b, got %+v", v, acts)
 		}
 	}
 	f.Providers["a"] = ProviderState{Down: now.Add(-time.Second)}
-	if acts := (Default{Cfg: Config{MaxMachines: 4}}).Plan(f); acts[0].Size.Provider != "a" {
+	if acts := (Default{Cfg: Config{}}).Plan(f); acts[0].Size.Provider != "a" {
 		t.Fatalf("cooldown over: want a, got %+v", acts)
 	}
 }
@@ -127,13 +127,13 @@ func TestPlanWaitsForReleasesInsteadOfCreating(t *testing.T) {
 	tk := profiled(time.Minute, 2*time.Minute)
 	f := Pool{Now: now, Sizes: priced, Machines: []Machine{m}, Queue: []Task{tk}}
 	for _, r := range []float64{0, 0.5, 1} {
-		if acts := (Default{Cfg: Config{CostOptimization: r, MaxMachines: 4, CPUOvercommit: 1, MemoryOvercommit: 1}}).Plan(f); len(creates(acts)) != 0 {
+		if acts := (Default{Cfg: Config{CostOptimization: r, CPUOvercommit: 1, MemoryOvercommit: 1}}).Plan(f); len(creates(acts)) != 0 {
 			t.Fatalf("r=%v: want no create, got %+v", r, acts)
 		}
 	}
 	// Sessions running for an hour more: create.
 	f.Machines[0].Releases[0].At = now.Add(time.Hour)
-	if acts := (Default{Cfg: Config{CostOptimization: 0.5, MaxMachines: 4, CPUOvercommit: 1, MemoryOvercommit: 1}}).Plan(f); len(creates(acts)) != 1 {
+	if acts := (Default{Cfg: Config{CostOptimization: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1}}).Plan(f); len(creates(acts)) != 1 {
 		t.Fatalf("long sessions: want create, got %+v", acts)
 	}
 }
@@ -144,7 +144,7 @@ func TestPlanWaitsForReleasesInsteadOfCreating(t *testing.T) {
 func TestConsolidationUsesForecast(t *testing.T) {
 	a := busy("a", res(8, 16), res(1, 2), 1)
 	b := busy("b", res(8, 16), res(1, 2), 1)
-	cfg := Config{MaxMachines: 4, ConsolidateBelow: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1}
+	cfg := Config{ConsolidateBelow: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1}
 	f := Pool{Now: now, Sizes: priced, Machines: []Machine{a, b}}
 	if got := kinds(Default{Cfg: cfg}.Plan(f))[Drain]; len(got) != 1 {
 		t.Fatalf("no forecast: want a drain, got %v", got)
@@ -264,7 +264,7 @@ func TestStartStoppedInsteadOfWaitingForOverrunningSession(t *testing.T) {
 	f := Pool{Now: now, Sizes: sizes, Machines: []Machine{x4, x8},
 		Providers: map[string]ProviderState{"aws": {Start: 16 * time.Second, Boot: 110 * time.Second}}}
 	for _, r := range []float64{0.2, 0.5} {
-		p := Default{Cfg: Config{CostOptimization: r, MaxMachines: 8, CPUOvercommit: 2, MemoryOvercommit: 1, QueueTimeout: 10 * time.Minute, IdleStop: 5 * time.Minute}}
+		p := Default{Cfg: Config{CostOptimization: r, CPUOvercommit: 2, MemoryOvercommit: 1, QueueTimeout: 10 * time.Minute, IdleStop: 5 * time.Minute}}
 		if pl := p.Place(f, tk); pl.Kind != Wait || strings.Contains(pl.Reason, "on x4") {
 			t.Fatalf("r=%v: must not wait for the smaller x4: %+v", r, pl)
 		}
@@ -295,7 +295,7 @@ func TestQueueNoLongerThanAStart(t *testing.T) {
 	tk.Profile = Profile{Warm: time.Second, Cold: 4 * time.Minute, Spread: 1}
 	f := Pool{Now: now, Sizes: sizes, Machines: []Machine{b, st},
 		Providers: map[string]ProviderState{"aws": {Start: 16 * time.Second, Boot: 110 * time.Second}}}
-	p := Default{Cfg: Config{CostOptimization: 0.5, MaxMachines: 8, CPUOvercommit: 1, MemoryOvercommit: 1, QueueTimeout: 10 * time.Minute, IdleStop: 5 * time.Minute}}
+	p := Default{Cfg: Config{CostOptimization: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1, QueueTimeout: 10 * time.Minute, IdleStop: 5 * time.Minute}}
 	starts := func(waited time.Duration) bool {
 		tk.Since = now.Add(-waited)
 		f.Queue = []Task{tk}
@@ -322,16 +322,16 @@ func TestQueueNoLongerThanAStart(t *testing.T) {
 	}
 }
 
-// providers.X.max_machines = 0 disables a provider: no create there and
-// its stopped machines are not started; unset means no own limit.
-func TestProviderMaxZeroDisables(t *testing.T) {
+// providers.X.enabled = false disables a provider: no create there and
+// its stopped machines are not started.
+func TestDisabledProviderNotUsed(t *testing.T) {
 	sizes := []Size{{Provider: "oci", Name: "m", Capacity: res(8, 16), PricePerHour: 0.1}, {Provider: "aws", Name: "m", Capacity: res(8, 16), PricePerHour: 0.4}}
 	st := machine("st", res(8, 16), Resources{})
 	st.Provider, st.State, st.Size = "oci", Stopped, "m"
 	f := Pool{Now: now, Sizes: sizes, Machines: []Machine{st}, Queue: queue(task(2, 4))}
 	for _, r := range []float64{0, 0.5, 1} {
 		for _, v := range []string{VariantDefault, VariantBinpack, VariantClassic} {
-			cfg := Config{Variant: v, CostOptimization: r, MaxMachines: 4, CPUOvercommit: 1, MemoryOvercommit: 1, ProviderMax: map[string]int{"oci": 0}}
+			cfg := Config{Variant: v, CostOptimization: r, CPUOvercommit: 1, MemoryOvercommit: 1, DisabledProviders: map[string]bool{"oci": true}}
 			for _, a := range (Default{Cfg: cfg}).Plan(f) {
 				if a.Kind == Start || a.Kind == Create && a.Size.Provider == "oci" {
 					t.Fatalf("%s r=%v: disabled provider used: %+v", v, r, a)
@@ -339,7 +339,7 @@ func TestProviderMaxZeroDisables(t *testing.T) {
 			}
 		}
 	}
-	if !(Config{ProviderMax: map[string]int{"oci": 0}}).Disabled("oci") || (Config{ProviderMax: map[string]int{}}).Disabled("oci") {
+	if !(Config{DisabledProviders: map[string]bool{"oci": true}}).Disabled("oci") || (Config{}).Disabled("oci") {
 		t.Fatal("Disabled")
 	}
 }

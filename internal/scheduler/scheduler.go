@@ -240,6 +240,9 @@ type Demand struct {
 	// Peak is the largest reservation (running plus queued) of the
 	// environment's sessions in the forecast window.
 	Peak Resources
+	// Load is the offered load: the time average of the reservation
+	// (running plus queued) over LoadWindow.
+	Load Resources
 	// LastScaleUp is the last create, start or undrain for it.
 	LastScaleUp time.Time
 	// LastStop is the last idle or consolidation stop of one of its
@@ -287,6 +290,22 @@ type Pool struct {
 	// prepared): no machines of the environment are created on the
 	// provider before the time (backoff).
 	CreateBlocked map[string]time.Time
+	// ProviderLimit holds the hard limits of the providers' accounts
+	// (quota discovery, observed limit errors; missing: none known).
+	ProviderLimit map[string]Limit
+}
+
+// Limit is a hard limit of a provider account.
+type Limit struct {
+	// CPU is the vCPUs the pool's running and starting machines of the
+	// provider may hold in total (0: no limit), e.g. the account's vCPU
+	// quota minus what other instances use.
+	CPU float64
+	// Machines is how many machines (all but gone) the provider may hold
+	// (0: no limit).
+	Machines int
+	// Source says where it comes from ("quota", "limit error").
+	Source string
 }
 
 // CreateKey is the CreateBlocked key of an environment on a provider.

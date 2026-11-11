@@ -81,6 +81,9 @@ type Options struct {
 	// Down makes providers fail creates with a capacity error during
 	// [From, To) seconds since the trace start.
 	Down []Outage
+	// Limits are hard limits of the provider accounts (quotas) the
+	// policy sees as Pool.ProviderLimit.
+	Limits map[string]scheduler.Limit
 	// Debug, when set, is called for every completed job with its wait.
 	Debug func(j Job, wait time.Duration)
 }
@@ -673,7 +676,7 @@ func (s *sim) task(j *job) scheduler.Task {
 
 // pool is the policy's view, built like the orchestrator's poolLocked.
 func (s *sim) pool() scheduler.Pool {
-	f := scheduler.Pool{Now: s.now, Sizes: s.o.Sizes, Recent: map[string]time.Time{}, Providers: map[string]scheduler.ProviderState{},
+	f := scheduler.Pool{Now: s.now, Sizes: s.o.Sizes, Recent: map[string]time.Time{}, Providers: map[string]scheduler.ProviderState{}, ProviderLimit: s.o.Limits,
 		Refetch: s.cal.Factors()}
 	for env, t := range s.recent {
 		f.Recent[env] = t

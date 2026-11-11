@@ -449,9 +449,6 @@ func fixConfig(cfg *Config) {
 			cfg.Policy.ExpiryMargin = cfg.MaxLifetime / 4
 		}
 	}
-	if cfg.Policy.MaxMachines == 0 {
-		cfg.Policy.MaxMachines = 1
-	}
 }
 
 // now is the decision time (see Clock).
@@ -1706,6 +1703,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	if err := o.Refresh(ctx); err != nil {
 		return err
 	}
+	go o.refreshQuotas(context.WithoutCancel(ctx)) // bounded, at most every quotaRefresh
 	now := o.now()
 	o.mu.Lock()
 	var invariant []scheduler.Action
@@ -1717,7 +1715,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 		case m.State == provider.Failed:
 			invariant = append(invariant, scheduler.Action{Kind: scheduler.Destroy, Machine: m.ID, Reason: "failed"})
 		case o.cfg.Policy.Disabled(m.Provider) && !inFlight && m.State != provider.Starting && !busy && len(m.pending) == 0:
-			// max_machines = 0: the provider is disabled; its machines
+			// enabled = false: the provider is disabled; its machines
 			// finish their sessions and are destroyed.
 			invariant = append(invariant, scheduler.Action{Kind: scheduler.Destroy, Machine: m.ID, Reason: "provider disabled"})
 		case expired && m.State == provider.Running && busy:

@@ -195,8 +195,18 @@ func testConfig(prov string) Config {
 	return Config{
 		Owner: "test", MaxLifetime: 24 * time.Hour, QueueTimeout: 30 * time.Second,
 		Sizes:  []scheduler.Size{{Provider: prov, Name: "m4", Capacity: scheduler.Resources{CPU: 4, Memory: 4 * gib}}},
-		Policy: scheduler.Config{CPUOvercommit: 2, MemoryOvercommit: 1, MinMachines: 0, MaxMachines: 3, IdleStop: time.Minute},
+		Policy: scheduler.Config{CPUOvercommit: 2, MemoryOvercommit: 1, MinMachines: 0, IdleStop: time.Minute},
 	}
+}
+
+// limitVCPU sets a provider's account quota to cpu vCPUs (a limit of
+// cpu/4 machines of the test size m4).
+func limitVCPU(o *Orchestrator, prov string, cpu float64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	h := o.health[prov]
+	h.quota, h.hasQuota, h.quotaAt = cpu, true, o.now().Add(time.Hour)
+	o.health[prov] = h
 }
 
 func newTestOrch(t *testing.T, f *fakeProvider, mod func(*Config)) *Orchestrator {
@@ -255,9 +265,10 @@ func TestScaleOutWhenFull(t *testing.T) {
 	}
 }
 
-func TestQueueTimeoutAtMaxMachines(t *testing.T) {
+func TestQueueTimeoutAtProviderLimit(t *testing.T) {
 	f := newFake()
-	o := newTestOrch(t, f, func(c *Config) { c.Policy.MaxMachines = 1; c.QueueTimeout = 500 * time.Millisecond })
+	o := newTestOrch(t, f, func(c *Config) { c.QueueTimeout = 500 * time.Millisecond })
+	limitVCPU(o, "fake", 4)
 	ctx := context.Background()
 	for i := 0; i < 2; i++ {
 		l, err := o.Acquire(ctx, req("r1"), io.Discard)
@@ -419,12 +430,11 @@ func TestMultiProviderBurst(t *testing.T) {
 		{Provider: "aws", Name: "c7a.xlarge", Capacity: scheduler.Resources{CPU: 4, Memory: 4 * gib}, PricePerHour: 0.2},
 		{Provider: "local", Name: "box", Capacity: scheduler.Resources{CPU: 4, Memory: 4 * gib}, PricePerHour: 0},
 	}
-	cfg.Policy.MaxMachines = 3
-	cfg.Policy.ProviderMax = map[string]int{"local": 1}
 	o, err := New(cfg, map[string]provider.Provider{"local": local, "aws": cloud}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	limitVCPU(o, "local", 4)
 	o.ProbeFunc = multiProbe(local, cloud)
 	ctx := context.Background()
 	placed := map[string]int{}
@@ -475,7 +485,6 @@ func (s *slowStart) Caps() provider.Caps {
 func TestWarmRestartStartsOnce(t *testing.T) {
 	f := &slowStart{fakeProvider: newFake(), delay: 2500 * time.Millisecond}
 	cfg := testConfig("fake")
-	cfg.Policy.MaxMachines = 2
 	o, err := New(cfg, map[string]provider.Provider{"fake": f}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)

@@ -113,13 +113,13 @@ func (p Default) hedgeMargin() (time.Duration, bool) {
 // outages) or the knob is 1: then waiting is only bounded by the queue
 // timeout. Starting a machine does not commit the task to it: it takes
 // whatever frees first.
-func (p Default) hedgeBound(f Pool, t Task, active int, perProvider map[string]int, roomForMore bool) (time.Duration, bool) {
+func (p Default) hedgeBound(f Pool, t Task, st *planState, roomForMore bool) (time.Duration, bool) {
 	margin, ok := p.hedgeMargin()
 	if !p.next() || !ok {
 		return 0, false
 	}
 	c := p.cfg()
-	if active >= c.MaxMachines && c.MaxMachines > 0 && !roomForMore {
+	if !p.room(st, t.EnvHash) && !roomForMore {
 		return 0, false
 	}
 	best := time.Duration(-1)
@@ -132,7 +132,7 @@ func (p Default) hedgeBound(f Pool, t Task, active int, perProvider map[string]i
 			best = l
 		}
 	}
-	for _, s := range p.allowedSizes(f.SizesFor(t.EnvHash), perProvider) {
+	for _, s := range p.allowedSizes(f.SizesFor(t.EnvHash), st) {
 		if !p.sizeAdmissible(s).Fits(t.Request) || !p.physical(f, s.Capacity, t) {
 			continue
 		}
@@ -144,21 +144,6 @@ func (p Default) hedgeBound(f Pool, t Task, active int, perProvider map[string]i
 		return 0, false
 	}
 	return best + margin, true
-}
-
-// poolCounts returns the machines that count against MaxMachines
-// (running, starting) and against each provider's limit (all but gone).
-func poolCounts(f Pool) (int, map[string]int) {
-	active, per := 0, map[string]int{}
-	for _, m := range f.Machines {
-		if m.State == Running || m.State == Starting {
-			active++
-		}
-		if m.State != Gone {
-			per[m.Provider]++
-		}
-	}
-	return active, per
 }
 
 // idleMachine reports whether f has an empty running machine that could

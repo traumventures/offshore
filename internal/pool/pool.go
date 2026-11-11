@@ -110,8 +110,8 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 			CPUOvercommit: f.CPUOvercommit, MemoryOvercommit: f.MemoryOvercommit,
 			MaxCPUPressure: f.MaxCPUPressure, MaxMemoryPressure: f.MaxMemoryPressure,
 			SoftLimit: f.SoftLimit, Swap: f.Swap, LimitJobs: f.LimitJobs,
-			MinMachines: f.MinMachines, MaxMachines: f.MaxMachines, IdleStop: idle,
-			ProviderMax: map[string]int{}, Variant: f.Policy, ConsolidateTarget: f.ConsolidateTarget,
+			MinMachines: f.MinMachines, MaxSpendPerHour: f.MaxSpendPerHour, IdleStop: idle,
+			DisabledProviders: map[string]bool{}, Variant: f.Policy, ConsolidateTarget: f.ConsolidateTarget,
 		},
 	}
 	c.DirtyRatio = u.Writeback.DirtyRatio
@@ -145,10 +145,10 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 		c.Policy.WarmPool = append(c.Policy.WarmPool, scheduler.WarmWindow{Days: days, From: from, To: to, Machines: w.Machines, Location: loc})
 	}
 	for name, opts := range u.Providers {
-		// Unset: no own limit; 0: disabled (no new machines, stopped ones
-		// are not started again).
-		if v, ok := opts["max_machines"].(int64); ok {
-			c.Policy.ProviderMax[name] = int(v)
+		// enabled = false: no new machines, stopped ones are not started
+		// again, idle ones are destroyed.
+		if v, ok := opts["enabled"].(bool); ok && !v {
+			c.Policy.DisabledProviders[name] = true
 		}
 	}
 	return c

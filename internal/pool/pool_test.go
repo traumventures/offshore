@@ -97,7 +97,7 @@ func testEnv(t *testing.T) Env {
 }
 
 func TestControlPlaneRoundTrip(t *testing.T) {
-	u := &config.PoolConfig{Pool: config.Pool{ID: "t", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s", MaxMachines: 1,
+	u := &config.PoolConfig{Pool: config.Pool{ID: "t", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s",
 		Scheduler: config.Scheduler{Estimator: "static", CPUOvercommit: 1, MemoryOvercommit: 1}},
 		Providers: map[string]map[string]any{"img": {"type": "test-img"}}}
 	state := t.TempDir()
@@ -220,9 +220,9 @@ func TestConfigTierStack(t *testing.T) {
 	}
 }
 
-func TestProviderMaxMachinesInPolicy(t *testing.T) {
+func TestProviderEnabledInPolicy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
-	cfg := "[pool]\nmax_machines = 4\n[providers.a]\ntype = \"local-docker\"\nmax_machines = 0\n[providers.b]\ntype = \"local-docker\"\n" +
+	cfg := "[pool]\nmax_spend_per_hour = 2.5\n[providers.a]\ntype = \"local-docker\"\nenabled = false\n[providers.b]\ntype = \"local-docker\"\nenabled = true\n" +
 		"[[providers.a.size]]\nname = \"s\"\ncpu = 2\nmemory = \"4G\"\n[[providers.b.size]]\nname = \"s\"\ncpu = 2\nmemory = \"4G\"\n"
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -232,10 +232,7 @@ func TestProviderMaxMachinesInPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := Config(u).Policy
-	if lim, ok := p.ProviderMax["a"]; !ok || lim != 0 || !p.Disabled("a") {
-		t.Fatalf("a: %v", p.ProviderMax)
-	}
-	if _, ok := p.ProviderMax["b"]; ok || p.Disabled("b") {
-		t.Fatalf("b unset must have no limit: %v", p.ProviderMax)
+	if !p.Disabled("a") || p.Disabled("b") || p.MaxSpendPerHour != 2.5 {
+		t.Fatalf("disabled %v, max spend %v", p.DisabledProviders, p.MaxSpendPerHour)
 	}
 }

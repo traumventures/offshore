@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // evalCase is one trace on one pool of the evaluation matrix.
@@ -20,6 +22,23 @@ type evalCase struct {
 	resize bool
 }
 
+// evalLimits are provider machine limits from OFFSHORE_EVAL_LIMIT
+// (provider:machines,...), e.g. aws:4 for the machine limit production
+// had before the runaway guard.
+func evalLimits() map[string]scheduler.Limit {
+	s := os.Getenv("OFFSHORE_EVAL_LIMIT")
+	if s == "" {
+		return nil
+	}
+	out := map[string]scheduler.Limit{}
+	for _, kv := range strings.Split(s, ",") {
+		prov, n, _ := strings.Cut(kv, ":")
+		m, _ := strconv.Atoi(n)
+		out[prov] = scheduler.Limit{Machines: m, Source: "eval"}
+	}
+	return out
+}
+
 // evalCases are the evaluation traces: the sample traces, the production
 // exports (nov10: the old control plane's day, nov11: today's with the
 // waiting regression) and the adversarial scenarios, each on the pools it
@@ -27,6 +46,7 @@ type evalCase struct {
 func evalCases(t testing.TB) []evalCase {
 	pools := map[string]EvalPool{}
 	for _, p := range EvalPools() {
+		p.Limits = evalLimits()
 		pools[p.Name] = p
 	}
 	var cs []evalCase

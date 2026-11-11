@@ -16,7 +16,7 @@ import (
 )
 
 func TestControlPlaneMetricsAndRequestIDs(t *testing.T) {
-	u := &config.PoolConfig{Pool: config.Pool{ID: "t", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s", MaxMachines: 1,
+	u := &config.PoolConfig{Pool: config.Pool{ID: "t", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s",
 		Scheduler: config.Scheduler{Estimator: "static", CPUOvercommit: 1, MemoryOvercommit: 1}},
 		Providers: map[string]map[string]any{"img": {"type": "test-img"}}}
 	state := t.TempDir()

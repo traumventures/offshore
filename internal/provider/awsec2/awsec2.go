@@ -84,6 +84,7 @@ type EC2 struct {
 	s3          *s3.Client
 	cf          *cloudformation.Client
 	ssm         *ssm.Client
+	quotas      quotaAPI // Service Quotas (created on first use)
 	infraMu     sync.Mutex
 	infra       *infra
 	binMu       sync.Mutex

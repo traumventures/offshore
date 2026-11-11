@@ -122,7 +122,7 @@ func init() {
 }
 
 func multiPool(t *testing.T, provs map[string]*hostProvider) *Local {
-	u := &config.PoolConfig{Pool: config.Pool{ID: "t", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s", MaxMachines: 4,
+	u := &config.PoolConfig{Pool: config.Pool{ID: "t", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s",
 		Scheduler: config.Scheduler{Estimator: "static", CPUOvercommit: 1, MemoryOvercommit: 1}},
 		Providers: map[string]map[string]any{}}
 	for name, p := range provs {

@@ -39,9 +39,9 @@ func TestReloaderAppliesOnlyChanges(t *testing.T) {
 	if r.Check() || loads != 0 {
 		t.Fatal("unchanged file reloaded")
 	}
-	write("[pool]\nid = \"t\"\nmax_machines = 7\n[providers.img]\ntype = \"test-img\"\n\n[scheduler]\nestimator = \"static\"\n", t0.Add(time.Minute))
-	if !r.Check() || local.PoolConfig().Pool.MaxMachines != 7 {
-		t.Fatalf("change not applied: %d", local.PoolConfig().Pool.MaxMachines)
+	write("[pool]\nid = \"t\"\nmin_machines = 7\n[providers.img]\ntype = \"test-img\"\n\n[scheduler]\nestimator = \"static\"\n", t0.Add(time.Minute))
+	if !r.Check() || local.PoolConfig().Pool.MinMachines != 7 {
+		t.Fatalf("change not applied: %d", local.PoolConfig().Pool.MinMachines)
 	}
 	if r.Check() || loads != 1 {
 		t.Fatalf("reloaded without change (%d loads)", loads)
@@ -49,7 +49,7 @@ func TestReloaderAppliesOnlyChanges(t *testing.T) {
 	// A broken file keeps the previous configuration and is not retried
 	// until it changes again.
 	write("[scheduler]\npolicy = \"fifo\"\n", t0.Add(2*time.Minute))
-	if r.Check() || local.PoolConfig().Pool.MaxMachines != 7 {
+	if r.Check() || local.PoolConfig().Pool.MinMachines != 7 {
 		t.Fatal("broken configuration applied")
 	}
 	if r.Check() || loads != 2 {

@@ -68,7 +68,7 @@ func TestPlanScaleOutPicksSmallestFittingSize(t *testing.T) {
 		{Provider: "p", Name: "large", Capacity: res(32, 64), PricePerHour: 1.6},
 		{Provider: "p", Name: "small", Capacity: res(4, 8), PricePerHour: 0.2},
 	}
-	pol := Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1, MaxMachines: 10}}
+	pol := Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1}}
 	one := pol.Plan(Pool{Now: now, Sizes: sizes, Queue: []Task{task(2, 4)}})
 	if len(one) != 1 || one[0].Kind != Create || one[0].Size.Name != "small" {
 		t.Fatalf("one small task: %+v", one)
@@ -89,7 +89,7 @@ func TestPlanScaleOutPicksSmallestFittingSize(t *testing.T) {
 func TestPlanStartsStoppedBeforeCreating(t *testing.T) {
 	st := machine("st", res(4, 8), Resources{})
 	st.State = Stopped
-	pol := Default{Cfg: Config{MaxMachines: 3}}
+	pol := Default{Cfg: Config{}}
 	acts := pol.Plan(Pool{Now: now, Sizes: []Size{{Provider: "p", Name: "s", Capacity: res(4, 8)}}, Machines: []Machine{st}, Queue: []Task{task(2, 4)}})
 	if len(acts) != 1 || acts[0].Kind != Start || acts[0].Machine != "st" {
 		t.Fatalf("%+v", acts)
@@ -103,8 +103,9 @@ func TestPlanProviderLimitBursts(t *testing.T) {
 		{Provider: "local", Name: "box", Capacity: res(4, 4)},
 		{Provider: "aws", Name: "c7a", Capacity: res(4, 4), PricePerHour: 0.2},
 	}
-	pol := Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1, MaxMachines: 5, ProviderMax: map[string]int{"local": 1}}}
-	acts := pol.Plan(Pool{Now: now, Sizes: sizes, Machines: []Machine{local}, Queue: []Task{task(2, 2)}})
+	pol := Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1}}
+	acts := pol.Plan(Pool{Now: now, Sizes: sizes, Machines: []Machine{local}, Queue: []Task{task(2, 2)},
+		ProviderLimit: map[string]Limit{"local": {Machines: 1}}})
 	if len(acts) != 1 || acts[0].Size.Provider != "aws" {
 		t.Fatalf("local is at its limit, want burst to aws: %+v", acts)
 	}
@@ -113,7 +114,7 @@ func TestPlanProviderLimitBursts(t *testing.T) {
 func TestPlanIdleStopKeepsWarmPool(t *testing.T) {
 	a, b := machine("a", res(4, 8), Resources{}), machine("b", res(4, 8), Resources{})
 	a.IdleSince, b.IdleSince = now.Add(-time.Hour), now.Add(-time.Hour)
-	pol := Default{Cfg: Config{MinMachines: 1, MaxMachines: 3, IdleStop: time.Minute}}
+	pol := Default{Cfg: Config{MinMachines: 1, IdleStop: time.Minute}}
 	acts := pol.Plan(Pool{Now: now, Machines: []Machine{a, b}, Recent: map[string]time.Time{"e": now}})
 	if len(acts) != 1 || acts[0].Kind != Stop {
 		t.Fatalf("want exactly one stop: %+v", acts)

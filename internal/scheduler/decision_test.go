@@ -88,7 +88,7 @@ func TestScaleOutDecision(t *testing.T) {
 	tk.Since = now.Add(-10 * time.Minute)
 	f := Pool{Now: now, Sizes: sizes, Queue: []Task{tk},
 		Providers: map[string]ProviderState{"b": {Down: now.Add(time.Hour)}}}
-	acts := Default{Cfg: Config{MaxMachines: 4, CPUOvercommit: 1, MemoryOvercommit: 1}}.Plan(f)
+	acts := Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1}}.Plan(f)
 	var create *Action
 	for i := range acts {
 		if acts[i].Kind == Create {

@@ -122,14 +122,13 @@ sed -i "s/\"18092:18080\"/\"$FWD_SVC:18080\"/" "$PROJ/.offshore.toml"
 
 # write_config writes the pool configuration: the client file in embedded
 # mode, the control plane's own file in remote mode.
-write_config() { # lifetime idle min max
+write_config() { # lifetime idle min
   cat > "$POOLCFG" <<EOF
 [pool]
 id = "$OWNER"
 max_lifetime = "$1"
 idle_stop = "$2"
 min_machines = $3
-max_machines = $4
 queue_timeout = "3m"
 
 [scheduler]
@@ -167,7 +166,7 @@ if [ -n "$REMOTE" ]; then
   POOLCFG="$WORK/cp-config.toml"
   CPPORT="$(freeport)"
   MPORT="$(freeport)"
-  write_config 24h 10m 0 2
+  write_config 24h 10m 0
   start_cp || exit 1
   FP="$(sed -n 's/.*"Fingerprint":"\([0-9a-f]*\)".*/\1/p' "$CPSTATE/tls.json")"
   cat > "$OFFSHORE_CONFIG" <<EOF
@@ -177,4 +176,4 @@ fingerprint = "$FP"
 api_key = "file:$CPSTATE/api-key"
 EOF
 fi
-write_config 24h 10m 0 2
+write_config 24h 10m 0

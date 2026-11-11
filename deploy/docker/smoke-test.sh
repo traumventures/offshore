@@ -54,7 +54,6 @@ mkdir -p "$HOSTSTATE"
 cat > "$HOSTSTATE/config.toml" <<CFG
 [pool]
 id = "$OWNER"
-max_machines = 1
 
 [providers.local]
 type = "local-docker"
