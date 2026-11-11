@@ -642,6 +642,25 @@ disk), `go` sets `GOCACHEPROG` to `cloudsourced gocacheprog`, which keeps
 outputs on the machine disk (go reads them from there) and shares them through
 the endpoint. A `ttl` below 24h lowers the age of reused entries.
 
+#### Machine caches per digest (`node_modules`)
+
+A machine cache with `digest` and `install` is immutable per content hash:
+the digest covers the matching files (globs, e.g. the lockfile), the
+cache's name, paths and install command, and the environment's platform
+(`os/arch/libc`). The first session that needs a digest runs `install`
+remotely (sandboxed, with the session's environment and the cache paths
+bound to a fresh directory; its output appears on stderr) and stores the
+result in the machine store `<deps dir>/digest/<name>/<digest>`. Every slot
+gets a copy linked from the store on the same disk: reflinks where the
+filesystem supports them (writable), otherwise hard links mounted
+read-only, so sessions can never change the store. The copy is refreshed
+when the digest changes. The paths are hidden from the source projection,
+so a local `node_modules` (e.g. for another platform) never reaches the
+machine. Digests unused for the cache's `ttl` are removed, and per cache
+the least recently used ones beyond `max_size` (the newest stays). Plain
+machine caches with `max_size` are pruned by least recent access while the
+machine is idle.
+
 #### Pruning
 
 Slots are pruned against two budgets: per slot the sum of the slot caches'

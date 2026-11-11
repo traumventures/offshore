@@ -19,7 +19,7 @@ func TestRelocateToolchain(t *testing.T) {
 	tc := &proto.Toolchain{CargoHome: "/home/u/.cargo", RustupHome: "/home/u/.rustup"}
 
 	r := relocateToolchain(env, tc, []string{"/home/u/src/repo"}, all)
-	if fmt.Sprint(r.binds) != fmt.Sprintf("[{%s /home/u/.cargo} {%s /home/u/.rustup}]", cargo, rustup) {
+	if fmt.Sprint(r.binds) != fmt.Sprintf("[{%s /home/u/.cargo false} {%s /home/u/.rustup false}]", cargo, rustup) {
 		t.Fatalf("binds = %v", r.binds)
 	}
 	if fmt.Sprint(r.env) != "[[CARGO_HOME /home/u/.cargo] [PATH /home/u/.cargo/bin:/usr/bin] [RUSTUP_HOME /home/u/.rustup]]" {

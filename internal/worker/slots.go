@@ -48,6 +48,9 @@ type slotMeta struct {
 	// Caches are the slot-scope caches of the last session (paths and
 	// prune policies), so the slot can be pruned without a request.
 	Caches []slotCache `json:"caches,omitempty"`
+	// Digests are the digests of machine caches linked into the slot
+	// (cache name -> digest).
+	Digests map[string]string `json:"digests,omitempty"`
 }
 
 // slotCache is a slot-scope cache path with its pruning settings.
