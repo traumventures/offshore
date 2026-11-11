@@ -184,6 +184,7 @@ type Worker struct {
 	// the periodic gc.
 	machineCacheBytes atomic.Int64
 	pruneMu           sync.Mutex // one prune at a time
+	machineBudgets    machineCacheBudgets
 }
 
 type fetchCall struct {
@@ -309,10 +310,12 @@ func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
 		}
 		if time.Since(lastGC) > 5*time.Minute {
 			s.slots.gc(s.cfg.BuildTTL)
+			s.gcDigests(time.Now())
 			go s.measureMachineCaches()
 			go func() {
 				s.pruneMu.Lock()
 				defer s.pruneMu.Unlock()
+				s.pruneMachineCaches()
 				s.enforceDiskBudget()
 			}()
 			lastGC = time.Now()

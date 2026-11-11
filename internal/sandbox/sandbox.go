@@ -21,8 +21,9 @@ const SpecEnv = "CLOUDSOURCED_SANDBOX_SPEC"
 
 // Bind is a bind mount from Src onto Dst.
 type Bind struct {
-	Src string `json:"src"`
-	Dst string `json:"dst"`
+	Src      string `json:"src"`
+	Dst      string `json:"dst"`
+	ReadOnly bool   `json:"ro,omitempty"`
 }
 
 // Spec describes the process to start.
@@ -70,6 +71,11 @@ func Init() error {
 		}
 		if err := syscall.Mount(b.Src, b.Dst, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
 			return fmt.Errorf("sandbox: bind %s -> %s: %w", b.Src, b.Dst, err)
+		}
+		if b.ReadOnly {
+			if err := syscall.Mount("", b.Dst, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY|syscall.MS_REC, ""); err != nil {
+				return fmt.Errorf("sandbox: read-only %s: %w", b.Dst, err)
+			}
 		}
 	}
 	if spec.Cgroup != "" {

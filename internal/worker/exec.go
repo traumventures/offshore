@@ -206,7 +206,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	}
 	// Toolchain first: dependency caches ($CARGO_HOME/registry) nest in it.
 	binds := s.relocation(req).binds
-	cb, err := s.cacheBinds(req, data, env)
+	cb, err := s.cacheBinds(req, slot, env, binds, frameWriter{pc, proto.TStderr})
 	if err != nil {
 		return prepErr(err)
 	}
