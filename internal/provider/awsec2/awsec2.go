@@ -1,5 +1,5 @@
 // Package awsec2 runs machines as EC2 instances. Each instance runs Docker
-// and the supervisor ("cloudsourced supervisor"), which applies the same machine
+// and the supervisor ("offshore supervisor"), which applies the same machine
 // container layout as the local-docker backend (machine.Layout: server with
 // FUSE, services in its network namespace, cache volumes on the instance
 // disk), so behaviour matches the reference backend. User data carries only
@@ -43,9 +43,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
-	"github.com/traumventures/cloudsourced/internal/image"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/store"
+	"github.com/traumventures/offshore/internal/image"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/store"
 )
 
 //go:embed stack.yaml
@@ -57,7 +57,7 @@ const templateVersion = "8"
 const (
 	serverPort = 7443
 	tagProject = "project"
-	project    = "cloudsourced"
+	project    = "offshore"
 )
 
 func init() {
@@ -305,7 +305,7 @@ func (e *EC2) ensureIngress(ctx context.Context, sg string) error {
 	}
 	var ranges []ec2types.IpRange
 	for _, c := range cidrs {
-		ranges = append(ranges, ec2types.IpRange{CidrIp: aws.String(c), Description: aws.String("cloudsourced clients")})
+		ranges = append(ranges, ec2types.IpRange{CidrIp: aws.String(c), Description: aws.String("offshore clients")})
 	}
 	for _, r := range ranges {
 		_, err := e.ec2.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
@@ -397,7 +397,7 @@ func (e *EC2) ensureBinary(ctx context.Context, bucket, arch string) (string, er
 // binaryKey is the content addressed S3 key of a server binary.
 func binaryKey(arch string, data []byte) string {
 	sum := sha256.Sum256(data)
-	return "bin/cloudsourced-linux-" + arch + "-" + hex.EncodeToString(sum[:])[:16]
+	return "bin/offshore-linux-" + arch + "-" + hex.EncodeToString(sum[:])[:16]
 }
 
 func (e *EC2) amiID(ctx context.Context, arch string) (string, error) {
@@ -437,7 +437,7 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 		return provider.Machine{}, fmt.Errorf("aws-ec2: user data too large (%d bytes)", len(ud))
 	}
 	tags := []ec2types.Tag{
-		{Key: aws.String("Name"), Value: aws.String("cloudsourced-" + spec.ID)},
+		{Key: aws.String("Name"), Value: aws.String("offshore-" + spec.ID)},
 		{Key: aws.String(tagProject), Value: aws.String(project)},
 		{Key: aws.String(provider.LabelPool), Value: aws.String(spec.Owner)},
 		{Key: aws.String(provider.LabelMachine), Value: aws.String(spec.ID)},
@@ -514,7 +514,7 @@ func (e *EC2) PutSecrets(ctx context.Context, machineID string, env map[string]s
 	in := &ssm.PutParameterInput{
 		Name: aws.String(secretParameter(e.stack, machineID)), Type: ssmtypes.ParameterTypeSecureString,
 		Value:       aws.String(string(b)),
-		Description: aws.String("cloudsourced machine secrets, deleted by the machine after boot"),
+		Description: aws.String("offshore machine secrets, deleted by the machine after boot"),
 		Tags:        []ssmtypes.Tag{{Key: aws.String(tagProject), Value: aws.String(project)}, {Key: aws.String(provider.LabelMachine), Value: aws.String(machineID)}},
 	}
 	if len(b) > 4096 {

@@ -2,17 +2,17 @@ package orchestrator
 
 import (
 	"context"
-	"github.com/traumventures/cloudsourced/internal/labels"
+	"github.com/traumventures/offshore/internal/labels"
 	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/tracing"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/scheduler"
+	"github.com/traumventures/offshore/internal/tracing"
 )
 
 // observer records the analysis event log and holds what Finish needs to
@@ -69,10 +69,10 @@ func (o *Orchestrator) machineEventLocked(typ, id string) events.Event {
 // background work: new roots linked to the triggering request.
 func machineSpan(ctx context.Context, action string, ev events.Event) (context.Context, trace.Span) {
 	attrs := trace.WithAttributes(
-		attribute.String("cloudsourced.machine", ev.Machine),
-		attribute.String("cloudsourced.provider", ev.Provider),
-		attribute.String("cloudsourced.size", ev.Size),
-		attribute.Float64("cloudsourced.price_per_hour", ev.Price),
+		attribute.String("offshore.machine", ev.Machine),
+		attribute.String("offshore.provider", ev.Provider),
+		attribute.String("offshore.size", ev.Size),
+		attribute.Float64("offshore.price_per_hour", ev.Price),
 	)
 	if action == "create" || action == "start" {
 		return tracing.StartLinked(ctx, "pool."+action, attrs)
@@ -97,7 +97,7 @@ func (o *Orchestrator) traced(ctx context.Context, a scheduler.Action, fn func(c
 		ev.Capacity = &cp
 	}
 	ctx, span := machineSpan(ctx, a.Kind.String(), ev)
-	span.SetAttributes(attribute.String("cloudsourced.reason", a.Reason))
+	span.SetAttributes(attribute.String("offshore.reason", a.Reason))
 	ev.TraceID = tracing.TraceID(ctx)
 	start := time.Now()
 	if a.Kind == scheduler.Create || a.Kind == scheduler.Start {
@@ -106,7 +106,7 @@ func (o *Orchestrator) traced(ctx context.Context, a scheduler.Action, fn func(c
 	}
 	fn(ctx)
 	ms := time.Since(start).Milliseconds()
-	span.SetAttributes(attribute.Int64("cloudsourced.action_ms", ms))
+	span.SetAttributes(attribute.Int64("offshore.action_ms", ms))
 	if a.Kind == scheduler.Stop || a.Kind == scheduler.Destroy {
 		ev.Time, ev.LatencyMs = time.Time{}, ms
 		o.obs.log.Append(ev)
@@ -125,7 +125,7 @@ func (o *Orchestrator) readyEvent(ctx context.Context, id string) {
 	o.mu.Unlock()
 	ev.TraceID = tracing.TraceID(ctx)
 	o.obs.log.Append(ev)
-	trace.SpanFromContext(ctx).AddEvent("machine ready", trace.WithAttributes(attribute.Int64("cloudsourced.ready_ms", ev.LatencyMs)))
+	trace.SpanFromContext(ctx).AddEvent("machine ready", trace.WithAttributes(attribute.Int64("offshore.ready_ms", ev.LatencyMs)))
 }
 
 // markEventsLocked records drain decisions (no provider call).
@@ -154,10 +154,10 @@ func (o *Orchestrator) stateEventLocked(id string, state provider.State) {
 // startAcquire starts the span of a capacity request.
 func startAcquire(ctx context.Context, req Request) (context.Context, trace.Span) {
 	return tracing.Start(ctx, "pool.acquire", trace.WithAttributes(
-		attribute.String("cloudsourced.repo_id", req.RepoID),
-		attribute.String("cloudsourced.env_hash", req.EnvHash),
-		attribute.Float64("cloudsourced.need.cpu", req.Need.CPU),
-		attribute.Int64("cloudsourced.need.memory", req.Need.Memory),
+		attribute.String("offshore.repo_id", req.RepoID),
+		attribute.String("offshore.env_hash", req.EnvHash),
+		attribute.Float64("offshore.need.cpu", req.Need.CPU),
+		attribute.Int64("offshore.need.memory", req.Need.Memory),
 	))
 }
 
@@ -206,15 +206,15 @@ func (o *Orchestrator) endAcquire(ctx context.Context, span trace.Span, req Requ
 		o.obs.mu.Unlock()
 	}
 	span.SetAttributes(
-		attribute.String("cloudsourced.placement", kind),
-		attribute.String("cloudsourced.placement_reason", ev.Reason),
-		attribute.Int64("cloudsourced.queue_wait_ms", ev.WaitMs),
-		attribute.String("cloudsourced.machine", lease.MachineID),
-		attribute.String("cloudsourced.provider", lease.Provider),
-		attribute.String("cloudsourced.size", lease.Size),
-		attribute.Float64("cloudsourced.price_per_hour", lease.PricePerHour),
-		attribute.Float64("cloudsourced.reserve.cpu", lease.Grant.Reserve.CPU),
-		attribute.Int64("cloudsourced.reserve.memory", lease.Grant.Reserve.Memory),
+		attribute.String("offshore.placement", kind),
+		attribute.String("offshore.placement_reason", ev.Reason),
+		attribute.Int64("offshore.queue_wait_ms", ev.WaitMs),
+		attribute.String("offshore.machine", lease.MachineID),
+		attribute.String("offshore.provider", lease.Provider),
+		attribute.String("offshore.size", lease.Size),
+		attribute.Float64("offshore.price_per_hour", lease.PricePerHour),
+		attribute.Float64("offshore.reserve.cpu", lease.Grant.Reserve.CPU),
+		attribute.Int64("offshore.reserve.memory", lease.Grant.Reserve.Memory),
 	)
 	tracing.End(span, err)
 }

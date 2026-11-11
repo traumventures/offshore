@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 func TestSendBlobCompressed(t *testing.T) {

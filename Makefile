@@ -6,16 +6,16 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 
 # The binary is mounted into machines, so it must be static. Machines of
 # the other architecture (aws-ec2 sizes with arch = "arm64" or "amd64") run
-# bin/cloudsourced-linux-<arch>, which the provider finds next to the
+# bin/offshore-linux-<arch>, which the provider finds next to the
 # orchestrator's binary.
 HOST_PLATFORM := $(shell $(GO) env GOOS)/$(shell $(GO) env GOARCH)
 MACHINE_ARCHES ?= amd64 arm64
 build:
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/cloudsourced ./cmd/cloudsourced
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/offshore ./cmd/offshore
 	@for a in $(MACHINE_ARCHES); do \
 	  if [ "$(HOST_PLATFORM)" != "linux/$$a" ]; then \
-	    echo "building bin/cloudsourced-linux-$$a"; \
-	    CGO_ENABLED=0 GOOS=linux GOARCH=$$a $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/cloudsourced-linux-$$a ./cmd/cloudsourced || exit 1; \
+	    echo "building bin/offshore-linux-$$a"; \
+	    CGO_ENABLED=0 GOOS=linux GOARCH=$$a $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/offshore-linux-$$a ./cmd/offshore || exit 1; \
 	  fi; \
 	done
 
@@ -27,12 +27,12 @@ vet:
 
 # Control plane container image (Dockerfile). DOCKER="sudo -n docker" if needed.
 DOCKER ?= docker
-IMAGE ?= cloudsourced-controlplane
+IMAGE ?= offshore-controlplane
 image:
 	$(DOCKER) build --platform linux/amd64 --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION) -t $(IMAGE):latest .
 
 # Push to a registry, e.g. the ECR repository of deploy/aws/controlplane.yaml:
-#   make image-push IMAGE_REPO=123456789012.dkr.ecr.eu-central-1.amazonaws.com/cloudsourced-controlplane
+#   make image-push IMAGE_REPO=123456789012.dkr.ecr.eu-central-1.amazonaws.com/offshore-controlplane
 image-push: image
 	@test -n "$(IMAGE_REPO)" || { echo "set IMAGE_REPO"; exit 2; }
 	$(DOCKER) tag $(IMAGE):$(VERSION) $(IMAGE_REPO):$(VERSION)

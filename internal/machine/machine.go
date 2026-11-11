@@ -5,7 +5,7 @@
 // namespace, plus the order in which they are created and started.
 //
 // The local-docker provider applies the layout with the Docker CLI on the
-// developer's host; the supervisor ("cloudsourced supervisor") applies the same
+// developer's host; the supervisor ("offshore supervisor") applies the same
 // layout on VM hosts.
 package machine
 
@@ -13,21 +13,21 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // Paths inside the machine container.
 const (
-	BinaryPath = "/opt/cloudsourced/bin/cloudsourced"
+	BinaryPath = "/opt/offshore/bin/offshore"
 	CacheDir   = "/cache"
 	DepsDir    = "/deps"
 	// StoreDir is where a directory store shared by the machines appears
 	// (local-docker's native store).
 	StoreDir      = "/store"
-	HostStatusDir = "/run/cloudsourced-supervisor"
+	HostStatusDir = "/run/offshore-supervisor"
 	// HostStatusEnv names the file the server publishes its status to for
 	// the supervisor (see HostStatus).
-	HostStatusEnv  = "CLOUDSOURCED_HOST_STATUS"
+	HostStatusEnv  = "OFFSHORE_HOST_STATUS"
 	HostStatusFile = HostStatusDir + "/status.json"
 	// ServerPort is the QUIC port of the server inside the container.
 	ServerPort = 7443

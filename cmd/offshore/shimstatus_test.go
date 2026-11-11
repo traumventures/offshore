@@ -9,7 +9,7 @@ import (
 
 func TestInspectShims(t *testing.T) {
 	root := t.TempDir()
-	self := filepath.Join(root, "cloudsourced")
+	self := filepath.Join(root, "offshore")
 	shims := filepath.Join(root, "shims")
 	sys := filepath.Join(root, "usr-bin")
 	for _, d := range []string{shims, sys} {

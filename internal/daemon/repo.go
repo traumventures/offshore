@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/manifest"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/manifest"
 )
 
 // root tracks one projected local directory: its manifest, versions and

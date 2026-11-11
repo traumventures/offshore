@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
-	"github.com/traumventures/cloudsourced/internal/platform"
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/platform"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 // clientToolchain returns the client's toolchain locations (CARGO_HOME and

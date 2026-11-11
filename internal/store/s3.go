@@ -14,7 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
+	"github.com/traumventures/offshore/internal/blobcache"
 )
 
 func newS3(ctx context.Context, g Grant, root string, ttl time.Duration) (Store, error) {
@@ -109,7 +109,7 @@ func (g *s3Granter) Grant(ctx context.Context, scopes []string, ttl time.Duratio
 	}
 	secs := int32(min(max(ttl, 15*time.Minute), 12*time.Hour) / time.Second)
 	res, err := g.sts.AssumeRole(ctx, &sts.AssumeRoleInput{
-		RoleArn: aws.String(g.c.RoleARN), RoleSessionName: aws.String("cloudsourced-worker"),
+		RoleArn: aws.String(g.c.RoleARN), RoleSessionName: aws.String("offshore-worker"),
 		DurationSeconds: aws.Int32(secs), Policy: aws.String(sessionPolicy(g.c.Bucket, out.Prefix, scopes)),
 	})
 	if err != nil {

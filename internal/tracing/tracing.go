@@ -1,4 +1,4 @@
-// Package telemetry sets up OpenTelemetry tracing for every cloudsourced
+// Package telemetry sets up OpenTelemetry tracing for every offshore
 // component and propagates W3C trace context between them.
 //
 // Tracing is off by default. It is enabled by the standard environment
@@ -37,16 +37,16 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 // Default service names of the components.
 const (
-	ServiceProxy        = "cloudsourced-proxy"
-	ServiceDaemon       = "cloudsourced-daemon"
-	ServiceControlPlane = "cloudsourced-controlplane"
-	ServiceWorker       = "cloudsourced-worker"
-	ServiceSupervisor   = "cloudsourced-supervisor"
+	ServiceProxy        = "offshore-proxy"
+	ServiceDaemon       = "offshore-daemon"
+	ServiceControlPlane = "offshore-controlplane"
+	ServiceWorker       = "offshore-worker"
+	ServiceSupervisor   = "offshore-supervisor"
 )
 
 // Exporters.
@@ -59,13 +59,13 @@ const (
 // EnvMachineEndpoint overrides the OTLP endpoint forwarded to machines
 // (telemetry.machine_endpoint), e.g. when the collector is reachable from
 // the machines under another address than from the orchestrator.
-const EnvMachineEndpoint = "CLOUDSOURCED_OTEL_MACHINE_ENDPOINT"
+const EnvMachineEndpoint = "OFFSHORE_OTEL_MACHINE_ENDPOINT"
 
 // EnvConsoleFile makes the console exporter append to a file instead of
 // writing to stderr.
-const EnvConsoleFile = "CLOUDSOURCED_OTEL_CONSOLE_FILE"
+const EnvConsoleFile = "OFFSHORE_OTEL_CONSOLE_FILE"
 
-const scopeName = "github.com/traumventures/cloudsourced"
+const scopeName = "github.com/traumventures/offshore"
 
 // Options is the effective tracing configuration of a process.
 type Options struct {
@@ -249,7 +249,7 @@ func Setup(o Options, log *slog.Logger) func(context.Context) error {
 	res, err := resource.New(context.Background(),
 		resource.WithAttributes(attribute.String("service.name", o.Service)),
 		resource.WithFromEnv(),
-		resource.WithAttributes(attribute.String("service.namespace", "cloudsourced")),
+		resource.WithAttributes(attribute.String("service.namespace", "offshore")),
 	)
 	if err != nil {
 		res = resource.NewSchemaless(attribute.String("service.name", o.Service))
@@ -372,10 +372,10 @@ func escape(s string) string {
 	return b.String()
 }
 
-// Tracer returns the cloudsourced tracer of the global provider.
+// Tracer returns the offshore tracer of the global provider.
 func Tracer() trace.Tracer { return otel.Tracer(scopeName) }
 
-// Start starts a span with the cloudsourced tracer.
+// Start starts a span with the offshore tracer.
 func Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
 	return Tracer().Start(ctx, name, opts...)
 }

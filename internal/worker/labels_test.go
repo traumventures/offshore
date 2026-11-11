@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 // TestStatusSessionLabels: the labels of a session's Exec request are

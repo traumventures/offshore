@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 var one = []scheduler.Size{{Provider: "p", Name: "m", Capacity: scheduler.Resources{CPU: 4, Memory: 8 * gib}, PricePerHour: 1}}

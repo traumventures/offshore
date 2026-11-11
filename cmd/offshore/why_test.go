@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 func TestPrintRun(t *testing.T) {
@@ -33,7 +33,7 @@ func TestPrintRun(t *testing.T) {
 
 func TestWhyReadsRunLog(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("CLOUDSOURCED_STATE_DIR", dir)
+	t.Setenv("OFFSHORE_STATE_DIR", dir)
 	if err := why(nil); err == nil {
 		t.Fatal("expected error without runs")
 	}

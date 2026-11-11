@@ -7,12 +7,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 func TestServerBinaries(t *testing.T) {
-	b := serverBinaries(map[string]any{}, "/opt/cs/bin/cloudsourced", "linux", "amd64")
-	if b["amd64"] != "/opt/cs/bin/cloudsourced" || b["arm64"] != "/opt/cs/bin/cloudsourced-linux-arm64" {
+	b := serverBinaries(map[string]any{}, "/opt/cs/bin/offshore", "linux", "amd64")
+	if b["amd64"] != "/opt/cs/bin/offshore" || b["arm64"] != "/opt/cs/bin/offshore-linux-arm64" {
 		t.Errorf("defaults: %v", b)
 	}
 	b = serverBinaries(map[string]any{"binary": "/x/cs", "binary_arm64": "/y/cs-arm"}, "/opt/cs", "linux", "amd64")
@@ -20,8 +20,8 @@ func TestServerBinaries(t *testing.T) {
 		t.Errorf("explicit: %v", b)
 	}
 	// An orchestrator on a Mac hands out the linux builds next to it.
-	b = serverBinaries(map[string]any{}, "/usr/local/bin/cloudsourced", "darwin", "arm64")
-	if b["amd64"] != "/usr/local/bin/cloudsourced-linux-amd64" || b["arm64"] != "/usr/local/bin/cloudsourced-linux-arm64" {
+	b = serverBinaries(map[string]any{}, "/usr/local/bin/offshore", "darwin", "arm64")
+	if b["amd64"] != "/usr/local/bin/offshore-linux-amd64" || b["arm64"] != "/usr/local/bin/offshore-linux-arm64" {
 		t.Errorf("darwin: %v", b)
 	}
 }
@@ -56,13 +56,13 @@ func TestArchSelection(t *testing.T) {
 	if p := amiParameter(archARM64); !strings.HasSuffix(p, "al2023-ami-kernel-default-arm64") {
 		t.Error(p)
 	}
-	if k := binaryKey(archARM64, []byte("x")); !strings.HasPrefix(k, "bin/cloudsourced-linux-arm64-") || k == binaryKey(archAMD64, []byte("x")) {
+	if k := binaryKey(archARM64, []byte("x")); !strings.HasPrefix(k, "bin/offshore-linux-arm64-") || k == binaryKey(archAMD64, []byte("x")) {
 		t.Error(k)
 	}
-	if got := machineImage("r", provider.MachineSpec{Image: "cloudsourced-env:abc", Arch: archARM64}); got != "r:abc-arm64" {
+	if got := machineImage("r", provider.MachineSpec{Image: "offshore-env:abc", Arch: archARM64}); got != "r:abc-arm64" {
 		t.Errorf("arm64 machine image %s", got)
 	}
-	if got := machineImage("r", provider.MachineSpec{Image: "cloudsourced-env:abc"}); got != "r:abc-amd64" {
+	if got := machineImage("r", provider.MachineSpec{Image: "offshore-env:abc"}); got != "r:abc-amd64" {
 		t.Errorf("amd64 machine image %s", got)
 	}
 	if archOf("") != archAMD64 {

@@ -2,7 +2,7 @@
 // per-session bind mounts (worker-local build directories, dependency
 // caches) and an optional cgroup.
 //
-// The server re-executes its own binary as "cloudsourced sandbox-init" with
+// The server re-executes its own binary as "offshore sandbox-init" with
 // CLONE_NEWNS; the init step performs the mounts and then execs the command.
 package sandbox
 
@@ -17,7 +17,7 @@ import (
 )
 
 // SpecEnv is the environment variable carrying the JSON spec.
-const SpecEnv = "CLOUDSOURCED_SANDBOX_SPEC"
+const SpecEnv = "OFFSHORE_SANDBOX_SPEC"
 
 // Bind is a bind mount from Src onto Dst.
 type Bind struct {

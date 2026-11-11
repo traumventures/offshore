@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/cas"
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/cas"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 // fakeSource serves an in-memory build slot.
@@ -281,8 +281,8 @@ func TestTreeWithoutSource(t *testing.T) {
 
 func TestParseMountinfo(t *testing.T) {
 	in := `36 35 98:0 /mnt1 /mnt1 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
-100 29 0:77 / /home/u/my\040repo/target ro,nosuid,nodev,relatime shared:5 - fuse.cloudsourced-outputs cloudsourced ro,user_id=1000
-101 29 0:78 / /home/u/proj ro shared:6 - fuse.cloudsourced cloudsourced rw
+100 29 0:77 / /home/u/my\040repo/target ro,nosuid,nodev,relatime shared:5 - fuse.offshore-outputs offshore ro,user_id=1000
+101 29 0:78 / /home/u/proj ro shared:6 - fuse.offshore offshore rw
 `
 	got := parseMountinfo(bufio.NewScanner(strings.NewReader(in)))
 	if len(got) != 1 || got[0] != "/home/u/my repo/target" {

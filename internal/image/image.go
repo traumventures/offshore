@@ -53,9 +53,9 @@ type Spec struct {
 }
 
 // BaseArg is the build argument naming the base image in generated
-// Dockerfiles ("ARG CLOUDSOURCED_BASE=<tag>" / "FROM ${CLOUDSOURCED_BASE}"),
+// Dockerfiles ("ARG OFFSHORE_BASE=<tag>" / "FROM ${OFFSHORE_BASE}"),
 // so a base built for another platform can be substituted.
-const BaseArg = "CLOUDSOURCED_BASE"
+const BaseArg = "OFFSHORE_BASE"
 
 // LocalRef returns the local tag of an image built for platform. Images of
 // the native platform keep their tag; others get an architecture suffix so

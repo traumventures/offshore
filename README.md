@@ -1,15 +1,15 @@
-# cloudsourced
+# offshore
 
 Run build and test commands on cloud machines as if they ran locally.
 
 ```console
-$ cargo build          # ~/.cloudsourced/bin/cargo -> cloudsourced
+$ cargo build          # ~/.offshore/bin/cargo -> offshore
    Compiling hello v0.1.0 (/home/me/hello)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.61s
 $ ./target/debug/hello # the binary was copied back
 ```
 
-`cloudsourced` is a single static Go binary with three roles:
+`offshore` is a single static Go binary with three roles:
 
 | Role | Runs on | Does |
 |---|---|---|
@@ -69,24 +69,24 @@ cargo build ──► proxy ──► daemon ── QUIC ────► server
 Requirements: Linux, Docker, `/dev/fuse`, Go ≥ 1.24.
 
 ```sh
-make build                       # static binary in bin/cloudsourced
-bin/cloudsourced shim install cargo
-export PATH="$HOME/.cloudsourced/bin:$PATH"   # in ~/.profile or ~/.zshrc
-bin/cloudsourced shim status     # checks that the shims are first in PATH
+make build                       # static binary in bin/offshore
+bin/offshore shim install cargo
+export PATH="$HOME/.offshore/bin:$PATH"   # in ~/.profile or ~/.zshrc
+bin/offshore shim status     # checks that the shims are first in PATH
 ```
 
-Shims are the standard setup: with `~/.cloudsourced/bin` first in PATH,
+Shims are the standard setup: with `~/.offshore/bin` first in PATH,
 plain `cargo build`, `cargo test` and `cargo nextest run` in a repository
-with a `.cloudsourced.toml` go through cloudsourced, for people, scripts and
-coding agents alike. `cloudsourced shim install` without tools installs the
-tools of the current repository's `[tool.*]` sections; `cloudsourced shim
+with a `.offshore.toml` go through offshore, for people, scripts and
+coding agents alike. `offshore shim install` without tools installs the
+tools of the current repository's `[tool.*]` sections; `offshore shim
 status` exits 1 when a shim is missing from PATH or shadowed by an earlier
-entry. `cloudsourced run <tool> ...` is the explicit form without shims.
+entry. `offshore run <tool> ...` is the explicit form without shims.
 
 ### Getting a repository ready: `init`, `doctor`
 
-`cloudsourced init` prints a `.cloudsourced.toml` for the current
-repository (git top level) and `cloudsourced init --write` writes it
+`offshore init` prints a `.offshore.toml` for the current
+repository (git top level) and `offshore init --write` writes it
 (`--force` replaces an existing one). It is derived from what the repository
 already declares, with a comment explaining every detected item:
 
@@ -117,7 +117,7 @@ already declares, with a comment explaining every detected item:
 For ~/app the result matches the hand-written configuration in
 every detectable item (tested with a fixture of its files).
 
-`cloudsourced doctor [--json]` checks and explains: `cloudsourced` in PATH
+`offshore doctor [--json]` checks and explains: `offshore` in PATH
 and the shims first in PATH for their tools, the client configuration, the
 control plane (reachable, certificate fingerprint, API key accepted, clock
 skew from its `Date` header) or the embedded pool configuration, the daemon,
@@ -129,16 +129,16 @@ The exit status is 1 when a check failed.
 
 ### Environment image prebuild
 
-When the environment of a repository changes (`.cloudsourced.toml`, the
+When the environment of a repository changes (`.offshore.toml`, the
 toolchain file, setup `inputs`, the Dockerfile directory: anything that
-changes `cloudsourced env hash`), the daemon builds the new image in the
+changes `offshore env hash`), the daemon builds the new image in the
 background right away: on the file watcher event (debounced 2 s) and, when no
 event was seen, at the next request. The build goes to every provider and
 platform of the pool, including pushes to remote registries (ECR, OCIR) that
 would otherwise wait for the first machine; with a shared control plane the
 daemon uploads the context and the control plane builds detached from the
 request. A run that needs the image meanwhile joins the running build.
-`cloudsourced env build [--wait]` starts it explicitly, `cloudsourced env
+`offshore env build [--wait]` starts it explicitly, `offshore env
 status [--json]` shows where the image exists and the last background build;
 failures are in the daemon log and `env-build.log`.
 
@@ -148,29 +148,29 @@ There are three configuration files, each with one role:
 
 | file | role | read by |
 |------|------|---------|
-| client: `~/.config/cloudsourced/config.toml` (`$CLOUDSOURCED_CONFIG`) | `[control_plane]` (absent: embedded orchestrator), `user` | CLI, daemon |
-| pool: `[pool]`, `[providers.*]` (`$CLOUDSOURCED_POOL_CONFIG`, `controlplane --config`; default: the client file) | sizes, policy, lifetimes, providers | the orchestrator: daemon in embedded mode, control plane |
-| repository: `.cloudsourced.toml` | environment, caches, resources, TTLs | sent with every request |
+| client: `~/.config/offshore/config.toml` (`$OFFSHORE_CONFIG`) | `[control_plane]` (absent: embedded orchestrator), `user` | CLI, daemon |
+| pool: `[pool]`, `[providers.*]` (`$OFFSHORE_POOL_CONFIG`, `controlplane --config`; default: the client file) | sizes, policy, lifetimes, providers | the orchestrator: daemon in embedded mode, control plane |
+| repository: `.offshore.toml` | environment, caches, resources, TTLs | sent with every request |
 
 In embedded mode one file may hold the client and the pool sections. In
 remote mode pool sections in the client file have no effect (the client warns);
 the control plane ignores `[control_plane]` and `user`. `user` (default `$USER`)
 salts repository ids; `pool.id` (default `$USER`) names the pool and is the
-`cloudsourced.pool` label of its machines and volumes. Repository settings
+`offshore.pool` label of its machines and volumes. Repository settings
 such as the cache TTLs travel in each request, so
 repositories with different settings share one pool without affecting each
 other. Pool settings change only by reload: the daemon applies a changed pool
-file on the next request and on `cloudsourced reconcile`; the control plane
+file on the next request and on `offshore reconcile`; the control plane
 when the file changes and on `SIGHUP`. Changing `pool.id` or the providers
-needs a restart. `cloudsourced config check` validates the files of the current
-mode and names their roles; `cloudsourced config show` prints the effective
+needs a restart. `offshore config check` validates the files of the current
+mode and names their roles; `offshore config show` prints the effective
 configuration with secrets redacted.
 
 ```toml
 user = "alice"               # client: repository id salt (default $USER)
 
 [pool]                       # pool
-id             = "alice"     # labels machines (cloudsourced.pool)
+id             = "alice"     # labels machines (offshore.pool)
 machine_cpu    = 8
 machine_memory = "16G"
 max_machines   = 4
@@ -272,14 +272,14 @@ fixes the drain-then-create flapping seen in production
 (`internal/scheduler/sim/testdata/prod-flap.json`, regression test
 `TestRegressionDrainThenCreate`).
 
-`cloudsourced sim -sweep trace.json` sweeps `cost_optimization` from 0 to 1
+`offshore sim -sweep trace.json` sweeps `cost_optimization` from 0 to 1
 and prints the cost/time frontier (Pareto points marked); `sim
 -cost-optimization 0,0.5,1` compares chosen values, `-resize` lets
 machines grow disks. Traces exported with `sim export` carry slot sizes,
 so disk, slot growth, restores and multiple providers are simulated.
 
 Without `[providers]` the pool has one local-docker provider `local`
-(command `$CLOUDSOURCED_DOCKER`, default `docker`); a provider without
+(command `$OFFSHORE_DOCKER`, default `docker`); a provider without
 `[[providers.NAME.size]]` gets one size `default` of `pool.machine_cpu` and
 `pool.machine_memory`.
 
@@ -290,10 +290,10 @@ Clients only fetch leases from it; build traffic goes directly to the machines.
 
 ```sh
 # pool and providers in the control plane's pool file (--config FILE)
-cloudsourced controlplane                        # self-signed, :7443, fingerprint pinned
-cloudsourced controlplane --hostname cs.example.com   # Let's Encrypt, :443 (+ :80 for ACME)
-cloudsourced controlplane client-config          # prints the client block below
-cloudsourced controlplane info [--show-key]      # URLs, fingerprint, API key location
+offshore controlplane                        # self-signed, :7443, fingerprint pinned
+offshore controlplane --hostname cs.example.com   # Let's Encrypt, :443 (+ :80 for ACME)
+offshore controlplane client-config          # prints the client block below
+offshore controlplane info [--show-key]      # URLs, fingerprint, API key location
 ```
 
 The API key is generated once (`<state>/api-key`) and never logged. Without a
@@ -305,7 +305,7 @@ in a reverse proxy and use `--insecure-http`). Clients:
 [control_plane]
 url         = "https://10.0.0.5:7443"   # or https://cs.example.com
 fingerprint = "0b91…"                    # only for the self-signed certificate
-api_key     = "env:CLOUDSOURCED_API_KEY" # or file:…, cmd:…
+api_key     = "env:OFFSHORE_API_KEY" # or file:…, cmd:…
 client_cert = "client.pem"               # only with controlplane --client-ca
 client_key  = "client-key.pem"
 ```
@@ -315,8 +315,8 @@ CA (mutual TLS); the API key is still checked. The control plane keeps the
 pool master key in `<state>/master.key` (0600, created on first start). It is
 the only secret that matters: every machine identity and token is derived from
 it. Replicas or a rebuilt control plane share a pool by importing the same key
-with `CLOUDSOURCED_MASTER_KEY` (hex or base64) or
-`CLOUDSOURCED_MASTER_KEY_FILE`.
+with `OFFSHORE_MASTER_KEY` (hex or base64) or
+`OFFSHORE_MASTER_KEY_FILE`.
 
 Container image (`make image`), running it on a Docker host and on AWS
 (`deploy/aws/controlplane.yaml`): [docs/CONTROLPLANE.md](docs/CONTROLPLANE.md).
@@ -339,16 +339,16 @@ memory   = "15G"
 price_per_hour = 0.42
 ```
 
-On first use the provider creates the CloudFormation stack `cloudsourced`
+On first use the provider creates the CloudFormation stack `offshore`
 (`internal/provider/awsec2/stack.yaml`): security group, instance role, S3
 bucket for the worker binary, ECR repository for environment images, a reaper
 Lambda (every 10 minutes it terminates machines past their expiry) and a
-resource group of everything tagged `project=cloudsourced`. Machines are
+resource group of everything tagged `project=offshore`. Machines are
 Amazon Linux 2023 instances running the same container layout as local-docker
-(`internal/machine`), applied by the supervisor `cloudsourced supervisor` (a systemd
+(`internal/machine`), applied by the supervisor `offshore supervisor` (a systemd
 unit). User data carries only the public machine spec; the machine's secrets
 (server key, token) travel in an SSM SecureString parameter
-`/cloudsourced/<stack>/machines/<id>` that the supervisor reads once with the
+`/offshore/<stack>/machines/<id>` that the supervisor reads once with the
 instance role and deletes. Machines terminate themselves at `max_lifetime`,
 and stop themselves when idle for `idle_stop` while no orchestrator has probed
 them for `max(idle_stop, 10m)` (an offline control plane does not leave them
@@ -379,8 +379,8 @@ capacity error (`InsufficientInstanceCapacity`, vCPU quota, type not offered
 in the zone) moves on to the next type.
 
 `arch = "arm64"` sizes (Graviton: c7g, m7g, t4g, ...) boot the arm64 Amazon
-Linux 2023 AMI and run `bin/cloudsourced-linux-arm64`, which `make build`
-puts next to `bin/cloudsourced` (provider options `binary_amd64`,
+Linux 2023 AMI and run `bin/offshore-linux-arm64`, which `make build`
+puts next to `bin/offshore` (provider options `binary_amd64`,
 `binary_arm64` and `ami_arm64` override). Environments are per architecture:
 a repository pins `resources.arch = "aarch64"` (default `"x86_64"`, because
 build outputs must run on the client) and only sizes of that architecture
@@ -391,37 +391,37 @@ tonistiigi/binfmt:qemu-v9.2.2 --install arm64`; emulated builds are several
 times slower).
 
 Do not use root or admin credentials. `deploy/aws/iam.yaml` creates the managed
-policies `cloudsourced-operator` (machines, images, artifacts, machine secrets)
-and `cloudsourced-operator-stack` (resources of the shared stack) and the role
-`cloudsourced-operator` with both attached:
+policies `offshore-operator` (machines, images, artifacts, machine secrets)
+and `offshore-operator-stack` (resources of the shared stack) and the role
+`offshore-operator` with both attached:
 
 ```sh
-aws cloudformation deploy --stack-name cloudsourced-iam \
+aws cloudformation deploy --stack-name offshore-iam \
   --template-file deploy/aws/iam.yaml --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides TrustedPrincipalArn=arn:aws:iam::123456789012:user/alice RequireMfa=true
 ```
 
 ```ini
 # ~/.aws/config
-[profile cloudsourced]
+[profile offshore]
 source_profile = alice          # your own credentials
-role_arn       = arn:aws:iam::123456789012:role/cloudsourced-operator
+role_arn       = arn:aws:iam::123456789012:role/offshore-operator
 mfa_serial     = arn:aws:iam::123456789012:mfa/alice   # with RequireMfa=true
 region         = eu-central-1
 ```
 
-and `profile = "cloudsourced"` in `[providers.aws]`. A control plane on EC2
+and `profile = "offshore"` in `[providers.aws]`. A control plane on EC2
 trusts its instance role (`TrustedPrincipalArn=<instance role ARN>`) and
 assumes the operator role, or gets the two policies attached directly
-(exported as `cloudsourced-operator-policy` and
-`cloudsourced-operator-stack-policy`). `CreateUser=true` adds an IAM user for
+(exported as `offshore-operator-policy` and
+`offshore-operator-stack-policy`). `CreateUser=true` adds an IAM user for
 hosts that cannot assume roles. The policies only cover stacks named
-`StackPrefix*` (default `cloudsourced`), instances tagged
-`project=cloudsourced` launched with IMDSv2 and hop limit 1, the `cloudsourced*`
-bucket and repository and SSM parameters under `/cloudsourced/`. Once the
-shared stack exists, day to day operation only needs `cloudsourced-operator`.
+`StackPrefix*` (default `offshore`), instances tagged
+`project=offshore` launched with IMDSv2 and hop limit 1, the `offshore*`
+bucket and repository and SSM parameters under `/offshore/`. Once the
+shared stack exists, day to day operation only needs `offshore-operator`.
 
-Add `.cloudsourced.toml` to a repository:
+Add `.offshore.toml` to a repository:
 
 ```toml
 version = 1
@@ -494,33 +494,33 @@ Then just use the tool:
 ```sh
 cargo build
 cargo test
-cloudsourced status                 # machines, sessions (with labels), cost today (--json)
-cloudsourced top                    # live view: graphs, machines, sessions, queue, cost
-cloudsourced why                    # last run: local/remote and why, machine,
+offshore status                 # machines, sessions (with labels), cost today (--json)
+offshore top                    # live view: graphs, machines, sessions, queue, cost
+offshore why                    # last run: local/remote and why, machine,
                                     # placement, timings, usage, labels (N, list, --json)
-cloudsourced prewarm                # start the remote environment of this repo now
-cloudsourced hooks install          # prewarm automatically on new worktrees
-cloudsourced fetch 'target/debug/deps/*.so'   # lazy outputs
-cloudsourced outputs mount          # remote target/ at its local path (writable overlay)
-cloudsourced down                   # destroy machines and caches
+offshore prewarm                # start the remote environment of this repo now
+offshore hooks install          # prewarm automatically on new worktrees
+offshore fetch 'target/debug/deps/*.so'   # lazy outputs
+offshore outputs mount          # remote target/ at its local path (writable overlay)
+offshore down                   # destroy machines and caches
 ```
 
-Escape hatches: `CLOUDSOURCED_DISABLE=1` (always local),
-`CLOUDSOURCED_REQUIRE_REMOTE=1` (fail instead of falling back),
-`CLOUDSOURCED_STDIN=always|never`, `CLOUDSOURCED_VERBOSE=1`.
+Escape hatches: `OFFSHORE_DISABLE=1` (always local),
+`OFFSHORE_REQUIRE_REMOTE=1` (fail instead of falling back),
+`OFFSHORE_STDIN=always|never`, `OFFSHORE_VERBOSE=1`.
 When no machine can be provisioned the proxy falls back to the local tool.
 
 Port forwarding: while a remote session runs, the proxy listens on
 `127.0.0.1:<local>` for every port of `[tool.X] ports` (or
-`CLOUDSOURCED_PORTS=8080,3000:3001`, which replaces the configured list)
+`OFFSHORE_PORTS=8080,3000:3001`, which replaces the configured list)
 and carries each connection over its own QUIC stream to
 `127.0.0.1:<remote>` in the machine's network namespace, which sessions and
 service containers share. Connections end with the session. A busy local
 port is reported and skipped; the command still runs.
 
-`cloudsourced why` reads the last 50 runs from `<state>/runs.jsonl`. The
+`offshore why` reads the last 50 runs from `<state>/runs.jsonl`. The
 `cache` field carries counters of cache integrations (e.g. sccache hits).
-`cloudsourced status` estimates today's cost (since local midnight) per
+`offshore status` estimates today's cost (since local midnight) per
 machine size as `price_per_hour` times the uptime the orchestrator observed
 (starting or running). Machines first seen up count from their creation
 time; restarts and removals that happened while the daemon or control plane
@@ -534,7 +534,7 @@ ignored.
 type        = "oci"
 profile     = "DEFAULT"            # ~/.oci/config profile (config_file overrides the path)
 region      = "eu-frankfurt-1"     # default: the profile's region
-compartment = "cloudsourced"       # name below the tenancy root (created) or an OCID
+compartment = "offshore"       # name below the tenancy root (created) or an OCID
 allow_cidrs = ["203.0.113.4/32"]   # who may reach machines (QUIC, UDP 7443); default: own public IP
 disk_gb     = 100                  # boot volume (min 50)
 docker_command = ["docker"]        # builds and pushes environment images
@@ -555,11 +555,11 @@ price_per_hour = 0.07
 ```
 
 On first use the provider creates, idempotently: the compartment, a VCN
-`cloudsourced` (10.77.0.0/16) with internet gateway, default route and one
+`offshore` (10.77.0.0/16) with internet gateway, default route and one
 public subnet, whose security list admits only UDP 7443 from `allow_cidrs`
-(no SSH); a private Object Storage bucket `cloudsourced` (server binaries,
+(no SSH); a private Object Storage bucket `offshore` (server binaries,
 machine secrets, compiler cache below `cache/`, expired after a day by a
-lifecycle rule); a container repository `cloudsourced-env` in OCIR; and a
+lifecycle rule); a container repository `offshore-env` in OCIR; and a
 dynamic group of the compartment's instances with a policy that lets them
 stop and terminate instances of the compartment, use the bucket and pull
 images (`iam = false` skips the IAM part when the API user may not manage
@@ -594,8 +594,8 @@ reserved instances) with sshd, Docker and systemd:
 ```toml
 [providers.lab]
 type        = "static"
-registry    = "registry.lab:5000/cloudsourced-env"  # hosts pull environment images from here
-ssh_key     = "file:~/.ssh/cloudsourced"            # default file:~/.ssh/id_ed25519
+registry    = "registry.lab:5000/offshore-env"  # hosts pull environment images from here
+ssh_key     = "file:~/.ssh/offshore"            # default file:~/.ssh/id_ed25519
 known_hosts = "~/.ssh/known_hosts"                  # host keys are verified
 hosts = [
   { name = "build1", ssh = "root@10.0.0.5", cpu = 32, memory = "128G" },
@@ -610,10 +610,10 @@ memory = "64G"
 
 The orchestrator places one machine per host (the first free host with
 enough CPU and memory) and drives it over SSH: it uploads its own binary to
-`/var/lib/cloudsourced/bin/` once, then runs `<binary> supervisor static
+`/var/lib/offshore/bin/` once, then runs `<binary> supervisor static
 apply|start|stop|destroy|status`. `apply` writes the public machine spec,
 the secret environment (root-only, read once by the supervisor, which is
-the static provider's secret channel) and the `cloudsourced-supervisor`
+the static provider's secret channel) and the `offshore-supervisor`
 unit; the supervisor starts the containers as on a VM. At the end of a
 machine's lifetime the supervisor removes the machine instead of powering
 the host off; `destroy` does the same on request. Hosts must be logged in
@@ -623,12 +623,12 @@ on UDP 7443. Static hosts have no native object store: configure
 
 ### Output overlay (output FUSE)
 
-By default only `eager` outputs come back after a run; `cloudsourced fetch`
+By default only `eager` outputs come back after a run; `offshore fetch`
 copies others on request. With the output overlay the remote build
 directories (`[cache.build] paths`, e.g. `target/`) appear at their local
 path as if they had been built locally: local `cargo run`, `cargo test`,
 `cargo nextest` use the remote artifacts without rebuilding and without
-`cloudsourced fetch`.
+`offshore fetch`.
 
 ```toml
 [outputs]
@@ -636,13 +636,13 @@ mode = "fuse"      # mounted by the daemon for this repository
 ```
 
 ```sh
-cloudsourced outputs mount      # mount by hand (also without mode = "fuse")
-cloudsourced outputs status     # mount points, upper layers, generation
-cloudsourced outputs unmount    # unmount and discard local writes
+offshore outputs mount      # mount by hand (also without mode = "fuse")
+offshore outputs status     # mount points, upper layers, generation
+offshore outputs unmount    # unmount and discard local writes
 ```
 
 - The mount (owned by the daemon, `fusermount3`, file system type
-  `fuse.cloudsourced-outputs`) is a writable union implemented with go-fuse
+  `fuse.offshore-outputs`) is a writable union implemented with go-fuse
   (`internal/outputfs`). Lower layer: the build slot of the latest remote
   build of the repository. Upper layer: `$STATE/outputs/upper/<hash>`, a
   local directory next to the client state, never in the repository; every
@@ -741,7 +741,7 @@ Global caches use the result-cache endpoint of the machine (see
 [Compiler cache and linker](#compiler-cache-and-linker)): `sccache` sets
 `RUSTC_WRAPPER`, `ccache` installs the Debian package and points
 `CCACHE_REMOTE_STORAGE` at the endpoint (local `CCACHE_DIR` on the machine
-disk), `go` sets `GOCACHEPROG` to `cloudsourced gocacheprog`, which keeps
+disk), `go` sets `GOCACHEPROG` to `offshore gocacheprog`, which keeps
 outputs on the machine disk (go reads them from there) and shares them through
 the endpoint. A `ttl` below 24h lowers the age of reused entries.
 
@@ -768,7 +768,7 @@ machine is idle.
 
 Slots are pruned against two budgets: per slot the sum of the slot caches'
 `max_size` (unset: unbounded) after every session, per machine
-`CLOUDSOURCED_DISK_BUDGET` bytes of the cache filesystem (default 90%).
+`OFFSHORE_DISK_BUDGET` bytes of the cache filesystem (default 90%).
 The worker tracks reads per session: after a run it records for every slot
 file the last run (session number of the slot) that read or wrote it, using
 the atime (relatime re-armed by resetting the atime of read files to their
@@ -801,14 +801,14 @@ the Store part of every provider:
 ```toml
 [storage]
 endpoint   = "https://<account>.r2.cloudflarestorage.com"   # "" = AWS S3
-bucket     = "cloudsourced-cache"
+bucket     = "offshore-cache"
 region     = "auto"
 prefix     = "cache/team"           # default "cache/<pool id>"
 access_key = "env:R2_ACCESS_KEY_ID" # env:/file:/cmd: references
 secret_key = "env:R2_SECRET_ACCESS_KEY"
 # role_arn   = "arn:aws:iam::123:role/cache"  # STS: per-repository credentials
 # path_style = true                            # MinIO
-# dir        = "/srv/cloudsourced-store"       # a directory every machine mounts
+# dir        = "/srv/offshore-store"       # a directory every machine mounts
 ```
 
 Native stores: `aws-ec2` uses the stack's bucket below `cache/<pool>/`
@@ -898,7 +898,7 @@ warm state only survives through snapshots. To compare on a real machine
    and `--rw=write --bs=1M` for sequential throughput.
 3. Builds: run the same `cargo build` cold, with warm sccache and warm slot
    on each, and compare `task_end.usage` (`wall`, `cpu_stall_seconds`)
-   with `cloudsourced report --by size`.
+   with `offshore report --by size`.
 4. Restore: `test/bench/snapshot.sh` with `BENCH_STORE` on the machine
    measures save and fill against each disk; gp3 throughput (125 MB/s
    unless provisioned higher) bounds the fill of large slots.
@@ -907,14 +907,14 @@ warm state only survives through snapshots. To compare on a real machine
 
 A global cache with `tool = "sccache"` adds the pinned static sccache release
 (checksum verified, downloaded once on the client into the user cache
-directory, `CLOUDSOURCED_TOOL_CACHE` overrides) to the environment image.
+directory, `OFFSHORE_TOOL_CACHE` overrides) to the environment image.
 Each session gets its own sccache server on a unix socket inside the session
 sandbox (`SCCACHE_SERVER_UDS`, `SCCACHE_DIR` in a private temporary
 directory); it ends with the session. The cache backend is WebDAV
 (`SCCACHE_WEBDAV_ENDPOINT`), served by `internal/blobcache`:
 
 The worker serves it on `127.0.0.1` from a tiered store: a directory under
-`<deps dir>/sccache` (`CLOUDSOURCED_SCCACHE_DIR`) backed by the pool's
+`<deps dir>/sccache` (`OFFSHORE_SCCACHE_DIR`) backed by the pool's
 object store under the environment's prefix (see
 [Object store](#object-store-storage-and-provider-parts)), so a new machine
 gets hits for everything an earlier one compiled. Keys are prefixed with
@@ -923,13 +923,13 @@ the environment hash, so toolchains never mix.
 sccache cannot cache incremental compilations, which cargo uses for
 workspace crates in dev profiles; dependencies are cached regardless.
 Set `CARGO_INCREMENTAL=0` in `[environment.env]` to make them cacheable.
-User settings of `RUSTC_WRAPPER` win. With `CLOUDSOURCED_VERBOSE=1` the proxy
+User settings of `RUSTC_WRAPPER` win. With `OFFSHORE_VERBOSE=1` the proxy
 prints the run's statistics (`sccache: 3 hits / 1 misses (...)`); they are
-also part of the session's exit message (`proto.Exit.Cache`: `sccache_requests`, `_hits`, `_misses`, `_not_cacheable`, `_errors`; shown by `cloudsourced why`).
+also part of the session's exit message (`proto.Exit.Cache`: `sccache_requests`, `_hits`, `_misses`, `_not_cacheable`, `_errors`; shown by `offshore why`).
 
 `[environment] linker = "mold"` installs the pinned static mold release
 (`lld` installs the distribution's `lld` package, Debian based images) and a
-driver `/usr/local/bin/cloudsourced-cc-<linker>` (`cc ... -fuse-ld=<linker>`, last so it beats
+driver `/usr/local/bin/offshore-cc-<linker>` (`cc ... -fuse-ld=<linker>`, last so it beats
 rustc's own `-fuse-ld=lld` for its bundled rust-lld),
 which sessions use as `CARGO_TARGET_<host triple>_LINKER` unless set (with
 `[outputs] mode = "fuse"` through a `cc` on `PATH` instead, see above). This
@@ -938,7 +938,7 @@ leaves `RUSTFLAGS` and `rustflags` from `.cargo/config.toml` untouched; a
 
 ### rust-analyzer
 
-`cloudsourced editor vscode` (or `zed`, `neovim`) prints settings that run
+`offshore editor vscode` (or `zed`, `neovim`) prints settings that run
 flycheck and build scripts through the proxy. rust-analyzer stays local;
 because paths are identical, diagnostics need no rewriting. Proc-macro
 libraries and build script outputs must be available locally:
@@ -963,7 +963,7 @@ here for a local phase) and what a local phase needs. `[tool.X]` stays the
 per-tool configuration (`local`, `remote`, `env`, `eager`, `ports`,
 `split`); `adapter = "cargo" | "go" | "node" | "generic"` picks the
 adapter, by default from the tool name (cargo; go; bun, bunx, npm, npx,
-pnpm, yarn; anything else generic). `cloudsourced why` shows the adapter
+pnpm, yarn; anything else generic). `offshore why` shows the adapter
 and the phases of a run (`adapter`, `phases` in `runs.jsonl`).
 
 | adapter | remote as typed | split: remote build, local run | default caches (`init`) |
@@ -977,7 +977,7 @@ Local platform checks (OS, architecture, C library family and version,
 dynamic loader, shared libraries) use `internal/platform`, which also feeds
 the environment image hash (`platform=linux/<arch>`) and the cache key of
 machine caches (`Platform.CacheKey()`: OS/arch/libc without version).
-`CLOUDSOURCED_PLATFORM=linux/amd64/glibc-2.39` overrides the detection.
+`OFFSHORE_PLATFORM=linux/amd64/glibc-2.39` overrides the detection.
 
 ### Tests: remote build, local run
 
@@ -1012,7 +1012,7 @@ environment and local services (e.g. the developer's Postgres via
   directories with the test flags as `-test.*` (`-run`, `-v`, `-count`,
   `-timeout`, ..., `-args`), printing go test's `ok`/`FAIL`/`?` lines and
   exiting 1 on failure. The binaries travel in the first slot-scope cache
-  directory (`init` proposes `[cache.go-out] paths = [".cloudsourced-build"]`).
+  directory (`init` proposes `[cache.go-out] paths = [".offshore-build"]`).
 
 Commands that do not run tests (`--no-run`, `--doc`, `--message-format`,
 `nextest list`, `nextest archive`, reuse options such as `--archive-file`;
@@ -1027,11 +1027,11 @@ or test binaries outside the slot-scope cache paths.
 
 `split` lists what is split (cargo: `["test", "nextest"]`, go: `["test"]`,
 both the default); `split = []` turns it off for a tool,
-`CLOUDSOURCED_SPLIT=0` for one run. Transport: with `[outputs] mode =
+`OFFSHORE_SPLIT=0` for one run. Transport: with `[outputs] mode =
 "fuse"` the binaries appear through the output overlay
 (`daemon.EnsureOutputs` after the build's release, nothing is copied);
 otherwise they are fetched over the session that built them, zstd
-compressed, only files whose content changed (`cloudsourced fetch` uses
+compressed, only files whose content changed (`offshore fetch` uses
 zstd too). Not reproduced locally: files a test reads at run time from
 outside `OUT_DIR` and the build directories (e.g. generated next to the
 sources by a remote build script), cargo `[env]` set by `--config` on the
@@ -1061,7 +1061,7 @@ what needs local hardware, a GUI or another OS stays local.
 **Limited:**
 
 * rust-analyzer stays local; flycheck and build scripts run remotely
-  (`cloudsourced editor`). Proc-macro dylibs must come back as outputs
+  (`offshore editor`). Proc-macro dylibs must come back as outputs
   (eager outputs or the output mount); a fully remote mode via an LSP
   bridge is not part of this release.
 * `cargo tarpaulin` needs `ptrace`, which sessions do not get; use
@@ -1075,14 +1075,14 @@ what needs local hardware, a GUI or another OS stays local.
 **Local only:**
 
 * flashing and debugging hardware (`probe-rs`, `espflash`, `cargo embed`):
-  build remotely, flash locally (`cloudsourced fetch` or outputs).
+  build remotely, flash locally (`offshore fetch` or outputs).
 * `trunk serve`, `tauri dev` and other dev servers can run remotely with
   port forwarding (`[tool.X] ports`); anything that opens local windows or
   devices runs locally.
 * macOS, iOS and Windows-native targets (other than `xwin` builds) need the
   respective host and run locally.
 
-Only tools with an installed shim are proxied; `CLOUDSOURCED_DISABLE=1`
+Only tools with an installed shim are proxied; `OFFSHORE_DISABLE=1`
 always runs locally.
 
 ## Operations
@@ -1097,7 +1097,7 @@ status, so the lost attempt has applied nothing. There is no retry when the
 write-back had begun, standard input had been forwarded (it cannot be
 replayed), the user signalled the command, the session had not started yet
 (that falls back as before), the worker reported an error, the machine still
-answers, after a second loss, or with `CLOUDSOURCED_NO_RETRY=1`. Output the
+answers, after a second loss, or with `OFFSHORE_NO_RETRY=1`. Output the
 first attempt already printed stays on the terminal.
 
 
@@ -1105,43 +1105,43 @@ first attempt already printed stays on the terminal.
 dependencies; `internal/metrics`):
 
 * Control plane: `GET /metrics` on the API port (API key required) and,
-  with `--metrics-listen 127.0.0.1:9090` (`$CLOUDSOURCED_METRICS_LISTEN`),
+  with `--metrics-listen 127.0.0.1:9090` (`$OFFSHORE_METRICS_LISTEN`),
   without authentication on a separate plain HTTP listener for a local
-  scraper. Pool metrics: `cloudsourced_machines{provider,size,state}`,
-  `cloudsourced_queue_length`, `cloudsourced_acquire_wait_seconds{result}`,
-  `cloudsourced_placements_total{kind}` (assign, queue, reject, timeout),
-  `cloudsourced_pool_actions_total{action}`,
-  `cloudsourced_provider_errors_total{provider,op}`,
-  `cloudsourced_image_builds_total{provider,result}`,
-  `cloudsourced_image_build_seconds{provider}`,
-  `cloudsourced_reconcile_duration_seconds{result}`,
-  `cloudsourced_cost_per_hour{provider}`, `cloudsourced_environments_recent`,
-  `cloudsourced_http_requests_total{path,result}`,
-  `cloudsourced_http_request_duration_seconds{path}`.
+  scraper. Pool metrics: `offshore_machines{provider,size,state}`,
+  `offshore_queue_length`, `offshore_acquire_wait_seconds{result}`,
+  `offshore_placements_total{kind}` (assign, queue, reject, timeout),
+  `offshore_pool_actions_total{action}`,
+  `offshore_provider_errors_total{provider,op}`,
+  `offshore_image_builds_total{provider,result}`,
+  `offshore_image_build_seconds{provider}`,
+  `offshore_reconcile_duration_seconds{result}`,
+  `offshore_cost_per_hour{provider}`, `offshore_environments_recent`,
+  `offshore_http_requests_total{path,result}`,
+  `offshore_http_request_duration_seconds{path}`.
 * Machines report their metrics in the status stream the orchestrator
   already probes (scope `probe`, no extra port), and the orchestrator
   republishes them with `machine`, `provider` and `size` labels:
-  `cloudsourced_worker_sessions_running`,
-  `cloudsourced_worker_session_duration_seconds`,
-  `cloudsourced_worker_session_exits_total{code}`,
-  `cloudsourced_worker_oom_kills_total`,
-  `cloudsourced_worker_sessions_rejected_total{reason}`,
-  `cloudsourced_worker_pressure{resource}`,
-  `cloudsourced_worker_reserved{resource}`,
-  `cloudsourced_worker_memory_used_bytes`,
-  `cloudsourced_worker_compiler_cache_total{counter}` (sccache counters),
-  `cloudsourced_worker_transfer_bytes_total{direction}` (fetch, writeback,
-  output), `cloudsourced_worker_ready`, `_draining`, `_warm_repos`. Machine
+  `offshore_worker_sessions_running`,
+  `offshore_worker_session_duration_seconds`,
+  `offshore_worker_session_exits_total{code}`,
+  `offshore_worker_oom_kills_total`,
+  `offshore_worker_sessions_rejected_total{reason}`,
+  `offshore_worker_pressure{resource}`,
+  `offshore_worker_reserved{resource}`,
+  `offshore_worker_memory_used_bytes`,
+  `offshore_worker_compiler_cache_total{counter}` (sccache counters),
+  `offshore_worker_transfer_bytes_total{direction}` (fetch, writeback,
+  output), `offshore_worker_ready`, `_draining`, `_warm_repos`. Machine
   counters restart with the worker.
-* `cloudsourced metrics` prints the daemon's metrics
-  (`cloudsourced_daemon_requests_total{op,result}`,
-  `cloudsourced_daemon_prepare_seconds{result}`,
-  `cloudsourced_daemon_runs_total{tool,mode}`, `cloudsourced_daemon_roots`,
-  `cloudsourced_daemon_machine_connections`) with the embedded
+* `offshore metrics` prints the daemon's metrics
+  (`offshore_daemon_requests_total{op,result}`,
+  `offshore_daemon_prepare_seconds{result}`,
+  `offshore_daemon_runs_total{tool,mode}`, `offshore_daemon_roots`,
+  `offshore_daemon_machine_connections`) with the embedded
   orchestrator's (embedded mode) or the control plane's (remote mode).
 
-**Logs.** `CLOUDSOURCED_LOG_FORMAT=json` (default `text`) and
-`CLOUDSOURCED_LOG_LEVEL=debug|info|warn|error` apply to the daemon
+**Logs.** `OFFSHORE_LOG_FORMAT=json` (default `text`) and
+`OFFSHORE_LOG_LEVEL=debug|info|warn|error` apply to the daemon
 (`<state>/daemon.log`), the control plane and workers; the
 orchestrator passes both to the machines it creates. The control plane logs
 every API request with a `request_id` (the client's `X-Request-Id` when
@@ -1166,17 +1166,17 @@ machine_endpoint = "http://10.0.0.5:4318"   # pool file: the collector as seen b
 Spans are exported as OTLP/HTTP with JSON encoding (accepted by the
 OpenTelemetry Collector and OTLP backends on `/v1/traces`; OTLP/gRPC is not
 supported, which keeps gRPC and protobuf out of the static binary). Default
-service names: `cloudsourced-proxy`, `-daemon`, `-controlplane`, `-server`,
+service names: `offshore-proxy`, `-daemon`, `-controlplane`, `-server`,
 `-host`. The orchestrator forwards the exporter settings to the machines it
 creates (headers as secrets; `machine_endpoint` or
-`$CLOUDSOURCED_OTEL_MACHINE_ENDPOINT` overrides the endpoint), servers do
+`$OFFSHORE_OTEL_MACHINE_ENDPOINT` overrides the endpoint), servers do
 not pass `OTEL_*` on to sessions, and `console` writes to stderr or to
-`$CLOUDSOURCED_OTEL_CONSOLE_FILE`. One tool run is one trace, propagated as
+`$OFFSHORE_OTEL_CONSOLE_FILE`. One tool run is one trace, propagated as
 W3C `traceparent` (daemon RPC field, control plane HTTP header, optional
 `traceparent` field of the QUIC `Hello` and `Exec` frames):
 
 ```
-cloudsourced.run (proxy: tool, subcommand, flag names, repo id, decision, reason, exit code)
+offshore.run (proxy: tool, subcommand, flag names, repo id, decision, reason, exit code)
 ├─ proxy.prepare
 │  └─ daemon.prepare (repo id, env hash, usage key, estimate, lease, machine)
 │     ├─ daemon.env_resolve, daemon.image_ensure, daemon.manifest_refresh, daemon.estimate
@@ -1203,27 +1203,27 @@ worktree), `repo` (name of the main repository, shared by its worktrees),
 proxy (git metadata is read from `.git` files, git is not run), travel with
 the session to the daemon, the orchestrator and the worker, and are recorded
 in the event log (`labels` of `task_placed`/`task_end`) and the run log.
-`cloudsourced why`, `status`, `top` and `report` show them.
+`offshore why`, `status`, `top` and `report` show them.
 
-`agent` is `CLOUDSOURCED_AGENT` if set, otherwise detected from the first
+`agent` is `OFFSHORE_AGENT` if set, otherwise detected from the first
 present variable: `CODEX_THREAD_ID` (codex, the thread id also becomes
 `agent_session`), `CODEX_SANDBOX`, `CODEX_MANAGED_BY_NPM` (codex),
 `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT` (claude-code), `CURSOR_AGENT`
 (cursor), `GEMINI_CLI` (gemini-cli), `OPENCODE` (opencode), `AIDER_MODEL`
 (aider), `AMP_THREAD_ID` (amp, also `agent_session`). Only these names and
-ids are read, never other environment values. `CLOUDSOURCED_LABELS="task=WP-7,team=infra"`
+ids are read, never other environment values. `OFFSHORE_LABELS="task=WP-7,team=infra"`
 adds free labels. Keys are `[a-z0-9_.-]{1,32}`, values at most 200
 characters, at most 16 labels; servers clean labels again on receipt.
 Labels never influence placement.
 
-`cloudsourced report` groups cost (attributed by reserved share, as per
+`offshore report` groups cost (attributed by reserved share, as per
 repository), session-hours, CPU-hours, requests and failures, queue wait
 p50/p95/max and contention (share of wall time stalled on CPU/memory) by
 agent and by worktree; `--by agent|worktree|branch|repo|user` (comma
 separated) chooses the dimensions. Events from before labels fall back to
 the repository id; sessions without an agent count as `(human)`.
 
-**Prewarm.** `cloudsourced prewarm` starts the remote environment of the
+**Prewarm.** `offshore prewarm` starts the remote environment of the
 current repository in the background (log `<state>/prewarm.log`): image
 ensure, machine lease and start, source sync and the build slot, then an
 optional warm-up command from the repository configuration:
@@ -1239,16 +1239,16 @@ build slot of the repository and (with `run`) the warm-up succeeded for the
 same commit, environment and command within 12 hours. Only one prewarm per
 repository runs at a time. Prewarm sessions are labelled `purpose=prewarm`
 (shown in `why` and `report`), never fall back to local execution and are
-not counted as user runs in the daemon metrics. `cloudsourced hooks install`
+not counted as user runs in the daemon metrics. `offshore hooks install`
 installs a git `post-checkout` hook into the repository's hooks directory
 (shared by all worktrees, honours `core.hooksPath`) that calls
-`cloudsourced prewarm --quiet` after branch checkouts, which includes `git
+`offshore prewarm --quiet` after branch checkouts, which includes `git
 worktree add`. An existing hook is chained (renamed to
-`post-checkout.cloudsourced-chain`, runs first, its exit status is kept);
-install is idempotent and `cloudsourced hooks uninstall` restores the
+`post-checkout.offshore-chain`, runs first, its exit status is kept);
+install is idempotent and `offshore hooks uninstall` restores the
 previous hook.
 
-**Top.** `cloudsourced top` is a full-screen view in the style of zenith:
+**Top.** `offshore top` is a full-screen view in the style of zenith:
 history graphs of the pool (busy cores, session memory, sessions plus queue,
 cost per hour; seeded from the `machine_sample` events and extended by the
 2 s status polls, kept in memory for 3 h), one line per machine (busy-core
@@ -1257,7 +1257,7 @@ bar and history, memory bar, PSI, sessions, price), a sortable session table
 used/reserved memory, command) and the queue. Keys: ↑/↓ PgUp/PgDn select,
 `e c m a w n` sort by elapsed, CPU, memory, agent, worktree, machine (again:
 reverse), `r` reverse, `+`/`-` zoom the graph window (1m..3h), `q` quit.
-`cloudsourced top --once [--width N] [--window 10m]` prints one plain text
+`offshore top --once [--width N] [--window 10m]` prints one plain text
 frame without colors, for agents and scripts. Busy cores per session come
 from the session's cgroup CPU time between polls (`Status.Sessions[]
 cpu_seconds`, `used_memory`).
@@ -1265,9 +1265,9 @@ cpu_seconds`, `used_memory`).
 **Event log and reports.** Independent of tracing, the orchestrator writes
 an analysis event log (`events-YYYY-MM-DD.jsonl` in its state directory,
 `[telemetry] events_retention_days`, default 30) of task and machine events.
-`cloudsourced report [--since 7d] [--by agent,worktree] [--json]` shows cost per day, repository
+`offshore report [--since 7d] [--by agent,worktree] [--json]` shows cost per day, repository
 and size, per agent/worktree/branch/repo/user, utilisation and overprovisioning, queue wait p50/p95, warm vs.
-cold caches and estimator accuracy; `cloudsourced sim export --since 7d -o
+cold caches and estimator accuracy; `offshore sim export --since 7d -o
 trace.json` converts the real runs into a simulator trace (both work
 embedded and remote, via the control plane's `POST /v1/events`, API key
 protected). See [docs/SCHEDULER.md](docs/SCHEDULER.md#calibrating-the-simulator-from-real-runs).
@@ -1280,7 +1280,7 @@ protected). See [docs/SCHEDULER.md](docs/SCHEDULER.md#calibrating-the-simulator-
 | build slots | build TTL ≤ 24h ≤ `max_lifetime` | server garbage collection; die with the machine's cache volume |
 | compiler cache | 24h | blobcache never serves older entries; S3 lifecycle `cache/` 1 day |
 | machine caches | `ttl` of `scope = "machine"` caches (default 7 days) | volume expiry label, orchestrator reaps volumes |
-| machine secrets (AWS SSM) | until the supervisor reads them | agent deletes after reading; reaper deletes parameters under `/cloudsourced/<stack>/machines/` without a live machine (after 15 min) |
+| machine secrets (AWS SSM) | until the supervisor reads them | agent deletes after reading; reaper deletes parameters under `/offshore/<stack>/machines/` without a live machine (after 15 min) |
 | server binaries (S3 `bin/`) | 30 days | bucket lifecycle |
 | environment images (ECR) | 30 days | repository lifecycle |
 
@@ -1296,9 +1296,9 @@ E2E_REMOTE=1 E2E_DOCKER="sudo -n docker" ./test/e2e/run.sh     # against a contr
 The test is split into parts (`test/e2e/parts`: `core` without compiling,
 `rust`, `lifecycle`), selectable with `E2E_PARTS`; each part has its own
 owner, daemon, ports and test clock. Idle stop and lifetime expiry use the
-test clock (`CLOUDSOURCED_TEST_CLOCK=offset:FILE`, moved with the hidden
-`cloudsourced debug clock advance DURATION`) and a fast reconcile loop
-(`CLOUDSOURCED_RECONCILE_INTERVAL`), so they take seconds. In remote mode
+test clock (`OFFSHORE_TEST_CLOCK=offset:FILE`, moved with the hidden
+`offshore debug clock advance DURATION`) and a fast reconcile loop
+(`OFFSHORE_RECONCILE_INTERVAL`), so they take seconds. In remote mode
 only `core` runs unless `E2E_FULL=1`. The environment image is reused
 across runs (`E2E_CLEAN_IMAGES=1` removes the images a run built).
 
@@ -1318,14 +1318,14 @@ Design notes and roadmap: [docs/PLAN.md](docs/PLAN.md).
   (HKDF-SHA256 over the machine id; the certificate is deterministic in id
   and expiry), so clients pin a fingerprint the orchestrator can always
   recompute and provider labels need not be trusted. A machine only receives
-  the seed of its own key (`CLOUDSOURCED_TLS_SEED`, secret) and the control
-  plane's public key (`CLOUDSOURCED_SIGNER_PUB`).
+  the seed of its own key (`OFFSHORE_TLS_SEED`, secret) and the control
+  plane's public key (`OFFSHORE_SIGNER_PUB`).
 * Every stream carries a token signed by the control plane (Ed25519): claims
   `scope`, `machine`, `lease`, `exp`, `iat`. Sessions, root sync and output
   fetch need a `session` token, which is minted per lease, valid until the
   machine expires and only for that lease's sessions; status needs a `probe`
   token (minted per probe, two minutes); `admin` allows everything. There is
-  no shared per-machine secret any more. `cloudsourced debug token|probe`
+  no shared per-machine secret any more. `offshore debug token|probe`
   mints and tests tokens for operators.
 * Only allowlisted environment variables are forwarded; `PATH` and `HOME`
   come from the remote environment. Secrets are resolved locally per run.

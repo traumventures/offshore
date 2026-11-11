@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // packMeta describes a packed environment build context.
@@ -198,7 +198,7 @@ func fileEnv(hash, tag, file string) Env {
 			return provider.ImageSpec{}, "", err
 		}
 		defer f.Close()
-		dir, err := os.MkdirTemp("", "cloudsourced-env-")
+		dir, err := os.MkdirTemp("", "offshore-env-")
 		if err != nil {
 			return provider.ImageSpec{}, "", err
 		}

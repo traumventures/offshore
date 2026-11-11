@@ -102,7 +102,7 @@ func Mount(mountpoint string, f *Filler) (func() error, error) {
 	sec := time.Second
 	srv, err := fs.Mount(mountpoint, rootNode, &fs.Options{
 		EntryTimeout: &sec, AttrTimeout: &sec,
-		MountOptions: fuse.MountOptions{AllowOther: true, DirectMount: true, FsName: "cloudsourced-fill", Name: "cloudsourced-fill", MaxWrite: 1 << 20},
+		MountOptions: fuse.MountOptions{AllowOther: true, DirectMount: true, FsName: "offshore-fill", Name: "offshore-fill", MaxWrite: 1 << 20},
 	})
 	if err != nil {
 		return nil, err

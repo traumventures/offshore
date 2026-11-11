@@ -11,7 +11,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/smithy-go"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 func typedSpec() provider.MachineSpec {
@@ -29,7 +29,7 @@ func TestLaunchPlan(t *testing.T) {
 }
 
 func baseInput() *ec2.RunInstancesInput {
-	tags := []ec2types.Tag{{Key: aws.String("project"), Value: aws.String("cloudsourced")}}
+	tags := []ec2types.Tag{{Key: aws.String("project"), Value: aws.String("offshore")}}
 	return &ec2.RunInstancesInput{
 		InstanceInitiatedShutdownBehavior: ec2types.ShutdownBehaviorTerminate,
 		TagSpecifications: []ec2types.TagSpecification{

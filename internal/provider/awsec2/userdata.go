@@ -7,15 +7,15 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/traumventures/cloudsourced/internal/machine"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/supervisor"
+	"github.com/traumventures/offshore/internal/machine"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/supervisor"
 )
 
 // shq quotes s for a POSIX shell.
 func shq(s string) string { return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'" }
 
-const hostBinary = "/opt/cloudsourced/bin/cloudsourced"
+const hostBinary = "/opt/offshore/bin/offshore"
 
 // pathSegment makes s safe as one S3 key segment.
 func pathSegment(s string) string {
@@ -42,7 +42,7 @@ func hostSpec(spec provider.MachineSpec, region, stack, bucket, registry, image 
 			ID: spec.ID, Image: image, Binary: hostBinary,
 			Publish:     strconv.Itoa(machine.ServerPort) + ":" + machine.ServerPortSpec(),
 			CacheVolume: "cs-cache", DepsVolume: "cs-deps",
-			StatusDir: "/run/cloudsourced/status",
+			StatusDir: "/run/offshore/status",
 			// The whole VM is the machine: no container limits.
 			Env: spec.Env, SecretKeys: provider.SortedKeys(spec.SecretEnv), Services: spec.Services,
 		},
@@ -71,9 +71,9 @@ func userData(spec provider.MachineSpec, region, stack string, in *infra, binKey
 	w := func(format string, a ...any) { fmt.Fprintf(&b, format+"\n", a...) }
 	w("#!/bin/bash")
 	w("set -euo pipefail")
-	w("exec >>/var/log/cloudsourced-boot.log 2>&1")
+	w("exec >>/var/log/offshore-boot.log 2>&1")
 	w("umask 077")
-	w("mkdir -p /etc/cloudsourced /opt/cloudsourced/bin %s", supervisor.StateDir)
+	w("mkdir -p /etc/offshore /opt/offshore/bin %s", supervisor.StateDir)
 	w("echo %s | base64 -d > %s", base64.StdEncoding.EncodeToString(hs), supervisor.SpecPath)
 	if spec.Swap {
 		w("if [ ! -f /swapfile ]; then fallocate -l 8G /swapfile && chmod 600 /swapfile && mkswap /swapfile && echo '/swapfile none swap sw 0 0' >> /etc/fstab; fi; swapon -a || true")
@@ -85,9 +85,9 @@ func userData(spec provider.MachineSpec, region, stack string, in *infra, binKey
 	w("chmod 755 %s", hostBinary)
 	// The agent creates the containers, starts them on every boot and
 	// enforces expiry and idle stop.
-	w(`cat > /etc/systemd/system/cloudsourced-supervisor.service <<'EOF'
+	w(`cat > /etc/systemd/system/offshore-supervisor.service <<'EOF'
 [Unit]
-Description=cloudsourced supervisor
+Description=offshore supervisor
 After=docker.service network-online.target
 Wants=network-online.target
 Requires=docker.service
@@ -98,7 +98,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF`, hostBinary)
-	w("systemctl daemon-reload && systemctl enable --now cloudsourced-supervisor.service")
-	w("echo cloudsourced machine %s handed to the supervisor", spec.ID)
+	w("systemctl daemon-reload && systemctl enable --now offshore-supervisor.service")
+	w("echo offshore machine %s handed to the supervisor", spec.ID)
 	return b.String(), nil
 }

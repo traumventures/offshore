@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	"github.com/traumventures/cloudsourced/internal/auth"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/tracing"
-	"github.com/traumventures/cloudsourced/internal/tracing/tracingtest"
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/auth"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/tracing"
+	"github.com/traumventures/offshore/internal/tracing/tracingtest"
+	"github.com/traumventures/offshore/internal/transport"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -85,12 +85,12 @@ func TestExecContinuesTrace(t *testing.T) {
 		t.Fatalf("worker.exec must continue the Hello's trace: %+v", s)
 	}
 	for _, kv := range s.Attributes() {
-		if v := kv.Value.Emit(); kv.Key == "cloudsourced.subcommand" && v != "build" || strings.Contains(v, "secret") {
+		if v := kv.Value.Emit(); kv.Key == "offshore.subcommand" && v != "build" || strings.Contains(v, "secret") {
 			t.Fatalf("attribute %s=%s", kv.Key, v)
 		}
 	}
 
-	ectx, root := tracing.Start(context.Background(), "cloudsourced.run")
+	ectx, root := tracing.Start(context.Background(), "offshore.run")
 	run(dctx, tracing.Inject(ectx)) // Hello without trace context
 	root.End()
 	s = find(root.SpanContext().TraceID())

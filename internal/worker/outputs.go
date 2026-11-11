@@ -12,8 +12,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 // serveOutputs answers one output FUSE request (directory listing or whole

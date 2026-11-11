@@ -3,7 +3,7 @@ package worker
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/traumventures/cloudsourced/internal/clock"
+	"github.com/traumventures/offshore/internal/clock"
 	"os"
 	"os/exec"
 	"path/filepath"

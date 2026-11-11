@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 func TestRetryable(t *testing.T) {
@@ -78,7 +78,7 @@ func fakeSession(t *testing.T, script func(*proto.Conn, net.Conn)) *proto.Conn {
 }
 
 func TestStreamClassifiesLostConnection(t *testing.T) {
-	t.Setenv("CLOUDSOURCED_STDIN", "never")
+	t.Setenv("OFFSHORE_STDIN", "never")
 	pc := fakeSession(t, func(srv *proto.Conn, raw net.Conn) {
 		srv.Write(proto.TStdout, []byte("partial output\n"))
 		raw.Close() // the machine disappears mid-run
@@ -113,7 +113,7 @@ func TestStreamClassifiesLostConnection(t *testing.T) {
 
 // Forwarded standard input cannot be replayed on another machine.
 func TestStreamRecordsStdinUse(t *testing.T) {
-	t.Setenv("CLOUDSOURCED_STDIN", "always")
+	t.Setenv("OFFSHORE_STDIN", "always")
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)

@@ -10,7 +10,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // Prebuilder builds an environment image for every provider and platform

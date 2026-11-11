@@ -12,21 +12,21 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/pool"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/scheduler/sim"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/pool"
+	"github.com/traumventures/offshore/internal/scheduler"
+	"github.com/traumventures/offshore/internal/scheduler/sim"
 )
 
 const simUsage = `Usage:
-  cloudsourced sim [flags] <trace.json|trace.csv>...
+  offshore sim [flags] <trace.json|trace.csv>...
       replay traces against the pool configuration and compare policies
-  cloudsourced sim -sweep <trace>...
+  offshore sim -sweep <trace>...
       sweep [scheduler] cost_optimization from 0 (fastest) to 1 (cheapest)
       and print the cost/time frontier of the default policy
-  cloudsourced sim -generate out.json [-profile team|small] [-seed N] [-days N] [-tz ZONE]
+  offshore sim -generate out.json [-profile team|small] [-seed N] [-days N] [-tz ZONE]
       write a synthetic bursty workday trace
-  cloudsourced sim export [-since 7d] [-until T] [-o trace.json] [-cold-penalty 0.5] [-request-cpu]
+  offshore sim export [-since 7d] [-until T] [-o trace.json] [-cold-penalty 0.5] [-request-cpu]
       convert the pool's event log (real runs) into a trace
 
 Flags:

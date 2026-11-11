@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // prodSizes is the production pool of the flapping case (AWS x4/x8/x16).

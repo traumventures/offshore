@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // noCapacity fails every create with a capacity error.

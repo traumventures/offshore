@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 	"golang.org/x/term"
 )
 
@@ -98,7 +98,7 @@ func (a Cargo) Classify(c Command) Plan {
 		return a.splitPlan(c, plan, Plan{
 			Phases: []Phase{
 				{Name: Build, Where: Remote, Argv: append([]string{"cargo"}, n.archiveArgs("<archive>")...),
-					Artifacts: []Artifact{cargoTarget, cargoRegistry, {Path: "target/cloudsourced/nextest-<cwd>.tar.zst", Scope: ScopeLocal}}},
+					Artifacts: []Artifact{cargoTarget, cargoRegistry, {Path: "target/offshore/nextest-<cwd>.tar.zst", Scope: ScopeLocal}}},
 				{Name: Run, Where: Local, Argv: append([]string{"cargo"}, n.runArgs("<archive>")...), Needs: []string{"cargo-nextest", "test executables run here"}},
 			},
 			Why:  "[tool.cargo] split: remote build, local test run",
@@ -182,7 +182,7 @@ func runNextest(ctx context.Context, rt Runtime, args []string, n nextestRun) (i
 	}
 	h := fnv.New64a()
 	h.Write([]byte(rt.Cwd()))
-	rel := filepath.Join(filepath.Clean(dirs[0]), "cloudsourced", fmt.Sprintf("nextest-%016x.tar.zst", h.Sum64()))
+	rel := filepath.Join(filepath.Clean(dirs[0]), "offshore", fmt.Sprintf("nextest-%016x.tar.zst", h.Sum64()))
 	archive := filepath.Join(rt.Root(), rel)
 	filter := newLineFilter(os.Stderr, "Archiving ", "Archived ")
 	sniff := newSniffer(filter, nextestMissing)

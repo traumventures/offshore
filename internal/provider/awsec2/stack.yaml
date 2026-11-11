@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  cloudsourced shared infrastructure for the aws-ec2 provider. Build machines are
-  EC2 instances created by the cloudsourced orchestrator (not by this stack); this
+  offshore shared infrastructure for the aws-ec2 provider. Build machines are
+  EC2 instances created by the offshore orchestrator (not by this stack); this
   stack holds what they share - security group, instance role, a bucket for the
   server binary, the environment image repository, a reaper that terminates
   expired machines when no orchestrator is running, and a resource group.
@@ -14,7 +14,7 @@ Metadata:
       outlive it, even when the orchestrator is offline. Caches live on the
       instance disks and die with them; nothing here stores build state.
     must:
-      - Every resource carries the tag project=cloudsourced (set on the stack).
+      - Every resource carries the tag project=offshore (set on the stack).
       - TemplateVersion output must change whenever this template changes.
 Parameters:
   VpcId:
@@ -29,7 +29,7 @@ Resources:
           Ingress (UDP 7443, QUIC) is managed by the provider from its allow_cidrs
           option, because client addresses change; the stack only owns the group.
     Properties:
-      GroupDescription: cloudsourced build machines - QUIC from allowed clients only
+      GroupDescription: offshore build machines - QUIC from allowed clients only
       VpcId: !Ref VpcId
       SecurityGroupEgress:
         - IpProtocol: "-1"
@@ -79,14 +79,14 @@ Resources:
                 Action:
                   - ssm:GetParameter
                   - ssm:DeleteParameter
-                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cloudsourced/${AWS::StackName}/machines/*"
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/offshore/${AWS::StackName}/machines/*"
               - Sid: IdleSelfStop
                 Effect: Allow
                 Action: ec2:StopInstances
                 Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
                 Condition:
                   StringEquals:
-                    aws:ResourceTag/cloudsourced.kind: machine
+                    aws:ResourceTag/offshore.kind: machine
 
   MachineInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -218,15 +218,15 @@ Resources:
                 Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
                 Condition:
                   StringEquals:
-                    aws:ResourceTag/cloudsourced.kind: machine
+                    aws:ResourceTag/offshore.kind: machine
               # Orphaned machine secrets (supervisors delete theirs after
               # reading; these are left by machines that never booted).
               - Effect: Allow
                 Action: ssm:GetParametersByPath
-                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cloudsourced/${AWS::StackName}/machines"
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/offshore/${AWS::StackName}/machines"
               - Effect: Allow
                 Action: ssm:DeleteParameter
-                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cloudsourced/${AWS::StackName}/machines/*"
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/offshore/${AWS::StackName}/machines/*"
 
   Reaper:
     Type: AWS::Lambda::Function
@@ -239,7 +239,7 @@ Resources:
           deletes machine secrets (SSM) whose machine is gone. The source is
           internal/provider/awsec2/reaper/reaper.py (a test keeps them equal).
     Properties:
-      Description: Terminates expired cloudsourced machines and deletes orphaned machine secrets
+      Description: Terminates expired offshore machines and deletes orphaned machine secrets
       Runtime: python3.12
       Handler: index.handler
       Timeout: 60
@@ -247,7 +247,7 @@ Resources:
       Role: !GetAtt ReaperRole.Arn
       Environment:
         Variables:
-          MACHINE_PARAMETERS: !Sub "/cloudsourced/${AWS::StackName}/machines"
+          MACHINE_PARAMETERS: !Sub "/offshore/${AWS::StackName}/machines"
       Code:
         ZipFile: |
           import os
@@ -263,7 +263,7 @@ Resources:
               """Return (instance id, tags) of every live machine."""
               out = []
               pages = ec2.get_paginator("describe_instances").paginate(Filters=[
-                  {"Name": "tag:cloudsourced.kind", "Values": ["machine"]},
+                  {"Name": "tag:offshore.kind", "Values": ["machine"]},
                   {"Name": "instance-state-name", "Values": LIVE},
               ])
               for page in pages:
@@ -276,7 +276,7 @@ Resources:
 
           def expired(tags, now):
               try:
-                  expires = int(tags.get("cloudsourced.expires-at", "0"))
+                  expires = int(tags.get("offshore.expires-at", "0"))
               except ValueError:
                   expires = 0
               return bool(expires) and now > expires + GRACE
@@ -303,8 +303,8 @@ Resources:
               for instance_id, tags in machines(ec2):
                   if expired(tags, now):
                       doomed.append(instance_id)
-                  elif tags.get("cloudsourced.machine"):
-                      alive.add(tags["cloudsourced.machine"])
+                  elif tags.get("offshore.machine"):
+                      alive.add(tags["offshore.machine"])
               for k in range(0, len(doomed), 50):
                   ec2.terminate_instances(InstanceIds=doomed[k:k + 50])
               deleted = []
@@ -332,7 +332,7 @@ Resources:
   ReaperSchedule:
     Type: AWS::Events::Rule
     Properties:
-      Description: Run the cloudsourced reaper
+      Description: Run the offshore reaper
       ScheduleExpression: rate(10 minutes)
       State: ENABLED
       Targets:
@@ -351,14 +351,14 @@ Resources:
     Type: AWS::ResourceGroups::Group
     Properties:
       Name: !Ref AWS::StackName
-      Description: Everything tagged with project cloudsourced including build machines
+      Description: Everything tagged with project offshore including build machines
       ResourceQuery:
         Type: TAG_FILTERS_1_0
         Query:
           ResourceTypeFilters: [AWS::AllSupported]
           TagFilters:
             - Key: project
-              Values: [cloudsourced]
+              Values: [offshore]
 
 Outputs:
   TemplateVersion:

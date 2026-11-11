@@ -25,11 +25,11 @@ const (
 	// AgentSession identifies the agent's conversation/thread when the
 	// agent exports one (e.g. CODEX_THREAD_ID).
 	AgentSession = "agent_session"
-	// Purpose is "prewarm" for runs started by `cloudsourced prewarm`.
+	// Purpose is "prewarm" for runs started by `offshore prewarm`.
 	Purpose = "purpose"
 )
 
-// PurposePrewarm marks runs of `cloudsourced prewarm`.
+// PurposePrewarm marks runs of `offshore prewarm`.
 const PurposePrewarm = "prewarm"
 
 // Limits keep labels small on the wire and in the event log.
@@ -42,8 +42,8 @@ const (
 // EnvAgent overrides agent detection; EnvLabels adds free labels
 // ("k=v,k=v").
 const (
-	EnvAgent  = "CLOUDSOURCED_AGENT"
-	EnvLabels = "CLOUDSOURCED_LABELS"
+	EnvAgent  = "OFFSHORE_AGENT"
+	EnvLabels = "OFFSHORE_LABELS"
 )
 
 // agentProbe detects one agent from the presence of an environment
@@ -67,7 +67,7 @@ var Probes = []agentProbe{
 }
 
 // Detect returns the labels of a run in the repository at root (the
-// directory holding .cloudsourced.toml). getenv is os.Getenv in production.
+// directory holding .offshore.toml). getenv is os.Getenv in production.
 func Detect(root, user string, getenv func(string) string) map[string]string {
 	l := map[string]string{}
 	if root != "" {

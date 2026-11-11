@@ -11,7 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/traumventures/cloudsourced/internal/clock"
+	"github.com/traumventures/offshore/internal/clock"
 	"io"
 	"log/slog"
 	"os"
@@ -21,23 +21,23 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/auth"
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/labels"
-	"github.com/traumventures/cloudsourced/internal/logs"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/store"
-	"github.com/traumventures/cloudsourced/internal/tracing"
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/auth"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/labels"
+	"github.com/traumventures/offshore/internal/logs"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/scheduler"
+	"github.com/traumventures/offshore/internal/store"
+	"github.com/traumventures/offshore/internal/tracing"
+	"github.com/traumventures/offshore/internal/transport"
 )
 
 // Config is the pool configuration. Placement and scaling decisions are
 // made by Policy; the orchestrator only gathers state and executes them.
 // It holds pool settings only: repository settings travel in Request.
 type Config struct {
-	Owner        string           // pool id, the cloudsourced.pool label of all resources
+	Owner        string           // pool id, the offshore.pool label of all resources
 	Sizes        []scheduler.Size // machine types; the first is the default
 	MaxLifetime  time.Duration
 	QueueTimeout time.Duration
@@ -85,7 +85,7 @@ type Request struct {
 	Labels map[string]string `json:",omitempty"`
 }
 
-// QueuedTask is a request waiting for capacity (`cloudsourced top`).
+// QueuedTask is a request waiting for capacity (`offshore top`).
 type QueuedTask struct {
 	ID     string              `json:"id"`
 	Since  time.Time           `json:"since"`
@@ -150,7 +150,7 @@ type Lease struct {
 	// uses it as admission safety net.
 	MemoryOvercommit float64
 	// Provider, Size and PricePerHour describe the leased machine; Reason
-	// is the policy's placement reason (shown by `cloudsourced why`).
+	// is the policy's placement reason (shown by `offshore why`).
 	Provider     string
 	Size         string
 	PricePerHour float64
@@ -301,7 +301,7 @@ type Orchestrator struct {
 	// Clock is the time of pool decisions: idle stop, lifetime expiry,
 	// pending lease and volume TTLs, warm pool windows, uptime. Waits,
 	// probe recency and latency metrics use real time. Set before use;
-	// New takes it from $CLOUDSOURCED_TEST_CLOCK (default: real time).
+	// New takes it from $OFFSHORE_TEST_CLOCK (default: real time).
 	Clock clock.Clock
 
 	// PrepareImage makes the environment image available on a provider
@@ -910,7 +910,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			env := m.EnvHash
 			o.mu.Unlock()
 			if pl.Slot.Kind != scheduler.SlotNone {
-				fmt.Fprintf(log, "cloudsourced: preparing build slot on %s (%s)\n", m.ID, pl.Slot.Kind)
+				fmt.Fprintf(log, "offshore: preparing build slot on %s (%s)\n", m.ID, pl.Slot.Kind)
 				o.prepareSlot(ctx, m.ID, pl.Slot)
 			}
 			lease.Store = o.storeGrant(ctx, lease.Provider, req.RepoID, env)
@@ -945,13 +945,13 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 				msg = fmt.Sprintf("creating %s machine for environment %s", a.Size.Name, a.EnvHash[:min(12, len(a.EnvHash))])
 			}
 			if msg != "" && !announced[msg] {
-				fmt.Fprintf(log, "cloudsourced: %s\n", msg)
+				fmt.Fprintf(log, "offshore: %s\n", msg)
 				announced[msg] = true
 			}
 		}
 		o.execute(context.WithoutCancel(ctx), acts, false)
 		if len(acts) == 0 && !announced["wait"] {
-			fmt.Fprintf(log, "cloudsourced: waiting for machine capacity\n")
+			fmt.Fprintf(log, "offshore: waiting for machine capacity\n")
 			announced["wait"] = true
 		}
 		if time.Now().After(deadline) {
@@ -1178,14 +1178,14 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 		ExpiresAt: expires, Finger: ident.Fingerprint, DepsTTL: params.DepsTTL,
 		IdleStop: cfg.Policy.IdleStop, Services: services,
 		Env: map[string]string{
-			"CLOUDSOURCED_MACHINE_ID": id,
-			"CLOUDSOURCED_ENV_HASH":   envHash,
-			"CLOUDSOURCED_EXPIRES_AT": strconv.FormatInt(expires.Unix(), 10),
-			"CLOUDSOURCED_CPU":        strconv.FormatFloat(size.Capacity.CPU, 'f', -1, 64),
-			"CLOUDSOURCED_MEMORY":     strconv.FormatInt(size.Capacity.Memory, 10),
-			"CLOUDSOURCED_PROVISION":  string(provision),
-			auth.EnvSignerPub:         o.master.SignerPublic(),
-			auth.EnvFingerprint:       ident.Fingerprint,
+			"OFFSHORE_MACHINE_ID": id,
+			"OFFSHORE_ENV_HASH":   envHash,
+			"OFFSHORE_EXPIRES_AT": strconv.FormatInt(expires.Unix(), 10),
+			"OFFSHORE_CPU":        strconv.FormatFloat(size.Capacity.CPU, 'f', -1, 64),
+			"OFFSHORE_MEMORY":     strconv.FormatInt(size.Capacity.Memory, 10),
+			"OFFSHORE_PROVISION":  string(provision),
+			auth.EnvSignerPub:     o.master.SignerPublic(),
+			auth.EnvFingerprint:   ident.Fingerprint,
 		},
 		SecretEnv: map[string]string{
 			auth.EnvTLSSeed: auth.EncodeKey(seed),
@@ -1194,7 +1194,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	// The machine-wide build TTL is only an upper bound: every session
 	// sends its repository's TTL, which the server records per build slot.
 	if cfg.MaxLifetime > 0 {
-		spec.Env["CLOUDSOURCED_BUILD_TTL"] = cfg.MaxLifetime.String()
+		spec.Env["OFFSHORE_BUILD_TTL"] = cfg.MaxLifetime.String()
 	}
 	for k, v := range logs.Forward() { // machines log like the pool
 		spec.Env[k] = v

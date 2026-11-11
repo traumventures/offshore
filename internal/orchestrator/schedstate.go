@@ -9,9 +9,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // Provider health: a capacity or quota error takes a provider out of

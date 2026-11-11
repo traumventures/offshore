@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Drive a local rust-analyzer over LSP with the settings printed by
-`cloudsourced editor --mode lsp-remote` and check that the derive macro of
+`offshore editor --mode lsp-remote` and check that the derive macro of
 the fixture is expanded: the type of `_len = Greeter::NAME.len()` is only
 known if the proc-macro library (built remotely, read through the output
 FUSE) was loaded.
@@ -17,7 +17,7 @@ overall deadline ($E2E_RA_TIMEOUT seconds, default 600).
 import json, os, signal, subprocess, sys, threading, time
 
 ra, proj, check = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
-# Own process group: the checks rust-analyzer spawns (cloudsourced run cargo
+# Own process group: the checks rust-analyzer spawns (offshore run cargo
 # check, i.e. remote sessions) must end with it, or they keep a build slot
 # leased while the next steps of the e2e run.
 p = subprocess.Popen([ra], cwd=proj, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

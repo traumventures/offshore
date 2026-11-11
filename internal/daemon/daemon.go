@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/traumventures/cloudsourced/internal/envbuild"
+	"github.com/traumventures/offshore/internal/envbuild"
 	"io"
 	"log/slog"
 	"net"
@@ -20,28 +20,28 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/labels"
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/orchestrator"
-	"github.com/traumventures/cloudsourced/internal/pool"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/store"
-	"github.com/traumventures/cloudsourced/internal/tracing"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/labels"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/orchestrator"
+	"github.com/traumventures/offshore/internal/pool"
+	"github.com/traumventures/offshore/internal/scheduler"
+	"github.com/traumventures/offshore/internal/store"
+	"github.com/traumventures/offshore/internal/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
 // StateDir returns the daemon state directory.
 func StateDir() string {
-	if d := os.Getenv("CLOUDSOURCED_STATE_DIR"); d != "" {
+	if d := os.Getenv("OFFSHORE_STATE_DIR"); d != "" {
 		return d
 	}
 	if d := os.Getenv("XDG_STATE_HOME"); d != "" {
-		return filepath.Join(d, "cloudsourced")
+		return filepath.Join(d, "offshore")
 	}
-	return filepath.Join(os.Getenv("HOME"), ".local", "state", "cloudsourced")
+	return filepath.Join(os.Getenv("HOME"), ".local", "state", "offshore")
 }
 
 // SocketPath returns the daemon socket path.
@@ -335,7 +335,7 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 			return nil, nil
 		}
 		ctx, span := tracing.Start(ctx, "daemon.release", trace.WithSpanKind(trace.SpanKindServer),
-			trace.WithAttributes(attribute.String("cloudsourced.lease", req.Lease)))
+			trace.WithAttributes(attribute.String("offshore.lease", req.Lease)))
 		err := d.pool.Release(ctx, req.Lease, req.UsageKey, req.Usage)
 		tracing.End(span, err)
 		return nil, err
@@ -418,7 +418,7 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 	return nil, fmt.Errorf("unknown op %q", req.Op)
 }
 
-// record appends a run to the run log of `cloudsourced why`.
+// record appends a run to the run log of `offshore why`.
 func (d *Daemon) record(r *events.Run) {
 	if r == nil {
 		return
@@ -485,7 +485,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	if err != nil {
 		return nil, err
 	}
-	span.SetAttributes(attribute.String("cloudsourced.env_hash", plan.Hash))
+	span.SetAttributes(attribute.String("offshore.env_hash", plan.Hash))
 	d.env.observe(repo, plan, "configuration changed (run of "+req.Tool+")")
 	var tm events.Timings
 	mark := time.Now()
@@ -496,7 +496,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		return ms
 	}
 	env := pool.Env{Hash: plan.Hash, Tag: plan.Tag, Context: plan.Context}
-	ictx, sp := tracing.Start(ctx, "daemon.image_ensure", trace.WithAttributes(attribute.String("cloudsourced.image", plan.Tag)))
+	ictx, sp := tracing.Start(ctx, "daemon.image_ensure", trace.WithAttributes(attribute.String("offshore.image", plan.Tag)))
 	err = d.pool.EnsureEnv(ictx, env, progress)
 	tracing.End(sp, err)
 	if err != nil {
@@ -507,7 +507,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	paths := append([]string{repo.Root}, repo.ExtraRootPaths()...)
 	roots := map[string]*root{}
 	versions := map[string]uint64{}
-	_, sp = tracing.Start(ctx, "daemon.manifest_refresh", trace.WithAttributes(attribute.Int("cloudsourced.roots", len(paths))))
+	_, sp = tracing.Start(ctx, "daemon.manifest_refresh", trace.WithAttributes(attribute.Int("offshore.roots", len(paths))))
 	for _, p := range paths {
 		r, err := d.rootFor(p, rulesFor(repo, p))
 		if err != nil {
@@ -524,14 +524,14 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	repoID := RepoID(c.User, repo.Root)
 	lbl := labels.Clean(labels.Merge(req.Labels, map[string]string{labels.User: c.User}))
 	key := UsageKey(repoID, req.Tool, req.Args)
-	span.SetAttributes(attribute.String("cloudsourced.repo_id", repoID), attribute.String("cloudsourced.usage_key", key))
+	span.SetAttributes(attribute.String("offshore.repo_id", repoID), attribute.String("offshore.usage_key", key))
 	ectx, sp := tracing.Start(ctx, "daemon.estimate")
 	need, err := d.pool.Estimate(ectx, key, scheduler.Resources{CPU: repo.Resources.CPU, Memory: repo.MemoryBytes()})
 	tracing.End(sp, err)
 	if err != nil {
 		return nil, err
 	}
-	span.SetAttributes(attribute.Float64("cloudsourced.need.cpu", need.CPU), attribute.Int64("cloudsourced.need.memory", need.Memory))
+	span.SetAttributes(attribute.Float64("offshore.need.cpu", need.CPU), attribute.Int64("offshore.need.memory", need.Memory))
 	if max := repo.MaxMemoryBytes(); max > 0 && need.Memory > max {
 		need.Memory = max
 	}
@@ -548,7 +548,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		}
 		tm.Queue += lap()
 		actx, sp := tracing.Start(ctx, "daemon.attach", trace.WithAttributes(
-			attribute.String("cloudsourced.machine", lease.MachineID), attribute.Int("cloudsourced.attempt", attempt)))
+			attribute.String("offshore.machine", lease.MachineID), attribute.Int("offshore.attempt", attempt)))
 		err = d.attachAll(actx, lease, repo, roots)
 		tracing.End(sp, err)
 		tm.Attach += lap()
@@ -566,11 +566,11 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		Addr: lease.Addr, Fingerprint: lease.Fingerprint, Token: lease.Token})
 	if repo.Outputs.Mode == config.OutputsFuse {
 		if _, err := d.outputs.mount(repo.Root, repo); err != nil {
-			fmt.Fprintf(progress, "cloudsourced: outputs mount failed, using eager outputs only: %v\n", err)
+			fmt.Fprintf(progress, "offshore: outputs mount failed, using eager outputs only: %v\n", err)
 		}
 	}
-	span.SetAttributes(attribute.String("cloudsourced.lease", lease.ID), attribute.String("cloudsourced.machine", lease.MachineID),
-		attribute.String("cloudsourced.provider", lease.Provider), attribute.String("cloudsourced.size", lease.Size))
+	span.SetAttributes(attribute.String("offshore.lease", lease.ID), attribute.String("offshore.machine", lease.MachineID),
+		attribute.String("offshore.provider", lease.Provider), attribute.String("offshore.size", lease.Size))
 	ttl := lease.BuildTTL
 	if ttl <= 0 {
 		ttl = buildTTL // control plane without request-scoped TTLs; the server caps it

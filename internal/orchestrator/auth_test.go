@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/auth"
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/auth"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // TestMachineSecretsAndTokens checks what a machine receives and what a

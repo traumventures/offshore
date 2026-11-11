@@ -52,7 +52,7 @@ func TestConcurrentRequestsKeepTheirTTLs(t *testing.T) {
 		}
 		// The machine-wide build TTL is the upper bound only; sessions send
 		// their own.
-		if got := s.Env["CLOUDSOURCED_BUILD_TTL"]; got != (6 * time.Hour).String() {
+		if got := s.Env["OFFSHORE_BUILD_TTL"]; got != (6 * time.Hour).String() {
 			t.Errorf("machine build TTL %q, want max_lifetime", got)
 		}
 	}

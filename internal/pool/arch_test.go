@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // Images are built for the architecture of the size a machine is created

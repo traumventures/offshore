@@ -3,7 +3,7 @@
 // (`git worktree add` runs post-checkout in the new worktree).
 //
 // The hook is chained: an existing post-checkout hook that is not ours is
-// renamed to post-checkout.cloudsourced-chain and still runs first, with
+// renamed to post-checkout.offshore-chain and still runs first, with
 // its exit status preserved. Uninstall restores it.
 package hooks
 
@@ -20,25 +20,25 @@ import (
 // Name is the hook file; Chain the renamed previous hook.
 const (
 	Name   = "post-checkout"
-	Chain  = "post-checkout.cloudsourced-chain"
-	Marker = "# managed by `cloudsourced hooks install`"
+	Chain  = "post-checkout.offshore-chain"
+	Marker = "# managed by `offshore hooks install`"
 )
 
-// Script returns the hook for the cloudsourced binary bin.
+// Script returns the hook for the offshore binary bin.
 func Script(bin string) string {
 	return `#!/bin/sh
 ` + Marker + `
 # Prewarms the remote build environment after branch checkouts and new
-# worktrees (non-blocking). Remove with: cloudsourced hooks uninstall
+# worktrees (non-blocking). Remove with: offshore hooks uninstall
 status=0
 chain="$(dirname "$0")/` + Chain + `"
 if [ -x "$chain" ]; then
 	"$chain" "$@" || status=$?
 fi
 # $3 is 1 for branch checkouts (including git worktree add), 0 for files.
-if [ "$3" = "1" ] && [ -z "$CLOUDSOURCED_DISABLE" ]; then
+if [ "$3" = "1" ] && [ -z "$OFFSHORE_DISABLE" ]; then
 	cs=` + shellQuote(bin) + `
-	[ -x "$cs" ] || cs=$(command -v cloudsourced 2>/dev/null)
+	[ -x "$cs" ] || cs=$(command -v offshore 2>/dev/null)
 	if [ -n "$cs" ]; then
 		"$cs" prewarm --quiet </dev/null >/dev/null 2>&1 || true
 	fi
@@ -105,7 +105,7 @@ func Uninstall(hooksDir string) error {
 		return nil
 	}
 	if !Installed(hooksDir) {
-		return fmt.Errorf("%s was not installed by cloudsourced; left unchanged", path)
+		return fmt.Errorf("%s was not installed by offshore; left unchanged", path)
 	}
 	if err := os.Remove(path); err != nil {
 		return err

@@ -1,6 +1,6 @@
 // Package report turns the orchestrator's analysis event log into a cost
-// and efficiency report (`cloudsourced report`) and into simulator traces
-// (`cloudsourced sim export`).
+// and efficiency report (`offshore report`) and into simulator traces
+// (`offshore sim export`).
 package report
 
 import (
@@ -12,8 +12,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // Lookback is how far before a report window machine events are needed to

@@ -18,9 +18,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/orchestrator"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/tracing"
+	"github.com/traumventures/offshore/internal/orchestrator"
+	"github.com/traumventures/offshore/internal/scheduler"
+	"github.com/traumventures/offshore/internal/tracing"
 )
 
 // Remote is a Pool served by a shared control plane.
@@ -149,7 +149,7 @@ func (r *Remote) ensureEnv(ctx context.Context, env Env, progress io.Writer, ext
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(PackEnv(pw, spec)) }()
 	defer pr.Close()
-	fmt.Fprintf(progress, "cloudsourced: uploading environment %s to the control plane\n", env.Tag)
+	fmt.Fprintf(progress, "offshore: uploading environment %s to the control plane\n", env.Tag)
 	res = envResult{}
 	if err := r.call(ctx, q, pr, "application/gzip", progress, &res); err != nil {
 		return err

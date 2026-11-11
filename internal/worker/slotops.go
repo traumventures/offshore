@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 // serveSlot runs one build slot operation of the orchestrator.

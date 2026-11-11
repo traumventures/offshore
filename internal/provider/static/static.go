@@ -22,11 +22,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/image"
-	"github.com/traumventures/cloudsourced/internal/machine"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/supervisor"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/image"
+	"github.com/traumventures/offshore/internal/machine"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/supervisor"
 )
 
 // Host is one fixed host.
@@ -179,7 +179,7 @@ func (s *Static) hostBinary() (string, error) {
 		sum := sha256.Sum256(b)
 		s.binHash = hex.EncodeToString(sum[:8])
 	})
-	return "/var/lib/cloudsourced/bin/cloudsourced-" + s.binHash, s.binErr
+	return "/var/lib/offshore/bin/offshore-" + s.binHash, s.binErr
 }
 
 // ensureBinary uploads the binary to a host unless present.
@@ -199,7 +199,7 @@ func (s *Static) ensureBinary(ctx context.Context, h Host) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		cmd := fmt.Sprintf("mkdir -p /var/lib/cloudsourced/bin && cat > %[1]s.tmp && chmod 755 %[1]s.tmp && mv %[1]s.tmp %[1]s", bin)
+		cmd := fmt.Sprintf("mkdir -p /var/lib/offshore/bin && cat > %[1]s.tmp && chmod 755 %[1]s.tmp && mv %[1]s.tmp %[1]s", bin)
 		if out, err := s.Transport.Run(ctx, h, cmd, data); err != nil {
 			return "", fmt.Errorf("static: upload binary to %s: %v: %s", h.Name, err, out)
 		}
@@ -286,7 +286,7 @@ func (s *Static) Create(ctx context.Context, spec provider.MachineSpec) (provide
 		provider.LabelExpiresAt: strconv.FormatInt(spec.ExpiresAt.Unix(), 10), provider.LabelFinger: spec.Finger,
 		provider.LabelSize: spec.Size, provider.LabelArch: host.Arch,
 		provider.LabelCPU:    strconv.FormatFloat(host.CPU, 'f', -1, 64),
-		provider.LabelMemory: strconv.FormatInt(host.Memory, 10), "cloudsourced.host": host.Name,
+		provider.LabelMemory: strconv.FormatInt(host.Memory, 10), "offshore.host": host.Name,
 	}
 	hs := supervisor.Spec{
 		Provider: supervisor.StaticProvider,
@@ -294,7 +294,7 @@ func (s *Static) Create(ctx context.Context, spec provider.MachineSpec) (provide
 			ID: spec.ID, Image: spec.Image, Binary: bin,
 			Publish:     strconv.Itoa(machine.ServerPort) + ":" + machine.ServerPortSpec(),
 			CacheVolume: "cs-cache-" + spec.ID, DepsVolume: "cs-deps",
-			StatusDir: "/run/cloudsourced/status",
+			StatusDir: "/run/offshore/status",
 			Labels:    labels, SvcLabels: map[string]string{provider.LabelKind: "service", provider.LabelMachine: spec.ID},
 			Env: spec.Env, SecretKeys: provider.SortedKeys(spec.SecretEnv), Services: spec.Services,
 		},

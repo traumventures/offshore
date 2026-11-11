@@ -10,22 +10,22 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/image"
+	"github.com/traumventures/offshore/internal/image"
 )
 
 // Label keys attached to every resource.
 const (
-	LabelPool      = "cloudsourced.pool"
-	LabelMachine   = "cloudsourced.machine"
-	LabelEnvHash   = "cloudsourced.env-hash"
-	LabelCreatedAt = "cloudsourced.created-at"
-	LabelExpiresAt = "cloudsourced.expires-at"
-	LabelKind      = "cloudsourced.kind"
-	LabelCPU       = "cloudsourced.cpu"
-	LabelMemory    = "cloudsourced.memory"
-	LabelFinger    = "cloudsourced.fingerprint"
-	LabelSize      = "cloudsourced.size"
-	LabelArch      = "cloudsourced.arch" // machine architecture (amd64, arm64)
+	LabelPool      = "offshore.pool"
+	LabelMachine   = "offshore.machine"
+	LabelEnvHash   = "offshore.env-hash"
+	LabelCreatedAt = "offshore.created-at"
+	LabelExpiresAt = "offshore.expires-at"
+	LabelKind      = "offshore.kind"
+	LabelCPU       = "offshore.cpu"
+	LabelMemory    = "offshore.memory"
+	LabelFinger    = "offshore.fingerprint"
+	LabelSize      = "offshore.size"
+	LabelArch      = "offshore.arch" // machine architecture (amd64, arm64)
 )
 
 // MachineSpec describes a machine to create. Providers treat the server
@@ -51,8 +51,8 @@ type MachineSpec struct {
 	DepsTTL       time.Duration // lifetime of shared dependency cache volumes
 	IdleStop      time.Duration // machine stops itself after this long idle and unobserved (0: never)
 	Services      []Service
-	Env           map[string]string // CLOUDSOURCED_* variables of the worker
-	SecretEnv     map[string]string // secret CLOUDSOURCED_* variables
+	Env           map[string]string // OFFSHORE_* variables of the worker
+	SecretEnv     map[string]string // secret OFFSHORE_* variables
 }
 
 // SortedKeys returns the keys of m in order.

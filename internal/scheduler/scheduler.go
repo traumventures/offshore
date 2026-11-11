@@ -1,4 +1,4 @@
-// Package scheduler contains the scheduling decisions of cloudsourced as
+// Package scheduler contains the scheduling decisions of offshore as
 // pure functions over a pool snapshot: where a task runs (Place), how the
 // pool changes (Plan) and how much a task needs (Estimator).
 //

@@ -10,10 +10,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/image"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/image"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // countingBuilder is a shared fake Docker builder.

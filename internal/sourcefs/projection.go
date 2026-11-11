@@ -21,8 +21,8 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/traumventures/cloudsourced/internal/cas"
-	"github.com/traumventures/cloudsourced/internal/manifest"
+	"github.com/traumventures/offshore/internal/cas"
+	"github.com/traumventures/offshore/internal/manifest"
 )
 
 // Fetcher retrieves the content of path with the given hash into the store.
@@ -130,8 +130,8 @@ func (p *Projection) Mount() error {
 		MountOptions: fuse.MountOptions{
 			AllowOther:  true,
 			DirectMount: true,
-			FsName:      "cloudsourced",
-			Name:        "cloudsourced",
+			FsName:      "offshore",
+			Name:        "offshore",
 			MaxWrite:    1 << 20,
 		},
 	}

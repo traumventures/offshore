@@ -13,11 +13,11 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/tracing"
-	"github.com/traumventures/cloudsourced/internal/tracing/tracingtest"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/scheduler"
+	"github.com/traumventures/offshore/internal/tracing"
+	"github.com/traumventures/offshore/internal/tracing/tracingtest"
 )
 
 // TestControlPlaneTracePropagation: daemon → control plane calls carry the

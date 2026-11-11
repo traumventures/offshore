@@ -15,9 +15,9 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/core"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/supervisor"
+	"github.com/traumventures/offshore/internal/blobcache"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/supervisor"
 )
 
 type svcErr struct {
@@ -80,7 +80,7 @@ func TestLaunchFallsBackOnCapacity(t *testing.T) {
 		}
 		return core.LaunchInstanceResponse{Instance: core.Instance{Id: common.String("i1")}}, nil
 	}
-	base := core.LaunchInstanceDetails{FreeformTags: map[string]string{"project": "cloudsourced"}}
+	base := core.LaunchInstanceDetails{FreeformTags: map[string]string{"project": "offshore"}}
 	inst, shape, failed, err := launch(context.Background(), run, base, shapedSpec())
 	if err != nil || *inst.Id != "i1" || shape != "VM.Standard.E4.Flex" || len(failed) != 1 {
 		t.Fatalf("inst %v shape %v failed %v err %v", inst.Id, shape, failed, err)
@@ -195,21 +195,21 @@ func TestPickAD(t *testing.T) {
 }
 
 func testInfra() *infra {
-	return &infra{tenancy: "t", compartment: "c", ad: "AD-1", subnet: "s", namespace: "ns", bucket: "cloudsourced",
-		repo: "ocir.eu-frankfurt-1.oci.oraclecloud.com/ns/cloudsourced-env"}
+	return &infra{tenancy: "t", compartment: "c", ad: "AD-1", subnet: "s", namespace: "ns", bucket: "offshore",
+		repo: "ocir.eu-frankfurt-1.oci.oraclecloud.com/ns/offshore-env"}
 }
 
 func TestUserData(t *testing.T) {
 	spec := provider.MachineSpec{ID: "m1", Owner: "my pool", ExpiresAt: time.Unix(2_000_000_000, 0), Swap: true,
-		Env: map[string]string{"CLOUDSOURCED_A": "1"}, SecretEnv: map[string]string{"CLOUDSOURCED_TOKEN": "s3cret"}}
-	ud, err := userData(spec, "eu-frankfurt-1", testInfra(), "https://objectstorage.example/p/x/n/ns/b/cloudsourced/o/bin", "img:tag")
+		Env: map[string]string{"OFFSHORE_A": "1"}, SecretEnv: map[string]string{"OFFSHORE_TOKEN": "s3cret"}}
+	ud, err := userData(spec, "eu-frankfurt-1", testInfra(), "https://objectstorage.example/p/x/n/ns/b/offshore/o/bin", "img:tag")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(ud, "s3cret") {
 		t.Fatal("user data must not contain secrets")
 	}
-	for _, want := range []string{"docker-ce", "curl -fsS", "/swapfile", "DOCKER-USER -d 169.254.0.0/16", "cloudsourced-supervisor.service", "oci-growfs"} {
+	for _, want := range []string{"docker-ce", "curl -fsS", "/swapfile", "DOCKER-USER -d 169.254.0.0/16", "offshore-supervisor.service", "oci-growfs"} {
 		if !strings.Contains(ud, want) {
 			t.Errorf("user data lacks %q", want)
 		}
@@ -225,7 +225,7 @@ func TestUserData(t *testing.T) {
 		t.Fatal(err)
 	}
 	if hs.Provider != "oci" || hs.Params[paramSecret] != "secrets/m1.json" || hs.Params[paramRegistry] != "ocir.eu-frankfurt-1.oci.oraclecloud.com" ||
-		hs.Layout.SecretKeys[0] != "CLOUDSOURCED_TOKEN" {
+		hs.Layout.SecretKeys[0] != "OFFSHORE_TOKEN" {
 		t.Errorf("host spec %+v", hs)
 	}
 }
@@ -242,7 +242,7 @@ func TestRegistryHost(t *testing.T) {
 	if h := registryHost("eu-frankfurt-1"); h != "ocir.eu-frankfurt-1.oci.oraclecloud.com" {
 		t.Error(h)
 	}
-	if m := machineImage("r/ns/env", provider.MachineSpec{Image: "cloudsourced-env:abc", Arch: "arm64"}); m != "r/ns/env:abc-arm64" {
+	if m := machineImage("r/ns/env", provider.MachineSpec{Image: "offshore-env:abc", Arch: "arm64"}); m != "r/ns/env:abc-arm64" {
 		t.Error(m)
 	}
 }
@@ -343,15 +343,15 @@ func (f *fakeHostCompute) TerminateInstance(_ context.Context, r core.TerminateI
 }
 
 func TestHost(t *testing.T) {
-	spec := hostSpec(provider.MachineSpec{ID: "m1", Owner: "p", SecretEnv: map[string]string{"CLOUDSOURCED_TOKEN": "t"}}, "eu-frankfurt-1", testInfra(), "img")
-	objs := &fakeObjects{objects: map[string][]byte{"secrets/m1.json": []byte(`{"CLOUDSOURCED_TOKEN":"t"}`)}, mod: time.Now()}
+	spec := hostSpec(provider.MachineSpec{ID: "m1", Owner: "p", SecretEnv: map[string]string{"OFFSHORE_TOKEN": "t"}}, "eu-frankfurt-1", testInfra(), "img")
+	objs := &fakeObjects{objects: map[string][]byte{"secrets/m1.json": []byte(`{"OFFSHORE_TOKEN":"t"}`)}, mod: time.Now()}
 	c := &fakeHostCompute{}
 	h := &host{spec: spec, objects: objs, compute: c,
 		instanceID: func(context.Context) (string, error) { return "ocid1.instance", nil },
 		token:      func(context.Context, string) (string, error) { return "tok", nil }}
 	ctx := context.Background()
 	m, err := h.FetchSecrets(ctx)
-	if err != nil || m["CLOUDSOURCED_TOKEN"] != "t" {
+	if err != nil || m["OFFSHORE_TOKEN"] != "t" {
 		t.Fatal(m, err)
 	}
 	if err := h.DeleteSecrets(ctx); err != nil || len(objs.objects) != 0 {
@@ -379,12 +379,12 @@ func TestHost(t *testing.T) {
 }
 
 func TestServerBinaries(t *testing.T) {
-	b := serverBinaries(map[string]any{"binary_arm64": "/x/arm"}, "/opt/bin/cloudsourced", "linux", "amd64")
-	if b["amd64"] != "/opt/bin/cloudsourced" || b["arm64"] != "/x/arm" {
+	b := serverBinaries(map[string]any{"binary_arm64": "/x/arm"}, "/opt/bin/offshore", "linux", "amd64")
+	if b["amd64"] != "/opt/bin/offshore" || b["arm64"] != "/x/arm" {
 		t.Errorf("%v", b)
 	}
-	b = serverBinaries(nil, "/u/bin/cloudsourced", "darwin", "arm64")
-	if b["amd64"] != "/u/bin/cloudsourced-linux-amd64" || b["arm64"] != "/u/bin/cloudsourced-linux-arm64" {
+	b = serverBinaries(nil, "/u/bin/offshore", "darwin", "arm64")
+	if b["amd64"] != "/u/bin/offshore-linux-amd64" || b["arm64"] != "/u/bin/offshore-linux-arm64" {
 		t.Errorf("%v", b)
 	}
 	if err := checkBinary("/nonexistent", "amd64"); err == nil || !strings.Contains(err.Error(), "make build") {

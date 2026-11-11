@@ -12,10 +12,10 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/pool"
-	"github.com/traumventures/cloudsourced/internal/tracing"
-	"github.com/traumventures/cloudsourced/internal/tracing/tracingtest"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/pool"
+	"github.com/traumventures/offshore/internal/tracing"
+	"github.com/traumventures/offshore/internal/tracing/tracingtest"
 )
 
 // eventPool is a pool that only serves events and remembers the trace
@@ -37,7 +37,7 @@ func TestRPCContinuesTrace(t *testing.T) {
 	f := &eventPool{}
 	d := &Daemon{log: slog.New(slog.NewTextHandler(io.Discard, nil)), pool: f, roots: map[string]*root{}, conns: map[string]*machineConn{}}
 	d.metrics = newDaemonMetrics(d)
-	ctx, span := tracing.Start(context.Background(), "cloudsourced.run")
+	ctx, span := tracing.Start(context.Background(), "offshore.run")
 	defer span.End()
 	a, b := net.Pipe()
 	go d.handle(context.Background(), b)

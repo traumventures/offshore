@@ -27,8 +27,8 @@ max_machines = 2
 [providers.local]
 type = "local-docker"
 `)
-	t.Setenv("CLOUDSOURCED_CONFIG", p)
-	t.Setenv("CLOUDSOURCED_POOL_CONFIG", "")
+	t.Setenv("OFFSHORE_CONFIG", p)
+	t.Setenv("OFFSHORE_POOL_CONFIG", "")
 	c, err := LoadClient()
 	if err != nil {
 		t.Fatal(err)
@@ -62,19 +62,19 @@ url = "https://cs.example.com"
 [pool]
 max_machines = 9
 `)
-	t.Setenv("CLOUDSOURCED_CONFIG", p)
+	t.Setenv("OFFSHORE_CONFIG", p)
 	c, err := LoadClient()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ControlPlane.Mode != "remote" || c.ControlPlane.APIKey != "env:CLOUDSOURCED_API_KEY" {
+	if c.ControlPlane.Mode != "remote" || c.ControlPlane.APIKey != "env:OFFSHORE_API_KEY" {
 		t.Fatalf("orchestrator %+v", c.ControlPlane)
 	}
 	if !hasWarning(c.Warnings, "[pool] have no effect in remote mode") {
 		t.Fatalf("warnings %v", c.Warnings)
 	}
 	// Without pool sections there is nothing to warn about.
-	t.Setenv("CLOUDSOURCED_CONFIG", writeFile(t, "[control_plane]\nurl = \"https://cs.example.com\"\n"))
+	t.Setenv("OFFSHORE_CONFIG", writeFile(t, "[control_plane]\nurl = \"https://cs.example.com\"\n"))
 	if c, err := LoadClient(); err != nil || len(c.Warnings) != 0 {
 		t.Fatalf("%v %v", c.Warnings, err)
 	}
@@ -82,8 +82,8 @@ max_machines = 9
 
 func TestSeparatePoolFile(t *testing.T) {
 	client := writeFile(t, "[pool]\nmax_machines = 9\n")
-	t.Setenv("CLOUDSOURCED_CONFIG", client)
-	t.Setenv("CLOUDSOURCED_POOL_CONFIG", writeFile(t, "[pool]\nid = \"f\"\n"))
+	t.Setenv("OFFSHORE_CONFIG", client)
+	t.Setenv("OFFSHORE_POOL_CONFIG", writeFile(t, "[pool]\nid = \"f\"\n"))
 	c, err := LoadClient()
 	if err != nil {
 		t.Fatal(err)
@@ -130,13 +130,13 @@ func TestConfigValidation(t *testing.T) {
 		"user = \" \"\n",
 		"[pool]\nunknown_key = 1\n",
 	} {
-		t.Setenv("CLOUDSOURCED_CONFIG", writeFile(t, bad))
+		t.Setenv("OFFSHORE_CONFIG", writeFile(t, bad))
 		if _, err := LoadClient(); err == nil {
 			t.Errorf("client accepted:\n%s", bad)
 		}
 	}
 	// Pool validation errors do not break the client (remote mode).
-	t.Setenv("CLOUDSOURCED_CONFIG", writeFile(t, "[control_plane]\nurl = \"https://x\"\n[scheduler]\npolicy = \"fifo\"\n"))
+	t.Setenv("OFFSHORE_CONFIG", writeFile(t, "[control_plane]\nurl = \"https://x\"\n[scheduler]\npolicy = \"fifo\"\n"))
 	if _, err := LoadClient(); err != nil {
 		t.Fatal(err)
 	}

@@ -37,7 +37,7 @@ type Claims struct {
 }
 
 // signContext separates token signatures from any other use of the key.
-const signContext = "cloudsourced-token-v1."
+const signContext = "offshore-token-v1."
 
 // Sign encodes and signs claims: base64url(JSON) "." base64url(signature).
 func Sign(key ed25519.PrivateKey, c Claims) string {

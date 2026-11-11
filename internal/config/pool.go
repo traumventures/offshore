@@ -45,7 +45,7 @@ func cloudBackend(t string) bool { return t == "aws-ec2" || t == "oci" }
 // Pool configures machine provisioning and scaling.
 type Pool struct {
 	// ID names the pool: machines and volumes carry it in the
-	// cloudsourced.pool label, and an orchestrator only manages resources
+	// offshore.pool label, and an orchestrator only manages resources
 	// of its own pool. Default: $USER.
 	ID            string  `toml:"id"`
 	MachineCPU    float64 `toml:"machine_cpu"`
@@ -211,10 +211,10 @@ type ProvisionStep struct {
 }
 
 // PoolConfigPath returns the pool configuration file:
-// $CLOUDSOURCED_POOL_CONFIG, else the client configuration file (embedded
+// $OFFSHORE_POOL_CONFIG, else the client configuration file (embedded
 // mode and single-host control planes keep both in one file).
 func PoolConfigPath() string {
-	if p := os.Getenv("CLOUDSOURCED_POOL_CONFIG"); p != "" {
+	if p := os.Getenv("OFFSHORE_POOL_CONFIG"); p != "" {
 		return p
 	}
 	return ClientConfigPath()
@@ -341,7 +341,7 @@ func (u *PoolConfig) applyDefaults() {
 	if len(u.Providers) == 0 {
 		// Without [providers]: one local-docker provider on this host.
 		cmd := []any{"docker"}
-		if c := os.Getenv("CLOUDSOURCED_DOCKER"); c != "" {
+		if c := os.Getenv("OFFSHORE_DOCKER"); c != "" {
 			cmd = nil
 			for _, w := range strings.Fields(c) {
 				cmd = append(cmd, w)

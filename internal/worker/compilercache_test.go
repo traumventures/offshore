@@ -3,7 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
-	"github.com/traumventures/cloudsourced/internal/store"
+	"github.com/traumventures/offshore/internal/store"
 	"io"
 	"log/slog"
 	"maps"
@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 func envMap(env []string) map[string]string {
@@ -48,7 +48,7 @@ func TestSessionEnvCompilerCache(t *testing.T) {
 		"CCACHE_REMOTE_STORAGE":                    "http://127.0.0.1:1234/ccache|layout=subdirs",
 		"CCACHE_DIR":                               "/cache/ccache",
 		"GOCACHEPROG":                              "/bin/cs gocacheprog /cache/gocache http://127.0.0.1:1234/_ttl/7200/",
-		"CARGO_TARGET_" + hostTriple() + "_LINKER": "/usr/local/bin/cloudsourced-cc-mold",
+		"CARGO_TARGET_" + hostTriple() + "_LINKER": "/usr/local/bin/offshore-cc-mold",
 		"RUSTFLAGS":                                "-Dwarnings", // untouched
 		"FOO":                                      "1",
 	}

@@ -15,8 +15,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
-	"github.com/traumventures/cloudsourced/internal/snapshot"
+	"github.com/traumventures/offshore/internal/blobcache"
+	"github.com/traumventures/offshore/internal/snapshot"
 )
 
 func main() {

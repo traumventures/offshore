@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 const cgroupRoot = "/sys/fs/cgroup"
@@ -37,7 +37,7 @@ func setupCgroups(log *slog.Logger) *cgroups {
 	}
 	// cgroup v2 forbids processes in inner nodes: move everything in the
 	// root group into a leaf before enabling controllers.
-	leaf := filepath.Join(cgroupRoot, "cloudsourced-worker")
+	leaf := filepath.Join(cgroupRoot, "offshore-worker")
 	if err := os.MkdirAll(leaf, 0o755); err != nil {
 		log.Warn("cannot create cgroup", "err", err)
 		return cg

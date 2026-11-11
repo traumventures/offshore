@@ -1,9 +1,9 @@
 // Package logs configures structured logging for the daemon, the control
 // plane and workers from the environment:
 //
-//	CLOUDSOURCED_LOG_FORMAT=text|json  (default text)
-//	CLOUDSOURCED_LOG_LEVEL=debug|info|warn|error  (default info;
-//	                                  CLOUDSOURCED_DEBUG=1 means debug)
+//	OFFSHORE_LOG_FORMAT=text|json  (default text)
+//	OFFSHORE_LOG_LEVEL=debug|info|warn|error  (default info;
+//	                                  OFFSHORE_DEBUG=1 means debug)
 //
 // The orchestrator forwards both variables to the machines it creates, so
 // a pool logs in one format.
@@ -19,8 +19,8 @@ import (
 
 // Environment variables.
 const (
-	EnvFormat = "CLOUDSOURCED_LOG_FORMAT"
-	EnvLevel  = "CLOUDSOURCED_LOG_LEVEL"
+	EnvFormat = "OFFSHORE_LOG_FORMAT"
+	EnvLevel  = "OFFSHORE_LOG_LEVEL"
 )
 
 // Options is a parsed logging configuration.
@@ -41,7 +41,7 @@ func Parse(getenv func(string) string) (Options, error) {
 	default:
 		errs = append(errs, fmt.Sprintf("%s=%q: want text or json", EnvFormat, f))
 	}
-	if getenv("CLOUDSOURCED_DEBUG") != "" {
+	if getenv("OFFSHORE_DEBUG") != "" {
 		o.Level = slog.LevelDebug
 	}
 	if l := strings.TrimSpace(getenv(EnvLevel)); l != "" {

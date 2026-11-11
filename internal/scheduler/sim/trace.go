@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 // Bytes is a memory amount; JSON accepts a number of bytes or a string

@@ -5,9 +5,9 @@ import (
 	"strings"
 
 	"github.com/quic-go/quic-go"
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/transport"
 )
 
 // escapeGlob quotes the glob metacharacters of a literal path.

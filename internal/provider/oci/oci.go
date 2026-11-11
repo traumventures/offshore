@@ -1,6 +1,6 @@
 // Package oci runs machines as Oracle Cloud Infrastructure compute
 // instances, the counterpart of aws-ec2: each instance runs Docker and the
-// supervisor ("cloudsourced supervisor"), which applies the machine
+// supervisor ("offshore supervisor"), which applies the machine
 // container layout of the local-docker reference backend (machine.Layout).
 // User data carries only the public machine spec; the secret server
 // environment travels through a private Object Storage object that the
@@ -43,14 +43,14 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/identity"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 
-	"github.com/traumventures/cloudsourced/internal/image"
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/image"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 const (
 	serverPort = 7443
 	tagProject = "project"
-	project    = "cloudsourced"
+	project    = "offshore"
 )
 
 func init() {
@@ -338,7 +338,7 @@ func machineImage(repo string, spec provider.MachineSpec) string {
 // binaryKey is the content addressed object name of a server binary.
 func binaryKey(arch string, data []byte) string {
 	sum := sha256.Sum256(data)
-	return "bin/cloudsourced-linux-" + arch + "-" + hex.EncodeToString(sum[:])[:16]
+	return "bin/offshore-linux-" + arch + "-" + hex.EncodeToString(sum[:])[:16]
 }
 
 // ensureBinary uploads the server binary of arch (content addressed) once
@@ -437,7 +437,7 @@ func deref(s *string) string {
 // OCI allows at most 10 freeform tags, with keys without dots. The
 // labels that select instances (pool, machine, kind) and identify their
 // content (env hash, fingerprint) are tags of their own, keyed
-// "cloudsourced_pool" etc.; the others are packed into one tag
+// "offshore_pool" etc.; the others are packed into one tag
 // (specTag: "size=x4,arch=amd64,...").
 const (
 	specTag    = project + "_spec"
@@ -450,8 +450,8 @@ var ownTags = map[string]bool{
 	provider.LabelEnvHash: true, provider.LabelFinger: true,
 }
 
-// tagKey maps a label to a freeform tag key ("cloudsourced.pool" becomes
-// "cloudsourced_pool"), labelKey back.
+// tagKey maps a label to a freeform tag key ("offshore.pool" becomes
+// "offshore_pool"), labelKey back.
 func tagKey(label string) string {
 	if rest, ok := strings.CutPrefix(label, project+"."); ok {
 		return project + "_" + rest
@@ -582,7 +582,7 @@ func (o *OCI) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	base := core.LaunchInstanceDetails{
 		AvailabilityDomain: common.String(in.ad),
 		CompartmentId:      common.String(in.compartment),
-		DisplayName:        common.String("cloudsourced-" + spec.ID),
+		DisplayName:        common.String("offshore-" + spec.ID),
 		CreateVnicDetails: &core.CreateVnicDetails{SubnetId: common.String(in.subnet), AssignPublicIp: common.Bool(true),
 			FreeformTags: freeform()},
 		SourceDetails: core.InstanceSourceViaImageDetails{ImageId: common.String(img), BootVolumeSizeInGBs: common.Int64(o.diskGB)},

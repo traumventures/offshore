@@ -4,7 +4,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // CostApproximation documents how costs are estimated.

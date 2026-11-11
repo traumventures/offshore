@@ -8,11 +8,11 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/labels"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/labels"
 )
 
-// GroupKeys are the dimensions of `cloudsourced report --by`.
+// GroupKeys are the dimensions of `offshore report --by`.
 var GroupKeys = []string{labels.Agent, labels.Worktree, labels.Branch, labels.Repo, labels.User}
 
 // DefaultGroups are shown when --by is not given.

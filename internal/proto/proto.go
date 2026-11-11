@@ -10,14 +10,14 @@ import (
 	"io"
 	"sync"
 
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/metrics"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/store"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/metrics"
+	"github.com/traumventures/offshore/internal/scheduler"
+	"github.com/traumventures/offshore/internal/store"
 )
 
-// ALPN is the TLS application protocol of cloudsourced.
-const ALPN = "cloudsourced/1"
+// ALPN is the TLS application protocol of offshore.
+const ALPN = "offshore/1"
 
 // MaxFrame is the largest accepted frame payload.
 const MaxFrame = 64 << 20
@@ -264,7 +264,7 @@ type Exit struct {
 	Signal int             `json:"signal,omitempty"`
 	Usage  scheduler.Usage `json:"usage"`
 	// Cache holds counters of cache integrations (e.g. "sccache_hits",
-	// "sccache_misses"); shown by `cloudsourced why`.
+	// "sccache_misses"); shown by `offshore why`.
 	Cache map[string]int64 `json:"cache,omitempty"`
 }
 

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/traumventures/cloudsourced/internal/machine"
+	"github.com/traumventures/offshore/internal/machine"
 )
 
 // Static hosts (provider type "static") are fixed machines with sshd,
@@ -22,7 +22,7 @@ import (
 const StaticProvider = "static"
 
 // StaticUnit is the systemd unit of the supervisor on a static host.
-const StaticUnit = "cloudsourced-supervisor.service"
+const StaticUnit = "offshore-supervisor.service"
 
 // StaticPayload is the input of "apply".
 type StaticPayload struct {
@@ -99,7 +99,7 @@ func (h *StaticHost) Apply(ctx context.Context, p StaticPayload) error {
 		return err
 	}
 	unit := fmt.Sprintf(`[Unit]
-Description=cloudsourced supervisor
+Description=offshore supervisor
 After=docker.service network-online.target
 Wants=network-online.target
 Requires=docker.service

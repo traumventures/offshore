@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/supervisor"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/supervisor"
 )
 
 // fakeHost runs the host side in-process with fake docker and systemctl.
@@ -76,7 +76,7 @@ func (t *fakeTransport) Run(ctx context.Context, h Host, cmd string, stdin []byt
 			return nil, errors.New("exit status 1")
 		}
 		return nil, nil
-	case strings.HasPrefix(cmd, "mkdir -p /var/lib/cloudsourced/bin && cat > "):
+	case strings.HasPrefix(cmd, "mkdir -p /var/lib/offshore/bin && cat > "):
 		f.uploaded = len(stdin) > 0
 		return nil, nil
 	}
@@ -104,7 +104,7 @@ func (t *fakeTransport) Run(ctx context.Context, h Host, cmd string, stdin []byt
 }
 
 func testProvider(t *testing.T) (*Static, *fakeTransport) {
-	bin := filepath.Join(t.TempDir(), "cloudsourced")
+	bin := filepath.Join(t.TempDir(), "offshore")
 	os.WriteFile(bin, []byte("binary"), 0o755)
 	ft := &fakeTransport{hosts: map[string]*fakeHost{"small": newFakeHost(t), "big": newFakeHost(t)}, down: map[string]bool{}}
 	s := &Static{Hosts: []Host{
@@ -119,12 +119,12 @@ func TestStaticLifecycle(t *testing.T) {
 	s, ft := testProvider(t)
 	spec := provider.MachineSpec{ID: "m1", Owner: "pool", Image: "registry.local/envs:abc-amd64", EnvHash: "abc", Size: "big",
 		CPU: 16, Memory: 64 << 30, ExpiresAt: time.Now().Add(time.Hour), Finger: "fp",
-		Env: map[string]string{"CLOUDSOURCED_MACHINE_ID": "m1"}, SecretEnv: map[string]string{"CLOUDSOURCED_TLS_SEED": "secret"}}
+		Env: map[string]string{"OFFSHORE_MACHINE_ID": "m1"}, SecretEnv: map[string]string{"OFFSHORE_TLS_SEED": "secret"}}
 	m, err := s.Create(ctx, spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.State != provider.Starting || m.Labels["cloudsourced.host"] != "big" {
+	if m.State != provider.Starting || m.Labels["offshore.host"] != "big" {
 		t.Fatalf("created %+v (needs the big host)", m)
 	}
 	big := ft.hosts["big"]

@@ -4,7 +4,7 @@
 // fetched per file on first open into a content addressed cache) and a
 // local upper directory that receives every write.
 //
-// The daemon owns the mounts ([outputs] mode = "fuse", "cloudsourced
+// The daemon owns the mounts ([outputs] mode = "fuse", "offshore
 // outputs mount"); other processes use daemon.EnsureOutputs to have them
 // mounted and IsMounted/Mounts/Covering to inspect them.
 package outputfs
@@ -20,9 +20,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/cas"
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/cas"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 // Source reads the latest build slot of one repository on one machine.

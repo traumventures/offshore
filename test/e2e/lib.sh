@@ -8,28 +8,28 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-BIN="${E2E_BIN:-$REPO/bin/cloudsourced}"
+BIN="${E2E_BIN:-$REPO/bin/offshore}"
 DOCKER="${E2E_DOCKER:-docker}"
 PART="${PART:-e2e}"
-WORK="$(mktemp -d "/tmp/cloudsourced-e2e-$PART.XXXXXX")"
+WORK="$(mktemp -d "/tmp/offshore-e2e-$PART.XXXXXX")"
 OWNER="e2e-$(basename "$WORK" | tr -dc 'a-zA-Z0-9' | tr 'A-Z' 'a-z')"
 PROJ="$WORK/hello"
 
-export CLOUDSOURCED_STATE_DIR="$WORK/state"
-export CLOUDSOURCED_CONFIG="$WORK/config.toml"
-POOLCFG="$CLOUDSOURCED_CONFIG"   # pool and providers; the control plane's in remote mode
+export OFFSHORE_STATE_DIR="$WORK/state"
+export OFFSHORE_CONFIG="$WORK/config.toml"
+POOLCFG="$OFFSHORE_CONFIG"   # pool and providers; the control plane's in remote mode
 REMOTE="${E2E_REMOTE:-}"
 CPSTATE="$WORK/cp-state"
 CPPID=""
-export CLOUDSOURCED_SHIM_DIR="$WORK/shims"
-export CLOUDSOURCED_REQUIRE_REMOTE=1
-export CLOUDSOURCED_LOG_FORMAT=json   # daemon, control plane and (forwarded) machines
+export OFFSHORE_SHIM_DIR="$WORK/shims"
+export OFFSHORE_REQUIRE_REMOTE=1
+export OFFSHORE_LOG_FORMAT=json   # daemon, control plane and (forwarded) machines
 # Test clock (internal/clock): idle stop and lifetime expiry follow
-# `cloudsourced debug clock advance` instead of real minutes. Fast
+# `offshore debug clock advance` instead of real minutes. Fast
 # reconciles act on it (and on everything else) within a second.
-export CLOUDSOURCED_TEST_CLOCK="offset:$WORK/clock"
-export CLOUDSOURCED_RECONCILE_INTERVAL="${E2E_RECONCILE_INTERVAL:-1s}"
-unset CLOUDSOURCED_DISABLE CLOUDSOURCED_ACTIVE
+export OFFSHORE_TEST_CLOCK="offset:$WORK/clock"
+export OFFSHORE_RECONCILE_INTERVAL="${E2E_RECONCILE_INTERVAL:-1s}"
+unset OFFSHORE_DISABLE OFFSHORE_ACTIVE
 
 PASS=0
 FAIL=0
@@ -43,7 +43,7 @@ check() { local name="$1" rc=0 t; shift; "$@" || rc=1; t=$((SECONDS - LAST)); [ 
 eq()   { [ "$1" = "$2" ] || { echo "     expected: $2"; echo "     got:      $1"; return 1; }; }
 contains() { case "$1" in *"$2"*) return 0;; esac; echo "     '$2' not in output:"; echo "$1" | sed 's/^/       /' | tail -20; return 1; }
 cs()   { "$BIN" "$@"; }
-# sccache_hits extracts N from the verbose line "cloudsourced: sccache: N hits / M misses ...".
+# sccache_hits extracts N from the verbose line "offshore: sccache: N hits / M misses ...".
 sccache_hits() { local n; n="$(echo "$1" | sed -n 's/.*sccache: \([0-9]*\) hits.*/\1/p' | tail -1)"; echo "${n:-0}"; [ -n "$n" ] || echo "$1" | tail -5 | sed 's/^/       /' >&2; }
 run()  { (cd "$PROJ" && "$BIN" run "$@"); }
 docker_() { $DOCKER "$@"; }
@@ -56,7 +56,7 @@ poll() { local end=$((SECONDS + $1)); shift; while [ $SECONDS -lt $end ]; do "$@
 # no_sessions: no machine runs a session (sessions column of cs status).
 no_sessions() { cs status | awk '/^[0-9a-f]+ / && $(NF-2) > 0 {busy=1} END {exit busy}'; }
 # machines: ids of this part's machine containers.
-machines() { docker_ ps -q --filter "label=cloudsourced.pool=$OWNER" --filter label=cloudsourced.kind=machine; }
+machines() { docker_ ps -q --filter "label=offshore.pool=$OWNER" --filter label=offshore.kind=machine; }
 # metric TEXT NAME LABELSUBSTR: value of the first sample of NAME whose labels contain LABELSUBSTR.
 metric() { local v; v="$(echo "$1" | awk -v n="$2" -v l="$3" 'index($0, n"{")==1 && index($0, l) {print $NF; exit}')"; echo "${v:-0}"; }
 # metric_ge NAME LABELSUBSTR MIN: the current value (cs metrics) is at least MIN.
@@ -71,7 +71,7 @@ ready() { [ -n "${E2E_READY:-}" ] && touch "$E2E_READY"; return 0; }
 # the machine's web service, which sessions reach on 127.0.0.1:18080.
 # Sessions so last exactly as long as a check needs them.
 wait_release() { printf 'for i in $(seq 1200); do (exec 3<>/dev/tcp/127.0.0.1/18080 && printf "GET /%s HTTP/1.0\\r\\n\\r\\n" >&3 && grep -q "200 OK" <&3) 2>/dev/null && break; sleep 0.1; done' "$1"; }
-services() { docker_ ps -q --filter "label=cloudsourced.pool=$OWNER" --filter label=cloudsourced.kind=service --filter status=running; }
+services() { docker_ ps -q --filter "label=offshore.pool=$OWNER" --filter label=offshore.kind=service --filter status=running; }
 # services_up: every running machine has its (running) web service.
 services_up() { [ "$(services | wc -l)" -ge "$(machines | wc -l)" ]; }
 release() { local svc; poll 60 services_up >/dev/null; for svc in $(services); do docker_ exec "$svc" touch "/etc/$1"; done; }
@@ -86,8 +86,8 @@ cleanup() {
   timed cs daemon stop
   timed stop_cp
   local left
-  left="$(docker_ ps -aq --filter "label=cloudsourced.pool=$OWNER" | wc -l)"
-  left=$((left + $(docker_ volume ls -q --filter "label=cloudsourced.pool=$OWNER" | wc -l)))
+  left="$(docker_ ps -aq --filter "label=offshore.pool=$OWNER" | wc -l)"
+  left=$((left + $(docker_ volume ls -q --filter "label=offshore.pool=$OWNER" | wc -l)))
   if [ "$left" = 0 ]; then ok "down removed all machines and volumes"; else bad "down left $left resources"; fi
   local t=$SECONDS
   if [ "${E2E_KEEP:-}" = "" ]; then chmod -R u+w "$WORK" 2>/dev/null; rm -r "$WORK"; else echo "kept $WORK"; fi
@@ -107,7 +107,7 @@ OTLP_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print
 OTLP_OUT="$WORK/otlp.jsonl"
 python3 "$HERE/otlp_sink.py" "$OTLP_PORT" "$OTLP_OUT" $$ >/dev/null 2>&1 &
 export OTEL_TRACES_EXPORTER=otlp OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:$OTLP_PORT"
-export CLOUDSOURCED_OTEL_MACHINE_ENDPOINT="http://$(docker_ network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'):$OTLP_PORT"
+export OFFSHORE_OTEL_MACHINE_ENDPOINT="http://$(docker_ network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'):$OTLP_PORT"
 
 cp -r "$HERE/fixture/hello" "$PROJ"
 echo file-secret > "$PROJ/.secret"
@@ -115,7 +115,7 @@ RUSTV="${E2E_RUSTV:-$(docker_ run --rm rust:1-slim-bookworm rustc --version | aw
 printf '[toolchain]\nchannel = "%s"\nprofile = "minimal"\n' "$RUSTV" > "$PROJ/rust-toolchain.toml"
 # Local port of the [tool.bash] forward, free on this host.
 FWD_SVC="$(freeport)"
-sed -i "s/\"18092:18080\"/\"$FWD_SVC:18080\"/" "$PROJ/.cloudsourced.toml"
+sed -i "s/\"18092:18080\"/\"$FWD_SVC:18080\"/" "$PROJ/.offshore.toml"
 
 # write_config writes the pool configuration: the client file in embedded
 # mode, the control plane's own file in remote mode.
@@ -148,7 +148,7 @@ EOF
 }
 stop_cp() { if [ -n "$CPPID" ]; then kill "$CPPID" 2>/dev/null; wait "$CPPID" 2>/dev/null; CPPID=""; fi; }
 start_cp() {
-  CLOUDSOURCED_CONFIG=/nonexistent CLOUDSOURCED_STATE_DIR="$CPSTATE" "$BIN" controlplane --config "$POOLCFG" --listen "127.0.0.1:$CPPORT" --metrics-listen "127.0.0.1:$MPORT" >>"$WORK/cp.log" 2>&1 &
+  OFFSHORE_CONFIG=/nonexistent OFFSHORE_STATE_DIR="$CPSTATE" "$BIN" controlplane --config "$POOLCFG" --listen "127.0.0.1:$CPPORT" --metrics-listen "127.0.0.1:$MPORT" >>"$WORK/cp.log" 2>&1 &
   CPPID=$!
   for _ in $(seq 300); do curl -skf "https://127.0.0.1:$CPPORT/healthz" >/dev/null && return 0; sleep 0.1; done
   echo "control plane did not start:"; cat "$WORK/cp.log"; return 1
@@ -163,7 +163,7 @@ if [ -n "$REMOTE" ]; then
   write_config 24h 10m 0 2
   start_cp || exit 1
   FP="$(sed -n 's/.*"Fingerprint":"\([0-9a-f]*\)".*/\1/p' "$CPSTATE/tls.json")"
-  cat > "$CLOUDSOURCED_CONFIG" <<EOF
+  cat > "$OFFSHORE_CONFIG" <<EOF
 [control_plane]
 url = "https://127.0.0.1:$CPPORT"
 fingerprint = "$FP"

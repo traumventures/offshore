@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/transport"
 )
 
 // KeySize is the size of the master key and of derived seeds.
@@ -36,14 +36,14 @@ const KeySize = 32
 
 // Environment variables and file name of the master key.
 const (
-	EnvMasterKey     = "CLOUDSOURCED_MASTER_KEY"      // base64 or hex encoded key
-	EnvMasterKeyFile = "CLOUDSOURCED_MASTER_KEY_FILE" // file with the encoded key
-	MasterKeyFile    = "master.key"                   // in the orchestrator state dir
+	EnvMasterKey     = "OFFSHORE_MASTER_KEY"      // base64 or hex encoded key
+	EnvMasterKeyFile = "OFFSHORE_MASTER_KEY_FILE" // file with the encoded key
+	MasterKeyFile    = "master.key"               // in the orchestrator state dir
 )
 
 // HKDF labels. Changing one invalidates every derived key.
 const (
-	hkdfSalt       = "cloudsourced/v1"
+	hkdfSalt       = "offshore/v1"
 	infoSigner     = "control-plane-signer"
 	infoMachineTLS = "machine-tls/"
 )
@@ -51,8 +51,8 @@ const (
 // Master is the pool master key.
 type Master [KeySize]byte
 
-// LoadMaster returns the master key: from $CLOUDSOURCED_MASTER_KEY, from the
-// file named by $CLOUDSOURCED_MASTER_KEY_FILE, or from <dir>/master.key,
+// LoadMaster returns the master key: from $OFFSHORE_MASTER_KEY, from the
+// file named by $OFFSHORE_MASTER_KEY_FILE, or from <dir>/master.key,
 // which is created (0600) on first use. Several control plane replicas
 // share a pool by importing the same key via the environment or a file.
 func LoadMaster(dir string) (Master, error) {
@@ -191,7 +191,7 @@ func MachineIdentity(seed []byte, machineID string, expires time.Time) (*transpo
 		return nil, errors.New("auth: machine identity needs an id and an expiry")
 	}
 	key := ed25519.NewKeyFromSeed(seed)
-	sum := sha256.Sum256([]byte("cloudsourced/machine-serial/" + machineID))
+	sum := sha256.Sum256([]byte("offshore/machine-serial/" + machineID))
 	serial := new(big.Int).SetBytes(sum[:15]) // < 2^120
 	serial.SetBit(serial, 119, 1)             // positive and never zero
 	name := "cs-" + machineID
@@ -225,10 +225,10 @@ func MachineIdentity(seed []byte, machineID string, expires time.Time) (*transpo
 // Machine server environment keys owned by this package.
 const (
 	// EnvTLSSeed (secret) is the encoded seed of the machine's TLS key.
-	EnvTLSSeed = "CLOUDSOURCED_TLS_SEED"
+	EnvTLSSeed = "OFFSHORE_TLS_SEED"
 	// EnvSignerPub (public) is the encoded control plane public key.
-	EnvSignerPub = "CLOUDSOURCED_SIGNER_PUB"
+	EnvSignerPub = "OFFSHORE_SIGNER_PUB"
 	// EnvFingerprint (public) is the expected certificate fingerprint; the
 	// server refuses to start when its derived identity differs.
-	EnvFingerprint = "CLOUDSOURCED_FINGERPRINT"
+	EnvFingerprint = "OFFSHORE_FINGERPRINT"
 )

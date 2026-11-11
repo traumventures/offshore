@@ -18,7 +18,7 @@ import (
 
 // Shared infrastructure, created on first use and found again by name:
 //
-//   - a compartment (default "cloudsourced" below the tenancy root) that
+//   - a compartment (default "offshore" below the tenancy root) that
 //     holds everything else;
 //   - a VCN 10.77.0.0/16 with an internet gateway, a default route to it
 //     and one regional public subnet; the VCN's default security list
@@ -127,7 +127,7 @@ func (o *OCI) ensureCompartment(ctx context.Context, tenancy string) (string, er
 	}
 	cr, err := o.identity.CreateCompartment(ctx, identity.CreateCompartmentRequest{CreateCompartmentDetails: identity.CreateCompartmentDetails{
 		CompartmentId: common.String(tenancy), Name: common.String(o.compartment),
-		Description: common.String("cloudsourced machines and their infrastructure"), FreeformTags: freeform(),
+		Description: common.String("offshore machines and their infrastructure"), FreeformTags: freeform(),
 	}})
 	if err != nil {
 		return "", fmt.Errorf("oci: create compartment %s: %w", o.compartment, err)
@@ -177,7 +177,7 @@ func pickAD(names []string, want string) (string, error) {
 }
 
 // ensureNetwork returns the machine subnet (the subnet option, or the
-// cloudsourced VCN's public subnet, created with the VCN) and makes sure
+// offshore VCN's public subnet, created with the VCN) and makes sure
 // its security list admits QUIC from allow_cidrs.
 func (o *OCI) ensureNetwork(ctx context.Context, compartment string) (string, error) {
 	cidrs, err := o.allowCIDRs(ctx)
@@ -320,7 +320,7 @@ func quicRule(cidr string) core.IngressSecurityRule {
 	return core.IngressSecurityRule{
 		Protocol: common.String("17"), Source: common.String(cidr), SourceType: core.IngressSecurityRuleSourceTypeCidrBlock,
 		UdpOptions:  &core.UdpOptions{DestinationPortRange: &core.PortRange{Min: common.Int(serverPort), Max: common.Int(serverPort)}},
-		Description: common.String("cloudsourced clients"),
+		Description: common.String("offshore clients"),
 	}
 }
 
@@ -420,7 +420,7 @@ func (o *OCI) ensureRepository(ctx context.Context, compartment, namespace strin
 // iamName names the dynamic group and policy of a compartment.
 func iamName(compartment string) string {
 	sum := sha256.Sum256([]byte(compartment))
-	return "cloudsourced-" + hex.EncodeToString(sum[:])[:10]
+	return "offshore-" + hex.EncodeToString(sum[:])[:10]
 }
 
 // policyStatements are the permissions of the compartment's instances
@@ -428,7 +428,7 @@ func iamName(compartment string) string {
 // stop and terminate instances of the compartment (themselves at idle
 // stop and expiry; termination deletes the boot volume), read and delete
 // objects of the bucket (secrets, cache) and pull images. The compartment
-// holds nothing but cloudsourced machines, and containers cannot reach
+// holds nothing but offshore machines, and containers cannot reach
 // the metadata service: only supervisors hold the instance principal.
 func policyStatements(group, compartment, bucket, region string) []string {
 	c := "compartment id " + compartment
@@ -453,7 +453,7 @@ func (o *OCI) ensureIAM(ctx context.Context, tenancy string, in *infra) error {
 		_, err := o.identity.CreateDynamicGroup(ctx, identity.CreateDynamicGroupRequest{CreateDynamicGroupDetails: identity.CreateDynamicGroupDetails{
 			CompartmentId: common.String(tenancy), Name: common.String(name),
 			MatchingRule: common.String("ALL {instance.compartment.id = '" + in.compartment + "'}"),
-			Description:  common.String("cloudsourced machines (instances of compartment " + o.compartment + ")"), FreeformTags: freeform(),
+			Description:  common.String("offshore machines (instances of compartment " + o.compartment + ")"), FreeformTags: freeform(),
 		}})
 		if err != nil && !conflict(err) {
 			return fmt.Errorf("oci: create dynamic group: %w", err)
@@ -477,7 +477,7 @@ func (o *OCI) ensureIAM(ctx context.Context, tenancy string, in *infra) error {
 	}
 	_, err = o.identity.CreatePolicy(ctx, identity.CreatePolicyRequest{CreatePolicyDetails: identity.CreatePolicyDetails{
 		CompartmentId: common.String(tenancy), Name: common.String(name), Statements: want,
-		Description: common.String("cloudsourced machines of compartment " + o.compartment), FreeformTags: freeform(),
+		Description: common.String("offshore machines of compartment " + o.compartment), FreeformTags: freeform(),
 	}})
 	if err != nil && !conflict(err) {
 		return fmt.Errorf("oci: create policy: %w", err)

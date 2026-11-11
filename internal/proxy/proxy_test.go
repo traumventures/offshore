@@ -5,7 +5,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 func TestSafeJoin(t *testing.T) {
@@ -50,17 +50,17 @@ func TestFormatCompilerCache(t *testing.T) {
 
 func TestPortsFromEnvAndConfig(t *testing.T) {
 	prof := config.Tool{Ports: []any{int64(8080)}}
-	t.Setenv("CLOUDSOURCED_PORTS", "")
+	t.Setenv("OFFSHORE_PORTS", "")
 	ps, err := ports(prof)
 	if err != nil || len(ps) != 1 || ps[0] != (config.Port{Local: 8080, Remote: 8080}) {
 		t.Fatalf("config ports: %v %v", ps, err)
 	}
-	t.Setenv("CLOUDSOURCED_PORTS", "3000:3001")
+	t.Setenv("OFFSHORE_PORTS", "3000:3001")
 	ps, err = ports(prof)
 	if err != nil || len(ps) != 1 || ps[0] != (config.Port{Local: 3000, Remote: 3001}) {
 		t.Fatalf("env ports: %v %v", ps, err)
 	}
-	t.Setenv("CLOUDSOURCED_PORTS", "x")
+	t.Setenv("OFFSHORE_PORTS", "x")
 	if _, err := ports(prof); err == nil {
 		t.Fatal("invalid env accepted")
 	}

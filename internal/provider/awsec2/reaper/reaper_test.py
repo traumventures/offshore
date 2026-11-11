@@ -57,27 +57,27 @@ class FakeSSM:
 
 def inst(iid, machine, expires):
     return {"InstanceId": iid, "Tags": [
-        {"Key": "cloudsourced.kind", "Value": "machine"},
-        {"Key": "cloudsourced.machine", "Value": machine},
-        {"Key": "cloudsourced.expires-at", "Value": str(expires)},
+        {"Key": "offshore.kind", "Value": "machine"},
+        {"Key": "offshore.machine", "Value": machine},
+        {"Key": "offshore.expires-at", "Value": str(expires)},
     ]}
 
 
 def param(machine, age):
-    return {"Name": "/cloudsourced/st/machines/" + machine,
+    return {"Name": "/offshore/st/machines/" + machine,
             "LastModifiedDate": datetime.datetime.fromtimestamp(NOW - age, tz=datetime.timezone.utc)}
 
 
 class ReaperTest(unittest.TestCase):
     def setUp(self):
-        os.environ["MACHINE_PARAMETERS"] = "/cloudsourced/st/machines"
+        os.environ["MACHINE_PARAMETERS"] = "/offshore/st/machines"
 
     def test_terminates_expired_and_deletes_orphaned_secrets(self):
         ec2 = FakeEC2([
             inst("i-live", "live", NOW + 3600),
             inst("i-old", "old", NOW - reaper.GRACE - 1),
             inst("i-grace", "grace", NOW - 10),
-            {"InstanceId": "i-bad", "Tags": [{"Key": "cloudsourced.expires-at", "Value": "x"}]},
+            {"InstanceId": "i-bad", "Tags": [{"Key": "offshore.expires-at", "Value": "x"}]},
         ])
         ssm = FakeSSM([
             param("live", 7200),            # machine running: keep
@@ -89,10 +89,10 @@ class ReaperTest(unittest.TestCase):
         ])
         res = reaper.handler({}, None, ec2=ec2, ssm=ssm, now=NOW)
         self.assertEqual(ec2.terminated, ["i-old"])
-        self.assertEqual(sorted(ssm.deleted), ["/cloudsourced/st/machines/gone", "/cloudsourced/st/machines/old"])
+        self.assertEqual(sorted(ssm.deleted), ["/offshore/st/machines/gone", "/offshore/st/machines/old"])
         self.assertEqual(res["terminated"], ["i-old"])
         self.assertEqual(sorted(res["deleted_parameters"]), sorted(ssm.deleted))
-        self.assertEqual(ssm.calls, [{"Path": "/cloudsourced/st/machines", "Recursive": True}])
+        self.assertEqual(ssm.calls, [{"Path": "/offshore/st/machines", "Recursive": True}])
         states = ec2.calls[0]["Filters"][1]["Values"]
         self.assertNotIn("terminated", states)
 

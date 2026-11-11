@@ -11,7 +11,7 @@ def machines(ec2):
     """Return (instance id, tags) of every live machine."""
     out = []
     pages = ec2.get_paginator("describe_instances").paginate(Filters=[
-        {"Name": "tag:cloudsourced.kind", "Values": ["machine"]},
+        {"Name": "tag:offshore.kind", "Values": ["machine"]},
         {"Name": "instance-state-name", "Values": LIVE},
     ])
     for page in pages:
@@ -24,7 +24,7 @@ def machines(ec2):
 
 def expired(tags, now):
     try:
-        expires = int(tags.get("cloudsourced.expires-at", "0"))
+        expires = int(tags.get("offshore.expires-at", "0"))
     except ValueError:
         expires = 0
     return bool(expires) and now > expires + GRACE
@@ -51,8 +51,8 @@ def handler(event, context, ec2=None, ssm=None, now=None):
     for instance_id, tags in machines(ec2):
         if expired(tags, now):
             doomed.append(instance_id)
-        elif tags.get("cloudsourced.machine"):
-            alive.add(tags["cloudsourced.machine"])
+        elif tags.get("offshore.machine"):
+            alive.add(tags["offshore.machine"])
     for k in range(0, len(doomed), 50):
         ec2.terminate_instances(InstanceIds=doomed[k:k + 50])
     deleted = []

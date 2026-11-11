@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 func TestInitCmd(t *testing.T) {

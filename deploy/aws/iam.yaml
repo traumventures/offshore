@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  cloudsourced operator identity - a least privilege managed policy for what the
+  offshore operator identity - a least privilege managed policy for what the
   aws-ec2 provider does (shared CloudFormation stack, build machine instances,
   image push, artifact bucket, machine secrets in SSM) and a role to assume it,
   so that neither the control plane nor developers use root or admin
@@ -14,15 +14,15 @@ Metadata:
       CloudFormation generates for stacks named StackPrefix*.
     must:
       - Keep in sync with internal/provider/awsec2 (API calls) and stack.yaml (resources).
-      - Machine instances, volumes and interfaces carry the tag project=cloudsourced.
+      - Machine instances, volumes and interfaces carry the tag project=offshore.
 Parameters:
   StackPrefix:
     Type: String
-    Default: cloudsourced
+    Default: offshore
     AllowedPattern: "[a-z][a-z0-9-]*"
     Description: >-
       Name (or prefix) of the provider's shared stack (provider option "stack",
-      default cloudsourced). Lower case, because bucket and repository names are
+      default offshore). Lower case, because bucket and repository names are
       derived from it.
   TrustedPrincipalArn:
     Type: String
@@ -41,7 +41,7 @@ Parameters:
     Default: "false"
     AllowedValues: ["true", "false"]
     Description: >-
-      Also create an IAM user cloudsourced-operator with the policy attached, for
+      Also create an IAM user offshore-operator with the policy attached, for
       hosts that cannot assume roles. Create its access key yourself; it is never
       put into stack outputs.
 
@@ -54,8 +54,8 @@ Resources:
   OperatorPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      ManagedPolicyName: cloudsourced-operator
-      Description: Least privilege for the cloudsourced aws-ec2 provider
+      ManagedPolicyName: offshore-operator
+      Description: Least privilege for the offshore aws-ec2 provider
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -81,7 +81,7 @@ Resources:
             Action: cloudformation:ValidateTemplate
             Resource: "*"
 
-          # --- EC2: read everything, change only cloudsourced machines.
+          # --- EC2: read everything, change only offshore machines.
           - Sid: Ec2Read
             Effect: Allow
             Action:
@@ -107,14 +107,14 @@ Resources:
               - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:network-interface/*"
             Condition:
               StringEquals:
-                aws:RequestTag/project: cloudsourced
+                aws:RequestTag/project: offshore
           - Sid: RunMachinesWithImdsV2HopLimit1
             Effect: Allow
             Action: ec2:RunInstances
             Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*"
             Condition:
               StringEquals:
-                aws:RequestTag/project: cloudsourced
+                aws:RequestTag/project: offshore
                 ec2:MetadataHttpTokens: required
               NumericLessThanEquals:
                 ec2:MetadataHttpPutResponseHopLimit: "1"
@@ -150,7 +150,7 @@ Resources:
               - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*"
             Condition:
               StringEquals:
-                aws:ResourceTag/project: cloudsourced
+                aws:ResourceTag/project: offshore
           - Sid: MachineLifecycle
             Effect: Allow
             Action:
@@ -161,7 +161,7 @@ Resources:
             Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*"
             Condition:
               StringEquals:
-                aws:ResourceTag/project: cloudsourced
+                aws:ResourceTag/project: offshore
           - Sid: MachineSecurityGroupIngress
             Effect: Allow
             Action:
@@ -172,7 +172,7 @@ Resources:
             Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*"
             Condition:
               StringEquals:
-                aws:ResourceTag/project: cloudsourced
+                aws:ResourceTag/project: offshore
           # --- Instance role of the machines (created by the stack).
           - Sid: PassMachineRole
             Effect: Allow
@@ -213,7 +213,7 @@ Resources:
             Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
             Resource: !Sub "arn:${AWS::Partition}:s3:::${StackPrefix}*/*"
 
-          # --- SSM: public AMI parameters, machine secrets under /cloudsourced/.
+          # --- SSM: public AMI parameters, machine secrets under /offshore/.
           - Sid: PublicAmiParameters
             Effect: Allow
             Action: [ssm:GetParameter, ssm:GetParameters]
@@ -229,7 +229,7 @@ Resources:
               - ssm:DeleteParameters
               - ssm:AddTagsToResource
               - ssm:ListTagsForResource
-            Resource: !Sub "arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/cloudsourced/*"
+            Resource: !Sub "arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/offshore/*"
           - Sid: ListMachineSecrets
             Effect: Allow
             Action: ssm:DescribeParameters
@@ -244,8 +244,8 @@ Resources:
           6144 characters. Only needed to create, update or delete the shared
           stack.
     Properties:
-      ManagedPolicyName: cloudsourced-operator-stack
-      Description: Resources of the cloudsourced aws-ec2 shared stack (created through CloudFormation with the caller's credentials)
+      ManagedPolicyName: offshore-operator-stack
+      Description: Resources of the offshore aws-ec2 shared stack (created through CloudFormation with the caller's credentials)
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -416,8 +416,8 @@ Resources:
   OperatorRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: cloudsourced-operator
-      Description: Assumed by the cloudsourced control plane or daemon to manage build machines
+      RoleName: offshore-operator
+      Description: Assumed by the offshore control plane or daemon to manage build machines
       MaxSessionDuration: 43200
       ManagedPolicyArns: [!Ref OperatorPolicy, !Ref StackPolicy]
       AssumeRolePolicyDocument:
@@ -432,26 +432,26 @@ Resources:
               - Bool: { aws:MultiFactorAuthPresent: "true" }
               - !Ref AWS::NoValue
       Tags:
-        - { Key: project, Value: cloudsourced }
+        - { Key: project, Value: offshore }
 
   OperatorUser:
     Type: AWS::IAM::User
     Condition: WithUser
     Properties:
-      UserName: cloudsourced-operator
+      UserName: offshore-operator
       ManagedPolicyArns: [!Ref OperatorPolicy, !Ref StackPolicy]
       Tags:
-        - { Key: project, Value: cloudsourced }
+        - { Key: project, Value: offshore }
 
 Outputs:
   PolicyArn:
     Value: !Ref OperatorPolicy
     Export:
-      Name: cloudsourced-operator-policy
+      Name: offshore-operator-policy
   StackPolicyArn:
     Value: !Ref StackPolicy
     Export:
-      Name: cloudsourced-operator-stack-policy
+      Name: offshore-operator-stack-policy
   RoleArn:
     Value: !GetAtt OperatorRole.Arn
   UserName:

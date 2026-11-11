@@ -12,7 +12,7 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
+	"github.com/traumventures/offshore/internal/blobcache"
 )
 
 // objectStoreAPI is the part of the Object Storage client the cache uses.

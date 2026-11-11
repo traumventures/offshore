@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/manifest"
+	"github.com/traumventures/offshore/internal/manifest"
 )
 
 // Policy variants of Default.

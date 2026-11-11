@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 func linkTo(t *testing.T, target, link string) {
@@ -36,7 +36,7 @@ func fakeBinary(t *testing.T, path string) {
 
 func TestCheckShimsOrder(t *testing.T) {
 	dir := t.TempDir()
-	self := filepath.Join(dir, "bin", "cloudsourced")
+	self := filepath.Join(dir, "bin", "offshore")
 	fakeBinary(t, self)
 	shims := filepath.Join(dir, "shims")
 	linkTo(t, self, filepath.Join(shims, "cargo"))
@@ -60,9 +60,9 @@ func TestCheckShimsOrder(t *testing.T) {
 
 func TestCheckBinary(t *testing.T) {
 	dir := t.TempDir()
-	self := filepath.Join(dir, "a", "cloudsourced")
+	self := filepath.Join(dir, "a", "offshore")
 	fakeBinary(t, self)
-	other := filepath.Join(dir, "b", "cloudsourced")
+	other := filepath.Join(dir, "b", "offshore")
 	fakeBinary(t, other)
 	if c := checkBinary(self, filepath.Dir(self)); c.Status != checkOK {
 		t.Errorf("%+v", c)

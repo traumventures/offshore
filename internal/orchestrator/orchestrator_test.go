@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/clock"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/clock"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // fakeProvider keeps machines in memory; servers are simulated by fakeStatus.

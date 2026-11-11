@@ -32,11 +32,11 @@ import (
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/daemon"
-	"github.com/traumventures/cloudsourced/internal/pool"
-	"github.com/traumventures/cloudsourced/internal/tracing"
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/daemon"
+	"github.com/traumventures/offshore/internal/pool"
+	"github.com/traumventures/offshore/internal/tracing"
+	"github.com/traumventures/offshore/internal/transport"
 )
 
 const (
@@ -44,10 +44,10 @@ const (
 	defaultListenACME       = ":443"
 	defaultACMEHTTP         = ":80"
 	cpStateFile             = "controlplane.json"
-	cpCertCN                = "cloudsourced-controlplane"
+	cpCertCN                = "offshore-controlplane"
 )
 
-// cpOptions are the flags of "cloudsourced controlplane".
+// cpOptions are the flags of "offshore controlplane".
 type cpOptions struct {
 	Listen        string // resolved: never empty after parsing
 	StateDir      string // resolved
@@ -82,10 +82,10 @@ type cpState struct {
 func controlplaneUsage(fs *flag.FlagSet) func() {
 	return func() {
 		fmt.Fprint(fs.Output(), `usage:
-  cloudsourced controlplane [flags]                  serve the pool API
-  cloudsourced controlplane info [--show-key]        URLs, fingerprint, API key location
-  cloudsourced controlplane client-config [--url U]  print the client [control_plane] block
-  cloudsourced controlplane health                   check a running control plane (exit status)
+  offshore controlplane [flags]                  serve the pool API
+  offshore controlplane info [--show-key]        URLs, fingerprint, API key location
+  offshore controlplane client-config [--url U]  print the client [control_plane] block
+  offshore controlplane health                   check a running control plane (exit status)
 
 Without --hostname the control plane uses a persistent self-signed certificate
 that clients pin by fingerprint. With --hostname cs.example.com (a DNS name
@@ -103,21 +103,21 @@ flags:
 func parseControlplaneFlags(args []string) (*cpOptions, error) {
 	o := &cpOptions{}
 	fs := flag.NewFlagSet("controlplane", flag.ContinueOnError)
-	fs.StringVar(&o.Listen, "listen", os.Getenv("CLOUDSOURCED_LISTEN"), "listen address (default "+defaultListenSelfSigned+", "+defaultListenACME+" with ACME; $CLOUDSOURCED_LISTEN)")
-	fs.StringVar(&o.StateDir, "state-dir", "", "state directory (default $CLOUDSOURCED_STATE_DIR or <state>/controlplane)")
-	fs.StringVar(&o.Hostname, "hostname", os.Getenv("CLOUDSOURCED_HOSTNAME"), "public DNS name of the control plane; enables ACME unless --acme=false, where it becomes a SAN of the self-signed certificate ($CLOUDSOURCED_HOSTNAME)")
+	fs.StringVar(&o.Listen, "listen", os.Getenv("OFFSHORE_LISTEN"), "listen address (default "+defaultListenSelfSigned+", "+defaultListenACME+" with ACME; $OFFSHORE_LISTEN)")
+	fs.StringVar(&o.StateDir, "state-dir", "", "state directory (default $OFFSHORE_STATE_DIR or <state>/controlplane)")
+	fs.StringVar(&o.Hostname, "hostname", os.Getenv("OFFSHORE_HOSTNAME"), "public DNS name of the control plane; enables ACME unless --acme=false, where it becomes a SAN of the self-signed certificate ($OFFSHORE_HOSTNAME)")
 	acmeFlag := fs.Bool("acme", false, "obtain a certificate via ACME (Let's Encrypt) for --hostname (default true when --hostname is a DNS name)")
-	fs.StringVar(&o.ACMEEmail, "acme-email", os.Getenv("CLOUDSOURCED_ACME_EMAIL"), "contact e-mail for the ACME account ($CLOUDSOURCED_ACME_EMAIL)")
-	fs.StringVar(&o.ACMEDirectory, "acme-directory", os.Getenv("CLOUDSOURCED_ACME_DIRECTORY"), "ACME directory URL (default Let's Encrypt production; $CLOUDSOURCED_ACME_DIRECTORY)")
+	fs.StringVar(&o.ACMEEmail, "acme-email", os.Getenv("OFFSHORE_ACME_EMAIL"), "contact e-mail for the ACME account ($OFFSHORE_ACME_EMAIL)")
+	fs.StringVar(&o.ACMEDirectory, "acme-directory", os.Getenv("OFFSHORE_ACME_DIRECTORY"), "ACME directory URL (default Let's Encrypt production; $OFFSHORE_ACME_DIRECTORY)")
 	fs.StringVar(&o.ACMEHTTP, "acme-http", "", "listen address for ACME HTTP-01 challenges, \"off\" to rely on TLS-ALPN-01 on the API port (default "+defaultACMEHTTP+" with ACME)")
 	fs.StringVar(&o.CertFile, "tls-cert", "", "TLS certificate (PEM) instead of self-signed or ACME")
 	fs.StringVar(&o.KeyFile, "tls-key", "", "TLS private key (PEM)")
 	fs.BoolVar(&o.Plain, "insecure-http", false, "serve plain HTTP (only behind a TLS terminating proxy)")
 	fs.StringVar(&o.ClientCA, "client-ca", "", "require client certificates signed by this CA (PEM) in addition to the API key (mutual TLS)")
-	fs.StringVar(&o.APIKeyFile, "api-key-file", "", "file with the API key (default $CLOUDSOURCED_API_KEY or a generated <state>/api-key)")
-	fs.StringVar(&o.MachineBinary, "machine-binary", os.Getenv("CLOUDSOURCED_MACHINE_BINARY"), "server binary of local-docker machines as a path on the Docker host; \"self\" = this executable; default: this executable, or a copy in <state>/bin when running in a container ($CLOUDSOURCED_MACHINE_BINARY)")
-	fs.StringVar(&o.MetricsListen, "metrics-listen", os.Getenv("CLOUDSOURCED_METRICS_LISTEN"), "also serve GET /metrics over plain HTTP without authentication on this address, e.g. 127.0.0.1:9090 (/metrics on the API port needs the API key; $CLOUDSOURCED_METRICS_LISTEN)")
-	fs.StringVar(&o.Config, "config", "", "pool configuration ([pool], [providers.*]; default $CLOUDSOURCED_POOL_CONFIG, else the client configuration file); reloaded when it changes or on SIGHUP")
+	fs.StringVar(&o.APIKeyFile, "api-key-file", "", "file with the API key (default $OFFSHORE_API_KEY or a generated <state>/api-key)")
+	fs.StringVar(&o.MachineBinary, "machine-binary", os.Getenv("OFFSHORE_MACHINE_BINARY"), "server binary of local-docker machines as a path on the Docker host; \"self\" = this executable; default: this executable, or a copy in <state>/bin when running in a container ($OFFSHORE_MACHINE_BINARY)")
+	fs.StringVar(&o.MetricsListen, "metrics-listen", os.Getenv("OFFSHORE_METRICS_LISTEN"), "also serve GET /metrics over plain HTTP without authentication on this address, e.g. 127.0.0.1:9090 (/metrics on the API port needs the API key; $OFFSHORE_METRICS_LISTEN)")
+	fs.StringVar(&o.Config, "config", "", "pool configuration ([pool], [providers.*]; default $OFFSHORE_POOL_CONFIG, else the client configuration file); reloaded when it changes or on SIGHUP")
 	fs.Usage = controlplaneUsage(fs)
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -179,7 +179,7 @@ func cpStateDir(flagValue string) string {
 	if flagValue != "" {
 		return flagValue
 	}
-	if d := os.Getenv("CLOUDSOURCED_STATE_DIR"); d != "" {
+	if d := os.Getenv("OFFSHORE_STATE_DIR"); d != "" {
 		return d
 	}
 	return filepath.Join(daemon.StateDir(), "controlplane")
@@ -301,7 +301,7 @@ func serveControlplane(o *cpOptions) error {
 	go local.Run(ctx, pool.ReconcileInterval(15*time.Second))
 	go watchPoolConfig(ctx, reloader, 15*time.Second)
 
-	fmt.Fprintf(os.Stderr, "cloudsourced control plane %s\n  listen:      %s\n  config:      %s (pool %s)\n  state:       %s\n  providers:   %s\n",
+	fmt.Fprintf(os.Stderr, "offshore control plane %s\n  listen:      %s\n  config:      %s (pool %s)\n  state:       %s\n  providers:   %s\n",
 		version, st.Listen, o.Config, u.Pool.ID, dir, strings.Join(u.ProviderNames(), ", "))
 	if bin != "" {
 		fmt.Fprintf(os.Stderr, "  machine bin: %s (path on the Docker host)\n", bin)
@@ -326,7 +326,7 @@ func serveControlplane(o *cpOptions) error {
 	if generated {
 		fmt.Fprint(os.Stderr, " (generated)")
 	}
-	fmt.Fprintf(os.Stderr, "\n  urls:        %s\n  clients:     cloudsourced controlplane client-config --state-dir %s\n",
+	fmt.Fprintf(os.Stderr, "\n  urls:        %s\n  clients:     offshore controlplane client-config --state-dir %s\n",
 		strings.Join(st.URLs, " "), dir)
 
 	errc := make(chan error, 2)
@@ -460,8 +460,8 @@ func loadAPIKey(path, dir string) (key, source string, generated bool, err error
 			return "", "", false, err
 		}
 		key, source = strings.TrimSpace(string(b)), path
-	} else if key = os.Getenv("CLOUDSOURCED_API_KEY"); key != "" {
-		source = "$CLOUDSOURCED_API_KEY"
+	} else if key = os.Getenv("OFFSHORE_API_KEY"); key != "" {
+		source = "$OFFSHORE_API_KEY"
 	} else {
 		p := filepath.Join(dir, "api-key")
 		source = p
@@ -495,7 +495,7 @@ func selfSigned(dir, hostname string) (*transport.Identity, error) {
 			if hostname == "" || certCovers(id.CertPEM, hostname) {
 				return &id, nil
 			}
-			fmt.Fprintf(os.Stderr, "cloudsourced: the self-signed certificate does not cover %s; creating a new one (clients need the new fingerprint)\n", hostname)
+			fmt.Fprintf(os.Stderr, "offshore: the self-signed certificate does not cover %s; creating a new one (clients need the new fingerprint)\n", hostname)
 		}
 	}
 	id, err := newSelfSigned(hostname, 10*365*24*time.Hour)
@@ -605,7 +605,7 @@ func hasLocalDocker(u *config.PoolConfig) bool {
 
 // inContainer reports whether the control plane runs in a container.
 func inContainer() bool {
-	if os.Getenv("CLOUDSOURCED_IN_CONTAINER") == "1" {
+	if os.Getenv("OFFSHORE_IN_CONTAINER") == "1" {
 		return true
 	}
 	_, err := os.Stat("/.dockerenv")
@@ -631,7 +631,7 @@ func resolveMachineBinary(flagValue, dir string, warn func(string, ...any)) (str
 	if err != nil {
 		return "", err
 	}
-	dst := filepath.Join(dir, "bin", "cloudsourced")
+	dst := filepath.Join(dir, "bin", "offshore")
 	if err := copyExecutable(self, dst); err != nil {
 		return "", fmt.Errorf("export machine binary: %w", err)
 	}
@@ -644,7 +644,7 @@ func resolveMachineBinary(flagValue, dir string, warn func(string, ...any)) (str
 }
 
 func dockerCommand() []string {
-	if c := strings.Fields(os.Getenv("CLOUDSOURCED_DOCKER")); len(c) > 0 {
+	if c := strings.Fields(os.Getenv("OFFSHORE_DOCKER")); len(c) > 0 {
 		return c
 	}
 	return []string{"docker"}
@@ -659,7 +659,7 @@ func copyExecutable(src, dst string) error {
 		return err
 	}
 	defer in.Close()
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".cloudsourced-*")
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".offshore-*")
 	if err != nil {
 		return err
 	}
@@ -767,7 +767,7 @@ func controlplaneInfo(args []string) error {
 	dir := cpStateDir(*stateDir)
 	st, err := readCPState(dir)
 	if err != nil {
-		return fmt.Errorf("no control plane state in %s (start \"cloudsourced controlplane\" first): %w", dir, err)
+		return fmt.Errorf("no control plane state in %s (start \"offshore controlplane\" first): %w", dir, err)
 	}
 	fmt.Printf("state:        %s\nversion:      %s\nstarted:      %s\nlisten:       %s\n", dir, st.Version, st.Started.Format(time.RFC3339), st.Listen)
 	if st.Hostname != "" {
@@ -796,7 +796,7 @@ func controlplaneInfo(args []string) error {
 		}
 		fmt.Printf("api key value: %s\n", key)
 	}
-	fmt.Printf("clients:      cloudsourced controlplane client-config --state-dir %s\n", dir)
+	fmt.Printf("clients:      offshore controlplane client-config --state-dir %s\n", dir)
 	return nil
 }
 
@@ -805,7 +805,7 @@ func controlplaneClientConfig(args []string) error {
 	stateDir := fs.String("state-dir", "", "state directory of a control plane on this host (default URL and fingerprint)")
 	url := fs.String("url", "", "control plane URL for clients (default: the first URL of the state)")
 	fp := fs.String("fingerprint", "", "certificate fingerprint to pin (default: from the state, else fetched from --url unless it is publicly trusted)")
-	keyRef := fs.String("api-key", "env:CLOUDSOURCED_API_KEY", "client reference to the API key (env:VAR, file:PATH, cmd:COMMAND)")
+	keyRef := fs.String("api-key", "env:OFFSHORE_API_KEY", "client reference to the API key (env:VAR, file:PATH, cmd:COMMAND)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -838,7 +838,7 @@ func clientConfigBlock(dir, url, fp, keyRef string, probe func(string) (string, 
 			}
 			if !trusted {
 				fp = got
-				note = "# fetched from the server: compare with \"cloudsourced controlplane info\" there\n"
+				note = "# fetched from the server: compare with \"offshore controlplane info\" there\n"
 			}
 		}
 	}

@@ -5,9 +5,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/scheduler/sim"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/scheduler"
+	"github.com/traumventures/offshore/internal/scheduler/sim"
 )
 
 // ExportOptions controls the conversion of task events into a trace.

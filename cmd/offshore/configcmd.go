@@ -12,21 +12,21 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 const configUsage = `usage:
-  cloudsourced config check [--pool FILE]   validate the configuration files of this mode
-  cloudsourced config show  [--pool FILE]   print the effective configuration (secrets redacted)
+  offshore config check [--pool FILE]   validate the configuration files of this mode
+  offshore config show  [--pool FILE]   print the effective configuration (secrets redacted)
 
 Without --pool both commands work on the files this client uses: the client
 configuration, the pool configuration when the orchestrator is embedded,
 and the repository configuration of the current directory. --pool FILE
-checks or shows only a pool configuration, as "cloudsourced controlplane
+checks or shows only a pool configuration, as "offshore controlplane
 --config FILE" reads it.
 `
 
-// configCmd implements "cloudsourced config".
+// configCmd implements "offshore config".
 func configCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
 		fmt.Fprint(out, configUsage)
@@ -75,7 +75,7 @@ func loadConfigSet(poolPath string) (*configSet, error) {
 		if err != nil {
 			return nil, err
 		}
-		s.pool, s.poolRole = f, "control plane (cloudsourced controlplane --config)"
+		s.pool, s.poolRole = f, "control plane (offshore controlplane --config)"
 		return s, nil
 	}
 	c, err := config.LoadClient()

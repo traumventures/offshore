@@ -11,18 +11,18 @@ import (
 	"syscall"
 
 	"github.com/quic-go/quic-go"
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/transport"
 )
 
-// ports returns the ports to forward for a tool: CLOUDSOURCED_PORTS
+// ports returns the ports to forward for a tool: OFFSHORE_PORTS
 // replaces the repository's [tool.X] ports when set.
 func ports(profile config.Tool) ([]config.Port, error) {
-	if env := os.Getenv("CLOUDSOURCED_PORTS"); env != "" {
+	if env := os.Getenv("OFFSHORE_PORTS"); env != "" {
 		ps, err := config.ParsePortsEnv(env)
 		if err != nil {
-			return nil, fmt.Errorf("CLOUDSOURCED_PORTS: %w", err)
+			return nil, fmt.Errorf("OFFSHORE_PORTS: %w", err)
 		}
 		return ps, nil
 	}

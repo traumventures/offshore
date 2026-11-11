@@ -1,7 +1,7 @@
 // Package events is the orchestrator's analysis event log: one JSON object
 // per line in daily files (events-YYYY-MM-DD.jsonl, UTC) in the state
 // directory, removed after a retention period. It is always on and
-// independent of tracing; `cloudsourced report` and `cloudsourced sim
+// independent of tracing; `offshore report` and `offshore sim
 // export` read it.
 //
 // Task events describe sessions (arrival and placement, end with measured
@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // Event types.

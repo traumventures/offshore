@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/image"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/image"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 type imgProvider struct {
@@ -93,8 +93,8 @@ func testEnv(t *testing.T) Env {
 	os.WriteFile(filepath.Join(src, "Dockerfile"), []byte("FROM scratch\n"), 0o644)
 	os.WriteFile(filepath.Join(src, "sub", "data"), []byte("payload"), 0o644)
 	os.Symlink("sub/data", filepath.Join(src, "link"))
-	return Env{Hash: "abcdef0123456789", Tag: "cloudsourced-env:abcdef012345", Context: func() (provider.ImageSpec, string, error) {
-		return provider.ImageSpec{Tag: "cloudsourced-env:abcdef012345", ContextDir: src, Dockerfile: filepath.Join(src, "Dockerfile")}, t.TempDir(), nil
+	return Env{Hash: "abcdef0123456789", Tag: "offshore-env:abcdef012345", Context: func() (provider.ImageSpec, string, error) {
+		return provider.ImageSpec{Tag: "offshore-env:abcdef012345", ContextDir: src, Dockerfile: filepath.Join(src, "Dockerfile")}, t.TempDir(), nil
 	}}
 }
 

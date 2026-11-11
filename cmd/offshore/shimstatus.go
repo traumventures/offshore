@@ -13,7 +13,7 @@ import (
 // the shell runs.
 type shimReport struct {
 	Dir      string
-	Tools    []string          // installed proxies (symlinks to cloudsourced)
+	Tools    []string          // installed proxies (symlinks to offshore)
 	Position int               // 1-based position of Dir in PATH, 0 = absent
 	Shadowed map[string]string // tool -> binary found earlier in PATH
 }
@@ -24,7 +24,7 @@ func (r shimReport) Active() bool {
 }
 
 // inspectShims inspects dir against path; self is the resolved
-// cloudsourced executable.
+// offshore executable.
 func inspectShims(dir, path, self string) shimReport {
 	r := shimReport{Dir: dir, Shadowed: map[string]string{}}
 	des, _ := os.ReadDir(dir)
@@ -69,7 +69,7 @@ func (r shimReport) print(w io.Writer) {
 		short = "~" + strings.TrimPrefix(short, home)
 	}
 	if len(r.Tools) == 0 {
-		fmt.Fprintf(w, "no shims installed in %s (cloudsourced shim install)\n", short)
+		fmt.Fprintf(w, "no shims installed in %s (offshore shim install)\n", short)
 		return
 	}
 	fmt.Fprintf(w, "shims in %s: %s\n", short, strings.Join(r.Tools, ", "))
@@ -87,7 +87,7 @@ func (r shimReport) print(w io.Writer) {
 		}
 	}
 	if r.Active() {
-		fmt.Fprintln(w, "active: these tools run through cloudsourced")
+		fmt.Fprintln(w, "active: these tools run through offshore")
 		return
 	}
 	fmt.Fprintf(w, "\nPut the shims first in PATH (e.g. in ~/.profile, ~/.zshrc):\n  export PATH=\"%s:$PATH\"\n", r.Dir)

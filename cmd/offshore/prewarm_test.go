@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/orchestrator"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/orchestrator"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 func TestAlreadyWarm(t *testing.T) {

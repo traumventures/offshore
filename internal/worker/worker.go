@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/traumventures/cloudsourced/internal/clock"
+	"github.com/traumventures/offshore/internal/clock"
 	"io"
 	"log/slog"
 	"os"
@@ -21,18 +21,18 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	"github.com/traumventures/cloudsourced/internal/auth"
-	"github.com/traumventures/cloudsourced/internal/cas"
-	"github.com/traumventures/cloudsourced/internal/labels"
-	"github.com/traumventures/cloudsourced/internal/machine"
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/sourcefs"
-	"github.com/traumventures/cloudsourced/internal/tracing"
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/auth"
+	"github.com/traumventures/offshore/internal/cas"
+	"github.com/traumventures/offshore/internal/labels"
+	"github.com/traumventures/offshore/internal/machine"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/sourcefs"
+	"github.com/traumventures/offshore/internal/tracing"
+	"github.com/traumventures/offshore/internal/transport"
 )
 
-// Config is read from CLOUDSOURCED_* environment variables set by the
+// Config is read from OFFSHORE_* environment variables set by the
 // provider at machine creation.
 type Config struct {
 	MachineID string
@@ -48,16 +48,16 @@ type Config struct {
 	DepsDir   string
 	BuildTTL  time.Duration // upper bound for build cache age
 	// DiskBudget is the bytes the cache disk may use before slots are
-	// pruned (CLOUDSOURCED_DISK_BUDGET; 0: 90% of the filesystem).
+	// pruned (OFFSHORE_DISK_BUDGET; 0: 90% of the filesystem).
 	DiskBudget int64
 	// HostStatus is a file the server publishes machine.HostStatus to for
-	// the supervisor (CLOUDSOURCED_HOST_STATUS; empty: none).
+	// the supervisor (OFFSHORE_HOST_STATUS; empty: none).
 	HostStatus string
 	// SccacheDir is the local tier of the result caches
-	// (CLOUDSOURCED_SCCACHE_DIR, default <deps dir>/sccache).
+	// (OFFSHORE_SCCACHE_DIR, default <deps dir>/sccache).
 	SccacheDir string
 	// Clock is the time of idle, expiry and build slot decisions
-	// ($CLOUDSOURCED_TEST_CLOCK; nil: real time).
+	// ($OFFSHORE_TEST_CLOCK; nil: real time).
 	Clock clock.Clock
 }
 
@@ -71,28 +71,28 @@ func (c Config) now() time.Time {
 // ConfigFromEnv reads the server configuration.
 func ConfigFromEnv() (Config, error) {
 	c := Config{
-		MachineID:  os.Getenv("CLOUDSOURCED_MACHINE_ID"),
-		Listen:     envOr("CLOUDSOURCED_LISTEN", ":7443"),
-		EnvHash:    os.Getenv("CLOUDSOURCED_ENV_HASH"),
-		CacheDir:   envOr("CLOUDSOURCED_CACHE_DIR", "/cache"),
-		DepsDir:    envOr("CLOUDSOURCED_DEPS_DIR", "/deps"),
+		MachineID:  os.Getenv("OFFSHORE_MACHINE_ID"),
+		Listen:     envOr("OFFSHORE_LISTEN", ":7443"),
+		EnvHash:    os.Getenv("OFFSHORE_ENV_HASH"),
+		CacheDir:   envOr("OFFSHORE_CACHE_DIR", "/cache"),
+		DepsDir:    envOr("OFFSHORE_DEPS_DIR", "/deps"),
 		BuildTTL:   24 * time.Hour,
 		HostStatus: os.Getenv(machine.HostStatusEnv),
 	}
-	c.SccacheDir = envOr("CLOUDSOURCED_SCCACHE_DIR", filepath.Join(c.DepsDir, "sccache"))
+	c.SccacheDir = envOr("OFFSHORE_SCCACHE_DIR", filepath.Join(c.DepsDir, "sccache"))
 	clk, err := clock.FromEnv()
 	if err != nil {
 		return c, err
 	}
 	c.Clock = clk
-	if c.MachineID == "" || os.Getenv(auth.EnvTLSSeed) == "" || os.Getenv(auth.EnvSignerPub) == "" || os.Getenv("CLOUDSOURCED_EXPIRES_AT") == "" {
-		return c, errors.New("server: CLOUDSOURCED_MACHINE_ID, _TLS_SEED, _SIGNER_PUB and _EXPIRES_AT are required")
+	if c.MachineID == "" || os.Getenv(auth.EnvTLSSeed) == "" || os.Getenv(auth.EnvSignerPub) == "" || os.Getenv("OFFSHORE_EXPIRES_AT") == "" {
+		return c, errors.New("server: OFFSHORE_MACHINE_ID, _TLS_SEED, _SIGNER_PUB and _EXPIRES_AT are required")
 	}
-	c.CPU, _ = strconv.ParseFloat(os.Getenv("CLOUDSOURCED_CPU"), 64)
-	c.Memory, _ = strconv.ParseInt(os.Getenv("CLOUDSOURCED_MEMORY"), 10, 64)
-	n, err := strconv.ParseInt(os.Getenv("CLOUDSOURCED_EXPIRES_AT"), 10, 64)
+	c.CPU, _ = strconv.ParseFloat(os.Getenv("OFFSHORE_CPU"), 64)
+	c.Memory, _ = strconv.ParseInt(os.Getenv("OFFSHORE_MEMORY"), 10, 64)
+	n, err := strconv.ParseInt(os.Getenv("OFFSHORE_EXPIRES_AT"), 10, 64)
 	if err != nil {
-		return c, fmt.Errorf("server: CLOUDSOURCED_EXPIRES_AT: %w", err)
+		return c, fmt.Errorf("server: OFFSHORE_EXPIRES_AT: %w", err)
 	}
 	c.ExpiresAt = time.Unix(n, 0)
 	seed, err := auth.DecodeKey(os.Getenv(auth.EnvTLSSeed), ed25519.SeedSize)
@@ -113,23 +113,23 @@ func ConfigFromEnv() (Config, error) {
 		return c, fmt.Errorf("server: %s: %w", auth.EnvSignerPub, err)
 	}
 	c.Verifier = auth.Verifier{Pub: ed25519.PublicKey(pub), Machine: c.MachineID}
-	if s := os.Getenv("CLOUDSOURCED_BUILD_TTL"); s != "" {
+	if s := os.Getenv("OFFSHORE_BUILD_TTL"); s != "" {
 		d, err := time.ParseDuration(s)
 		if err != nil {
-			return c, fmt.Errorf("server: CLOUDSOURCED_BUILD_TTL: %w", err)
+			return c, fmt.Errorf("server: OFFSHORE_BUILD_TTL: %w", err)
 		}
 		c.BuildTTL = d
 	}
-	if s := os.Getenv("CLOUDSOURCED_DISK_BUDGET"); s != "" {
+	if s := os.Getenv("OFFSHORE_DISK_BUDGET"); s != "" {
 		n, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
-			return c, fmt.Errorf("server: CLOUDSOURCED_DISK_BUDGET: %w", err)
+			return c, fmt.Errorf("server: OFFSHORE_DISK_BUDGET: %w", err)
 		}
 		c.DiskBudget = n
 	}
-	if s := os.Getenv("CLOUDSOURCED_PROVISION"); s != "" {
+	if s := os.Getenv("OFFSHORE_PROVISION"); s != "" {
 		if err := json.Unmarshal([]byte(s), &c.Provision); err != nil {
-			return c, fmt.Errorf("server: CLOUDSOURCED_PROVISION: %w", err)
+			return c, fmt.Errorf("server: OFFSHORE_PROVISION: %w", err)
 		}
 	}
 	return c, nil
@@ -210,7 +210,7 @@ func New(cfg Config, log *slog.Logger) (*Worker, error) {
 	for _, kv := range os.Environ() {
 		// Neither pool secrets nor the server's tracing setup (whose
 		// headers may hold credentials) reach sessions.
-		if !strings.HasPrefix(kv, "CLOUDSOURCED_") && !strings.HasPrefix(kv, "OTEL_") {
+		if !strings.HasPrefix(kv, "OFFSHORE_") && !strings.HasPrefix(kv, "OTEL_") {
 			env = append(env, kv)
 		}
 	}

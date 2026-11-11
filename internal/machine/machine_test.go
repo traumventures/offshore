@@ -8,24 +8,24 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 func testLayout() Layout {
 	return Layout{
-		ID: "m1", Image: "img:1", Binary: "/host/cloudsourced", Publish: "127.0.0.1::7443/udp",
+		ID: "m1", Image: "img:1", Binary: "/host/offshore", Publish: "127.0.0.1::7443/udp",
 		CacheVolume: "cache-m1", DepsVolume: "deps-x", CPU: 2, Memory: 1 << 30, Swap: true,
 		Labels:     map[string]string{"b": "2", "a": "1"},
 		SvcLabels:  map[string]string{"kind": "service"},
-		Env:        map[string]string{"CLOUDSOURCED_MACHINE_ID": "m1", "CLOUDSOURCED_CPU": "2"},
-		SecretKeys: []string{"CLOUDSOURCED_TOKEN", "CLOUDSOURCED_KEY"},
+		Env:        map[string]string{"OFFSHORE_MACHINE_ID": "m1", "OFFSHORE_CPU": "2"},
+		SecretKeys: []string{"OFFSHORE_TOKEN", "OFFSHORE_KEY"},
 		Services:   []provider.Service{{Name: "db", Image: "postgres:16", Env: map[string]string{"Z": "1", "A": "2"}, Command: []string{"postgres", "-c", "x=1"}}},
 	}
 }
 
 func TestMachineContainerArgs(t *testing.T) {
 	l := testLayout()
-	secret := map[string]string{"CLOUDSOURCED_TOKEN": "tok", "CLOUDSOURCED_KEY": "pem\nkey"}
+	secret := map[string]string{"OFFSHORE_TOKEN": "tok", "OFFSHORE_KEY": "pem\nkey"}
 	cs := l.Containers(secret, SecretsInline)
 	if len(cs) != 2 || cs[0].Name != "cs-m1" || cs[1].Name != "cs-m1-svc-db" {
 		t.Fatalf("containers %+v", cs)
@@ -34,11 +34,11 @@ func TestMachineContainerArgs(t *testing.T) {
 		"--label", "a=1", "--label", "b=2",
 		"--device", "/dev/fuse", "--cap-add", "SYS_ADMIN", "--security-opt", "apparmor=unconfined",
 		"--cgroupns", "private", "-p", "127.0.0.1::7443/udp",
-		"-v", "/host/cloudsourced:/opt/cloudsourced/bin/cloudsourced:ro",
+		"-v", "/host/offshore:/opt/offshore/bin/offshore:ro",
 		"-v", "cache-m1:/cache", "-v", "deps-x:/deps",
-		"--entrypoint", "/opt/cloudsourced/bin/cloudsourced",
-		"-e", "CLOUDSOURCED_CPU=2", "-e", "CLOUDSOURCED_MACHINE_ID=m1",
-		"-e", "CLOUDSOURCED_KEY=pem\nkey", "-e", "CLOUDSOURCED_TOKEN=tok",
+		"--entrypoint", "/opt/offshore/bin/offshore",
+		"-e", "OFFSHORE_CPU=2", "-e", "OFFSHORE_MACHINE_ID=m1",
+		"-e", "OFFSHORE_KEY=pem\nkey", "-e", "OFFSHORE_TOKEN=tok",
 		"--cpus", "2", "--memory", "1073741824", "--memory-swap", "-1",
 		"img:1", "worker"}
 	if !reflect.DeepEqual(cs[0].Create, want) {
@@ -58,13 +58,13 @@ func TestSecretsFromProcessEnvKeepValuesOutOfArgs(t *testing.T) {
 	l := testLayout()
 	l.CPU, l.Memory = 0, 0
 	l.StatusDir = "/run/cs"
-	secret := map[string]string{"CLOUDSOURCED_TOKEN": "tok", "CLOUDSOURCED_KEY": "pem"}
+	secret := map[string]string{"OFFSHORE_TOKEN": "tok", "OFFSHORE_KEY": "pem"}
 	args := l.Containers(secret, SecretsFromProcessEnv)[0].Create
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "tok") || strings.Contains(joined, "pem") {
 		t.Fatalf("secret value in args: %q", args)
 	}
-	for _, want := range []string{"-e CLOUDSOURCED_TOKEN ", "-e CLOUDSOURCED_KEY ", "-v /run/cs:" + HostStatusDir,
+	for _, want := range []string{"-e OFFSHORE_TOKEN ", "-e OFFSHORE_KEY ", "-v /run/cs:" + HostStatusDir,
 		"-e " + HostStatusEnv + "=" + HostStatusFile} {
 		if !strings.Contains(joined+" ", want) {
 			t.Fatalf("missing %q in %q", want, joined)
@@ -74,7 +74,7 @@ func TestSecretsFromProcessEnvKeepValuesOutOfArgs(t *testing.T) {
 	if slices.Contains(args, "--cpus") || slices.Contains(args, "--memory") || slices.Contains(args, "--memory-swap") {
 		t.Fatalf("unexpected limits: %q", args)
 	}
-	if env := l.SecretEnv(secret); !reflect.DeepEqual(env, []string{"CLOUDSOURCED_KEY=pem", "CLOUDSOURCED_TOKEN=tok"}) {
+	if env := l.SecretEnv(secret); !reflect.DeepEqual(env, []string{"OFFSHORE_KEY=pem", "OFFSHORE_TOKEN=tok"}) {
 		t.Fatalf("secret env %v", env)
 	}
 }

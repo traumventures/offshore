@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  cloudsourced control plane on a small EC2 instance - the "cloudsourced
+  offshore control plane on a small EC2 instance - the "offshore
   controlplane" container (systemd), an Elastic IP, encrypted EBS for its
   state, and an instance role that lets the aws-ec2 provider manage the build
   pool. Without Hostname it serves a self-signed, fingerprint-pinned
@@ -45,7 +45,7 @@ Parameters:
   ClientCidr:
     Type: String
     Description: >-
-      Who may use cloudsourced: reaches the control plane API (TCP 7443, or 443
+      Who may use offshore: reaches the control plane API (TCP 7443, or 443
       with Hostname) and the build machines (UDP 7443). E.g. 203.0.113.4/32.
     AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
   Hostname:
@@ -87,13 +87,13 @@ Parameters:
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
   PoolStackName:
     Type: String
-    Default: cloudsourced
+    Default: offshore
     AllowedPattern: '^[a-z][a-z0-9-]{0,30}$'
     Description: Name of the pool stack the aws-ec2 provider creates and manages (its "stack" option).
   PoolId:
     Type: String
-    Default: cloudsourced
-    Description: pool.id of the control plane (machines carry it in the cloudsourced.pool label).
+    Default: offshore
+    Description: pool.id of the control plane (machines carry it in the offshore.pool label).
   MachineInstanceType:
     Type: String
     Default: c7a.xlarge
@@ -135,7 +135,7 @@ Resources:
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: cloudsourced control plane API (and ACME HTTP-01 with a hostname)
+      GroupDescription: offshore control plane API (and ACME HTTP-01 with a hostname)
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - !If
@@ -160,18 +160,18 @@ Resources:
     Properties:
       Name: !Sub "/${AWS::StackName}/controlplane.env"
       Type: String
-      Description: Environment of the cloudsourced control plane container (no secrets)
+      Description: Environment of the offshore control plane container (no secrets)
       Value: !Sub
         - |
-          CLOUDSOURCED_HOSTNAME=${Hostname}
-          CLOUDSOURCED_ACME_EMAIL=${AcmeEmail}
-          CLOUDSOURCED_IMAGE=${Image}
+          OFFSHORE_HOSTNAME=${Hostname}
+          OFFSHORE_ACME_EMAIL=${AcmeEmail}
+          OFFSHORE_IMAGE=${Image}
         - Image: !If [OwnRepository, !Sub "${ControlPlaneRepository.RepositoryUri}:latest", !Ref ImageUri]
 
   InstanceRole:
     Type: AWS::IAM::Role
     Properties:
-      Description: cloudsourced control plane - manages the build pool with the aws-ec2 provider
+      Description: offshore control plane - manages the build pool with the aws-ec2 provider
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -228,7 +228,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*"
                 Condition:
                   StringEquals:
-                    aws:RequestTag/project: cloudsourced
+                    aws:RequestTag/project: offshore
               - Sid: LaunchMachinesInto
                 Effect: Allow
                 Action: ec2:RunInstances
@@ -250,7 +250,7 @@ Resources:
                 Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
                 Condition:
                   StringEquals:
-                    aws:ResourceTag/project: cloudsourced
+                    aws:ResourceTag/project: offshore
               - Sid: MachineIngressAndPoolSecurityGroup
                 Effect: Allow
                 Action:
@@ -262,7 +262,7 @@ Resources:
                 Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
                 Condition:
                   StringEquals:
-                    aws:ResourceTag/project: cloudsourced
+                    aws:ResourceTag/project: offshore
               - Sid: CreatePoolSecurityGroup
                 Effect: Allow
                 Action: ec2:CreateSecurityGroup
@@ -287,7 +287,7 @@ Resources:
                 # deleted by the supervisor after reading.
                 Effect: Allow
                 Action: [ssm:PutParameter, ssm:GetParameter, ssm:DeleteParameter, ssm:AddTagsToResource]
-                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cloudsourced/${PoolStackName}/*"
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/offshore/${PoolStackName}/*"
               - Sid: ArtifactsAndImages
                 Effect: Allow
                 Action: [s3:*]
@@ -408,12 +408,12 @@ Resources:
           AssociatePublicIpAddress: true
       Tags:
         - { Key: Name, Value: !Sub "${AWS::StackName}" }
-        - { Key: project, Value: cloudsourced }
-        - { Key: cloudsourced.kind, Value: controlplane }
+        - { Key: project, Value: offshore }
+        - { Key: offshore.kind, Value: controlplane }
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          # cloudsourced control plane host. Runs once; the services below
+          # offshore control plane host. Runs once; the services below
           # survive reboots and pick up setting changes from SSM.
           set -euxo pipefail
           dnf install -y docker
@@ -424,16 +424,16 @@ Resources:
           for i in $(seq 120); do [ -e /dev/sdf ] && break; sleep 5; done
           dev=$(readlink -f /dev/sdf)
           blkid "$dev" || mkfs.xfs -L cs-state "$dev"
-          mkdir -p /var/lib/cloudsourced
-          grep -q cs-state /etc/fstab || echo 'LABEL=cs-state /var/lib/cloudsourced xfs defaults,nofail 0 2' >> /etc/fstab
+          mkdir -p /var/lib/offshore
+          grep -q cs-state /etc/fstab || echo 'LABEL=cs-state /var/lib/offshore xfs defaults,nofail 0 2' >> /etc/fstab
           systemctl daemon-reload
           mount -a
-          chown 10001:10001 /var/lib/cloudsourced
-          chmod 0700 /var/lib/cloudsourced
+          chown 10001:10001 /var/lib/offshore
+          chmod 0700 /var/lib/offshore
 
           # Pool configuration, written once; edit it on the volume afterwards.
-          if [ ! -e /var/lib/cloudsourced/config.toml ]; then
-            cat > /var/lib/cloudsourced/config.toml <<'CFG'
+          if [ ! -e /var/lib/offshore/config.toml ]; then
+            cat > /var/lib/offshore/config.toml <<'CFG'
           [pool]
           id = "${PoolId}"
           max_machines = ${MaxMachines}
@@ -451,52 +451,52 @@ Resources:
           cpu = ${MachineCpu}
           memory = "${MachineMemory}"
           CFG
-            chown 10001:10001 /var/lib/cloudsourced/config.toml
+            chown 10001:10001 /var/lib/offshore/config.toml
           fi
 
-          mkdir -p /etc/cloudsourced
-          cat > /usr/local/bin/cloudsourced-controlplane-sync <<'SH'
+          mkdir -p /etc/offshore
+          cat > /usr/local/bin/offshore-controlplane-sync <<'SH'
           #!/bin/bash
           # Fetch the container environment from SSM; restart on change.
           set -euo pipefail
           new=$(aws ssm get-parameter --region ${AWS::Region} --name "/${AWS::StackName}/controlplane.env" --query Parameter.Value --output text)
-          if [ "$new" != "$(cat /etc/cloudsourced/controlplane.env 2>/dev/null)" ]; then
-            printf '%s\n' "$new" > /etc/cloudsourced/controlplane.env
-            [ "${!1:-}" = --init ] || systemctl restart cloudsourced-controlplane
+          if [ "$new" != "$(cat /etc/offshore/controlplane.env 2>/dev/null)" ]; then
+            printf '%s\n' "$new" > /etc/offshore/controlplane.env
+            [ "${!1:-}" = --init ] || systemctl restart offshore-controlplane
           fi
           SH
-          cat > /usr/local/bin/cloudsourced-controlplane-run <<'SH'
+          cat > /usr/local/bin/offshore-controlplane-run <<'SH'
           #!/bin/bash
           set -euo pipefail
-          set -a; . /etc/cloudsourced/controlplane.env; set +a
-          registry=${!CLOUDSOURCED_IMAGE%%/*}
+          set -a; . /etc/offshore/controlplane.env; set +a
+          registry=${!OFFSHORE_IMAGE%%/*}
           case "$registry" in *.dkr.ecr.*.amazonaws.com)
             aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin "$registry" ;;
           esac
           # Waits (systemd restarts) until the image has been pushed.
-          docker pull "$CLOUDSOURCED_IMAGE"
-          docker rm -f cloudsourced-controlplane >/dev/null 2>&1 || true
-          exec docker run --rm --name cloudsourced-controlplane --network host \
+          docker pull "$OFFSHORE_IMAGE"
+          docker rm -f offshore-controlplane >/dev/null 2>&1 || true
+          exec docker run --rm --name offshore-controlplane --network host \
             --group-add "$(stat -c %g /var/run/docker.sock)" \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v /var/lib/cloudsourced:/var/lib/cloudsourced \
-            -e CLOUDSOURCED_HOSTNAME -e CLOUDSOURCED_ACME_EMAIL \
-            "$CLOUDSOURCED_IMAGE" controlplane
+            -v /var/lib/offshore:/var/lib/offshore \
+            -e OFFSHORE_HOSTNAME -e OFFSHORE_ACME_EMAIL \
+            "$OFFSHORE_IMAGE" controlplane
           SH
-          chmod 0755 /usr/local/bin/cloudsourced-controlplane-sync /usr/local/bin/cloudsourced-controlplane-run
+          chmod 0755 /usr/local/bin/offshore-controlplane-sync /usr/local/bin/offshore-controlplane-run
 
-          cat > /etc/systemd/system/cloudsourced-controlplane.service <<'UNIT'
+          cat > /etc/systemd/system/offshore-controlplane.service <<'UNIT'
           [Unit]
-          Description=cloudsourced control plane
+          Description=offshore control plane
           After=docker.service network-online.target
           Requires=docker.service
           Wants=network-online.target
-          RequiresMountsFor=/var/lib/cloudsourced
+          RequiresMountsFor=/var/lib/offshore
 
           [Service]
-          ExecStartPre=/usr/local/bin/cloudsourced-controlplane-sync --init
-          ExecStart=/usr/local/bin/cloudsourced-controlplane-run
-          ExecStop=/usr/bin/docker stop -t 30 cloudsourced-controlplane
+          ExecStartPre=/usr/local/bin/offshore-controlplane-sync --init
+          ExecStart=/usr/local/bin/offshore-controlplane-run
+          ExecStop=/usr/bin/docker stop -t 30 offshore-controlplane
           Restart=always
           RestartSec=20
           TimeoutStopSec=60
@@ -504,16 +504,16 @@ Resources:
           [Install]
           WantedBy=multi-user.target
           UNIT
-          cat > /etc/systemd/system/cloudsourced-controlplane-sync.service <<'UNIT'
+          cat > /etc/systemd/system/offshore-controlplane-sync.service <<'UNIT'
           [Unit]
-          Description=apply cloudsourced control plane settings from SSM
+          Description=apply offshore control plane settings from SSM
           [Service]
           Type=oneshot
-          ExecStart=/usr/local/bin/cloudsourced-controlplane-sync
+          ExecStart=/usr/local/bin/offshore-controlplane-sync
           UNIT
-          cat > /etc/systemd/system/cloudsourced-controlplane-sync.timer <<'UNIT'
+          cat > /etc/systemd/system/offshore-controlplane-sync.timer <<'UNIT'
           [Unit]
-          Description=poll cloudsourced control plane settings
+          Description=poll offshore control plane settings
           [Timer]
           OnBootSec=2min
           OnUnitActiveSec=1min
@@ -521,7 +521,7 @@ Resources:
           WantedBy=timers.target
           UNIT
           systemctl daemon-reload
-          systemctl enable --now cloudsourced-controlplane.service cloudsourced-controlplane-sync.timer
+          systemctl enable --now offshore-controlplane.service offshore-controlplane-sync.timer
 
   StateVolume:
     Type: AWS::EC2::Volume
@@ -539,7 +539,7 @@ Resources:
       Encrypted: true
       Tags:
         - { Key: Name, Value: !Sub "${AWS::StackName}-state" }
-        - { Key: project, Value: cloudsourced }
+        - { Key: project, Value: offshore }
 
   StateVolumeAttachment:
     Type: AWS::EC2::VolumeAttachment
@@ -554,7 +554,7 @@ Resources:
       Domain: vpc
       Tags:
         - { Key: Name, Value: !Sub "${AWS::StackName}" }
-        - { Key: project, Value: cloudsourced }
+        - { Key: project, Value: offshore }
 
   ElasticIpAssociation:
     Type: AWS::EC2::EIPAssociation
@@ -590,5 +590,5 @@ Outputs:
       Prints the client [control_plane] block and the API key on the instance
       (then: aws ssm get-command-invocation --command-id <CommandId> --instance-id <InstanceId>).
     Value: !Sub
-      - "aws ssm send-command --region ${AWS::Region} --instance-ids ${Instance} --document-name AWS-RunShellScript --parameters 'commands=[\"docker exec cloudsourced-controlplane cloudsourced controlplane client-config --url ${ClientUrl}\",\"docker exec cloudsourced-controlplane cloudsourced controlplane info --show-key\"]'"
+      - "aws ssm send-command --region ${AWS::Region} --instance-ids ${Instance} --document-name AWS-RunShellScript --parameters 'commands=[\"docker exec offshore-controlplane offshore controlplane client-config --url ${ClientUrl}\",\"docker exec offshore-controlplane offshore controlplane info --show-key\"]'"
       - ClientUrl: !If [HasHostname, !Sub "https://${Hostname}", !Sub "https://${ElasticIp}:7443"]

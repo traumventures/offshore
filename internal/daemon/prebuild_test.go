@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/envbuild"
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/pool"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/envbuild"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/pool"
 )
 
 // prebuildPool records prebuilds and unreachable reports.
@@ -167,7 +167,7 @@ func TestPrebuildAtRequestAndRetryAfterFailure(t *testing.T) {
 	if st.Prebuild == nil || st.Prebuild.Error == "" || st.Prebuild.Trigger != "run of cargo" {
 		t.Fatalf("status %+v", st.Prebuild)
 	}
-	// `cloudsourced env build` retries a failed build.
+	// `offshore env build` retries a failed build.
 	p.mu.Lock()
 	p.fail = nil
 	p.mu.Unlock()
@@ -229,7 +229,7 @@ func TestEnvInputs(t *testing.T) {
 		Setup:      []config.SetupStep{{Run: "x", Inputs: []string{"scripts/setup.sh", "tools"}}}}}
 	in := envInputs(r)
 	for path, want := range map[string]bool{
-		".cloudsourced.toml": true, ".cloudsourced.local.toml": true, "app/rust-toolchain.toml": true,
+		".offshore.toml": true, ".offshore.local.toml": true, "app/rust-toolchain.toml": true,
 		"docker/other": true, "scripts/setup.sh": true, "tools/a/b": true, "toolsx": false, "app/src/lib.rs": false,
 	} {
 		if relevant(in, path) != want {

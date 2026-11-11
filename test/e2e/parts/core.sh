@@ -8,7 +8,7 @@ PART=core
 step "configuration roles"
 out="$(cd "$WORK" && cs config check 2>&1)"; code=$?
 check "config check exits 0" eq "$code" 0
-check "client configuration has the client role" contains "$out" "client configuration ok: $CLOUDSOURCED_CONFIG"
+check "client configuration has the client role" contains "$out" "client configuration ok: $OFFSHORE_CONFIG"
 if [ -n "$REMOTE" ]; then
   check "remote client does not use a pool configuration" contains "$out" "pool configuration: not used by this client"
   out="$(cs config check --pool "$POOLCFG" 2>&1)"
@@ -33,7 +33,7 @@ check "toolchain from rust-toolchain.toml" contains "$(run sh -c 'rustc --versio
 check "secrets resolved locally and injected" eq "$(run sh -c 'echo "$CMD_SECRET $FILE_SECRET"')" "from-cmd file-secret"
 check "secrets never reach the machine's disk" test -z "$(docker_ exec "$MACHINE" grep -rl file-secret /cache /deps 2>/dev/null)"
 check "service container reachable on localhost" contains "$(http_service)" "200 OK"
-check "service runs as its own container next to the machine" eq "$(docker_ ps -q --filter "label=cloudsourced.pool=$OWNER" --filter label=cloudsourced.kind=service | wc -l)" 1
+check "service runs as its own container next to the machine" eq "$(docker_ ps -q --filter "label=offshore.pool=$OWNER" --filter label=offshore.kind=service | wc -l)" 1
 
 step "exit codes, streams, stdin, environment, signals"
 out="$(run sh -c 'echo to-stdout; echo to-stderr >&2; exit 7' 2>"$WORK/err")"; code=$?
@@ -41,7 +41,7 @@ check "exit code forwarded" eq "$code" 7
 check "stdout separated" eq "$out" "to-stdout"
 check "stderr separated" contains "$(cat "$WORK/err")" "to-stderr"
 check "stdin forwarded" eq "$(printf 'a\nb\n' | run sh -c 'wc -l')" "2"
-out="$(E2E_VISIBLE=yes HIDDEN_SECRET=no run sh -c 'echo "v=$E2E_VISIBLE s=$HIDDEN_SECRET t=$(env | grep -c -e CLOUDSOURCED_TLS_SEED -e CLOUDSOURCED_SIGNER_PUB)"')"
+out="$(E2E_VISIBLE=yes HIDDEN_SECRET=no run sh -c 'echo "v=$E2E_VISIBLE s=$HIDDEN_SECRET t=$(env | grep -c -e OFFSHORE_TLS_SEED -e OFFSHORE_SIGNER_PUB)"')"
 check "environment allowlist" eq "$out" "v=yes s= t=0"
 (cd "$PROJ" && exec "$BIN" run sh -c 'trap "echo trapped; exit 42" INT; echo ready; sleep 60' > "$WORK/sig" 2>&1) & pid=$!
 poll 60 grep -q ready "$WORK/sig" >/dev/null
@@ -86,22 +86,22 @@ check "gitignore rules hide files" eq "$(run sh -c 'test -e ignored.log && echo 
 
 step "shims (transparent proxy through PATH)"
 cs shim install sh >/dev/null
-out="$(cd "$PROJ" && PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" sh -c 'echo ${CLOUDSOURCED_SESSION:+ran=remote}')"
+out="$(cd "$PROJ" && PATH="$OFFSHORE_SHIM_DIR:$PATH" sh -c 'echo ${OFFSHORE_SESSION:+ran=remote}')"
 check "sh via shim runs remotely" eq "$out" "ran=remote"
-out="$(cd "$PROJ" && PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" CLOUDSOURCED_DISABLE=1 sh -c 'echo ${CLOUDSOURCED_SESSION:-local}')"
-check "CLOUDSOURCED_DISABLE runs locally" eq "$out" "local"
-out="$(cd "$WORK" && PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" sh -c 'echo ${CLOUDSOURCED_SESSION:-local}')"
+out="$(cd "$PROJ" && PATH="$OFFSHORE_SHIM_DIR:$PATH" OFFSHORE_DISABLE=1 sh -c 'echo ${OFFSHORE_SESSION:-local}')"
+check "OFFSHORE_DISABLE runs locally" eq "$out" "local"
+out="$(cd "$WORK" && PATH="$OFFSHORE_SHIM_DIR:$PATH" sh -c 'echo ${OFFSHORE_SESSION:-local}')"
 check "outside a configured repo the real tool runs" eq "$out" "local"
 
-step "developer experience: port forwarding, cloudsourced why, cost in status"
+step "developer experience: port forwarding, offshore why, cost in status"
 FWD_ENV="$(freeport)"; FWD_BUSY="$(freeport)"
 # curl_local PORT PATH: poll a forwarded local port for up to 60s (session
 # start on a loaded host).
 curl_local() { for _ in $(seq 300); do curl -sf --max-time 2 "http://127.0.0.1:$1$2" && return 0; sleep 0.2; done; return 1; }
 # The sessions last until the test releases them (see wait_release).
-(cd "$PROJ" && CLOUDSOURCED_PORTS=$FWD_ENV:18081 exec "$BIN" run sh -c 'busybox httpd -f -p 18081 -h /etc & bash -c "$1"; echo dev-server-done' _ "$(wait_release fwd-done)" > "$WORK/fwd" 2>&1) & fpid=$!
+(cd "$PROJ" && OFFSHORE_PORTS=$FWD_ENV:18081 exec "$BIN" run sh -c 'busybox httpd -f -p 18081 -h /etc & bash -c "$1"; echo dev-server-done' _ "$(wait_release fwd-done)" > "$WORK/fwd" 2>&1) & fpid=$!
 got="$(curl_local $FWD_ENV /hostname)"
-check "dev server in the session reachable on the local port (CLOUDSOURCED_PORTS)" contains "$got" "cs-"
+check "dev server in the session reachable on the local port (OFFSHORE_PORTS)" contains "$got" "cs-"
 release fwd-done
 wait $fpid; code=$?
 check "forwarded session exits normally" eq "$code" 0
@@ -113,7 +113,7 @@ check "service reachable through [tool.bash] ports (local:remote)" contains "$go
 release svc-done; wait $fpid
 python3 -c 'import socket,sys,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1",int(sys.argv[1]))); s.listen(); time.sleep(300)' "$FWD_BUSY" & busypid=$!
 poll 10 sh -c "ss -ltn | grep -q '127.0.0.1:$FWD_BUSY '"
-out="$(cd "$PROJ" && CLOUDSOURCED_PORTS=$FWD_BUSY "$BIN" run sh -c 'echo still-runs' 2>&1)"; code=$?
+out="$(cd "$PROJ" && OFFSHORE_PORTS=$FWD_BUSY "$BIN" run sh -c 'echo still-runs' 2>&1)"; code=$?
 kill $busypid 2>/dev/null; wait $busypid 2>/dev/null
 check "busy local port: clear error" contains "$out" "local port $FWD_BUSY is already in use"
 check "busy local port: run continues" eq "$code" 0
@@ -128,8 +128,8 @@ check "why shows the placement reason" contains "$why_out" "placement"
 check "why shows timings" contains "$why_out" "queue / machine start"
 wj="$(cs why --json)"
 check "why --json has exit, timings and usage" eq "$(echo "$wj" | jq -r '[.mode, .exit, (.timings.total_ms > 0), (.usage != null), .provider, .size] | join(" ")')" "remote 3 true true local default"
-(cd "$PROJ" && CLOUDSOURCED_DISABLE=1 "$BIN" run sh -c true)
-check "why records local decisions" contains "$(cs why last)" "local: CLOUDSOURCED_DISABLE is set"
+(cd "$PROJ" && OFFSHORE_DISABLE=1 "$BIN" run sh -c true)
+check "why records local decisions" contains "$(cs why last)" "local: OFFSHORE_DISABLE is set"
 check "why N addresses older runs" contains "$(cs why 2)" "sh -c exit 3"
 check "why list shows recent runs" eq "$(cs why list | sed -n 2p | awk '{print $1, $5}')" "1 local"
 st="$(cs status)"
@@ -139,24 +139,24 @@ sj="$(cs status --json)"
 check "status --json reports cost from price_per_hour" eq "$(echo "$sj" | jq -r '[.cost.sizes[0].price_per_hour, (.cost.total > 0), (.cost.per_hour > 0), (.machines | length > 0)] | join(" ")')" "0.5 true true true"
 
 step "operations: metrics and structured logs"
-MLABEL="$(docker_ inspect -f '{{index .Config.Labels "cloudsourced.machine"}}' "$MACHINE")"
+MLABEL="$(docker_ inspect -f '{{index .Config.Labels "offshore.machine"}}' "$MACHINE")"
 m="$(cs metrics)"
-check "metrics: daemon counts prepares" test "$(metric "$m" cloudsourced_daemon_requests_total 'op="prepare",result="ok"')" -ge 1
-check "metrics: pool machines by provider, size and state" contains "$m" 'cloudsourced_machines{provider="local",size="default",state="running"} 1'
-check "metrics: machine session exits with machine label" poll 30 sh -c 'case "$("$1" metrics)" in *"$2"*) ;; *) exit 1;; esac' _ "$BIN" "cloudsourced_worker_session_exits_total{machine=\"$MLABEL\",provider=\"local\",size=\"default\",code=\"7\"}"
-check "metrics: acquire wait histogram" test "$(metric "$m" cloudsourced_acquire_wait_seconds_count 'result="assigned"')" -ge 1
-check "metrics: cost per hour of running machines" contains "$m" 'cloudsourced_cost_per_hour{provider="local"} 0.5'
+check "metrics: daemon counts prepares" test "$(metric "$m" offshore_daemon_requests_total 'op="prepare",result="ok"')" -ge 1
+check "metrics: pool machines by provider, size and state" contains "$m" 'offshore_machines{provider="local",size="default",state="running"} 1'
+check "metrics: machine session exits with machine label" poll 30 sh -c 'case "$("$1" metrics)" in *"$2"*) ;; *) exit 1;; esac' _ "$BIN" "offshore_worker_session_exits_total{machine=\"$MLABEL\",provider=\"local\",size=\"default\",code=\"7\"}"
+check "metrics: acquire wait histogram" test "$(metric "$m" offshore_acquire_wait_seconds_count 'result="assigned"')" -ge 1
+check "metrics: cost per hour of running machines" contains "$m" 'offshore_cost_per_hour{provider="local"} 0.5'
 check "worker logs JSON (format forwarded by the orchestrator)" contains "$(docker_ logs "$MACHINE" 2>&1 | grep '"msg":"session finished"' | tail -1)" '"level":"INFO"'
 if [ -n "$REMOTE" ]; then
   KEY="$(cat "$CPSTATE/api-key")"
   check "control plane /metrics needs the API key" eq "$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$CPPORT/metrics")" 401
   cm="$(curl -sk -H "Authorization: Bearer $KEY" "https://127.0.0.1:$CPPORT/metrics")"
-  check "control plane /metrics has machine and session metrics" contains "$cm" "cloudsourced_worker_session_duration_seconds_count{machine=\"$MLABEL\""
-  check "control plane /metrics counts API requests" test "$(metric "$cm" cloudsourced_http_requests_total 'path="/v1/acquire",result="200"')" -ge 1
-  check "--metrics-listen serves /metrics without authentication" contains "$(curl -s "http://127.0.0.1:$MPORT/metrics")" "cloudsourced_queue_length"
+  check "control plane /metrics has machine and session metrics" contains "$cm" "offshore_worker_session_duration_seconds_count{machine=\"$MLABEL\""
+  check "control plane /metrics counts API requests" test "$(metric "$cm" offshore_http_requests_total 'path="/v1/acquire",result="200"')" -ge 1
+  check "--metrics-listen serves /metrics without authentication" contains "$(curl -s "http://127.0.0.1:$MPORT/metrics")" "offshore_queue_length"
   check "control plane logs requests as JSON with request ids" contains "$(grep '"msg":"lease"' "$WORK/cp.log" | tail -1)" '"request_id":"'
 else
-  check "daemon logs JSON" contains "$(grep '"msg":"daemon started"' "$CLOUDSOURCED_STATE_DIR/daemon.log" | tail -1)" '"level":"INFO"'
+  check "daemon logs JSON" contains "$(grep '"msg":"daemon started"' "$OFFSHORE_STATE_DIR/daemon.log" | tail -1)" '"level":"INFO"'
 fi
 
 step "observability: one trace per run, event log, report, simulator export"
@@ -164,12 +164,12 @@ out="$(run sh -c 'echo traced' 2>&1)"
 check "traced run succeeds" contains "$out" "traced"
 trace=""
 for _ in $(seq 30); do # batch exporters flush within 5 s
-  trace="$(python3 "$HERE/otlp_sink.py" check "$OTLP_OUT" 2>/dev/null | grep cloudsourced-proxy | grep cloudsourced-daemon | grep cloudsourced-worker | head -1)"
+  trace="$(python3 "$HERE/otlp_sink.py" check "$OTLP_OUT" 2>/dev/null | grep offshore-proxy | grep offshore-daemon | grep offshore-worker | head -1)"
   [ -n "$trace" ] && break; sleep 1
 done
 check "one trace has proxy, daemon and worker spans" test -n "$trace"
-check "  ... with run, prepare, acquire and session spans" sh -c 'case "$1" in *cloudsourced.run*daemon.prepare*pool.acquire*worker.exec*) exit 0;; esac; echo "     $1"; exit 1' _ "$trace"
-[ -n "$REMOTE" ] && check "  ... and control plane spans" contains "$trace" "cloudsourced-controlplane"
+check "  ... with run, prepare, acquire and session spans" sh -c 'case "$1" in *offshore.run*daemon.prepare*pool.acquire*worker.exec*) exit 0;; esac; echo "     $1"; exit 1' _ "$trace"
+[ -n "$REMOTE" ] && check "  ... and control plane spans" contains "$trace" "offshore-controlplane"
 check "spans carry no secrets" sh -c '! grep -q -e from-cmd -e file-secret ${2:+-e "$2"} "$1"' _ "$OTLP_OUT" "$([ -n "$REMOTE" ] && cat "$CPSTATE/api-key")"
 rep="$(cs report --since 1d 2>&1)"
 check "report shows cost" contains "$rep" "cost: \$"
@@ -184,22 +184,22 @@ check "report has queue waits" test "$(echo "$repj" | json_get queue_wait.count)
 out="$(cs sim export --since 1d -o "$WORK/real.json" 2>&1)"
 check "sim export writes the real runs as a trace" contains "$out" "jobs to $WORK/real.json"
 out="$(cs sim -config "$POOLCFG" -json "$WORK/real.json" 2>&1)"; code=$?
-check "cloudsourced sim replays the exported trace" eq "$code" 0
+check "offshore sim replays the exported trace" eq "$code" 0
 check "  ... and completes its jobs" test "$(echo "$out" | python3 -c 'import json,sys; print(min(r["completed"] for r in json.load(sys.stdin)))' 2>/dev/null || echo 0)" -ge 5
 
 step "machine authentication (derived identity, signed scoped tokens)"
-MDIR="$CLOUDSOURCED_STATE_DIR"; [ -n "$REMOTE" ] && MDIR="$CPSTATE"
+MDIR="$OFFSHORE_STATE_DIR"; [ -n "$REMOTE" ] && MDIR="$CPSTATE"
 label() { docker_ inspect -f "{{index .Config.Labels \"$1\"}}" "$MACHINE"; }
-MID="$(label cloudsourced.machine)"; MFP="$(label cloudsourced.fingerprint)"
+MID="$(label offshore.machine)"; MFP="$(label offshore.fingerprint)"
 MADDR="$(docker_ port "$MACHINE" 7443/udp | head -1)"
-SEED="$(docker_ inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$MACHINE" | sed -n 's/^CLOUDSOURCED_TLS_SEED=//p')"
+SEED="$(docker_ inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$MACHINE" | sed -n 's/^OFFSHORE_TLS_SEED=//p')"
 probe() { cs debug probe "$MADDR" "$MFP" "$1" 2>&1; }
 token() { cs debug token --state-dir "$MDIR" --machine "$MID" "$@"; }
 check "pool master key stored with mode 600" eq "$(stat -c %a "$MDIR/master.key")" 600
 check "no per-machine secret files" test -z "$(ls "$MDIR/machines" 2>/dev/null)"
 check "machine got only a TLS seed as secret" test -n "$SEED"
 check "probe token reads machine status" contains "$(probe "$(token --scope probe)")" "\"machine\": \"$MID\""
-check "token signed by another key rejected" contains "$(probe "$(CLOUDSOURCED_MASTER_KEY="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" cs debug token --machine "$MID" --scope admin)")" "invalid token: bad signature"
+check "token signed by another key rejected" contains "$(probe "$(OFFSHORE_MASTER_KEY="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" cs debug token --machine "$MID" --scope admin)")" "invalid token: bad signature"
 check "token for another machine rejected" contains "$(probe "$(cs debug token --state-dir "$MDIR" --machine other --scope probe)")" "another machine"
 check "expired token rejected" contains "$(probe "$(token --scope probe --ttl -10m)")" "expired"
 check "session token cannot probe" contains "$(probe "$(token --scope session --lease l1)")" "does not allow status"

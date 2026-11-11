@@ -11,13 +11,13 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/traumventures/cloudsourced/internal/daemon"
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/orchestrator"
-	"github.com/traumventures/cloudsourced/internal/top"
+	"github.com/traumventures/offshore/internal/daemon"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/orchestrator"
+	"github.com/traumventures/offshore/internal/top"
 )
 
-// topCmd runs `cloudsourced top`.
+// topCmd runs `offshore top`.
 func topCmd(args []string) error {
 	fs := flag.NewFlagSet("top", flag.ContinueOnError)
 	once := fs.Bool("once", false, "print one plain text frame and exit (for agents and scripts)")

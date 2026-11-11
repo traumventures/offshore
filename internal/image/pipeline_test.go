@@ -71,10 +71,10 @@ func (r *fakeRegistry) Push(ctx context.Context, local string, p Platform, _ io.
 
 func source(t *testing.T, hash string) (Source, *atomic.Int32) {
 	n := &atomic.Int32{}
-	return Source{Hash: hash, Tag: "cloudsourced-env:" + hash, Context: func() (Spec, string, error) {
+	return Source{Hash: hash, Tag: "offshore-env:" + hash, Context: func() (Spec, string, error) {
 		n.Add(1)
 		dir, err := os.MkdirTemp(t.TempDir(), "ctx")
-		return Spec{Tag: "cloudsourced-env:" + hash, ContextDir: dir}, dir, err
+		return Spec{Tag: "offshore-env:" + hash, ContextDir: dir}, dir, err
 	}}, n
 }
 
@@ -141,7 +141,7 @@ func TestPipelineLocalRegistryNeedsNoPush(t *testing.T) {
 	local := &fakeRegistry{name: "local", local: true}
 	src, _ := source(t, "ccc")
 	ref, err := p.Ensure(context.Background(), src, Target{Name: "local", Platform: Native(), Registry: local, Builder: b}, io.Discard)
-	if err != nil || ref != "cloudsourced-env:ccc" {
+	if err != nil || ref != "offshore-env:ccc" {
 		t.Fatalf("%q %v", ref, err)
 	}
 	if len(b.builds) != 1 {
@@ -173,10 +173,10 @@ func TestPipelineFailureBackoff(t *testing.T) {
 }
 
 func TestRefs(t *testing.T) {
-	if got := RemoteTag("123.dkr.ecr.eu-central-1.amazonaws.com/cs-env", "cloudsourced-env:abc", LinuxAMD64); got != "123.dkr.ecr.eu-central-1.amazonaws.com/cs-env:abc-amd64" {
+	if got := RemoteTag("123.dkr.ecr.eu-central-1.amazonaws.com/cs-env", "offshore-env:abc", LinuxAMD64); got != "123.dkr.ecr.eu-central-1.amazonaws.com/cs-env:abc-amd64" {
 		t.Fatal(got)
 	}
-	if got := RemoteTag("r/x", "cloudsourced-env:abc-arm64", LinuxARM64); got != "r/x:abc-arm64" {
+	if got := RemoteTag("r/x", "offshore-env:abc-arm64", LinuxARM64); got != "r/x:abc-arm64" {
 		t.Fatal(got)
 	}
 	other := LinuxARM64

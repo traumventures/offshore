@@ -8,8 +8,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/tracing"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/tracing"
 )
 
 // pathEvents returns the analysis event log (POST, API key).

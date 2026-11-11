@@ -5,10 +5,10 @@ import (
 	"errors"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/store"
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/scheduler"
+	"github.com/traumventures/offshore/internal/store"
+	"github.com/traumventures/offshore/internal/transport"
 )
 
 // WorkerSlotOps implements SlotOps over the workers' slot streams

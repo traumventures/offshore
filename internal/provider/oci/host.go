@@ -15,7 +15,7 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/core"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 
-	"github.com/traumventures/cloudsourced/internal/supervisor"
+	"github.com/traumventures/offshore/internal/supervisor"
 )
 
 // Spec parameters of the supervisor on OCI.

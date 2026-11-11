@@ -9,7 +9,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/traumventures/cloudsourced/internal/manifest"
+	"github.com/traumventures/offshore/internal/manifest"
 )
 
 type node struct {

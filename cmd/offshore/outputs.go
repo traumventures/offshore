@@ -8,8 +8,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/daemon"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/daemon"
 )
 
 // outputsCmd manages the output overlay: the remote build directories of
@@ -69,7 +69,7 @@ func outputsCmd(args []string) error {
 		}
 		return nil
 	}
-	return errors.New("usage: cloudsourced outputs mount|unmount|status")
+	return errors.New("usage: offshore outputs mount|unmount|status")
 }
 
 // editorCmd prints rust-analyzer settings that run flycheck and build
@@ -92,7 +92,7 @@ func editorCmd(args []string) error {
 		case editor == "":
 			editor = a
 		default:
-			return errors.New("usage: cloudsourced editor [--mode local|lsp-remote] [vscode|zed|neovim]")
+			return errors.New("usage: offshore editor [--mode local|lsp-remote] [vscode|zed|neovim]")
 		}
 	}
 	if editor == "" {
@@ -150,22 +150,22 @@ settings = { ["rust-analyzer"] = {
 	if mode == config.RustAnalyzerLocal {
 		fmt.Print(`
 # Proc macros and build script outputs must exist locally for rust-analyzer.
-# Add them to the eager outputs in .cloudsourced.toml:
+# Add them to the eager outputs in .offshore.toml:
 #   [tool.cargo]
 #   eager = ["target/debug/deps/*.so", "target/debug/build/*/out/**"]
-# or use the output FUSE: cloudsourced editor --mode lsp-remote
+# or use the output FUSE: offshore editor --mode lsp-remote
 `)
 		return nil
 	}
 	fmt.Print(`
 # lsp-remote: proc macros and build script outputs are read from the
 # remote build directory, mounted at its local path (output overlay).
-# Keep it mounted with [outputs] mode = "fuse" in .cloudsourced.toml.
+# Keep it mounted with [outputs] mode = "fuse" in .offshore.toml.
 # The local toolchain must match the remote one (rust-toolchain.toml), or
 # rust-analyzer cannot load the proc-macro libraries.
 `)
 	if rootErr != nil {
-		fmt.Fprintln(os.Stderr, "cloudsourced: not in a repository, outputs not mounted")
+		fmt.Fprintln(os.Stderr, "offshore: not in a repository, outputs not mounted")
 		return nil
 	}
 	ctx := context.Background()
@@ -179,7 +179,7 @@ settings = { ["rust-analyzer"] = {
 	var mps []string
 	json.Unmarshal(raw, &mps)
 	for _, mp := range mps {
-		fmt.Fprintln(os.Stderr, "cloudsourced: outputs mounted at", mp)
+		fmt.Fprintln(os.Stderr, "offshore: outputs mounted at", mp)
 	}
 	return nil
 }

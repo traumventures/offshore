@@ -12,12 +12,12 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/daemon"
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/labels"
+	"github.com/traumventures/offshore/internal/daemon"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/labels"
 )
 
-const whyUsage = "usage: cloudsourced why [N|last|list] [--json]  (N=1 is the most recent run)"
+const whyUsage = "usage: offshore why [N|last|list] [--json]  (N=1 is the most recent run)"
 
 // why explains a recent proxied run from the daemon's run log.
 func why(args []string) error {

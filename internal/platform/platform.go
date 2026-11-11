@@ -22,7 +22,7 @@ const (
 )
 
 // EnvVar overrides the detected local platform ("linux/amd64/glibc-2.39").
-const EnvVar = "CLOUDSOURCED_PLATFORM"
+const EnvVar = "OFFSHORE_PLATFORM"
 
 // Platform is an execution platform. Libc and LibcVersion are empty when
 // unknown (e.g. an image that was not inspected) or not applicable.
@@ -134,7 +134,7 @@ var (
 )
 
 // Local is the platform of this process, detected once.
-// CLOUDSOURCED_PLATFORM overrides it.
+// OFFSHORE_PLATFORM overrides it.
 func Local() Platform {
 	localOnce.Do(func() { localVal = detect(os.Getenv, runCmd) })
 	return localVal

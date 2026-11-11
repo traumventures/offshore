@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/sandbox"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/sandbox"
 )
 
 // cacheBinds returns the bind mounts of the session's slot and machine

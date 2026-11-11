@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/adapter"
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/daemon"
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/adapter"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/daemon"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 // runtime executes the phases of an adapter plan for one proxied command.

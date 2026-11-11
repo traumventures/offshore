@@ -6,7 +6,7 @@
 # recompiles. Goal: 0 for unchanged sources.
 #
 # Not part of the e2e suite. Uses its setup (test/e2e/lib.sh): requires
-# docker, /dev/fuse, bin/cloudsourced, and a local rustup toolchain of the
+# docker, /dev/fuse, bin/offshore, and a local rustup toolchain of the
 # version pinned below (default: the local `rustc` version).
 #
 #   E2E_DOCKER="sudo -n docker" test/bench/overlay-fresh.sh
@@ -16,7 +16,7 @@ export E2E_RUSTV="${E2E_RUSTV:-$(rustc --version | awk '{print $2}')}"
 . "$(dirname "$0")/../e2e/lib.sh"
 [ -n "${BENCH_CARGO_HOME:-}" ] && export CARGO_HOME="$BENCH_CARGO_HOME"
 
-cat >> "$PROJ/.cloudsourced.toml" <<'TOML'
+cat >> "$PROJ/.offshore.toml" <<'TOML'
 
 [outputs]
 mode = "fuse"
@@ -37,7 +37,7 @@ mod tests {
 RS
 
 # local CMD...: cargo on this machine (not the proxy), in the project.
-lc() { (cd "$PROJ" && env -u CLOUDSOURCED_STATE_DIR -u CLOUDSOURCED_CONFIG cargo "$@"); }
+lc() { (cd "$PROJ" && env -u OFFSHORE_STATE_DIR -u OFFSHORE_CONFIG cargo "$@"); }
 # recompiled JSON: units cargo did not find fresh ("fresh":false artifacts
 # and executed build scripts), with their names on stderr.
 recompiled() {
@@ -63,7 +63,7 @@ check "remote cargo build exits 0" eq "$code" 0
 [ "$code" = 0 ] || echo "$out" | tail -20
 out="$(run cargo test --no-run 2>&1)"; code=$?
 check "remote cargo test --no-run exits 0" eq "$code" 0
-check "overlay mounted at target/" contains "$(grep " $PROJ/target " /proc/self/mountinfo)" "fuse.cloudsourced-outputs"
+check "overlay mounted at target/" contains "$(grep " $PROJ/target " /proc/self/mountinfo)" "fuse.offshore-outputs"
 check "remote session saw the client's CARGO_HOME" eq "$(run sh -c 'echo $CARGO_HOME')" "${CARGO_HOME:-$HOME/.cargo}"
 
 step "local cargo against the overlay"

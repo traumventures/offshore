@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 func TestReloaderAppliesOnlyChanges(t *testing.T) {

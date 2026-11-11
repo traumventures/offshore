@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 func TestControlPlaneMetricsAndRequestIDs(t *testing.T) {
@@ -73,13 +73,13 @@ func TestControlPlaneMetricsAndRequestIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`cloudsourced_image_builds_total{provider="img",result="ok"} 1`,
-		`cloudsourced_http_requests_total{path="/v1/env",result="200"}`,
-		`cloudsourced_http_requests_total{path="/metrics",result="401"} 1`,
-		`cloudsourced_http_requests_total{path="/v1/status",result="200"} 2`,
-		`cloudsourced_cost_per_hour{provider="img"} 0`,
-		"# TYPE cloudsourced_machines gauge",
-		"# TYPE cloudsourced_http_request_duration_seconds histogram",
+		`offshore_image_builds_total{provider="img",result="ok"} 1`,
+		`offshore_http_requests_total{path="/v1/env",result="200"}`,
+		`offshore_http_requests_total{path="/metrics",result="401"} 1`,
+		`offshore_http_requests_total{path="/v1/status",result="200"} 2`,
+		`offshore_cost_per_hour{provider="img"} 0`,
+		"# TYPE offshore_machines gauge",
+		"# TYPE offshore_http_request_duration_seconds histogram",
 	} {
 		if !strings.Contains(text.String(), want) {
 			t.Errorf("missing %q in\n%s", want, text.String())
@@ -95,7 +95,7 @@ func TestControlPlaneMetricsAndRequestIDs(t *testing.T) {
 	}
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/plain; version=0.0.4") || !strings.Contains(string(b), "cloudsourced_queue_length 0") {
+	if resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/plain; version=0.0.4") || !strings.Contains(string(b), "offshore_queue_length 0") {
 		t.Fatalf("plain metrics: %d %q\n%s", resp.StatusCode, resp.Header.Get("Content-Type"), b)
 	}
 	resp, _ = http.Post(plain.URL+pathStatus, "application/json", nil)

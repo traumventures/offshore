@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/metrics"
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/metrics"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // pathMetrics serves the Prometheus text format (GET, API key).
@@ -62,10 +62,10 @@ func (l *Local) imageBuilt(name string, start time.Time, err error) {
 	result := "ok"
 	if err != nil {
 		result = "error"
-		reg.Counter("cloudsourced_provider_errors_total", "", "provider", "op").Inc(name, "ensure_image")
+		reg.Counter("offshore_provider_errors_total", "", "provider", "op").Inc(name, "ensure_image")
 	}
-	reg.Counter("cloudsourced_image_builds_total", "Environment image preparations (build if missing, push) by provider and result.", "provider", "result").Inc(name, result)
-	reg.Histogram("cloudsourced_image_build_seconds", "Duration of environment image preparations.", metrics.DurationBuckets, "provider").Observe(time.Since(start).Seconds(), name)
+	reg.Counter("offshore_image_builds_total", "Environment image preparations (build if missing, push) by provider and result.", "provider", "result").Inc(name, result)
+	reg.Histogram("offshore_image_build_seconds", "Duration of environment image preparations.", metrics.DurationBuckets, "provider").Observe(time.Since(start).Seconds(), name)
 }
 
 // WriteMetrics fetches the control plane's metrics.

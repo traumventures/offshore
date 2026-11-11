@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/traumventures/cloudsourced/internal/daemon"
+	"github.com/traumventures/offshore/internal/daemon"
 )
 
 // metricsCmd prints the daemon's metrics (Prometheus text format) together
@@ -14,7 +14,7 @@ import (
 // the shared control plane in remote mode.
 func metricsCmd(args []string) error {
 	if len(args) > 0 {
-		return errors.New("usage: cloudsourced metrics")
+		return errors.New("usage: offshore metrics")
 	}
 	ctx := context.Background()
 	if err := daemon.EnsureDaemon(ctx); err != nil {

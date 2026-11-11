@@ -102,12 +102,12 @@ New keys: `policy = "default" | "binpack" | "classic"`, `consolidate_below`
 
 ## Simulator
 
-`cloudsourced sim` replays traces against the pool configuration:
+`offshore sim` replays traces against the pool configuration:
 
 ```sh
-cloudsourced sim -config internal/scheduler/sim/testdata/pool.toml \
+offshore sim -config internal/scheduler/sim/testdata/pool.toml \
   internal/scheduler/sim/testdata/team-week.json internal/scheduler/sim/testdata/small-week.json
-cloudsourced sim -generate trace.json -profile team -seed 1 -days 5 -tz Europe/Berlin
+offshore sim -generate trace.json -profile team -seed 1 -days 5 -tz Europe/Berlin
 ```
 
 The simulation (`internal/scheduler/sim`) is discrete-event and drives the
@@ -193,10 +193,10 @@ stopped itself when idle) with provider, size, price, capacity
 and provider latency. In remote mode the daemon already reports usage on
 release, so the control plane's log covers every client.
 
-`cloudsourced report` summarises a window from it:
+`offshore report` summarises a window from it:
 
 ```sh
-cloudsourced report --since 7d          # or --since 2026-11-01 --until 2026-11-08, --json
+offshore report --since 7d          # or --since 2026-11-01 --until 2026-11-08, --json
 ```
 
 - cost: machine-hours × price per UTC day and per provider/size; attributed
@@ -209,13 +209,13 @@ cloudsourced report --since 7d          # or --since 2026-11-01 --until 2026-11-
 - estimator accuracy: measured peak / memory estimate (p50, p95, mean,
   MAPE), sessions above their estimate, OOM kills, busy cores / CPU estimate.
 
-`cloudsourced sim export` turns the finished sessions into a trace the
+`offshore sim export` turns the finished sessions into a trace the
 simulator replays:
 
 ```sh
-cloudsourced sim export --since 7d -o real-week.json
-cloudsourced sim -config pool-candidate.toml -policy default,classic real-week.json
-cloudsourced sim -config pool-candidate.toml -estimator history real-week.json
+offshore sim export --since 7d -o real-week.json
+offshore sim -config pool-candidate.toml -policy default,classic real-week.json
+offshore sim -config pool-candidate.toml -estimator history real-week.json
 ```
 
 Each job keeps its repository id, environment hash, arrival time (relative
@@ -227,7 +227,7 @@ the measured number of busy cores (CPU seconds / wall time), so that
 by `1 + cold-penalty` (export flag `-cold-penalty`, default 0.5 like the
 simulator's, which adds the penalty back for cold machines). `-request-cpu`
 keeps the requested CPU instead. Workflow: export a representative week,
-check that `cloudsourced sim` with the current pool configuration
+check that `offshore sim` with the current pool configuration
 reproduces the report's cost and queue wait roughly (adjust `-boot`,
 `-start` and `-cold-penalty` until it does), then compare candidate sizes,
 overcommit factors and policies on the same trace.

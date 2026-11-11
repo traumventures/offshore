@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/traumventures/cloudsourced/internal/clock"
+	"github.com/traumventures/offshore/internal/clock"
 	"io"
 	"log/slog"
 	"os"
@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/machine"
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/machine"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 type fakePlatform struct {
@@ -86,12 +86,12 @@ func (d *fakeDocker) run(_ context.Context, env []string, _ []byte, args ...stri
 
 func testAgent(t *testing.T) (*Supervisor, *fakePlatform, *fakeDocker) {
 	dir := t.TempDir()
-	p := &fakePlatform{secrets: map[string]string{"CLOUDSOURCED_TOKEN": "tok"}, fails: 2}
+	p := &fakePlatform{secrets: map[string]string{"OFFSHORE_TOKEN": "tok"}, fails: 2}
 	d := &fakeDocker{containers: map[string]bool{}, images: map[string]bool{}}
 	a := &Supervisor{
 		Spec: Spec{Provider: "fake", ExpiresAt: time.Now().Add(time.Hour).Unix(), IdleStop: 120, Layout: machine.Layout{
 			ID: "m1", Image: "img", Binary: "/bin/cs", Publish: "7443:7443/udp", CacheVolume: "cs-cache", DepsVolume: "cs-deps",
-			StatusDir: filepath.Join(dir, "status"), SecretKeys: []string{"CLOUDSOURCED_TOKEN"},
+			StatusDir: filepath.Join(dir, "status"), SecretKeys: []string{"OFFSHORE_TOKEN"},
 			Services: []provider.Service{{Name: "db", Image: "pg"}},
 		}},
 		Platform: p, StateDir: filepath.Join(dir, "state"), Docker: d.run,
@@ -116,7 +116,7 @@ func TestFirstBootCreatesAndStartsInOrder(t *testing.T) {
 		switch f[0] {
 		case "create":
 			creates = append(creates, f[2])
-			if f[2] == "cs-m1" && !slices.Equal(d.envs[i], []string{"CLOUDSOURCED_TOKEN=tok"}) {
+			if f[2] == "cs-m1" && !slices.Equal(d.envs[i], []string{"OFFSHORE_TOKEN=tok"}) {
 				t.Fatalf("machine created without secret env: %v", d.envs[i])
 			}
 			if strings.Contains(c, "tok") {
@@ -137,7 +137,7 @@ func TestFirstBootCreatesAndStartsInOrder(t *testing.T) {
 		t.Fatalf("secret file mode %v", fi.Mode())
 	}
 	var m map[string]string
-	if json.Unmarshal(b, &m) != nil || m["CLOUDSOURCED_TOKEN"] != "tok" {
+	if json.Unmarshal(b, &m) != nil || m["OFFSHORE_TOKEN"] != "tok" {
 		t.Fatalf("persisted %s", b)
 	}
 }

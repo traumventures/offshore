@@ -4,4 +4,4 @@ bin/
 testdata/rapid/
 __pycache__/
 *.pyc
-/cloudsourced
+/offshore

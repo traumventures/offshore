@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 // generate detects a fixture, writes the rendered configuration into a copy
@@ -43,13 +43,13 @@ func sorted(s []string) []string {
 }
 
 // The fixture copies the relevant files of ~/app: the generated
-// configuration must match its hand-written .cloudsourced.toml in every
+// configuration must match its hand-written .offshore.toml in every
 // detectable item.
 func TestAppMatchesReference(t *testing.T) {
 	d, got, out := generate(t, "app")
 	ref := &config.Repo{}
 	refDir := t.TempDir()
-	data, _ := os.ReadFile("testdata/app/reference.cloudsourced.toml")
+	data, _ := os.ReadFile("testdata/app/reference.offshore.toml")
 	os.WriteFile(filepath.Join(refDir, config.RepoFileName), data, 0o644)
 	ref, err := config.LoadRepo(refDir)
 	if err != nil {

@@ -37,7 +37,7 @@ import (
 
 	"github.com/zeebo/blake3"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
+	"github.com/traumventures/offshore/internal/blobcache"
 )
 
 // Store is where snapshots live (a scope of the pool's store).

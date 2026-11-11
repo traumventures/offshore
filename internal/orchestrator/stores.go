@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/store"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/store"
 )
 
 // GrantTTL is the lifetime of worker store credentials.

@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/traumventures/cloudsourced/internal/adapter"
+	"github.com/traumventures/offshore/internal/adapter"
 	"io"
 	"os"
 	"os/signal"
@@ -19,13 +19,13 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/daemon"
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/labels"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/tracing"
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/daemon"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/labels"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/tracing"
+	"github.com/traumventures/offshore/internal/transport"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/term"
@@ -40,7 +40,7 @@ var defaultEnv = []string{"TERM", "COLORTERM", "NO_COLOR", "CLICOLOR", "CLICOLOR
 
 // Main runs tool with args and returns the exit code.
 func Main(tool string, args []string) int {
-	if os.Getenv("CLOUDSOURCED_ACTIVE") != "" {
+	if os.Getenv("OFFSHORE_ACTIVE") != "" {
 		return execLocal(tool, args) // nested inside a remote session
 	}
 	tr := startTrace(tool, args)
@@ -66,8 +66,8 @@ func mainRun(tr *runTrace, tool string, args []string) int {
 		recordLocal(rec)
 		return execLocal(tool, args)
 	}
-	if os.Getenv("CLOUDSOURCED_DISABLE") != "" {
-		return local("CLOUDSOURCED_DISABLE is set")
+	if os.Getenv("OFFSHORE_DISABLE") != "" {
+		return local("OFFSHORE_DISABLE is set")
 	}
 	repo, err := config.LoadRepo(rootDir)
 	if err != nil {
@@ -90,7 +90,7 @@ func mainRun(tr *runTrace, tool string, args []string) int {
 	if err != nil {
 		var fb *fallback
 		if errors.As(err, &fb) {
-			if os.Getenv("CLOUDSOURCED_REQUIRE_REMOTE") != "" {
+			if os.Getenv("OFFSHORE_REQUIRE_REMOTE") != "" {
 				warn("remote execution failed: %v", fb.err)
 				rec.Mode, rec.Why = events.Failed, "remote required but failed: "+fb.err.Error()
 				recordLocal(rec)
@@ -116,7 +116,7 @@ func recordLocal(rec *events.Run) {
 }
 
 func warn(format string, a ...any) {
-	fmt.Fprintf(os.Stderr, "cloudsourced: "+format+"\n", a...)
+	fmt.Fprintf(os.Stderr, "offshore: "+format+"\n", a...)
 }
 
 // fallback marks errors that happened before anything ran remotely.
@@ -132,7 +132,7 @@ func execLocal(tool string, args []string) int {
 	}
 	active.finish(-1) // the process is replaced: export spans now
 	err = syscall.Exec(bin, append([]string{tool}, args...), os.Environ())
-	fmt.Fprintf(os.Stderr, "cloudsourced: exec %s: %v\n", bin, err)
+	fmt.Fprintf(os.Stderr, "offshore: exec %s: %v\n", bin, err)
 	return 126
 }
 
@@ -188,7 +188,7 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 		if !errors.As(err, &lost) {
 			return code, err
 		}
-		ok, why := retryable(st, attempt, os.Getenv("CLOUDSOURCED_NO_RETRY") != "", lost.probe)
+		ok, why := retryable(st, attempt, os.Getenv("OFFSHORE_NO_RETRY") != "", lost.probe)
 		if !ok {
 			rec.Error = lost.Error() + " (not retried: " + why + ")"
 			daemon.Call(context.Background(), daemon.Request{Op: "record", Run: rec}, nil)
@@ -231,7 +231,7 @@ func (m *machineLost) Unwrap() error { return m.err }
 func retryable(st *attemptState, attempt int, disabled bool, probe func() bool) (bool, string) {
 	switch {
 	case disabled:
-		return false, "CLOUDSOURCED_NO_RETRY is set"
+		return false, "OFFSHORE_NO_RETRY is set"
 	case attempt > 1:
 		return false, "already retried once"
 	case !st.started.Load():
@@ -369,7 +369,7 @@ func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, 
 		req.TTY = &proto.TTY{Rows: uint16(rows), Cols: uint16(cols), Term: os.Getenv("TERM")}
 	}
 	tc := time.Now()
-	cctx, cspan := tracing.Start(ctx, "proxy.connect", trace.WithAttributes(attribute.String("cloudsourced.machine", prep.Machine)))
+	cctx, cspan := tracing.Start(ctx, "proxy.connect", trace.WithAttributes(attribute.String("offshore.machine", prep.Machine)))
 	dctx, dcancel := context.WithTimeout(cctx, 15*time.Second)
 	conn, err := transport.Dial(dctx, prep.Addr, prep.Fingerprint)
 	dcancel()
@@ -393,11 +393,11 @@ func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, 
 		tracing.End(cspan, err)
 		return 0, &fallback{err}
 	}
-	cspan.SetAttributes(attribute.String("cloudsourced.session", sstarted.Session), attribute.Int64("cloudsourced.server_wait_ms", sstarted.WaitMs))
+	cspan.SetAttributes(attribute.String("offshore.session", sstarted.Session), attribute.Int64("offshore.server_wait_ms", sstarted.WaitMs))
 	cspan.End()
 	started = true
 	st.started.Store(true)
-	verbose := os.Getenv("CLOUDSOURCED_VERBOSE") != ""
+	verbose := os.Getenv("OFFSHORE_VERBOSE") != ""
 	t1 := time.Now()
 	rec.Slot = sstarted.Slot
 	rec.Timings.Barrier = sstarted.WaitMs
@@ -442,7 +442,7 @@ func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, 
 	st.writeback.Store(true)
 	_, wspan := tracing.Start(ctx, "proxy.writeback")
 	touched, err := receiveWriteback(pc, repo)
-	wspan.SetAttributes(attribute.Int("cloudsourced.roots_touched", len(touched)))
+	wspan.SetAttributes(attribute.Int("offshore.roots_touched", len(touched)))
 	tracing.End(wspan, err)
 	if err != nil {
 		return code, fmt.Errorf("write back: %w", err)
@@ -550,9 +550,9 @@ func stream(pc *proto.Conn, useTTY, noStdin bool, stdout, stderr io.Writer, st *
 // forwardStdin decides whether local stdin is streamed to the remote
 // process. Terminals and pipes are forwarded; regular files and /dev/null
 // are not, so loops like `while read x; do cargo build; done < list` keep
-// their input. CLOUDSOURCED_STDIN=always|never overrides.
+// their input. OFFSHORE_STDIN=always|never overrides.
 func forwardStdin(useTTY bool) bool {
-	switch os.Getenv("CLOUDSOURCED_STDIN") {
+	switch os.Getenv("OFFSHORE_STDIN") {
 	case "always":
 		return true
 	case "never":
@@ -604,7 +604,7 @@ func Prewarm(ctx context.Context, repo *config.Repo, argv []string, progress io.
 	progressOut = progress
 	l := labels.Merge(labels.Detect(repo.Root, "", os.Getenv), map[string]string{labels.Purpose: labels.PurposePrewarm})
 	rec := &events.Run{Time: time.Now(), Repo: repo.Root, Cwd: repo.Root, Tool: argv[0], Args: argv[1:],
-		Mode: events.Remote, Why: "cloudsourced prewarm", Labels: labels.Clean(l)}
+		Mode: events.Remote, Why: "offshore prewarm", Labels: labels.Clean(l)}
 	code, err := runRemote(ctx, repo, config.Tool{}, argv[0], argv[1:], repo.Root, rec, remoteRun{})
 	var fb *fallback
 	if errors.As(err, &fb) {

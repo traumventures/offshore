@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/tracing"
-	"github.com/traumventures/cloudsourced/internal/tracing/tracingtest"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/scheduler"
+	"github.com/traumventures/offshore/internal/tracing"
+	"github.com/traumventures/offshore/internal/tracing/tracingtest"
 )
 
 func readEvents(t *testing.T, o *Orchestrator) []events.Event {
@@ -57,7 +57,7 @@ func TestAcquireSpansAndEvents(t *testing.T) {
 	for _, kv := range acq.Attributes() {
 		attrs[string(kv.Key)] = kv.Value.Emit()
 	}
-	if attrs["cloudsourced.placement"] != "assign" || attrs["cloudsourced.machine"] != l.MachineID || attrs["cloudsourced.size"] != "m4" || attrs["cloudsourced.price_per_hour"] != "0.5" {
+	if attrs["offshore.placement"] != "assign" || attrs["offshore.machine"] != l.MachineID || attrs["offshore.size"] != "m4" || attrs["offshore.price_per_hour"] != "0.5" {
 		t.Fatalf("acquire attributes %v", attrs)
 	}
 	var create = tracingtest.Find(rec, "pool.create")

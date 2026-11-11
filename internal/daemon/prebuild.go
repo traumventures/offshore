@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/envbuild"
-	"github.com/traumventures/cloudsourced/internal/pool"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/envbuild"
+	"github.com/traumventures/offshore/internal/pool"
 )
 
 // prebuildDebounce delays the environment check after a change of an
@@ -19,7 +19,7 @@ import (
 var prebuildDebounce = 2 * time.Second
 
 // envWatch starts environment image builds as soon as the environment of a
-// repository changes (.cloudsourced.toml, the toolchain file, setup inputs,
+// repository changes (.offshore.toml, the toolchain file, setup inputs,
 // the Dockerfile directory), instead of the first run after the change
 // waiting minutes for the image.
 type envWatch struct {
@@ -193,7 +193,7 @@ func (w *envWatch) finish(b *Prebuild, err error) {
 	}
 }
 
-// buildNow serves `cloudsourced env build`: start (or with wait, run and
+// buildNow serves `offshore env build`: start (or with wait, run and
 // stream) the build of root's environment.
 func (w *envWatch) buildNow(ctx context.Context, root string, wait bool, progress io.Writer) (*Prebuild, error) {
 	repo, err := config.LoadRepo(root)
@@ -209,13 +209,13 @@ func (w *envWatch) buildNow(ctx context.Context, root string, wait bool, progres
 	w.last[repo.Root] = plan.Hash
 	w.mu.Unlock()
 	if !wait {
-		return w.start(repo.Root, plan, "cloudsourced env build"), nil
+		return w.start(repo.Root, plan, "offshore env build"), nil
 	}
-	b := &Prebuild{Hash: plan.Hash, Tag: plan.Tag, Root: repo.Root, Trigger: "cloudsourced env build --wait", Started: time.Now(), Running: true}
+	b := &Prebuild{Hash: plan.Hash, Tag: plan.Tag, Root: repo.Root, Trigger: "offshore env build --wait", Started: time.Now(), Running: true}
 	w.mu.Lock()
 	w.builds[plan.Hash] = b
 	w.mu.Unlock()
-	fmt.Fprintf(progress, "cloudsourced: building environment image %s\n", plan.Tag)
+	fmt.Fprintf(progress, "offshore: building environment image %s\n", plan.Tag)
 	err = w.build(ctx, plan, progress)
 	w.finish(b, err)
 	return b, err

@@ -11,7 +11,7 @@ import (
 func TestInstallChainUninstall(t *testing.T) {
 	d := t.TempDir()
 	log := filepath.Join(d, "calls")
-	// A fake cloudsourced binary records its arguments.
+	// A fake offshore binary records its arguments.
 	bin := filepath.Join(d, "cs")
 	os.WriteFile(bin, []byte("#!/bin/sh\necho \"cs $*\" >> "+log+"\n"), 0o755)
 	hooksDir := filepath.Join(d, "hooks")
@@ -32,7 +32,7 @@ func TestInstallChainUninstall(t *testing.T) {
 	}
 	run := func(args ...string) int {
 		cmd := exec.Command(filepath.Join(hooksDir, Name), args...)
-		cmd.Env = append(os.Environ(), "CLOUDSOURCED_DISABLE=")
+		cmd.Env = append(os.Environ(), "OFFSHORE_DISABLE=")
 		err := cmd.Run()
 		if ee, ok := err.(*exec.ExitError); ok {
 			return ee.ExitCode()
@@ -88,7 +88,7 @@ func TestInstallFreshAndDir(t *testing.T) {
 	// git worktree add runs post-checkout in the new worktree.
 	git := func(args ...string) {
 		cmd := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
-		cmd.Env = append(os.Environ(), "CLOUDSOURCED_DISABLE=")
+		cmd.Env = append(os.Environ(), "OFFSHORE_DISABLE=")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v %s", args, err, out)
 		}
