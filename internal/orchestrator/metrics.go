@@ -101,7 +101,7 @@ func (o *Orchestrator) collect() []metrics.Family {
 		}
 		counts[key{m.Provider, size, state}]++
 		if m.State == provider.Running || m.State == provider.Starting {
-			cost[m.Provider] += o.priceLocked(m.Provider, size)
+			cost[m.Provider] += o.machinePriceLocked(m)
 		}
 		if m.Status != nil && len(m.Status.Metrics) > 0 {
 			machineFams = append(machineFams, metrics.WithLabels(m.Status.Metrics,

@@ -200,6 +200,7 @@ type Machine struct {
 	// listed for cost accounting only.
 	Removed  time.Time
 	observed bool
+	price    float64 // hourly price recorded at creation or in its events (0: unknown)
 	pending  map[string]pendingLease
 	// listed is when the provider view in Machine was taken (the start of
 	// the listing) or last changed locally. Older listings are stale: a
@@ -1037,7 +1038,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			lease := Lease{
 				ID: task.ID, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: o.sessionToken(m.Machine, task.ID),
 				Grant: pl.Grant, MemoryOvercommit: o.cfg.Policy.MemoryOvercommit,
-				Provider: m.Provider, Size: size, PricePerHour: o.priceLocked(m.Provider, size), Reason: pl.Reason,
+				Provider: m.Provider, Size: size, PricePerHour: o.machinePriceLocked(m), Reason: pl.Reason,
 				BuildTTL: req.buildTTL(o.cfg.MaxLifetime),
 			}
 			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: o.now().Add(2*time.Minute + slotTimeout)}
@@ -1358,7 +1359,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	}
 	provision, _ := json.Marshal(cfg.Provision)
 	spec := provider.MachineSpec{
-		ID: id, Owner: cfg.Owner, Image: image, EnvHash: envHash, Size: size.Name,
+		ID: id, Owner: cfg.Owner, Image: image, EnvHash: envHash, Size: size.Name, PricePerHour: size.PricePerHour,
 		Arch: size.ArchOf(), InstanceTypes: size.InstanceTypes,
 		CPU: size.Capacity.CPU, Memory: size.Capacity.Memory, Swap: cfg.Swap,
 		ExpiresAt: expires, Finger: ident.Fingerprint, DepsTTL: params.DepsTTL,
@@ -1439,7 +1440,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	}
 	m.Fingerprint = ident.Fingerprint
 	o.mu.Lock()
-	nm := &Machine{Machine: m, Provider: size.Provider, pending: map[string]pendingLease{}, listed: time.Now()}
+	nm := &Machine{Machine: m, Provider: size.Provider, pending: map[string]pendingLease{}, listed: time.Now(), price: size.PricePerHour}
 	nm.observe(o.now())
 	o.machines[id] = nm
 	o.mu.Unlock()
@@ -1580,7 +1581,7 @@ func (o *Orchestrator) Snapshot() []Machine {
 		c := *m
 		c.pending = nil
 		c.Uptime = append([]Span(nil), m.Uptime...)
-		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize])
+		c.PricePerHour = o.machinePriceLocked(m)
 		out = append(out, c)
 	}
 	kept := o.removed[:0]
@@ -1591,12 +1592,26 @@ func (o *Orchestrator) Snapshot() []Machine {
 		kept = append(kept, m)
 		c := *m
 		c.Uptime = append([]Span(nil), m.Uptime...)
-		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize])
+		c.PricePerHour = o.machinePriceLocked(m)
 		out = append(out, c)
 	}
 	o.removed = kept
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out
+}
+
+// machinePriceLocked returns a machine's hourly price: recorded on the
+// machine (LabelPrice, set at creation), else seen in its events, else
+// the configured price of its size (0: unknown). A size removed from the
+// configuration keeps the price its machines were created with.
+func (o *Orchestrator) machinePriceLocked(m *Machine) float64 {
+	if v, err := strconv.ParseFloat(m.Labels[provider.LabelPrice], 64); err == nil && v > 0 {
+		return v
+	}
+	if m.price > 0 {
+		return m.price
+	}
+	return o.priceLocked(m.Provider, m.Labels[provider.LabelSize])
 }
 
 // priceLocked returns the hourly price of a pool size (0: unknown).

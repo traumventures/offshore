@@ -23,6 +23,13 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 		opts, pls = append(opts, o), append(pls, cand)
 	}
 	assignable := false
+	raw := p.rawFits(f, t)
+	// Never wait for a machine physically smaller than the task when a
+	// size or machine fits it (overcommit packs sessions; it is no reason
+	// to queue a session behind a busy small machine).
+	big := func(m Machine) bool {
+		return raw && !m.Capacity.Fits(Resources{CPU: t.Request.CPU, Memory: t.Request.Memory})
+	}
 	for _, m := range f.Machines {
 		if !p.accepting(m, t.EnvHash, f.Now) || !p.Free(m).Fits(t.Request) || !p.physical(f, m.Capacity, t) {
 			continue
@@ -42,7 +49,7 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 	active, per := poolCounts(f)
 	bound, bounded := p.hedgeBound(f, t, active, per, idleMachine(f))
 	for _, m := range f.Machines {
-		if m.EnvHash != t.EnvHash || m.Draining || !p.usable(m, f.Now) || !p.physical(f, m.Capacity, t) {
+		if m.EnvHash != t.EnvHash || m.Draining || !p.usable(m, f.Now) || !p.physical(f, m.Capacity, t) || !p.next() && big(m) {
 			continue
 		}
 		if !(m.State == Starting || m.State == Running && !p.Free(m).Fits(t.Request)) {
@@ -71,6 +78,28 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 		pl.Machine = ""
 	}
 	return pl
+}
+
+// rawFits reports whether t fits the physical capacity of some size or
+// machine of its environment: then it never runs on a machine smaller
+// than itself (overcommit is for packing sessions, not for one session
+// larger than the machine). Not at cost_optimization 1.
+func (p Default) rawFits(f Pool, t Task) bool {
+	need := Resources{CPU: t.Request.CPU, Memory: t.Request.Memory}
+	if p.costOptimization() >= 1 { // only money: overcommit as configured
+		return false
+	}
+	for _, s := range f.ArchSizes(t.EnvHash) {
+		if s.Capacity.Fits(need) {
+			return true
+		}
+	}
+	for _, m := range f.Machines {
+		if m.EnvHash == t.EnvHash && m.Capacity.Fits(need) {
+			return true
+		}
+	}
+	return false
 }
 
 // tlMachine is a machine in the scale-out timeline.
@@ -193,6 +222,9 @@ func (p Default) timeline(f Pool, ms []*tlMachine, tasks []Task, tail time.Durat
 		var bestRun time.Duration
 		for _, tm := range ms {
 			if !tm.m.Capacity.Scale(p.cfg().CPUOvercommit, p.cfg().MemoryOvercommit).Fits(t.Request) || !p.physical(f, tm.m.Capacity, t) {
+				continue
+			}
+			if !p.next() && p.rawFits(f, t) && !tm.m.Capacity.Fits(Resources{CPU: t.Request.CPU, Memory: t.Request.Memory}) {
 				continue
 			}
 			run := p.quickRun(f, tm, t)
@@ -360,9 +392,40 @@ func (p Default) scaleOutModel(st *planState, env string) {
 				}
 			}
 		}
+		// Never queue longer than a start or create takes: once the oldest
+		// task has waited that long (scaled up a little towards cheapest),
+		// the capacity already there is not an option any more. Expected
+		// releases of busy machines slip while their sessions overrun.
+		waited := f.Now.Sub(tasks[0].Since)
+		base := ms
+		for _, cd := range cands {
+			// Starting a stopped machine of the environment counts unless
+			// only money matters (cost_optimization 1); a create only when
+			// time matters more than money.
+			if r := p.costOptimization(); p.next() || r >= 1 || cd.act.Kind == Create && r >= 0.5 {
+				continue
+			}
+			if cd.tm.latency > 0 && waited >= time.Duration(float64(cd.tm.latency)*(1+p.costOptimization())) {
+				// Compare new capacity only (incl. machines this plan
+				// already starts): the slipping estimates of the busy
+				// machines must not win the timeline again.
+				opts, optC, base = nil, nil, nil
+				for _, tm := range ms {
+					if tm.created || tm.m.State == Starting { // capacity on its way
+						base = append(base, tm)
+					}
+				}
+				if len(base) > 0 { // capacity of this plan may already serve them
+					if _, _, ok := p.timeline(f, base, tasks, tail, bounds); ok {
+						opts, optC = []option{{tie: "~"}}, []*cand{nil}
+					}
+				}
+				break
+			}
+		}
 		for i := range cands {
 			cd := &cands[i]
-			cost, total, _ := p.timeline(f, append(ms, cd.tm), tasks, tail, bounds)
+			cost, total, _ := p.timeline(f, append(append([]*tlMachine(nil), base...), cd.tm), tasks, tail, bounds)
 			if cd.tm.planned == 0 {
 				continue // takes none of the tasks
 			}

@@ -43,6 +43,9 @@ func replayUptime(evs []events.Event) (gone []*Machine, seen map[string]*Machine
 		if ev.Env != "" {
 			m.EnvHash = ev.Env
 		}
+		if ev.Price > 0 {
+			m.price = ev.Price
+		}
 		open := len(m.Uptime) > 0 && m.Uptime[len(m.Uptime)-1].End.IsZero()
 		switch {
 		case up && !open:
@@ -134,6 +137,9 @@ func (o *Orchestrator) mergeUptimeLocked(m *Machine, id string, st provider.Stat
 	}
 	delete(o.seedUptime, id)
 	m.Uptime, m.observed = s.Uptime, true
+	if m.price <= 0 {
+		m.price = s.price
+	}
 	// Up before the restart but not up now: it went down after its last
 	// recorded event, not now (the caller observes the current state).
 	if sp := &m.Uptime[len(m.Uptime)-1]; sp.End.IsZero() && st != provider.Running && st != provider.Starting {
