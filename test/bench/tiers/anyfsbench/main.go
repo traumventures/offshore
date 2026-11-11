@@ -50,6 +50,9 @@ func main() {
 	stats := fl.String("stats", "", "stats file")
 	to := fl.String("to", head, "commit: head to point at the new layer")
 	passthrough := fl.Bool("passthrough", true, "FUSE passthrough")
+	localCap := fl.Int64("local-cap", 0, "local page tier capacity in bytes (0: unbounded; clean pages beyond it are reclaimed)")
+	seed := fl.String("seed", "", "mount: adopt files of DIR (same tree) before warming (reflinks on xfs, like a commit)")
+	meta := fl.String("meta", "", "mount: also write the metadata layer to DIR and serve the digest view at MNT-digest (DIR.lowerdir: overlay lowerdir)")
 	fl.Parse(args)
 	ds, err := blobcache.NewDirStore(*storeDir, 24*time.Hour)
 	if err != nil {
@@ -74,7 +77,7 @@ func main() {
 		out(map[string]any{"op": "pack", "seconds": time.Since(begin).Seconds(), "files": ss.Files, "bytes": ss.Bytes, "pages": ss.Pages, "page_bytes": ss.PageBytes})
 	case "commit":
 		chain := loadChain(ctx, ds)
-		stack, files := openStack(*cache, st)
+		stack, files := openStack(*cache, st, *localCap)
 		begin := time.Now()
 		base := chain.Tree()
 		var keys []anyfs.Key
@@ -96,8 +99,18 @@ func main() {
 			"read_bytes": ss.Read, "reused": ss.Reused, "pages": ss.Pages, "page_bytes": ss.PageBytes, "nodes": len(l.Nodes), "delta": l.Delta})
 	case "mount":
 		chain := loadChain(ctx, ds)
-		stack, files := openStack(*cache, st)
+		stack, files := openStack(*cache, st, *localCap)
 		ts := anyfs.NewTreeSource(chain.Tree(), files, stack)
+		if *seed != "" {
+			begin := time.Now()
+			n := 0
+			for i, nodes := 0, ts.Tree().Nodes(); i < len(nodes); i++ {
+				if nd := &nodes[i]; nd.Kind == anyfs.File && files.Adopt(nd, filepath.Join(*seed, nd.Path), true, false) == nil {
+					n++
+				}
+			}
+			log.Printf("seed: adopted %d files from %s in %s", n, *seed, time.Since(begin))
+		}
 		if *warm {
 			begin := time.Now()
 			n := ts.PrefetchSmall(ctx, 1<<62, 16)
@@ -106,15 +119,30 @@ func main() {
 		fs, err := anyfs.MountLower(*mnt, ts, anyfs.LowerOptions{AllowOther: true, PrefetchMax: *prefetch, NoPassthrough: !*passthrough})
 		must(err)
 		log.Printf("mounted %d nodes (%d bytes) at %s, passthrough=%v", ts.Tree().Len(), ts.Tree().Bytes(), *mnt, fs.Passthrough())
+		var dfs *anyfs.LowerFS
+		if *meta != "" {
+			begin := time.Now()
+			os.RemoveAll(*meta)
+			must(anyfs.WriteMetaLayer(*meta, ts.Tree()))
+			wrote := time.Since(begin)
+			dfs, err = anyfs.MountLower(*mnt+"-digest", anyfs.NewDigestSource(ts), anyfs.LowerOptions{AllowOther: true, NoPassthrough: !*passthrough})
+			must(err)
+			must(os.WriteFile(*meta+".lowerdir", []byte(*meta+"::"+files.Dir()+"::"+*mnt+"-digest"), 0o644))
+			log.Printf("meta layer %s written in %s, digest view at %s-digest", *meta, wrote, *mnt)
+		}
 		dump := func() {
 			if *stats == "" {
 				return
 			}
 			s := anyfs.StatsOf(stack)
 			f := files.Stats()
-			b, _ := json.Marshal(map[string]any{"faults": s.Faults, "page_ins": s.PageIns, "page_in_bytes": s.PageInBytes,
+			m := map[string]any{"faults": s.Faults, "page_ins": s.PageIns, "page_in_bytes": s.PageInBytes,
 				"resident_bytes": s.ResidentBytes + f.ResidentBytes, "file_faults": f.Faults, "file_fault_bytes": f.PageInBytes,
-				"wait_seconds": waited.Seconds(), "ops": opCounts(fs.Ops()), "op_seconds": opSeconds(fs.Ops())})
+				"wait_seconds": waited.Seconds(), "ops": opCounts(fs.Ops()), "op_seconds": opSeconds(fs.Ops())}
+			if dfs != nil {
+				m["digest_ops"], m["digest_op_seconds"] = opCounts(dfs.Ops()), opSeconds(dfs.Ops())
+			}
+			b, _ := json.Marshal(m)
 			os.WriteFile(*stats, b, 0o644)
 		}
 		sig := make(chan os.Signal, 4)
@@ -122,6 +150,9 @@ func main() {
 		for s := range sig {
 			dump()
 			if s != syscall.SIGUSR1 {
+				if dfs != nil {
+					dfs.Unmount()
+				}
 				fs.Unmount()
 				return
 			}
@@ -155,8 +186,8 @@ func loadChain(ctx context.Context, ds blobcache.Store) anyfs.Chain {
 	return c
 }
 
-func openStack(cache string, st *anyfs.Store) (anyfs.Tier, *anyfs.Files) {
-	local, err := anyfs.OpenLocal(anyfs.LocalOptions{Dir: filepath.Join(cache, "local")})
+func openStack(cache string, st *anyfs.Store, capacity int64) (anyfs.Tier, *anyfs.Files) {
+	local, err := anyfs.OpenLocal(anyfs.LocalOptions{Dir: filepath.Join(cache, "local"), Capacity: capacity})
 	must(err)
 	stack, err := anyfs.Fold(nil, nil, local, st)
 	must(err)

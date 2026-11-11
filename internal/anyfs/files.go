@@ -99,6 +99,10 @@ func (f *Files) SetBacked(digest string) {
 	f.mu.Unlock()
 }
 
+// Dir returns the directory of the materialized files (by digest,
+// "ab/abcd...": the files data-only layer of a slot overlay).
+func (f *Files) Dir() string { return f.dir }
+
 // MarkAllBacked marks every resident file as backed: a cache whose
 // contents can always be faulted in again (the source projection, where
 // the laptop holds every file of the tree).

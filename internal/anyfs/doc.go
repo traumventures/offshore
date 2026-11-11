@@ -43,7 +43,10 @@
 // read-only FUSE file system with kernel passthrough, fetch on first
 // read (never on open) and prefetch of small files. On privileged hosts
 // (workers) a kernel overlayfs (redirect_dir, metacopy) stacks a local
-// upper directory over it; unprivileged hosts (laptops) use the
+// upper directory over a local metadata layer whose metacopy files
+// redirect to content digests, found in the data-only layers Files and
+// LowerFS over a DigestSource (MountSlot): resident content never goes
+// through FUSE; unprivileged hosts (laptops) use the
 // userspace overlay (UserOverlay) with whiteouts and a merge policy
 // (top-wins or newest-mtime).
 //
