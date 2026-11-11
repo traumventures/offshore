@@ -244,6 +244,11 @@ Global caches use a tiered store in the worker: a directory on the machine
 disk, backed by the grant's environment prefix, so a fresh machine reuses
 what earlier machines compiled. Keys are prefixed with the environment hash,
 so toolchains never mix. A `ttl` below 24h lowers the age of reused entries.
+A failing store (network, DNS, expired grant) never fails a build: its
+errors count as misses, writes stay on the machine, and the store is skipped
+for a minute after each failure; sccache additionally runs with
+`SCCACHE_IGNORE_SERVER_IO_ERROR=1` and compiles locally when its server
+fails.
 
 * `sccache`: the pinned static sccache release (checksum verified,
   downloaded once on the client into the user cache directory,
