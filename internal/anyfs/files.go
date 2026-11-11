@@ -3,6 +3,7 @@ package anyfs
 import (
 	"container/list"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zeebo/blake3"
 	"golang.org/x/sys/unix"
 )
 
@@ -148,6 +150,55 @@ func (f *Files) Release(n *Node) {
 // fault if it is not resident) and returns its path. Concurrent calls
 // share one fetch.
 func (f *Files) Ensure(ctx context.Context, tier Tier, n *Node) (string, error) {
+	return f.fault(ctx, n, func(d string) error {
+		if tier == nil {
+			return fmt.Errorf("fault %s: %w", n.Path, ErrNotFound)
+		}
+		return f.assemble(ctx, tier, n, d)
+	})
+}
+
+// FileFetcher writes the whole content of a node to w: a source that
+// serves files by content digest rather than pages (the laptop over
+// QUIC for the source projection).
+type FileFetcher func(ctx context.Context, n *Node, w io.Writer) error
+
+// EnsureWith materializes a node's content with fetch (a page fault of
+// the whole file) and returns its path. The content is verified against
+// the node's digest; concurrent calls share one fetch.
+func (f *Files) EnsureWith(ctx context.Context, n *Node, fetch FileFetcher) (string, error) {
+	return f.fault(ctx, n, func(d string) error {
+		p := f.path(d)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return err
+		}
+		tmp := fmt.Sprintf("%s.%d.tmp", p, time.Now().UnixNano())
+		out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o444)
+		if err != nil {
+			return err
+		}
+		h := blake3.New()
+		cw := &countWriter{w: io.MultiWriter(out, h)}
+		err = fetch(ctx, n, cw)
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+		if err == nil {
+			if got := hex.EncodeToString(h.Sum(nil)); got != d {
+				err = fmt.Errorf("content of %s changed: want %s, got %s", n.Path, Key(d).Short(), Key(got).Short())
+			}
+		}
+		if err != nil {
+			os.Remove(tmp)
+			return fmt.Errorf("fault %s: %w", n.Path, err)
+		}
+		return f.add(tmp, d, cw.n, true)
+	})
+}
+
+// fault runs fill (which must leave the content at f.path(d)) unless the
+// node is resident, sharing concurrent faults of the same digest.
+func (f *Files) fault(ctx context.Context, n *Node, fill func(d string) error) (string, error) {
 	if p, ok := f.Local(n); ok {
 		return p, nil
 	}
@@ -172,11 +223,7 @@ func (f *Files) Ensure(ctx context.Context, tier Tier, n *Node) (string, error) 
 	f.inflight[d] = fl
 	f.mu.Unlock()
 	begin := time.Now()
-	if tier == nil {
-		fl.err = fmt.Errorf("fault %s: %w", n.Path, ErrNotFound)
-	} else {
-		fl.err = f.assemble(ctx, tier, n, d)
-	}
+	fl.err = fill(d)
 	f.mu.Lock()
 	delete(f.inflight, d)
 	if fl.err == nil {

@@ -129,7 +129,18 @@ func sortNodes(ns []Node) {
 }
 
 func pathLess(a, b string) bool {
-	return strings.ReplaceAll(a, "/", "\x00") < strings.ReplaceAll(b, "/", "\x00")
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if ca, cb := a[i], b[i]; ca != cb {
+			switch {
+			case ca == '/':
+				return true
+			case cb == '/':
+				return false
+			}
+			return ca < cb
+		}
+	}
+	return len(a) < len(b)
 }
 
 func parent(p string) string {

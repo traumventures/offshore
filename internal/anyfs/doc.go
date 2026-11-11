@@ -1,6 +1,7 @@
 // Package anyfs is the one storage core behind offshore's file systems:
-// build slot caches on workers, the source projection (sourcefs) and the
-// laptop's output overlay (UserOverlay over a RemoteTree source) are configurations of it.
+// build slot caches on workers, the source projection on workers and the
+// laptop's output overlay (UserOverlay over a RemoteTree source) are
+// configurations of it.
 //
 // Data model. A Tree is a manifest: every path with kind, mode, size,
 // mtime, the BLAKE3 digest of its content and the pages holding it. A
@@ -39,4 +40,12 @@
 // upper directory over it; unprivileged hosts (laptops) use the
 // userspace overlay (UserOverlay) with whiteouts and a merge policy
 // (top-wins or newest-mtime).
+//
+// The worker's projection of a laptop root is a WritableFS over a
+// peer source (NewPeerSource): the tree is the synced manifest, file
+// contents are fetched whole by digest from the laptop, and local
+// writes go to a dirty overlay that is written back to the laptop with
+// the base digest of each change (conflict detection). A kernel overlay
+// does not fit there: the lower tree changes all the time and the
+// laptop's version of a path must replace a local modification.
 package anyfs
