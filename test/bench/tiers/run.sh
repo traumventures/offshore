@@ -5,6 +5,7 @@
 #
 #   test/bench/tiers/run.sh                 # all layouts
 #   test/bench/tiers/run.sh layout_A        # one layout (see bench.sh)
+#   test/bench/tiers/run.sh alt 5 A E       # A and E alternating in one window
 #   KEEP=1 test/bench/tiers/run.sh ...      # keep container + work dir
 #
 # Needs: sudo -n docker, /dev/fuse, ~12 GB free disk (target ~3.2 GB, lower
@@ -30,7 +31,12 @@ $D exec tierbench bash -c 'command -v python3 >/dev/null || (apt-get -qq update 
 $D exec tierbench cargo fetch --locked
 ovl=",redirect_dir=on,metacopy=on"
 run() { $D exec ${OVL:+-e OVL_OPTS=$OVL} tierbench bash /work/bench.sh "$@"; }
-if [ $# -gt 0 ]; then run "$@"; else
+out="$here/results-$(date +%F).jsonl"
+if [ "${1:-}" = alt ]; then  # alt ROUNDS TAG...: alternating A/E/... in one window (bench.sh layout_alt)
+  shift; out="$here/results-alt-$(date +%F-%H%M).jsonl"
+  [ -f "$WORK/s1/leaf" ] || run layout_A
+  run layout_alt "$@"
+elif [ $# -gt 0 ]; then run "$@"; else
   run layout_A                       # baseline; its final target becomes the lower
   run layout_C Cwb -writeback        # rw FUSE, writeback cache (passthrough refused)
   run layout_C Cpt                   # rw FUSE, passthrough
@@ -47,7 +53,7 @@ if [ $# -gt 0 ]; then run "$@"; else
   $D exec tierbench bash /work/check.sh
   run layout_freshclone              # last: touches every source file
 fi
-cp "$WORK/results.jsonl" "$here/results-$(date +%F).jsonl" 2>/dev/null || true
+cp "$WORK/results.jsonl" "$out" 2>/dev/null || true
 if [ -z "${KEEP:-}" ]; then
   $D exec tierbench python3 -c "import shutil; shutil.rmtree('/work', ignore_errors=True)" || true
   $D rm -f tierbench >/dev/null
