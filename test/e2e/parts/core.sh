@@ -168,7 +168,7 @@ for _ in $(seq 30); do # batch exporters flush within 5 s
   [ -n "$trace" ] && break; sleep 1
 done
 check "one trace has proxy, daemon and worker spans" test -n "$trace"
-check "  ... with run, prepare, acquire and session spans" sh -c 'case "$1" in *offshore.run*daemon.prepare*pool.acquire*worker.exec*) exit 0;; esac; echo "     $1"; exit 1' _ "$trace"
+check "  ... with run, prepare, acquire and session spans" sh -c 'for s in offshore.run daemon.prepare pool.acquire worker.exec; do case ",$1," in *[,\ ]$s,*) ;; *) echo "     missing $s: $1"; exit 1;; esac; done' _ "$trace"
 [ -n "$REMOTE" ] && check "  ... and control plane spans" contains "$trace" "offshore-controlplane"
 check "spans carry no secrets" sh -c '! grep -q -e from-cmd -e file-secret ${2:+-e "$2"} "$1"' _ "$OTLP_OUT" "$([ -n "$REMOTE" ] && cat "$CPSTATE/api-key")"
 rep="$(cs report --since 1d 2>&1)"
