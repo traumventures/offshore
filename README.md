@@ -642,6 +642,32 @@ disk), `go` sets `GOCACHEPROG` to `cloudsourced gocacheprog`, which keeps
 outputs on the machine disk (go reads them from there) and shares them through
 the endpoint. A `ttl` below 24h lowers the age of reused entries.
 
+#### Pruning
+
+Slots are pruned against two budgets: per slot the sum of the slot caches'
+`max_size` (unset: unbounded) after every session, per machine
+`CLOUDSOURCED_DISK_BUDGET` bytes of the cache filesystem (default 90%).
+The worker tracks reads per session: after a run it records for every slot
+file the last run (session number of the slot) that read or wrote it, using
+the atime (relatime re-armed by resetting the atime of read files to their
+mtime; on `noatime` mounts only writes count). Pruning runs in stages until
+the slot fits:
+
+1. `prune = "rust"`: old incremental compilation sessions (all but the
+   newest per crate in `target/*/incremental/`);
+2. units not read for 5 runs, the stalest first (`rust`: all files of one
+   compilation unit, i.e. `deps/*-<hash>.*`, `.fingerprint/<unit>/`,
+   `build/<unit>/`; `lru`: single files); with a size target also more
+   recently read ones, never those of the latest run;
+3. the whole slot (cold; the next session starts a new one).
+
+Over the machine budget the least recently used slots get the policy prune
+(stages 1 and 2) first, then go cold. The orchestrator can prune a
+repository's slots on demand through the worker's slot stream
+(`proto.KindSlot`, admin token; `orchestrator.WorkerSlotOps.PruneSlot`):
+older duplicate slots go cold first, then the newest is pruned in stages to
+the requested size.
+
 ### Compiler cache and linker
 
 A global cache with `tool = "sccache"` adds the pinned static sccache release

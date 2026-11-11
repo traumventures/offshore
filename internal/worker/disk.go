@@ -11,12 +11,10 @@ import (
 	"github.com/traumventures/cloudsourced/internal/proto"
 )
 
-// treeSize returns the bytes allocated by the files below dir (hard links
-// counted once). It walks directories in parallel: a Rust target directory
-// has 10^5 files.
-func treeSize(dir string) int64 {
-	var total atomic.Int64
-	var seen sync.Map // dev/ino of multiply linked files
+// walkFiles calls fn for every non-directory below dir, walking
+// directories in parallel (a Rust target directory has 10^5 files). fn
+// must be safe for concurrent use.
+func walkFiles(dir string, fn func(path string, fi os.FileInfo)) {
 	sem := make(chan struct{}, 4*runtime.NumCPU())
 	var wg sync.WaitGroup
 	var walk func(d string)
@@ -33,13 +31,21 @@ func treeSize(dir string) int64 {
 				continue
 			}
 			if fi, err := de.Info(); err == nil {
-				total.Add(allocated(fi, &seen))
+				fn(p, fi)
 			}
 		}
 	}
 	wg.Add(1)
 	walk(dir)
 	wg.Wait()
+}
+
+// treeSize returns the bytes allocated by the files below dir (hard links
+// counted once).
+func treeSize(dir string) int64 {
+	var total atomic.Int64
+	var seen sync.Map
+	walkFiles(dir, func(_ string, fi os.FileInfo) { total.Add(allocated(fi, &seen)) })
 	return total.Load()
 }
 

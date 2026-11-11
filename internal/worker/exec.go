@@ -190,7 +190,11 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	data := filepath.Join(slot, "data")
 	slotBefore := s.slots.size(slot)
 	slotAfter := int64(-1)
-	defer func() { s.slots.releaseSized(slot, slotAfter) }()
+	s.slots.update(slot, func(m *slotMeta) { m.Caches = slotCaches(req) })
+	defer func() {
+		s.slots.releaseSized(slot, slotAfter)
+		go s.enforceBudgets(slot)
+	}()
 
 	env := s.sessionEnv(req, se.id)
 	sccache := req.GlobalCache(config.CacheToolSccache) != nil && s.ccEndpoint != ""
@@ -347,7 +351,7 @@ loop:
 	exit.Usage.PeakMemory, exit.Usage.CPUSeconds = s.cg.usage(cgDir)
 	exit.Usage.CPUStall, exit.Usage.MemoryStall = s.cg.stall(cgDir)
 	exit.Usage.Warm = warm
-	slotAfter = treeSize(data)
+	slotAfter = s.recordSlotRun(slot, se.started)
 	exit.Usage.SlotBytesBefore, exit.Usage.SlotBytesAfter = slotBefore, slotAfter
 	exit.Usage.ExitCode = exit.Code
 	if s.cg.oomKilled(cgDir) {
