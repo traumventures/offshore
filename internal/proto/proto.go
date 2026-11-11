@@ -234,7 +234,13 @@ type Writeback struct {
 // Need requests blobs by hash.
 type Need struct {
 	Hashes []string `json:"hashes"`
+	// Compress asks the sender to compress every blob's data frames
+	// ("" or CompressZstd). BlobHeader.Size stays the uncompressed size.
+	Compress string `json:"compress,omitempty"`
 }
+
+// CompressZstd compresses blob data with zstd.
+const CompressZstd = "zstd"
 
 // BlobHeader precedes TData frames of one blob, terminated by TDataEnd.
 type BlobHeader struct {

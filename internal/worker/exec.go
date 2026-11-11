@@ -20,6 +20,7 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/creack/pty"
+	"github.com/klauspost/compress/zstd"
 	"github.com/quic-go/quic-go"
 	"github.com/traumventures/cloudsourced/internal/auth"
 	"github.com/traumventures/cloudsourced/internal/manifest"
@@ -547,7 +548,7 @@ func (s *Worker) sendNeeded(pc *proto.Conn, frames chan frame, blobs map[string]
 			return pc.SendError("transfer", err)
 		}
 		fi, _ := f.Stat()
-		err = pc.SendBlob(h, fi.Size(), f)
+		err = sendBlob(pc, h, fi.Size(), f, need.Compress)
 		f.Close()
 		if err != nil {
 			return err
@@ -555,6 +556,30 @@ func (s *Worker) sendNeeded(pc *proto.Conn, frames chan frame, blobs map[string]
 		s.countBytes(float64(fi.Size()), direction)
 	}
 	return nil
+}
+
+// sendBlob sends one blob, compressed when the receiver asked for it.
+func sendBlob(pc *proto.Conn, hash string, size int64, r io.Reader, compress string) error {
+	if compress != proto.CompressZstd {
+		return pc.SendBlob(hash, size, r)
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		enc, err := zstd.NewWriter(pw, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1))
+		if err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		if _, err := io.Copy(enc, r); err != nil {
+			enc.Close()
+			pw.CloseWithError(err)
+			return
+		}
+		pw.CloseWithError(enc.Close())
+	}()
+	err := pc.SendBlob(hash, size, pr)
+	pr.Close()
+	return err
 }
 
 // collectOutputs resolves output globs inside worker-local build directories.

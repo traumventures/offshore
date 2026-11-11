@@ -29,7 +29,7 @@ func (fetchArtifacts) Fetch(ctx context.Context, s *session, paths []string) err
 	for i, p := range paths {
 		globs[i] = escapeGlob(p)
 	}
-	_, err := FetchOutputs(ctx, s.conn, s.token, s.repoID, s.root, globs)
+	_, err := FetchOutputs(ctx, s.conn, s.token, s.repoID, s.root, globs, proto.CompressZstd)
 	return err
 }
 
@@ -47,8 +47,9 @@ func escapeGlob(p string) string {
 
 // FetchOutputs copies the output files matching globs (relative to root)
 // from the latest build slot of the repository on the machine behind conn
-// and returns them.
-func FetchOutputs(ctx context.Context, conn *quic.Conn, token, repoID, root string, globs []string) ([]manifest.Entry, error) {
+// and returns them. compress ("" or proto.CompressZstd) selects the
+// transfer encoding.
+func FetchOutputs(ctx context.Context, conn *quic.Conn, token, repoID, root string, globs []string, compress string) ([]manifest.Entry, error) {
 	st, pc, err := transport.OpenStream(ctx, conn, token, proto.KindFetch)
 	if err != nil {
 		return nil, err
@@ -61,7 +62,7 @@ func FetchOutputs(ctx context.Context, conn *quic.Conn, token, repoID, root stri
 	if err := pc.Expect(proto.TOutputs, &outs); err != nil {
 		return nil, err
 	}
-	if err := ReceiveFiles(pc, root, outs.Files); err != nil {
+	if err := ReceiveFiles(pc, root, outs.Files, compress); err != nil {
 		return nil, err
 	}
 	if err := pc.Write(proto.TDone, nil); err != nil {
