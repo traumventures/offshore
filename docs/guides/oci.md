@@ -50,7 +50,10 @@ compartment, attached paravirtualized at `/dev/oracleoci/oraclevdb`;
 `manage all-resources` covers them (narrower: `manage volume-family` and
 `use instance-family`). A volume lives in one availability domain and
 attaches only to instances there; a machine created with a volume is
-launched in its domain.
+launched in its domain. Sizes choose `medium = "local"` (default: the boot
+volume, or the local NVMe of DenseIO shapes, formatted on every boot) or
+`medium = "volume"` (`[providers.oci.volume]`: `vpus`, `min` (at least
+50G), `max`, `step`, `keep_detached`, `ttl`).
 
 When the user may not manage IAM, set `iam = false` and let an
 administrator create the dynamic group `offshore-<hash>` (matching rule

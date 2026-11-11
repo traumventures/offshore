@@ -248,6 +248,77 @@ with serde, serde_json, itoa, libc):
 With a remote store the fill is bounded by download bandwidth (about 1 s per
 125 MB at 1 Gbit/s); point `BENCH_STORE` at a mounted bucket to measure it.
 
+## Media: local, volume, store
+
+Independently of a cache's scope, a machine's caches live on one of three
+tiers. The object store is the durable source of truth; the live disk is a
+hot cache of it (builds read and write only there).
+
+| tier | medium | what | speed | survives | moves by | cost |
+| --- | --- | --- | --- | --- | --- | --- |
+| hot | `local` (default) | root disk, or instance-store NVMe (aws-ec2 `*d` types, oci DenseIO) | fastest (NVMe: GB/s) | nothing beyond the machine | snapshot to the store + lazy restore | root disk: per GB; NVMe: in the instance price |
+| hot / warm | `volume` | attachable block volume (EBS gp3, OCI block volume) | network disk (gp3 125 MiB/s baseline) | the machine (detached, until `ttl`) | detach/attach within its zone; other zone or provider: snapshot path | per GB-month, also while detached |
+| cold / durable | `store` | S3-compatible object store (`[storage]` or the provider's) | network, tens of ms first byte | everything; 24 h TTL | free (reachable everywhere) | per GB-month + requests + egress |
+
+The medium is chosen per size (`medium = "local" | "volume"`); volumes are
+off by default until measurements justify them. Repository caches
+(`[cache.<name>]` scopes) do not care about the medium.
+
+* **local, instance store**: the supervisor finds the instance's NVMe
+  disk (`/dev/disk/by-id/nvme-Amazon_EC2_NVMe_Instance_Storage_*`,
+  `/dev/nvme*n1` on oci), formats it (xfs with reflink) once per boot
+  (it is blank after every stop/start) and mounts it at the cache
+  directory. aws-ec2 takes the size's disk from the instance type.
+* **volume**: the orchestrator creates an encrypted volume
+  (`[providers.NAME.volume]`: `min` size, `type`/`iops`/`throughput`,
+  `vpus`) or reuses a detached one, places the machine in its zone and
+  attaches it; the supervisor formats it once (xfs with reflink), mounts
+  it at the cache directory and wipes content unused for longer than
+  `ttl` when it is attached. Full volumes grow by at least `step` up to
+  `max` (aws-ec2: once per 6 h); the supervisor rescans the device and
+  grows the file system online. When the machine is destroyed the volume
+  is deleted, or with `keep_detached = true` kept detached until `ttl`;
+  the scheduler then creates the next machine of a volume size on the
+  warm volume when one holds a slot of the waiting repository.
+  State: `volumes.json` in the orchestrator state; events `volume_create`,
+  `volume_attach`, `volume_detach`, `volume_resize`, `volume_delete`
+  (with `bytes`, and `cost`: the storage cost since the volume's previous
+  event).
+* **store**: snapshots (incremental, chunked CAS) and global result
+  caches; see below.
+
+### Capability profiles
+
+Every medium of every provider has a capability profile
+(`internal/medium`): throughput, IOPS, latency, reach (machine, zone,
+region, global), durability, price per GB-month, request and egress
+prices, attach and provision time, size limits and resize cooldown. The
+scheduler sees one composite profile per machine (hot medium over the
+store) and uses it for mobility (moving a warm slot: local means a
+snapshot and a restore bounded by the slower of store and hot medium; a
+detached volume in its zone means the attach time), storage cost (volume
+sizes pay their volume per hour, also while stopped or detached) and
+resizes (step, cooldown, price). Code defaults are approximate list values
+with the provider documentation cited in `internal/medium/defaults.go`:
+
+| provider | medium | throughput | IOPS | price/GB-month | attach | limits |
+| --- | --- | --- | --- | --- | --- | --- |
+| aws-ec2 | local (gp3 root) | 125 MiB/s | 3000 | 0.08 | | 16 TiB, resize every 6 h |
+| aws-ec2 | local (instance store) | ~1.5 GB/s | ~100k | in the instance | | lost on stop |
+| aws-ec2 | volume (gp3) | 125 MiB/s (up to 1000) | 3000 (up to 16000) | 0.08 | ~10 s | 1 GiB..16 TiB, resize every 6 h |
+| aws-ec2 | store (S3) | ~200 MB/s | | 0.023 (+0.0004 per 1000 GET) | | egress ~0.09/GB |
+| oci | local (boot, balanced) | ~48 MB/s per 100 GB | 60/GB | 0.0425 | | 32 TB |
+| oci | local (DenseIO NVMe) | ~2 GB/s | ~200k | in the shape | | lost on terminate |
+| oci | volume (balanced) | 480 KB/s per GB | 60/GB | 0.0425 | ~45 s | 50 GB..32 TB, online resize |
+| oci | store | ~200 MB/s | | 0.0255 | | 10 TB/month egress free |
+| local-docker, static | local / volume | host disk | | 0 | ~1 s | |
+
+Override values per provider and medium with
+`[providers.NAME.profile.MEDIUM]` (see
+[configuration](configuration.md#providers)); measured values override
+both through `medium.SetMeasured` (a hook; no measurement source is wired
+yet).
+
 ## Disks
 
 `aws-ec2` implements `provider.DiskResizer`: the scheduler can grow a full
@@ -270,11 +341,11 @@ attach only within their zone.
 | local-docker | Docker volume (unbounded directory) | `local` | at machine creation only | not needed |
 | static | none: the host's fixed disk | | | |
 
-A machine created with `MachineSpec.Volume` is placed in the volume's
-zone and gets it attached. The reaper deletes detached volumes past their
-expiry and cache volumes whose machine is gone and that carry no expiry.
-How the orchestrator and scheduler use volumes (medium per size, pool,
-TTL) is being designed.
+A machine created with a volume is placed in the volume's zone and gets it
+attached. The reaper deletes detached volumes past their expiry, managed
+volumes whose machine disappeared are released like destroyed ones, and
+unmanaged cache volumes whose machine is gone and that carry no expiry are
+deleted.
 
 Machines use gp3 root volumes (`disk_gb`, default 100; 3000 IOPS and
 125 MB/s baseline). Instance types with local NVMe (`c6id`, `m6id`,
