@@ -193,6 +193,7 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 			}
 		}
 	}
+	o.poolVolumesLocked(f)
 	o.forecast.Observe(*f)
 	o.forecast.Apply(f)
 }
@@ -248,6 +249,13 @@ func (o *Orchestrator) prepareSlot(ctx context.Context, machineID string, a sche
 		freed, err = slots.PruneSlot(ctx, t, a.Repo, a.Bytes)
 		ev.Bytes = freed
 	case scheduler.SlotResize:
+		o.mu.Lock()
+		vol := o.volumeOfLocked(machineID)
+		o.mu.Unlock()
+		if vol != nil {
+			err = o.resizeVolume(ctx, machineID, a.Bytes)
+			break
+		}
 		r, ok := p.(provider.DiskResizer)
 		if !ok {
 			err = errors.New("provider cannot resize disks")

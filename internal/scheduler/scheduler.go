@@ -9,7 +9,36 @@ package scheduler
 
 import (
 	"time"
+
+	"github.com/traumventures/offshore/internal/medium"
 )
+
+// VolumePolicy sizes the cache volumes of a volume size
+// ([providers.NAME.volume]).
+type VolumePolicy struct {
+	Min          int64         `json:"min,omitempty"`  // size of a new volume
+	Max          int64         `json:"max,omitempty"`  // largest size (0: provider limit)
+	Step         int64         `json:"step,omitempty"` // least growth of a resize
+	KeepDetached bool          `json:"keep_detached,omitempty"`
+	TTL          time.Duration `json:"ttl,omitempty"`
+	Type         string        `json:"type,omitempty"`
+	IOPS         int           `json:"iops,omitempty"`
+	Throughput   int           `json:"throughput,omitempty"`
+	VPUs         int           `json:"vpus,omitempty"`
+}
+
+// Volume is a detached cache volume the pool keeps for reuse.
+type Volume struct {
+	ID        string
+	Provider  string
+	Zone      string
+	Bytes     int64
+	SlotBytes map[string]int64 // warm build slots on it (repository -> bytes)
+	ExpiresAt time.Time
+}
+
+// Warm reports whether v holds a build slot of repo.
+func (v Volume) Warm(repo string) bool { return v.SlotBytes[repo] > 0 }
 
 // Resources is an amount of CPU (cores), memory (bytes) and disk (bytes).
 // Disk is not reserved per session: build slots persist on a machine's
@@ -57,6 +86,12 @@ type Size struct {
 	// fill before pruning ("90%" or "150G"; empty = the worker's default),
 	// passed to the worker.
 	DiskBudget string `json:"disk_budget,omitempty"`
+	// Medium is where machines of the size keep their caches: "local"
+	// (default) or "volume" (Volume). Stack is the composite capability
+	// profile of the size's media (hot medium over the store).
+	Medium string       `json:"medium,omitempty"`
+	Stack  medium.Stack `json:"stack,omitzero"`
+	Volume VolumePolicy `json:"volume,omitzero"`
 }
 
 // ArchOf returns a size's architecture (amd64 when unset).
@@ -132,6 +167,14 @@ type Machine struct {
 	StartBlocked time.Time
 	// CanResize: the machine's disk can be grown (provider support).
 	CanResize bool
+	// Medium, Zone and Volume (id) of the machine's cache; Stack the
+	// composite capability profile; ResizableAt is when its disk may be
+	// resized next (EBS: 6 h after the last resize).
+	Medium      string
+	Zone        string
+	Volume      string
+	Stack       medium.Stack
+	ResizableAt time.Time
 }
 
 // Release is the expected end of a session and the reservation it frees.
@@ -205,6 +248,10 @@ type Pool struct {
 	Demand map[string]Demand
 	// Snapshots are the saved build slots per repository.
 	Snapshots map[string][]Snapshot
+	// Volumes are detached cache volumes kept for reuse (keep_detached):
+	// a new machine of a volume size in their zone gets their warm slots
+	// for the attach time.
+	Volumes []Volume
 }
 
 // SizesFor returns the sizes that can be created for env now: those of
@@ -313,7 +360,10 @@ type Action struct {
 	Machine string // for everything but Create
 	EnvHash string // for Create
 	Size    Size   // for Create
-	Reason  string
+	// Volume is the detached cache volume a Create attaches (empty: a
+	// fresh volume for volume sizes, none for local ones).
+	Volume string
+	Reason string
 }
 
 // Policy makes all placement and scaling decisions. Implementations must be
