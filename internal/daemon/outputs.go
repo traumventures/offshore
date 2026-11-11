@@ -584,7 +584,17 @@ func (s *machineSource) open(ctx context.Context) (*quic.Stream, *proto.Conn, er
 		s.conn, conn = c, c
 	}
 	s.mu.Unlock()
-	return transport.OpenStream(ctx, conn, s.st.Token, proto.KindOutputs)
+	// Opening waits for stream credit from the machine: bounded like the
+	// answer, else a stalled connection blocks the FUSE read forever (D
+	// state); a timeout drops the connection, the next read redials.
+	octx, cancel := context.WithTimeout(ctx, answerTimeout)
+	defer cancel()
+	st, pc, err := transport.OpenStream(octx, conn, s.st.Token, proto.KindOutputs)
+	if err != nil && octx.Err() != nil && ctx.Err() == nil {
+		s.Close()
+		return nil, nil, fmt.Errorf("machine %s: no stream within %s: %w", s.st.Machine, answerTimeout, err)
+	}
+	return st, pc, err
 }
 
 // answerTimeout bounds the wait for the machine's first answer. A stopped
