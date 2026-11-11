@@ -132,7 +132,6 @@ type Pressure struct {
 	Memory float64 `json:"memory"`
 }
 
-// Machine is the scheduler's view of one machine.
 // VM is a machine's cache file system state (zero: unknown).
 type VM struct {
 	Capacity   int64   // local tier capacity in bytes
@@ -143,6 +142,7 @@ type VM struct {
 	Thrashing  bool    // working set > capacity with refaults
 }
 
+// Machine is the scheduler's view of one machine.
 type Machine struct {
 	ID        string
 	Provider  string
@@ -417,6 +417,10 @@ type Usage struct {
 	// session ran; RestoreSeconds is how long the restore took.
 	Restored       bool    `json:"restored,omitempty"`
 	RestoreSeconds float64 `json:"restore_seconds,omitempty"`
+	// WorkingSetBytes is the bytes of the slot the session touched
+	// (reported by the cache file system; 0 = unknown). The estimator
+	// learns it per key (Profile.WorkingSet).
+	WorkingSetBytes int64 `json:"working_set_bytes,omitempty"`
 	// Provider ran the session (cold durations are learned per provider).
 	Provider string `json:"provider,omitempty"`
 }

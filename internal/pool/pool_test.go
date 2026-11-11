@@ -206,3 +206,16 @@ func TestConfigDiskBudget(t *testing.T) {
 		t.Fatalf("budgets %q %q", s[0].DiskBudget, s[1].DiskBudget)
 	}
 }
+
+func TestConfigTierStack(t *testing.T) {
+	u := &config.PoolConfig{Pool: config.Pool{MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s",
+		Sizes: []config.Size{{Provider: "p", Name: "l", CPU: 2, Memory: "4G", Disk: "50G"},
+			{Provider: "p", Name: "lvs", CPU: 2, Memory: "4G", Stack: []string{"local", "volume", "store"}}}}}
+	s := Config(u).Sizes
+	if got := s[0].Stack; got.String() != "local>store" || got.Capacity != 50<<30 || s[0].Medium != "local" {
+		t.Fatalf("local size: %+v", got)
+	}
+	if got := s[1].Stack; got.String() != "local>volume>store" || got.Name != "local>volume>store" || s[1].Medium != "volume" || s[1].Volume.Min == 0 {
+		t.Fatalf("stacked size: %+v %+v", got, s[1])
+	}
+}

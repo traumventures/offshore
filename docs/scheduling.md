@@ -90,6 +90,30 @@ slot instead of building cold on an idle machine), `0` purely for time,
 `0.5` (default) accepts 10 % more cost for more than 10 % less time.
 Rendezvous hashing breaks ties. Waits are bounded by `queue_timeout`.
 
+**Tier stacks.** A size's caches live in a stack of tiers (`stack`, see
+[configuration](configuration.md); `internal/anyfs`), and the model reads
+the composite profile (`scheduler.Size.Stack`, a `medium.Stack`; anyfs.Profile is the same type):
+
+- *lazy restore*: a restored or moved slot is mounted lazily, so a build
+  waits only for its working set to fault in
+  (`Profile.FaultTime(working set)`: per page latency of the backing tier
+  plus the slowest transfer, at least the store bandwidth); the rest pages
+  in in the background. A move uploads only the source's dirty pages when
+  it reports a cache file system (`VM.Dirty`). The working set is learned
+  per key from `task_end.usage.working_set_bytes` (80th percentile;
+  unknown: the whole slot, as before).
+- *thrashing*: when the working set exceeds the local capacity (the top
+  tier: `VM.Capacity`, else the size's, else the disk budget), the build
+  is charged `2 x FaultTime(excess)` from the tier below the top. A machine
+  that reports `VM.Thrashing` (or a working set above its capacity) gets
+  this penalty for every placement. Against it the model weighs growing
+  the disk to 1.25 x the working set (a resize slot action, priced until
+  the machine expires) and, when scaling out, sizes whose local capacity
+  fits the working set. With `cost_optimization = 1` a cheaper thrashing
+  size can still win; at 0.5 and below the bigger disk or size does.
+- the medium slots persist on (the volume, else the top tier) prices
+  storage, attach and resize cooldown.
+
 Other inputs of the model: provider boot/start latencies (learned), snapshot
 locations (reported by workers when they save slots), per-repository slot
 sizes and the machine disk, and transfer prices between stores and
@@ -268,10 +292,20 @@ machines drain or are destroyed. It models what the policy cannot see:
   retried up to three times;
 - builds without a warm cache of the repository on their machine take
   `1 + cold-penalty` (default 1.5) times longer; caches survive stop/start;
-- the estimator (`-estimator static|history`) learns from runs and OOMs.
+- the estimator (`-estimator static|history`) learns from runs and OOMs;
+- the cache file system of each size's tier stack: jobs with a
+  `working_set` (bytes the build touches) restore lazily (the working set
+  faults in at the stack's fault time, the rest in the background) and
+  thrash when the working set exceeds the machine's local capacity (its
+  disk; growing with resizes): `2 x FaultTime(excess)` more build time.
+  The policy sees this as `Machine.VM` (capacity, working set, thrashing)
+  like the worker reports it. Reports add `thrashed` builds, thrash time
+  and page-in bytes; the sweep adds resizes, thrashed and machines created
+  per size.
 
 Traces are JSON (`{"start": RFC3339, "end": seconds, "jobs": [{"at",
-"repo", "env", "duration", "cpu", "memory", "peak_memory"}]}`) or CSV with
+"repo", "env", "duration", "cpu", "memory", "peak_memory", optional
+"slot_bytes", "slot_growth", "working_set"}]}`) or CSV with
 the same columns (`at` in seconds or RFC 3339, optional `# start=` line).
 The generator produces bursty workday load (morning ramp, lunch dip,
 afternoon peak, follow-up bursts, night trickle) for several repositories

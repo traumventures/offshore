@@ -55,6 +55,11 @@ type Job struct {
 	// build, SlotGrowth what a warm build adds (0: disk not simulated).
 	SlotBytes  Bytes `json:"slot_bytes,omitempty"`
 	SlotGrowth Bytes `json:"slot_growth,omitempty"`
+	// WorkingSet is the bytes of the slot the build touches (0: the whole
+	// slot, no thrashing modelled): a lazy restore faults it in before
+	// the build proceeds; beyond the machine's local capacity the build
+	// thrashes.
+	WorkingSet Bytes `json:"working_set,omitempty"`
 }
 
 // Trace is a sequence of jobs.

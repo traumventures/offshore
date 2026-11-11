@@ -28,6 +28,10 @@ type Profile struct {
 	// slot).
 	SlotBytes  int64 `json:"slot_bytes,omitempty"`
 	SlotGrowth int64 `json:"slot_growth,omitempty"`
+	// WorkingSet is the bytes a run touches (the 80th percentile of the
+	// runs that reported it): what a lazy restore faults in before the
+	// build proceeds and what must fit the local tier to avoid thrashing.
+	WorkingSet int64 `json:"working_set,omitempty"`
 	Runs       int   `json:"runs,omitempty"`
 }
 
@@ -88,7 +92,7 @@ func medianInt(xs []int64) int64 {
 func profileOf(rs []Usage) Profile {
 	var warm, cold, restore []time.Duration
 	coldBy := map[string][]time.Duration{}
-	var slots, growth []int64
+	var slots, growth, ws []int64
 	p := Profile{}
 	for _, u := range rs {
 		if u.OOM || u.Wall <= 0 {
@@ -105,6 +109,9 @@ func profileOf(rs []Usage) Profile {
 		}
 		if u.Restored && u.RestoreSeconds > 0 {
 			restore = append(restore, time.Duration(u.RestoreSeconds*float64(time.Second)))
+		}
+		if u.WorkingSetBytes > 0 {
+			ws = append(ws, u.WorkingSetBytes)
 		}
 		if u.SlotBytesAfter > 0 {
 			slots = append(slots, u.SlotBytesAfter)
@@ -136,5 +143,9 @@ func profileOf(rs []Usage) Profile {
 		p.ColdBy[prov] = medianDur(ds)
 	}
 	p.SlotBytes, p.SlotGrowth = medianInt(slots), medianInt(growth)
+	if len(ws) > 0 {
+		sort.Slice(ws, func(i, j int) bool { return ws[i] < ws[j] })
+		p.WorkingSet = ws[min(len(ws)-1, int(0.8*float64(len(ws))))]
+	}
 	return p
 }

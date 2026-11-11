@@ -5,7 +5,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -193,13 +195,13 @@ func simCmd(args []string) error {
 // printReports writes reports as a table.
 func printReports(w *os.File, rs []sim.Report) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "run\tjobs\tdone\tcost $\tmachine-h\tcreated\twait p50\twait p95\twait max\tturn p50\tturn p95\tcpu util\tmem util\tslowdown\tOOMs\twarm\tflaps\t")
+	fmt.Fprintln(tw, "run\tjobs\tdone\tcost $\tmachine-h\tcreated\twait p50\twait p95\twait max\tturn p50\tturn p95\tcpu util\tmem util\tslowdown\tOOMs\twarm\tflaps\tthrashed\tpage-in\t")
 	for _, r := range rs {
-		fmt.Fprintf(tw, "%s\t%d\t%d\t%.2f\t%.1f\t%d\t%s\t%s\t%s\t%s\t%s\t%.0f%%\t%.0f%%\t%.2f\t%d\t%.0f%%\t%d\t\n",
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%.2f\t%.1f\t%d\t%s\t%s\t%s\t%s\t%s\t%.0f%%\t%.0f%%\t%.2f\t%d\t%.0f%%\t%d\t%d\t%s\t\n",
 			r.Name, r.Jobs, r.Completed, r.Cost, r.MachineHours, r.Machines,
 			r.WaitP50.Round(time.Second), r.WaitP95.Round(time.Second), r.WaitMax.Round(time.Second),
 			r.TurnP50.Round(time.Second), r.TurnP95.Round(time.Second),
-			100*r.CPUUtil, 100*r.MemUtil, r.Slowdown, r.OOMs, 100*r.WarmRate, r.Flaps)
+			100*r.CPUUtil, 100*r.MemUtil, r.Slowdown, r.OOMs, 100*r.WarmRate, r.Flaps, r.Thrashed, gbytes(r.PageInBytes))
 	}
 	tw.Flush()
 }
@@ -210,7 +212,7 @@ func printReports(w *os.File, rs []sim.Report) {
 func printFrontier(w *os.File, path string, ratios []float64, rs []sim.Report) {
 	fmt.Fprintf(w, "%s: cost_optimization sweep (1 = cheapest, 0 = fastest result)\n", path)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "cost_optimization\tcost $\tvolumes $\tmachine-h\tturn p50\tturn p95\twait p95\twarm\trestores\tattaches\tflaps\tpareto\t")
+	fmt.Fprintln(tw, "cost_optimization\tcost $\tvolumes $\tmachine-h\tturn p50\tturn p95\twait p95\twarm\trestores\tattaches\tresizes\tthrashed\tflaps\tsizes\tpareto\t")
 	for i, r := range rs {
 		pareto := "*"
 		for j, o := range rs {
@@ -218,10 +220,31 @@ func printFrontier(w *os.File, path string, ratios []float64, rs []sim.Report) {
 				pareto = ""
 			}
 		}
-		fmt.Fprintf(tw, "%.1f\t%.2f\t%.2f\t%.1f\t%s\t%s\t%s\t%.0f%%\t%d\t%d\t%d\t%s\t\n", ratios[i], r.Cost, r.VolumeCost, r.MachineHours,
-			r.TurnP50.Round(time.Second), r.TurnP95.Round(time.Second), r.WaitP95.Round(time.Second), 100*r.WarmRate, r.Restores, r.VolumeAttaches, r.Flaps, pareto)
+		fmt.Fprintf(tw, "%.1f\t%.2f\t%.2f\t%.1f\t%s\t%s\t%s\t%.0f%%\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t\n", ratios[i], r.Cost, r.VolumeCost, r.MachineHours,
+			r.TurnP50.Round(time.Second), r.TurnP95.Round(time.Second), r.WaitP95.Round(time.Second), 100*r.WarmRate, r.Restores, r.VolumeAttaches,
+			r.Resizes, r.Thrashed, r.Flaps, createdSizes(r.Created), pareto)
 	}
 	tw.Flush()
+}
+
+// gbytes formats bytes as GB with one decimal ("-" for none).
+func gbytes(b int64) string {
+	if b <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.1fG", float64(b)/(1<<30))
+}
+
+// createdSizes lists machines created per size ("big:3,small:1").
+func createdSizes(m map[string]int) string {
+	var out []string
+	for _, k := range slices.Sorted(maps.Keys(m)) {
+		out = append(out, fmt.Sprintf("%s:%d", k, m[k]))
+	}
+	if len(out) == 0 {
+		return "-"
+	}
+	return strings.Join(out, ",")
 }
 
 // latencies parses "60s" or "aws=90s,local=5s".

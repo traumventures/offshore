@@ -16,7 +16,7 @@ import (
 
 func volumeSize(keep bool) scheduler.Size {
 	return scheduler.Size{Provider: "fake", Name: "v4", Capacity: scheduler.Resources{CPU: 4, Memory: 4 * gib, Disk: 100 * gib},
-		Medium: medium.Volume, Stack: medium.Stack{Hot: medium.Default("aws-ec2", medium.Volume), Store: medium.Default("aws-ec2", medium.Store)},
+		Medium: medium.Volume, Stack: scheduler.StackOf(0, medium.Default("aws-ec2", medium.Volume), medium.Default("aws-ec2", medium.Store)),
 		Volume: scheduler.VolumePolicy{Min: 100 * gib, Max: 300 * gib, Step: 50 * gib, KeepDetached: keep, TTL: 24 * time.Hour}}
 }
 
@@ -173,7 +173,7 @@ func TestLocalDisksFromInstanceStore(t *testing.T) {
 	}
 	o.resolveLocalDisks(context.Background())
 	sz := o.Config().Sizes
-	if sz[0].Capacity.Disk != 237e9 || sz[0].Stack.Hot.Throughput != medium.Default("aws-ec2", medium.LocalNVMe).Throughput {
+	if sz[0].Capacity.Disk != 237e9 || sz[0].Stack.Top().Throughput != medium.Default("aws-ec2", medium.LocalNVMe).Throughput {
 		t.Fatalf("instance store size %+v", sz[0])
 	}
 	if sz[1].Capacity.Disk != 0 {

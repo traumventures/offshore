@@ -757,25 +757,38 @@ func Probe(ctx context.Context, addr, fingerprint, token string) (proto.Status, 
 }
 
 // measuredSizes returns the configured sizes with measured medium
-// profiles (from the workers' tier counters) merged into their stacks.
+// profiles (from the workers' tier counters) merged into every level of
+// their stacks.
 func (o *Orchestrator) measuredSizes() []scheduler.Size {
 	sizes := o.cfg.Sizes
 	copied := false
 	for i, s := range sizes {
-		hot, okH := o.meter.Profile(s.Provider, s.Stack.Medium())
-		st, okS := o.meter.Profile(s.Provider, medium.Store)
-		if !okH && !okS {
+		var levels []medium.Profile
+		stack := s.Stack.Levels
+		if len(stack) == 0 { // no configured stack: the hot medium over the store
+			hot := s.Medium
+			if hot == "" {
+				hot = medium.Local
+			}
+			stack = []medium.Profile{{Medium: hot}, {Medium: medium.Store}}
+		}
+		for j, l := range stack {
+			mp, ok := o.meter.Profile(s.Provider, l.Medium)
+			if !ok {
+				continue
+			}
+			if levels == nil {
+				levels = append([]medium.Profile(nil), stack...)
+			}
+			levels[j] = l.Merge(mp, "measured")
+		}
+		if levels == nil {
 			continue
 		}
 		if !copied {
 			sizes, copied = append([]scheduler.Size(nil), sizes...), true
 		}
-		if okH {
-			sizes[i].Stack.Hot = sizes[i].Stack.Hot.Merge(hot, "measured")
-		}
-		if okS {
-			sizes[i].Stack.Store = sizes[i].Stack.Store.Merge(st, "measured")
-		}
+		sizes[i].Stack.Levels = levels
 	}
 	return sizes
 }
