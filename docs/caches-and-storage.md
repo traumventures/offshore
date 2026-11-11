@@ -395,7 +395,15 @@ one (`anyfs.ScanChanges`): the entries of the overlay's upper directory
 whose ctime is newer than the head's watermark (`scanned_ns` in the slot
 metadata) are stat'ed in the merged view, their directories listed
 (deletions, renames), whiteouts and opaque or redirected directories
-rescanned; everything else is taken from the head tree unread. Plain
+rescanned; everything else is taken from the head tree unread. Files
+are hashed only when their data changed: a stat'ed file keeps the head's
+digest and pages when kind, mode, size and mtime match and its ctime is
+older than the watermark, and a kernel metacopy entry of the upper (a
+chmod, touch or chown of a lower file, a rename of one with a path
+redirect, a hard link of a meta layer file with its digest redirect)
+takes the digest and pages of the lower file it redirects to (by path in
+the mounted chain's tree, or by content digest), whatever its mode, mtime
+or ctime, if the size matches. Plain
 directory slots are walked whole but only files with a newer ctime are
 read. In a test slot of 213 entries a second commit stats 5 entries and
 hashes the 2 changed files (plain: stats 213, hashes 2). Changed files

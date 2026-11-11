@@ -583,8 +583,14 @@ func (c *cacheFS) plan(ctx context.Context, slot string, r *repoFS, m slotMeta) 
 			opt.Since = 1 // the upper holds every change since the mount over the head
 		}
 		c.mu.Lock()
-		if sm := c.mounts[slot]; sm != nil && sm.user != nil {
-			opt.UpperFormat = anyfs.UpperUser
+		if sm := c.mounts[slot]; sm != nil {
+			if sm.user != nil {
+				opt.UpperFormat = anyfs.UpperUser
+			}
+			// Metacopy entries (renamed or chmod'ed lower files) keep
+			// the content of the lower file they redirect to: the
+			// mounted chain's digests and pages, unread.
+			opt.Lower = sm.src.Tree()
 		}
 		c.mu.Unlock()
 	}

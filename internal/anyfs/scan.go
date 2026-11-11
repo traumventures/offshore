@@ -49,9 +49,12 @@ type ScanStats struct {
 type scanned struct {
 	Node
 	ctime int64
-	// meta: a metadata-only copy-up (overlay metacopy): the content is
-	// the lower file's, a fresh ctime does not mean new content.
-	meta bool
+	// meta: a metadata-only entry (overlay metacopy): the content is the
+	// lower file's at from ("": the same path) or of the content digest
+	// fromDigest; a fresh ctime, mode or mtime does not mean new content.
+	meta       bool
+	from       string
+	fromDigest string
 }
 
 // ctimeOf returns a file's change time (unix ns, 0 if unknown).
@@ -171,8 +174,12 @@ func buildTree(nodes []scanned, st *ScanStats) *Tree {
 	return NewTree(out)
 }
 
-// reusable reports whether n can take the digest and pages of Prev.
-func reusable(n *scanned, opt ScanOptions, paged bool) (*Node, bool) {
+// reusable reports whether n can take the digest and pages of Prev (of
+// lower or byDigest for metadata-only entries).
+func reusable(n *scanned, opt ScanOptions, paged bool, lower *Tree, byDigest map[string]*Node) (*Node, bool) {
+	if n.meta {
+		return metaSource(n, opt.Prev, paged, lower, byDigest)
+	}
 	p, ok := opt.Prev.Get(n.Path)
 	if !ok || p.Kind != File || (p.Mode != n.Mode && !n.meta) || p.Size != n.Size || p.MtimeNs != n.MtimeNs || p.Digest == "" {
 		return nil, false
@@ -180,28 +187,84 @@ func reusable(n *scanned, opt ScanOptions, paged bool) (*Node, bool) {
 	if paged && len(p.Pages) == 0 && p.Size != 0 {
 		return nil, false
 	}
-	if opt.Since > 0 && n.ctime >= opt.Since && !n.meta {
+	if opt.Since > 0 && n.ctime >= opt.Since {
 		return nil, false
 	}
 	return p, true
+}
+
+// metaSource is the node whose content a metadata-only entry has: the
+// lower file it redirects to (by path or content digest), if its size
+// matches.
+func metaSource(n *scanned, prev *Tree, paged bool, lower *Tree, byDigest map[string]*Node) (*Node, bool) {
+	var p *Node
+	if n.fromDigest != "" {
+		p = byDigest[n.fromDigest]
+	} else {
+		from := n.Path
+		if n.from != "" {
+			from = n.from
+		}
+		t := lower
+		if t == nil {
+			t = prev
+		}
+		if t != nil {
+			p, _ = t.Get(from)
+		}
+	}
+	if p == nil || p.Kind != File || p.Size != n.Size || p.Digest == "" || (paged && len(p.Pages) == 0 && p.Size != 0) {
+		return nil, false
+	}
+	return p, true
+}
+
+// digestIndex maps the content digests of the trees' files to a node
+// holding them (for metadata-only entries redirecting by digest).
+func digestIndex(paged bool, trees ...*Tree) map[string]*Node {
+	out := map[string]*Node{}
+	for _, t := range trees {
+		if t == nil {
+			continue
+		}
+		ns := t.Nodes()
+		for i := range ns {
+			n := &ns[i]
+			if n.Kind != File || n.Digest == "" || (paged && len(n.Pages) == 0 && n.Size != 0) {
+				continue
+			}
+			if _, ok := out[n.Digest]; !ok {
+				out[n.Digest] = n
+			}
+		}
+	}
+	return out
 }
 
 // hashNodes sets digest and pages of the files among nodes: reused from
 // opt.Prev when unchanged, else read (and paged into opt.Sink). Files
 // removed meanwhile get Kind 0.
 func hashNodes(dir string, nodes []*scanned, opt ScanOptions, st *ScanStats) error {
-	return readFiles(dir, reuseNodes(nodes, opt, st), opt, st)
+	return readFiles(dir, reuseNodes(nodes, opt, nil, st), opt, st)
 }
 
-// reuseNodes takes digest and pages of unchanged files from opt.Prev and
-// returns the files that must be read.
-func reuseNodes(nodes []*scanned, opt ScanOptions, st *ScanStats) []*Node {
+// reuseNodes takes digest and pages of unchanged files from opt.Prev
+// (metadata-only entries from lower) and returns the files that must be
+// read.
+func reuseNodes(nodes []*scanned, opt ScanOptions, lower *Tree, st *ScanStats) []*Node {
 	var read []*Node
+	var byDigest map[string]*Node
+	for _, n := range nodes {
+		if n.fromDigest != "" {
+			byDigest = digestIndex(opt.Sink != nil, lower, opt.Prev)
+			break
+		}
+	}
 	for _, n := range nodes {
 		if n.Kind != File {
 			continue
 		}
-		if p, ok := reusable(n, opt, opt.Sink != nil); ok {
+		if p, ok := reusable(n, opt, opt.Sink != nil, lower, byDigest); ok {
 			n.Digest, n.Pages = p.Digest, p.Pages
 			st.Reused++
 			continue
