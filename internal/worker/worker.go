@@ -22,6 +22,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/traumventures/cloudsourced/internal/auth"
 	"github.com/traumventures/cloudsourced/internal/cas"
+	"github.com/traumventures/cloudsourced/internal/labels"
 	"github.com/traumventures/cloudsourced/internal/machine"
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/proto"
@@ -475,10 +476,13 @@ func (s *Worker) statusOnly() proto.Status {
 		r := se.req.Grant.Reserve
 		st.UsedCPU += r.CPU
 		st.UsedMemory += r.Memory
-		st.Measured.Memory += s.cg.current(se.cgroup)
+		cur := s.cg.current(se.cgroup)
+		st.Measured.Memory += cur
+		_, cpuSec := s.cg.usage(se.cgroup)
 		st.Sessions = append(st.Sessions, proto.Session{
 			ID: se.id, Repo: se.req.Repo, Argv: se.req.Argv, Started: se.started.Unix(),
-			CPU: r.CPU, Memory: r.Memory, Lease: se.req.Lease,
+			CPU: r.CPU, Memory: r.Memory, Lease: se.req.Lease, Labels: labels.Clean(se.req.Labels),
+			UsedMemory: cur, CPUSeconds: cpuSec,
 		})
 	}
 	st.Measured.CPU = s.cpuBusyLocked()

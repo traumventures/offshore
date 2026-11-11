@@ -36,6 +36,7 @@ type Repo struct {
 	Services    map[string]Service `toml:"services"`
 	Outputs     Outputs            `toml:"outputs"`
 	Editor      Editor             `toml:"editor"`
+	Prewarm     Prewarm            `toml:"prewarm"`
 
 	// Root is the absolute directory containing the configuration file.
 	Root string `toml:"-"`
@@ -180,6 +181,15 @@ const (
 	OutputsEager = "eager"
 	OutputsFuse  = "fuse"
 )
+
+// Prewarm configures `cloudsourced prewarm` (also run by the git
+// post-checkout hook of `cloudsourced hooks install`).
+type Prewarm struct {
+	// Run is an optional warm-up command run remotely after the machine
+	// is leased and the sources are synced, e.g. ["cargo", "check",
+	// "--workspace", "--tests"]. Empty: only lease, start and sync.
+	Run []string `toml:"run"`
+}
 
 // Editor configures editor integration.
 type Editor struct {

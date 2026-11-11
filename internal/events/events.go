@@ -89,6 +89,10 @@ type Event struct {
 	Pressure *scheduler.Pressure  `json:"pressure,omitempty"` // PSI some avg10, 0..1
 	Sessions int                  `json:"sessions,omitempty"`
 
+	// Labels describe who ran a task (worktree, repo, branch, user, agent
+	// and free labels; see internal/labels). Set on task events.
+	Labels map[string]string `json:"labels,omitempty"`
+
 	// TraceID correlates the event with a distributed trace.
 	TraceID string `json:"trace_id,omitempty"`
 }

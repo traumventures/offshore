@@ -43,6 +43,9 @@ type Report struct {
 	// waited for CPU (or memory): the price of overcommit and neighbours.
 	CPUStallShare    float64 `json:"cpu_stall_share"`
 	MemoryStallShare float64 `json:"memory_stall_share"`
+	// Groupings attribute cost, session hours, queue wait and contention
+	// to session labels (default: by agent and by worktree).
+	Groupings []Grouping `json:"groupings,omitempty"`
 }
 
 // SizeSamples aggregates the utilisation samples of machines of one size.
@@ -295,24 +298,14 @@ func Compute(evs []events.Event, from, to time.Time) Report {
 				}
 				r.Cache.Counters[k] += v
 			}
-			end := ev.Time
-			start := end.Add(-u.Wall)
-			s, e, ok := clip(start, end, from, to)
-			if ok && u.Wall > 0 {
-				h := e.Sub(s).Hours()
-				frac := e.Sub(s).Seconds() / u.Wall.Seconds()
+			if h, cost, cpuH, _, ok := taskShare(ev, from, to); ok {
 				r.Utilisation.SessionHours += h
-				r.Utilisation.UsedCPUHours += u.CPUSeconds / 3600 * frac
+				r.Utilisation.UsedCPUHours += cpuH
 				r.Utilisation.PeakMemGiBH += h * float64(u.PeakMemory) / gib
-				share := 1.0
 				if res := ev.Reserve; res != nil {
 					r.Utilisation.ReservedCPUHours += h * res.CPU
 					r.Utilisation.ReservedMemGiBH += h * float64(res.Memory) / gib
-					if c := ev.Capacity; c != nil && c.CPU > 0 && c.Memory > 0 {
-						share = math.Min(1, (res.CPU/c.CPU+float64(res.Memory)/float64(c.Memory))/2)
-					}
 				}
-				cost := h * ev.Price * share
 				r.Cost.Attributed += cost
 				repo := ev.Repo
 				if repo == "" {
@@ -346,6 +339,9 @@ func Compute(evs []events.Event, from, to time.Time) Report {
 	r.Cost.BySize = sorted(bySize, true)
 	r.Cost.ByRepo = sorted(byRepo, true)
 	r.Samples = sampleStats(evs, from, to)
+	for _, by := range DefaultGroups {
+		r.Groupings = append(r.Groupings, Groups(evs, from, to, by))
+	}
 	var wall, cpuStall, memStall float64
 	for _, ev := range evs {
 		if ev.Type == events.TaskEnd && ev.Usage != nil && !ev.Time.Before(from) && !ev.Time.After(to) {
@@ -548,4 +544,5 @@ func (r Report) Write(w io.Writer) {
 	e := r.Estimator
 	fmt.Fprintf(w, "estimator: peak/estimate memory p50 %.2f, p95 %.2f, mean %.2f, MAPE %.0f%%; %d of %d above estimate, %d OOM; busy cores/estimate %.2f\n",
 		e.RatioP50, e.RatioP95, e.RatioMean, 100*e.MAPE, e.Under, e.Samples, e.OOM, e.CPURatio)
+	WriteGroups(w, r.Groupings)
 }

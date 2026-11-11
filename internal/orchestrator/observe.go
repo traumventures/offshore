@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"github.com/traumventures/cloudsourced/internal/labels"
 	"sync"
 	"time"
 
@@ -173,7 +174,7 @@ func (o *Orchestrator) endAcquire(ctx context.Context, span trace.Span, req Requ
 		Type: events.TaskPlaced, Task: lease.ID, Repo: req.RepoID, Env: req.EnvHash, Key: req.Key,
 		Arrival: arrival.UTC(), WaitMs: wait.Milliseconds(), Placement: kind, Reason: lease.Reason,
 		Machine: lease.MachineID, Provider: lease.Provider, Size: lease.Size, Price: lease.PricePerHour,
-		TraceID: tracing.TraceID(ctx),
+		TraceID: tracing.TraceID(ctx), Labels: labels.Clean(req.Labels),
 	}
 	need, limit := req.Need, req.Limit
 	ev.Need = &need

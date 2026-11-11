@@ -351,9 +351,12 @@ Then just use the tool:
 ```sh
 cargo build
 cargo test
-cloudsourced status                 # machines, sessions, cost today (--json)
+cloudsourced status                 # machines, sessions (with labels), cost today (--json)
+cloudsourced top                    # live view: graphs, machines, sessions, queue, cost
 cloudsourced why                    # last run: local/remote and why, machine,
-                                    # placement, timings, usage (N, list, --json)
+                                    # placement, timings, usage, labels (N, list, --json)
+cloudsourced prewarm                # start the remote environment of this repo now
+cloudsourced hooks install          # prewarm automatically on new worktrees
 cloudsourced fetch 'target/debug/deps/*.so'   # lazy outputs
 cloudsourced outputs mount          # or browse target/ of the remote build
 cloudsourced down                   # destroy machines and caches
@@ -671,11 +674,78 @@ orchestrator.reconcile > pool.stop / pool.destroy (background, provider latency)
 Only the subcommand and the names of flags of a tool's arguments are
 recorded, never their values, positional arguments, environment or tokens.
 
+### Agents, worktrees and labels
+
+Every session carries labels: `worktree` (the repository root, i.e. the
+worktree), `repo` (name of the main repository, shared by its worktrees),
+`branch`, `user` (client config `user`) and `agent`. They are computed by the
+proxy (git metadata is read from `.git` files, git is not run), travel with
+the session to the daemon, the orchestrator and the worker, and are recorded
+in the event log (`labels` of `task_placed`/`task_end`) and the run log.
+`cloudsourced why`, `status`, `top` and `report` show them.
+
+`agent` is `CLOUDSOURCED_AGENT` if set, otherwise detected from the first
+present variable: `CODEX_THREAD_ID` (codex, the thread id also becomes
+`agent_session`), `CODEX_SANDBOX`, `CODEX_MANAGED_BY_NPM` (codex),
+`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT` (claude-code), `CURSOR_AGENT`
+(cursor), `GEMINI_CLI` (gemini-cli), `OPENCODE` (opencode), `AIDER_MODEL`
+(aider), `AMP_THREAD_ID` (amp, also `agent_session`). Only these names and
+ids are read, never other environment values. `CLOUDSOURCED_LABELS="task=WP-7,team=infra"`
+adds free labels. Keys are `[a-z0-9_.-]{1,32}`, values at most 200
+characters, at most 16 labels; servers clean labels again on receipt.
+Labels never influence placement.
+
+`cloudsourced report` groups cost (attributed by reserved share, as per
+repository), session-hours, CPU-hours, requests and failures, queue wait
+p50/p95/max and contention (share of wall time stalled on CPU/memory) by
+agent and by worktree; `--by agent|worktree|branch|repo|user` (comma
+separated) chooses the dimensions. Events from before labels fall back to
+the repository id; sessions without an agent count as `(human)`.
+
+**Prewarm.** `cloudsourced prewarm` starts the remote environment of the
+current repository in the background (log `<state>/prewarm.log`): image
+ensure, machine lease and start, source sync and the build slot, then an
+optional warm-up command from the repository configuration:
+
+```toml
+[prewarm]
+run = ["cargo", "check", "--workspace", "--tests"]
+```
+
+`--wait` runs in the foreground, `--force` skips the warm check. A prewarm
+is skipped when a running machine of the environment already has a warm
+build slot of the repository and (with `run`) the warm-up succeeded for the
+same commit, environment and command within 12 hours. Only one prewarm per
+repository runs at a time. Prewarm sessions are labelled `purpose=prewarm`
+(shown in `why` and `report`), never fall back to local execution and are
+not counted as user runs in the daemon metrics. `cloudsourced hooks install`
+installs a git `post-checkout` hook into the repository's hooks directory
+(shared by all worktrees, honours `core.hooksPath`) that calls
+`cloudsourced prewarm --quiet` after branch checkouts, which includes `git
+worktree add`. An existing hook is chained (renamed to
+`post-checkout.cloudsourced-chain`, runs first, its exit status is kept);
+install is idempotent and `cloudsourced hooks uninstall` restores the
+previous hook.
+
+**Top.** `cloudsourced top` is a full-screen view in the style of zenith:
+history graphs of the pool (busy cores, session memory, sessions plus queue,
+cost per hour; seeded from the `machine_sample` events and extended by the
+2 s status polls, kept in memory for 3 h), one line per machine (busy-core
+bar and history, memory bar, PSI, sessions, price), a sortable session table
+(machine, agent, worktree, branch, elapsed, busy/reserved cores,
+used/reserved memory, command) and the queue. Keys: ↑/↓ PgUp/PgDn select,
+`e c m a w n` sort by elapsed, CPU, memory, agent, worktree, machine (again:
+reverse), `r` reverse, `+`/`-` zoom the graph window (1m..3h), `q` quit.
+`cloudsourced top --once [--width N] [--window 10m]` prints one plain text
+frame without colors, for agents and scripts. Busy cores per session come
+from the session's cgroup CPU time between polls (`Status.Sessions[]
+cpu_seconds`, `used_memory`).
+
 **Event log and reports.** Independent of tracing, the orchestrator writes
 an analysis event log (`events-YYYY-MM-DD.jsonl` in its state directory,
 `[telemetry] events_retention_days`, default 30) of task and machine events.
-`cloudsourced report [--since 7d] [--json]` shows cost per day, repository
-and size, utilisation and overprovisioning, queue wait p50/p95, warm vs.
+`cloudsourced report [--since 7d] [--by agent,worktree] [--json]` shows cost per day, repository
+and size, per agent/worktree/branch/repo/user, utilisation and overprovisioning, queue wait p50/p95, warm vs.
 cold caches and estimator accuracy; `cloudsourced sim export --since 7d -o
 trace.json` converts the real runs into a simulator trace (both work
 embedded and remote, via the control plane's `POST /v1/events`, API key
