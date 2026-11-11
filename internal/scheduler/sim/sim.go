@@ -132,8 +132,10 @@ type job struct {
 }
 
 type run struct {
-	j       *job
-	reserve scheduler.Resources
+	j        *job
+	reserve  scheduler.Resources
+	expected time.Duration // the policy's expected run time (release forecast)
+	warm     bool
 	work    float64 // remaining seconds at full speed
 	speed   float64
 	seq     int
@@ -159,6 +161,7 @@ type machine struct {
 
 type sim struct {
 	o        Options
+	fc       *scheduler.Forecast
 	now      time.Time
 	machines []*machine
 	queue    []*job
@@ -173,7 +176,7 @@ type sim struct {
 // Run simulates trace under o.
 func Run(trace Trace, o Options) Report {
 	o.defaults()
-	s := &sim{o: o, now: trace.Start, recent: map[string]time.Time{}}
+	s := &sim{o: o, now: trace.Start, recent: map[string]time.Time{}, fc: scheduler.NewForecast()}
 	s.r = Report{Name: o.Name, Jobs: len(trace.Jobs), Actions: map[string]int{}}
 	jobs := make([]*job, len(trace.Jobs))
 	last := 0.0
@@ -237,7 +240,7 @@ func Run(trace Trace, o Options) Report {
 				}
 				m.warm[r.j.Repo] = true
 				s.o.Estimator.Observe(r.j.Repo, scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), CPUSeconds: r.j.CPU * r.j.Duration,
-					Wall: r.j.runFor})
+					Wall: r.j.runFor, Warm: r.warm, Provider: m.prov})
 			}
 			m.runs = kept
 			if len(m.runs) == 0 && m.idle.IsZero() && m.state == scheduler.Running {
@@ -361,23 +364,31 @@ func (s *sim) advance(d time.Duration) {
 func (s *sim) task(j *job) scheduler.Task {
 	fallback := scheduler.Resources{CPU: j.CPU, Memory: int64(j.Memory)}
 	return scheduler.Task{ID: fmt.Sprintf("j%d", j.n), EnvHash: j.Env, RepoID: j.Repo, Key: j.Repo,
-		Request: s.o.Estimator.Estimate(j.Repo, fallback), Since: j.since}
+		Request: s.o.Estimator.Estimate(j.Repo, fallback), Since: j.since, Profile: s.o.Estimator.Profile(j.Repo)}
 }
 
 // pool is the policy's view, built like the orchestrator's poolLocked.
 func (s *sim) pool() scheduler.Pool {
-	f := scheduler.Pool{Now: s.now, Sizes: s.o.Sizes, Recent: map[string]time.Time{}}
+	f := scheduler.Pool{Now: s.now, Sizes: s.o.Sizes, Recent: map[string]time.Time{}, Providers: map[string]scheduler.ProviderState{}}
 	for env, t := range s.recent {
 		f.Recent[env] = t
+	}
+	for _, sz := range s.o.Sizes {
+		f.Providers[sz.Provider] = scheduler.ProviderState{Boot: latency(s.o.Boot, sz.Provider, 60*time.Second),
+			Start: latency(s.o.Start, sz.Provider, 20*time.Second)}
 	}
 	for _, m := range s.machines {
 		sm := scheduler.Machine{ID: m.id, Provider: m.prov, EnvHash: m.env, Size: m.size.Name, State: m.state,
 			Draining: m.draining, Capacity: m.size.Capacity, CreatedAt: m.created, ExpiresAt: m.expires}
+		if m.state == scheduler.Starting {
+			sm.ReadyAt = m.readyAt
+		}
 		if m.state == scheduler.Running {
 			var cpu float64
 			var mem int64
 			for _, r := range m.runs {
 				sm.Reserved = sm.Reserved.Add(r.reserve)
+				sm.Releases = append(sm.Releases, scheduler.Release{At: r.start.Add(r.expected), Res: r.reserve, Start: r.start})
 				cpu += r.j.CPU
 				mem += int64(r.j.PeakMemory)
 			}
@@ -421,7 +432,12 @@ func (s *sim) settle(tick bool) {
 	if len(s.queue) == 0 && !tick {
 		return
 	}
-	s.execute(s.o.Policy.Plan(s.pool()))
+	f := s.pool()
+	s.fc.Observe(f)
+	s.fc.Apply(&f)
+	acts := s.o.Policy.Plan(f)
+	s.fc.Note(f, acts)
+	s.execute(acts)
 	s.placeQueued()
 }
 
@@ -440,7 +456,7 @@ func (s *sim) placeQueued() {
 		case scheduler.Assign:
 			if m := s.find(pl.Machine); m != nil && m.state == scheduler.Running {
 				s.dequeue(j)
-				s.assign(m, j, pl.Grant.Reserve)
+				s.assign(m, j, pl.Grant.Reserve, expected(pl, t, m))
 			}
 		case scheduler.Reject:
 			s.dequeue(j)
@@ -453,17 +469,29 @@ func (s *sim) dequeue(j *job) {
 	s.queue = slices.DeleteFunc(s.queue, func(o *job) bool { return o == j })
 }
 
-func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources) {
+// expected is the run time the policy expects for a placement.
+func expected(pl scheduler.Placement, t scheduler.Task, m *machine) time.Duration {
+	if pl.Expected > 0 {
+		return pl.Expected
+	}
+	if m.warm[t.RepoID] {
+		return t.Profile.High(t.Profile.WarmRun())
+	}
+	return t.Profile.High(t.Profile.ColdRun(m.prov))
+}
+
+func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.Duration) {
 	j.wait += s.now.Sub(j.since)
 	j.attempts++
 	work := j.Duration
-	if m.warm[j.Repo] {
+	warm := m.warm[j.Repo]
+	if warm {
 		s.r.WarmHits++
 	} else {
 		work *= 1 + s.o.ColdPenalty
 	}
 	s.seq++
-	m.runs = append(m.runs, &run{j: j, reserve: reserve, work: work, seq: s.seq, start: s.now})
+	m.runs = append(m.runs, &run{j: j, reserve: reserve, work: work, seq: s.seq, start: s.now, expected: exp, warm: warm})
 	m.idle = time.Time{}
 	if !s.o.Swap {
 		s.oom(m)
