@@ -120,8 +120,13 @@ Per decision:
   Drained machines are undrained first.
 - **Consolidate**: as below, on the forecast peak of the last 5 minutes,
   held for 2 minutes after a scale-up, never while anything is started.
+  These flap guards are scaled by `cost_optimization`: full up to 0.5,
+  fading out linearly to none at 1 (a drain followed by a create costs boot
+  latency and a cold cache, keeping a lightly used machine costs money; at
+  1 only money counts and the pool consolidates on the present
+  reservation, like the binpack policy).
 - **Idle stop**: an emptied consolidated machine is undrained when the
-  others cannot take the forecast demand.
+  others cannot take the forecast demand (while the flap guard is active).
 
 The orchestrator feeds the model: `Task.Profile` (estimator), expected
 releases (lease start + placement's expected run), provider latencies and
@@ -137,6 +142,42 @@ others, never within 2 minutes of a scale-up, a drained machine is undrained
 before anything is started or created, and an emptied consolidated machine
 whose demand the others cannot take is undrained instead of stopped (regression trace `internal/scheduler/sim/testdata/prod-flap.json`, test
 `TestRegressionDrainThenCreate`).
+
+### cost_optimization sweep (Nov 2026)
+
+`offshore sim -config internal/scheduler/sim/testdata/pool.toml -sweep
+<trace>` (c7a sizes, static estimator, boot 60 s, start 20 s, queue_timeout
+2m); binpack for reference:
+
+| trace | binpack | r=0 | r=0.5 | r=0.6 | r=0.7 | r=0.8 | r=0.9 | r=1 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| team-week cost $ | 60.03 | 66.33 | 65.68 | 64.26 | 63.92 | 61.72 | 60.02 | **58.12** |
+| team-week turn p50 | 3m9s | 3m8s | 3m11s | 3m9s | 3m10s | 3m12s | 3m14s | 3m16s |
+| team-week flaps | 171 | 19 | 20 | 21 | 24 | 37 | 42 | 140 |
+| small-week cost $ | 17.92 | 20.56 | 20.42 | 20.08 | 20.02 | 19.26 | 18.78 | **17.38** |
+| small-week turn p50 | 2m21s | 2m19s | 2m21s | 2m21s | 2m24s | 2m25s | 2m25s | 2m25s |
+| small-week flaps | 35 | 12 | 11 | 12 | 12 | 10 | 9 | 16 |
+| prod-flap cost $ | 1.27 | 1.76 | 1.66 | 1.62 | 1.52 | 1.39 | 1.40 | **1.26** |
+| prod-flap turn p50 | 21s | 16s | 16s | 16s | 16s | 16s | 17s | 21s |
+| prod-flap flaps | 7 | 1 | 0 | 0 | 0 | 0 | 2 | 6 |
+
+Why the earlier model was more expensive than binpack and the knob barely
+moved cost: swapping the model's parts for binpack's one at a time showed
+that placement (machine cost share) and scale-out (sizing by the timeline)
+are not the cause (the model's scale-out is cheaper than binpack's), but
+consolidation is: the forecast peak, the hold after a scale-up, "never while
+anything starts" and undraining emptied machines on the forecast kept
+lightly used machines running, independent of `cost_optimization`, which
+only weighed placement and scale-out choices. With the guards scaled by the
+knob, `cost_optimization = 1` is cheaper than binpack on every trace and
+0.5..1 is a real cost/time frontier (cost down, turnaround and flaps up).
+Below 0.5 the trade buys almost nothing on these traces: turnaround is
+dominated by run time, and keeping more idle capacity (tried: longer idle
+stop at low values) raised cost by up to 30 % for a few seconds of p50.
+`TestCheapestBeatsBinpack` asserts r=1 <= binpack on all three traces and 0
+flaps on the production trace at 0.5; `TestRegressionDrainThenCreate` is
+unchanged. The model needs a `queue_timeout` (default 2m) to bound waiting:
+without one, cost-only decisions may leave tasks waiting indefinitely.
 
 ## Binpack policy (before the cost model)
 

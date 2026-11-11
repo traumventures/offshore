@@ -675,7 +675,7 @@ func (p Default) idleStop(st *planState) map[string]int {
 			continue
 		}
 		keep, why := running[m.EnvHash] <= p.warmTarget(f, m.EnvHash), "warm pool"
-		if !keep && consolidated && p.model() && !p.othersAbsorb(f, m) {
+		if !keep && consolidated && p.model() && p.flapGuard() > 0 && !p.othersAbsorb(f, m) {
 			// The demand of the window needs it: undrain instead of
 			// stopping now and starting again in a minute.
 			keep, why = true, "demand forecast"

@@ -131,6 +131,10 @@ queue_timeout = "3m"
 
 [scheduler]
 estimator = "static"
+# local-docker machines share the host's file system, mostly filled by
+# unrelated data: the default budget (90% of the disk) would prune the
+# build slots cold after every session on a full host.
+disk_budget = "100%"
 
 [[machine.setup]]
 run = "echo provisioned-by-pool > /cache/pool-provision"

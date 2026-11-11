@@ -61,8 +61,15 @@ poll 60 sh -c '[ -z "$('"$DOCKER"' ps -aq --filter "name=^$1\$")" ]' _ "$NAME" >
 check "machine destroyed after max_lifetime" test -z "$(docker_ ps -aq --filter "name=^$NAME\$")"
 poll 30 sh -c '[ -z "$('"$DOCKER"' volume ls -q --filter "name=cs-cache-$1")" ]' _ "${NAME#cs-}" >/dev/null
 check "its build cache volume is gone" test -z "$(docker_ volume ls -q --filter "name=cs-cache-${NAME#cs-}")"
+# The orchestrator saved the build slot before destroying the machine; the
+# fresh machine restores it (the slot is younger than the build TTL on the
+# worker's real clock; only the orchestrator's test clock moved 25h).
 out="$(OFFSHORE_VERBOSE=1 run cargo build 2>&1)"
-check "fresh machine builds with an empty build cache" contains "$out" "Compiling itoa"
+check "fresh machine restores the build slot snapshot" contains "$out" "(restore)"
+check "restored build slot is warm" eq "$(echo "$out" | grep -c Compiling)" 0
+run cargo clean -q -p itoa >/dev/null 2>&1
+out="$(OFFSHORE_VERBOSE=1 run cargo build 2>&1)"
+check "fresh machine recompiles a cleaned dependency" contains "$out" "Compiling itoa"
 check "fresh machine gets compiler cache hits for dependencies" test "$(sccache_hits "$out")" -ge 1
 
 out="$(cd "$PROJ" && cs outputs unmount 2>&1)"
