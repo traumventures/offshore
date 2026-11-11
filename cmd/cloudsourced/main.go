@@ -61,6 +61,10 @@ Usage:
   cloudsourced reconcile                   reload the pool configuration, apply the policy now
   cloudsourced daemon run|stop|status      manage the local daemon
   cloudsourced env [hash|dockerfile]       show the environment image of this repo
+  cloudsourced env build [--wait]          build the environment image now (in the background)
+  cloudsourced env status [--json]         where the environment image exists, last prebuild
+  cloudsourced init [--write [--force]]    generate .cloudsourced.toml from Cargo, CI and Dockerfiles
+  cloudsourced doctor [--json]             check installation, configuration and connectivity
   cloudsourced editor [--mode local|lsp-remote] [vscode|zed|neovim]
                                            rust-analyzer settings for remote checks
   cloudsourced config check [--pool FILE] validate the configuration files of this mode
@@ -88,6 +92,7 @@ Environment:
   CLOUDSOURCED_AGENT=NAME         agent label of sessions (default: detected, see README)
   CLOUDSOURCED_LABELS=k=v,k=v     extra session labels (status, top, why, report --by)
   CLOUDSOURCED_VERBOSE=1          print the machine used for each run
+  CLOUDSOURCED_NO_RETRY=1         no second attempt when the machine is lost mid-run
   CLOUDSOURCED_SPLIT=0            run cargo test / nextest entirely remotely (no local test run)
   CLOUDSOURCED_PORTS=8080,3000:3001  forward local ports into the session
   CLOUDSOURCED_CONFIG=FILE        client configuration (default ~/.config/cloudsourced/config.toml)
@@ -213,6 +218,10 @@ func run(cmd string, args []string) error {
 		return debugCmd(args)
 	case "env":
 		return envCmd(args)
+	case "init":
+		return initCmd(args, os.Stdout)
+	case "doctor":
+		return doctorCmd(args, os.Stdout)
 	case "editor":
 		return editorCmd(args)
 	case "outputs":
@@ -490,6 +499,9 @@ func envCmd(args []string) error {
 	if err != nil {
 		return fmt.Errorf("no %s found", config.RepoFileName)
 	}
+	if len(args) > 0 && (args[0] == "build" || args[0] == "status") {
+		return envDaemonCmd(root, args[0], args[1:])
+	}
 	repo, err := config.LoadRepo(root)
 	if err != nil {
 		return err
@@ -508,6 +520,94 @@ func envCmd(args []string) error {
 	}
 	fmt.Printf("hash:  %s\nimage: %s\n", plan.Hash, plan.Tag)
 	return nil
+}
+
+// envDaemonCmd serves `env build` (prebuild through the daemon) and
+// `env status`.
+func envDaemonCmd(root, sub string, args []string) error {
+	wait, asJSON := false, false
+	for _, a := range args {
+		switch {
+		case a == "--wait" && sub == "build":
+			wait = true
+		case a == "--json" && sub == "status":
+			asJSON = true
+		default:
+			return errors.New("usage: cloudsourced env build [--wait] | env status [--json]")
+		}
+	}
+	ctx := context.Background()
+	if err := daemon.EnsureDaemon(ctx); err != nil {
+		return err
+	}
+	if sub == "build" {
+		raw, err := daemon.Call(ctx, daemon.Request{Op: "env-build", Root: root, Wait: wait}, os.Stderr)
+		if err != nil {
+			return err
+		}
+		var b daemon.Prebuild
+		json.Unmarshal(raw, &b)
+		switch {
+		case wait:
+			fmt.Printf("environment image %s ready\n", b.Tag)
+		case b.Running:
+			fmt.Printf("building environment image %s in the background (cloudsourced env status)\n", b.Tag)
+		default:
+			fmt.Printf("environment image %s already built\n", b.Tag)
+		}
+		return nil
+	}
+	raw, err := daemon.Call(ctx, daemon.Request{Op: "env-status", Root: root}, os.Stderr)
+	if err != nil {
+		return err
+	}
+	var st daemon.EnvStatus
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return err
+	}
+	if asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(st)
+	}
+	fmt.Printf("hash:  %s\nimage: %s\n", st.Hash, st.Tag)
+	fmt.Println("pool: ", describeEnvState(&st))
+	if b := st.Prebuild; b != nil {
+		state := "done"
+		switch {
+		case b.Running:
+			state = "running for " + time.Since(b.Started).Round(time.Second).String()
+		case b.Error != "":
+			state = "failed: " + b.Error
+		}
+		fmt.Printf("prebuild: %s (%s, started %s)\n", state, b.Trigger, b.Started.Format(time.TimeOnly))
+	}
+	return nil
+}
+
+// describeEnvState explains where an environment image exists.
+func describeEnvState(st *daemon.EnvStatus) string {
+	switch p := st.Pool; {
+	case st.PoolErr != "":
+		return "unknown (" + st.PoolErr + ")"
+	case p == nil:
+		return "unknown (the pool does not report image state)"
+	case p.Building:
+		return "building now"
+	case len(p.Missing) == 0 && len(p.Ready) > 0:
+		return "image exists on " + strings.Join(p.Ready, ", ")
+	case !p.Known:
+		return "not known yet: the next run uploads the build context and builds the image (or run `cloudsourced env build`)"
+	default:
+		s := "will be built for " + strings.Join(p.Missing, ", ") + " when a machine needs it (or run `cloudsourced env build`)"
+		if len(p.Ready) > 0 {
+			s += "; exists on " + strings.Join(p.Ready, ", ")
+		}
+		if p.Error != "" {
+			s += "; last prebuild failed: " + p.Error
+		}
+		return s
+	}
 }
 
 // fetch copies output files of the most recent remote build into the

@@ -30,6 +30,14 @@ type root struct {
 	overflow bool
 	lastUse  time.Time
 	closed   bool
+	// onChange receives the paths of every published delta.
+	onChange func(paths []string)
+}
+
+func (r *root) setOnChange(fn func([]string)) {
+	r.mu.Lock()
+	r.onChange = fn
+	r.mu.Unlock()
 }
 
 func rulesFor(r *config.Repo, rootPath string) manifest.Rules {
@@ -238,6 +246,14 @@ func (r *root) publishLocked(d manifest.Delta) {
 	}
 	for s := range r.subs {
 		s.push(d)
+	}
+	if r.onChange != nil {
+		paths := make([]string, 0, len(d.Upserts)+len(d.Deletes))
+		for _, e := range d.Upserts {
+			paths = append(paths, e.Path)
+		}
+		paths = append(paths, d.Deletes...)
+		r.onChange(paths)
 	}
 }
 

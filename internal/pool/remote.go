@@ -125,7 +125,15 @@ func (r *Remote) callJSON(ctx context.Context, path string, in any, progress io.
 // EnsureEnv asks the control plane for the image and uploads the build
 // context only when it does not have it yet.
 func (r *Remote) EnsureEnv(ctx context.Context, env Env, progress io.Writer) error {
-	q := pathEnv + "?" + url.Values{"hash": {env.Hash}, "tag": {env.Tag}}.Encode()
+	return r.ensureEnv(ctx, env, progress, nil)
+}
+
+func (r *Remote) ensureEnv(ctx context.Context, env Env, progress io.Writer, extra url.Values) error {
+	v := url.Values{"hash": {env.Hash}, "tag": {env.Tag}}
+	for k, vs := range extra {
+		v[k] = vs
+	}
+	q := pathEnv + "?" + v.Encode()
 	var res envResult
 	if err := r.call(ctx, q, http.NoBody, "", progress, &res); err != nil {
 		return err

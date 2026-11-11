@@ -147,6 +147,9 @@ func printRun(w io.Writer, r events.Run) {
 	if r.Error != "" {
 		fmt.Fprintf(w, "  error      %s\n", r.Error)
 	}
+	if r.LostMachine != "" {
+		fmt.Fprintf(w, "  retried    machine %s was lost mid-run; ran again on %s\n", r.LostMachine, r.Machine)
+	}
 	t := r.Timings
 	if r.Mode == events.Remote {
 		fmt.Fprintln(w, "  timings")
