@@ -17,7 +17,7 @@ IMAGE=${IMAGE:-rust:1-slim-bookworm}
 NEXTEST_REV=${NEXTEST_REV:-2cf55ec}
 D="sudo -n docker"
 mkdir -p "$WORK"
-(cd "$repo" && CGO_ENABLED=0 go build -o "$WORK/tierfs" ./test/bench/tiers/tierfs)
+(cd "$repo" && CGO_ENABLED=0 go build -o "$WORK/tierfs" ./test/bench/tiers/tierfs && CGO_ENABLED=0 go build -o "$WORK/anyfsbench" ./test/bench/tiers/anyfsbench)
 cp "$here/bench.sh" "$here/check.sh" "$WORK/"
 if [ ! -d "$WORK/src" ]; then
   git clone -q https://github.com/nextest-rs/nextest "$WORK/src"
@@ -42,6 +42,8 @@ if [ $# -gt 0 ]; then run "$@"; else
   OVL=$ovl run layout_B Bnopt -passthrough=false
   OVL=$ovl run layout_D D            # lazy fetch, 5 ms/object, 200 MB/s
   OVL=$ovl run layout_D Dpf -prefetch-max-size 65536
+  run layout_E                       # anyfs (real implementation), warm slot
+  run layout_F                       # anyfs, cold lazy restore from a slow store
   $D exec tierbench bash /work/check.sh
   run layout_freshclone              # last: touches every source file
 fi
