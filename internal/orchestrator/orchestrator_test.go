@@ -171,7 +171,7 @@ func (f *fakeProvider) probe(_ context.Context, addr, _, token string) (proto.St
 	defer f.mu.Unlock()
 	f.tokens = append(f.tokens, token)
 	for id, m := range f.machines {
-		if m.Addr == addr && m.State == provider.Running {
+		if m.Addr == addr && m.State == provider.Running && f.status[id] != nil {
 			return *f.status[id], nil
 		}
 	}
@@ -602,5 +602,26 @@ func TestReapKeepsVolumeOfMachineBeingCreated(t *testing.T) {
 	}
 	if _, ok := f.volumes["expired"]; ok {
 		t.Fatal("expired volume survived")
+	}
+}
+
+// A running machine whose first probe fails (worker still starting) has
+// no status: refresh must not dereference it. It panicked in the meter
+// update while holding the orchestrator lock, and the acquiring session's
+// deferred cleanup then deadlocked the daemon (live AWS run).
+func TestRefreshFirstProbeFails(t *testing.T) {
+	f := newFake()
+	o := newTestOrch(t, f, nil)
+	f.mu.Lock()
+	f.machines["booting"] = &provider.Machine{ID: "booting", State: provider.Running, Addr: "198.51.100.1:7443"}
+	f.mu.Unlock()
+	if err := o.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	o.mu.Lock()
+	m := o.machines["booting"]
+	o.mu.Unlock()
+	if m == nil || m.Status != nil {
+		t.Fatalf("machine %+v", m)
 	}
 }
