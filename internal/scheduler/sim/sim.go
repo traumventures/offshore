@@ -14,6 +14,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/scheduler"
 )
 
@@ -147,6 +148,13 @@ type Report struct {
 	Resizes      int           `json:"resizes"`
 	Evictions    int           `json:"evictions"` // slots dropped because a disk was full
 	EgressCost   float64       `json:"egress_cost"`
+	// Volumes: cache volumes created, attached warm from the detached pool
+	// (keep_detached), expired detached; VolumeCost is their storage (also
+	// in Cost).
+	VolumesCreated int     `json:"volumes_created"`
+	VolumeAttaches int     `json:"volume_attaches"`
+	VolumesExpired int     `json:"volumes_expired"`
+	VolumeCost     float64 `json:"volume_cost"`
 	// Flaps counts machines created or started within two minutes after a
 	// machine of the same environment was drained or stopped by
 	// consolidation (the production flapping case).
@@ -196,6 +204,18 @@ type machine struct {
 	swapping bool
 	disk     int64            // disk size (0 = unlimited)
 	slots    map[string]int64 // repository -> slot bytes
+	volume   string           // cache volume (medium volume)
+	resized  time.Time        // last disk resize
+}
+
+// volume is a detached cache volume kept for reuse.
+type volume struct {
+	id      string
+	prov    string
+	size    scheduler.Size
+	bytes   int64
+	slots   map[string]int64
+	expires time.Time
 }
 
 type sim struct {
@@ -204,6 +224,8 @@ type sim struct {
 	est      map[string]estimate // per repository until the next observation
 	snaps    map[string][]scheduler.Snapshot
 	calm     map[string]time.Time // env -> last consolidation drain or stop
+	vols     []*volume            // detached cache volumes
+	volIDs   int
 	now      time.Time
 	machines []*machine
 	queue    []*job
@@ -418,6 +440,22 @@ func (s *sim) advance(d time.Duration) {
 		s.memUsed += math.Min(float64(mem), float64(c.Memory)) * sec
 	}
 	s.r.MaxRunning = max(s.r.MaxRunning, running)
+	// Volumes cost storage while they exist: attached (also to stopped
+	// machines) and detached.
+	for _, m := range s.machines {
+		if m.volume != "" {
+			s.storage(m.size, m.disk, sec)
+		}
+	}
+	for _, v := range s.vols {
+		s.storage(v.size, v.bytes, sec)
+	}
+}
+
+func (s *sim) storage(sz scheduler.Size, bytes int64, sec float64) {
+	c := float64(bytes) / 1e9 * sz.Stack.Hot.PricePerGBHour() * sec / 3600
+	s.r.VolumeCost += c
+	s.r.Cost += c
 }
 
 type estimate struct {
@@ -480,6 +518,13 @@ func (s *sim) pool() scheduler.Pool {
 			}
 			sm.Sessions = len(m.runs)
 			sm.DiskTotal, sm.CanResize = m.disk, s.o.Resize
+			sm.Medium, sm.Stack, sm.Volume = m.size.Medium, m.size.Stack, m.volume
+			if m.volume != "" {
+				sm.CanResize = m.size.Volume.Max == 0 || m.disk < m.size.Volume.Max
+				if cd := m.size.Stack.Hot.ResizeCooldown; cd > 0 && !m.resized.IsZero() {
+					sm.ResizableAt = m.resized.Add(cd)
+				}
+			}
 			if len(m.slots) > 0 {
 				sm.SlotBytes = map[string]int64{}
 				for repo, b := range m.slots {
@@ -501,6 +546,9 @@ func (s *sim) pool() scheduler.Pool {
 		f.Queue = append(f.Queue, s.task(j))
 	}
 	f.Snapshots = s.snaps
+	for _, v := range s.vols {
+		f.Volumes = append(f.Volumes, scheduler.Volume{ID: v.id, Provider: v.prov, Bytes: v.bytes, SlotBytes: v.slots, ExpiresAt: v.expires})
+	}
 	for _, o := range s.o.Down {
 		at := s.start.Add(time.Duration(o.To * float64(time.Second)))
 		if s.now.Before(at) && !s.now.Before(s.start.Add(time.Duration(o.From*float64(time.Second)))) {
@@ -665,7 +713,11 @@ func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.D
 	case scheduler.SlotResize:
 		s.r.Resizes++
 		prep = scheduler.DefaultResize.Seconds()
-		m.disk = max(m.disk, slot.Bytes)
+		target := slot.Bytes
+		if m.volume != "" && m.size.Volume.Max > 0 {
+			target = min(target, m.size.Volume.Max)
+		}
+		m.disk, m.resized = max(m.disk, target), s.now
 	case scheduler.SlotRestore:
 		s.r.Restores++
 		bw := s.o.Bandwidth
@@ -675,7 +727,7 @@ func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.D
 			s.r.EgressCost += egress
 			s.r.Cost += egress
 		}
-		prep = float64(slot.Snapshot.Bytes) / float64(bw)
+		prep = math.Max(float64(slot.Snapshot.Bytes)/float64(bw), m.size.Stack.Hot.TransferTime(slot.Snapshot.Bytes).Seconds())
 		m.slots[j.Repo] = slot.Snapshot.Bytes
 		restored = true
 	case scheduler.SlotMove:
@@ -748,6 +800,7 @@ func (s *sim) reconcile() {
 			s.execute([]scheduler.Action{{Kind: scheduler.Destroy, Machine: m.id, Reason: "expired"}})
 		}
 	}
+	s.expireVolumes()
 	for env, t := range s.recent {
 		if s.now.Sub(t) > s.o.RecentTTL {
 			delete(s.recent, env)
@@ -772,6 +825,9 @@ func (s *sim) execute(acts []scheduler.Action) {
 				state: scheduler.Starting, readyAt: s.now.Add(latency(s.o.Boot, a.Size.Provider, 60*time.Second)),
 				created: s.now, expires: s.now.Add(s.o.MaxLifetime), warm: map[string]bool{}, up: s.now,
 				disk: a.Size.Capacity.Disk, slots: map[string]int64{}}
+			if a.Size.Medium == medium.Volume {
+				s.attachVolume(m, a.Volume)
+			}
 			s.machines = append(s.machines, m)
 			s.r.Machines++
 			continue
@@ -811,6 +867,7 @@ func (s *sim) execute(acts []scheduler.Action) {
 			if a.Kind == scheduler.Stop {
 				m.state = scheduler.Stopped
 			} else {
+				s.detachVolume(m)
 				s.remove(m)
 			}
 		case scheduler.Drain:
@@ -837,6 +894,59 @@ func (s *sim) saveSnapshots(m *machine) {
 		}
 		s.snaps[repo] = ss
 	}
+}
+
+// attachVolume gives a new machine of a volume size its cache volume: the
+// detached volume the policy chose (warm slots, attach latency) or a
+// fresh one.
+func (s *sim) attachVolume(m *machine, id string) {
+	for i, v := range s.vols {
+		if v.id != id || !s.now.Before(v.expires) {
+			continue
+		}
+		s.vols = append(s.vols[:i], s.vols[i+1:]...)
+		m.volume, m.disk, m.slots = v.id, v.bytes, v.slots
+		for repo, b := range v.slots {
+			if b > 0 {
+				m.warm[repo] = true
+			}
+		}
+		m.readyAt = m.readyAt.Add(m.size.Stack.Hot.Attach)
+		s.r.VolumeAttaches++
+		return
+	}
+	s.volIDs++
+	s.r.VolumesCreated++
+	m.volume = fmt.Sprintf("vol%04d", s.volIDs)
+	m.disk = max(m.size.Volume.Min, m.size.Capacity.Disk)
+}
+
+// detachVolume keeps a destroyed machine's volume for reuse
+// (keep_detached) with its warm slots until its ttl.
+func (s *sim) detachVolume(m *machine) {
+	if m.volume == "" || !m.size.Volume.KeepDetached || m.size.Volume.TTL <= 0 {
+		return
+	}
+	slots := map[string]int64{}
+	for repo, b := range m.slots {
+		if m.warm[repo] {
+			slots[repo] = b
+		}
+	}
+	s.vols = append(s.vols, &volume{id: m.volume, prov: m.prov, size: m.size, bytes: m.disk, slots: slots, expires: s.now.Add(m.size.Volume.TTL)})
+}
+
+// expireVolumes deletes detached volumes past their ttl.
+func (s *sim) expireVolumes() {
+	kept := s.vols[:0]
+	for _, v := range s.vols {
+		if s.now.Before(v.expires) {
+			kept = append(kept, v)
+		} else {
+			s.r.VolumesExpired++
+		}
+	}
+	s.vols = kept
 }
 
 func (s *sim) remove(m *machine) {

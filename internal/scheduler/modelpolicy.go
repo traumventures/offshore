@@ -5,6 +5,8 @@ import (
 	"math"
 	"sort"
 	"time"
+
+	"github.com/traumventures/offshore/internal/medium"
 )
 
 // placeModel decides with the cost model: run now on a machine with free
@@ -130,7 +132,7 @@ func (p Default) quickRun(f Pool, tm *tlMachine, t Task) time.Duration {
 	run := t.Profile.ColdRun(tm.m.Provider)
 	if s, ok := p.bestSnapshot(f, tm.m.Provider, t); ok {
 		_, bw := p.egress(f, s.Store, tm.m.Provider)
-		if r := time.Duration(float64(s.Bytes)/float64(bw)*float64(time.Second)) + t.Profile.WarmRun(); r < run {
+		if r := restoreTime(tm.m, s.Bytes, bw) + t.Profile.WarmRun(); r < run {
 			run = r
 		}
 	}
@@ -308,10 +310,25 @@ func (p Default) scaleOutModel(st *planState, env string) {
 				if s.Capacity.CPU <= 0 || s.Capacity.Memory <= 0 {
 					continue
 				}
-				m := Machine{ID: "new:" + s.Provider + "/" + s.Name, Provider: s.Provider, EnvHash: env, Size: s.Name, State: Starting, Capacity: s.Capacity}
+				m := Machine{ID: "new:" + s.Provider + "/" + s.Name, Provider: s.Provider, EnvHash: env, Size: s.Name, State: Starting, Capacity: s.Capacity,
+					Medium: s.Medium, Stack: s.Stack, DiskTotal: max(s.Volume.Min, s.Capacity.Disk)}
 				lat := p.boot(f, s.Provider)
-				tm := &tlMachine{m: m, ready: f.Now.Add(lat), free: p.sizeAdmissible(s), price: s.PricePerHour, created: true, latency: lat}
+				tm := &tlMachine{m: m, ready: f.Now.Add(lat), free: p.sizeAdmissible(s), price: sizePrice(s), created: true, latency: lat}
 				cands = append(cands, cand{Action{Kind: Create, EnvHash: env, Size: s, Reason: "queued demand"}, tm})
+				// A detached volume with warm slots of the queued tasks:
+				// a machine in its zone gets them for the attach time.
+				for _, v := range p.warmVolumes(st, s, tasks) {
+					vm := m
+					vm.ID, vm.Zone, vm.Volume, vm.DiskTotal = "new:"+s.Provider+"/"+s.Name+"/"+v.ID, v.Zone, v.ID, v.Bytes
+					vm.SlotBytes = v.SlotBytes
+					for repo := range v.SlotBytes {
+						vm.WarmRepos = append(vm.WarmRepos, repo)
+					}
+					sort.Strings(vm.WarmRepos)
+					vlat := lat + s.Stack.Hot.Attach
+					vtm := &tlMachine{m: vm, ready: f.Now.Add(vlat), free: p.sizeAdmissible(s), price: priceOf(f, vm), created: true, latency: vlat}
+					cands = append(cands, cand{Action{Kind: Create, EnvHash: env, Size: s, Volume: v.ID, Reason: "queued demand, warm volume " + v.ID}, vtm})
+				}
 			}
 		}
 		for i := range cands {
@@ -353,6 +370,31 @@ func (p Default) scaleOutModel(st *planState, env string) {
 		ms = append(ms, bestC.tm)
 	}
 	st.stopped[env] = stopped
+}
+
+// warmVolumes returns the detached volumes a new machine of size s could
+// attach that hold a warm slot of one of tasks (not yet taken by a create
+// of this plan).
+func (p Default) warmVolumes(st *planState, s Size, tasks []Task) []Volume {
+	if s.Medium != medium.Volume {
+		return nil
+	}
+	var out []Volume
+	for _, v := range st.f.Volumes {
+		if v.Provider != s.Provider || (!v.ExpiresAt.IsZero() && !st.f.Now.Before(v.ExpiresAt)) {
+			continue
+		}
+		if slicesAny(st.acts, func(a Action) bool { return a.Volume == v.ID }) {
+			continue
+		}
+		for _, t := range tasks {
+			if v.Warm(t.RepoID) {
+				out = append(out, v)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // freeSlotPossible reports whether freeSlot could stop a machine for env.

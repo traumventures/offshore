@@ -210,7 +210,7 @@ func printReports(w *os.File, rs []sim.Report) {
 func printFrontier(w *os.File, path string, ratios []float64, rs []sim.Report) {
 	fmt.Fprintf(w, "%s: cost_optimization sweep (1 = cheapest, 0 = fastest result)\n", path)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "cost_optimization\tcost $\tmachine-h\tturn p50\tturn p95\twait p95\twarm\trestores\tflaps\tpareto\t")
+	fmt.Fprintln(tw, "cost_optimization\tcost $\tvolumes $\tmachine-h\tturn p50\tturn p95\twait p95\twarm\trestores\tattaches\tflaps\tpareto\t")
 	for i, r := range rs {
 		pareto := "*"
 		for j, o := range rs {
@@ -218,8 +218,8 @@ func printFrontier(w *os.File, path string, ratios []float64, rs []sim.Report) {
 				pareto = ""
 			}
 		}
-		fmt.Fprintf(tw, "%.1f\t%.2f\t%.1f\t%s\t%s\t%s\t%.0f%%\t%d\t%d\t%s\t\n", ratios[i], r.Cost, r.MachineHours,
-			r.TurnP50.Round(time.Second), r.TurnP95.Round(time.Second), r.WaitP95.Round(time.Second), 100*r.WarmRate, r.Restores, r.Flaps, pareto)
+		fmt.Fprintf(tw, "%.1f\t%.2f\t%.2f\t%.1f\t%s\t%s\t%s\t%.0f%%\t%d\t%d\t%d\t%s\t\n", ratios[i], r.Cost, r.VolumeCost, r.MachineHours,
+			r.TurnP50.Round(time.Second), r.TurnP95.Round(time.Second), r.WaitP95.Round(time.Second), 100*r.WarmRate, r.Restores, r.VolumeAttaches, r.Flaps, pareto)
 	}
 	tw.Flush()
 }
