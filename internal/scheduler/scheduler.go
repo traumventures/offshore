@@ -180,13 +180,13 @@ type Machine struct {
 	// Medium, Zone and Volume (id) of the machine's cache; Stack the
 	// composite capability profile; ResizableAt is when its disk may be
 	// resized next (EBS: 6 h after the last resize).
-	Medium      string
-	Zone        string
-	Volume      string
-	Stack       medium.Stack
+	Medium string
+	Zone   string
+	Volume string
+	Stack  medium.Stack
 	// VM is the machine's cache file system (anyfs) in virtual memory
 	// terms: working set vs. local capacity, fault rate, thrashing.
-	VM VM
+	VM          VM
 	ResizableAt time.Time
 }
 
