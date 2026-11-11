@@ -403,23 +403,27 @@ func status(args []string) error {
 		}
 		sort.Slice(m.Status.Sessions, func(i, j int) bool { return m.Status.Sessions[i].Started < m.Status.Sessions[j].Started })
 		for _, s := range m.Status.Sessions {
-			where := s.Repo
-			if l := sessionLabels(s.Labels); l != "" {
-				where = l
-			}
-			fmt.Printf("  %s session %s: %s (%s, running %s)\n", m.ID, s.ID, strings.Join(s.Argv, " "), where,
-				time.Since(time.Unix(s.Started, 0)).Round(time.Second))
+			fmt.Println(sessionLine(m.ID, s, time.Since(time.Unix(s.Started, 0))))
 		}
 	}
 	return nil
 }
 
-// sessionLabels renders the labels of a running session for `status`
-// (without the user, which is the same for all of one's sessions).
-func sessionLabels(l map[string]string) string {
-	c := labels.Clean(l)
+// sessionLine renders a running session for `status`: client
+// (user@host), command, labels (without user and host) and run time.
+func sessionLine(machine string, s proto.Session, running time.Duration) string {
+	where := s.Repo
+	c := labels.Clean(s.Labels)
 	delete(c, labels.User)
-	return labels.Format(c)
+	delete(c, labels.Host)
+	if l := labels.Format(c); l != "" {
+		where = l
+	}
+	who := ""
+	if uh := labels.UserHost(s.Labels); uh != "" {
+		who = uh + " "
+	}
+	return fmt.Sprintf("  %s session %s: %s%s (%s, running %s)", machine, s.ID, who, strings.Join(s.Argv, " "), where, running.Round(time.Second))
 }
 
 // printCost prints the estimated cost per machine size since the start of

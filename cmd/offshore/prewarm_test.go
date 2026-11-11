@@ -67,7 +67,14 @@ func TestWhyShowsLabels(t *testing.T) {
 	if !strings.Contains(b.String(), "remote (prewarm)") || !strings.Contains(b.String(), "codex") {
 		t.Fatalf("why list:\n%s", b.String())
 	}
-	if got := sessionLabels(map[string]string{"user": "u", "agent": "codex", "worktree": "/w"}); got != "worktree=/w agent=codex" {
-		t.Fatalf("status labels %q", got)
+	se := proto.Session{ID: "s1", Argv: []string{"cargo", "build"}, Labels: map[string]string{"user": "u", "host": "box", "agent": "codex", "worktree": "/w"}}
+	if got := sessionLine("m1", se, 90*time.Second); got != "  m1 session s1: u@box cargo build (worktree=/w agent=codex, running 1m30s)" {
+		t.Fatalf("status line %q", got)
+	}
+	r.Labels["user"], r.Labels["host"] = "u", "box"
+	b.Reset()
+	printRun(&b, r)
+	if !strings.Contains(b.String(), "client     u@box") {
+		t.Fatalf("why lacks the client:\n%s", b.String())
 	}
 }

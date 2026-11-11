@@ -13,7 +13,7 @@ import (
 )
 
 // GroupKeys are the dimensions of `offshore report --by`.
-var GroupKeys = []string{labels.Agent, labels.Worktree, labels.Branch, labels.Repo, labels.User}
+var GroupKeys = []string{labels.Agent, labels.Worktree, labels.Branch, labels.Repo, labels.User, labels.Host}
 
 // DefaultGroups are shown when --by is not given.
 var DefaultGroups = []string{labels.Agent, labels.Worktree}

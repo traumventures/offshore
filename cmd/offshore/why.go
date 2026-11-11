@@ -114,6 +114,9 @@ func printRun(w io.Writer, r events.Run) {
 		fmt.Fprintf(w, "  directory  %s\n", r.Cwd)
 	}
 	fmt.Fprintf(w, "  ran        %s: %s\n", r.Mode, r.Why)
+	if uh := labels.UserHost(r.Labels); uh != "" {
+		fmt.Fprintf(w, "  client     %s\n", uh)
+	}
 	if len(r.Labels) > 0 {
 		fmt.Fprintf(w, "  labels     %s\n", labels.Format(r.Labels))
 	}

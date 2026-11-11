@@ -1625,6 +1625,7 @@ func (o *Orchestrator) removeLocked(id string) {
 	m.Status, m.pending, m.Addr = nil, nil, ""
 	if len(m.Uptime) > 0 {
 		o.removed = append(o.removed, m)
+		o.trimRemovedLocked()
 	}
 }
 

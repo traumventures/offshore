@@ -21,6 +21,7 @@ const (
 	Repo     = "repo"     // name of the main repository (shared by its worktrees)
 	Branch   = "branch"   // checked out branch ("" when detached)
 	User     = "user"     // client user (config "user")
+	Host     = "host"     // client host name
 	Agent    = "agent"    // coding agent, e.g. "codex", "claude-code"; "" for humans
 	// AgentSession identifies the agent's conversation/thread when the
 	// agent exports one (e.g. CODEX_THREAD_ID).
@@ -85,6 +86,9 @@ func Detect(root, user string, getenv func(string) string) map[string]string {
 	if user != "" {
 		l[User] = user
 	}
+	if h, err := hostname(); err == nil && h != "" {
+		l[Host] = h
+	}
 	if a := getenv(EnvAgent); a != "" {
 		l[Agent] = a
 	} else {
@@ -103,6 +107,22 @@ func Detect(root, user string, getenv func(string) string) map[string]string {
 		l[k] = v
 	}
 	return Clean(l)
+}
+
+// hostname is os.Hostname (replaced in tests).
+var hostname = os.Hostname
+
+// UserHost renders the client of a session as user@host (either part may
+// be missing; "" without both).
+func UserHost(l map[string]string) string {
+	u, h := l[User], l[Host]
+	switch {
+	case u != "" && h != "":
+		return u + "@" + h
+	case u != "":
+		return u
+	}
+	return h
 }
 
 // Parse reads "k=v,k=v" (whitespace around keys and values is trimmed;
@@ -186,7 +206,7 @@ func Format(l map[string]string) string {
 // lessKey orders well-known keys first, then alphabetically.
 func lessKey(a, b string) bool {
 	rank := func(k string) int {
-		for i, w := range []string{Worktree, Repo, Branch, User, Agent, AgentSession, Purpose} {
+		for i, w := range []string{Worktree, Repo, Branch, User, Host, Agent, AgentSession, Purpose} {
 			if k == w {
 				return i
 			}

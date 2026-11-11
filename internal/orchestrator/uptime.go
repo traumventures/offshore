@@ -21,6 +21,9 @@ func replayUptime(evs []events.Event) (gone []*Machine, seen map[string]*Machine
 	sort.SliceStable(evs, func(i, j int) bool { return evs[i].Time.Before(evs[j].Time) })
 	all := map[string]*Machine{}
 	last := map[string]time.Time{}
+	// Only machines that demonstrably existed count: a create request
+	// alone (e.g. one of a failed-create storm) is no machine.
+	alive := map[string]bool{}
 	for _, ev := range evs {
 		up, known := upEvent(ev)
 		if !known || ev.Machine == "" || ev.Time.IsZero() {
@@ -55,10 +58,16 @@ func replayUptime(evs []events.Event) (gone []*Machine, seen map[string]*Machine
 			m.State = provider.Failed
 		}
 		last[ev.Machine] = ev.Time
+		switch ev.Type {
+		case events.MachineReady, events.MachineSample, events.MachineStart, events.MachineStop:
+			alive[ev.Machine] = true
+		case events.MachineState:
+			alive[ev.Machine] = alive[ev.Machine] || ev.State == string(provider.Running)
+		}
 	}
 	seen = map[string]*Machine{}
 	for id, m := range all {
-		if len(m.Uptime) == 0 {
+		if len(m.Uptime) == 0 || !alive[id] {
 			continue
 		}
 		if m.State != provider.Failed {
@@ -99,7 +108,21 @@ func (o *Orchestrator) loadUptime() {
 	}
 	gone, seen := replayUptime(evs)
 	o.removed = append(o.removed, gone...)
+	o.trimRemovedLocked()
 	o.seedUptime = seen
+}
+
+// maxRemoved bounds the destroyed machines kept for cost history (and
+// listed by status).
+const maxRemoved = 300
+
+// trimRemovedLocked keeps the most recently removed machines.
+func (o *Orchestrator) trimRemovedLocked() {
+	if len(o.removed) <= maxRemoved {
+		return
+	}
+	sort.Slice(o.removed, func(i, j int) bool { return o.removed[i].Removed.After(o.removed[j].Removed) })
+	o.removed = append([]*Machine(nil), o.removed[:maxRemoved]...)
 }
 
 // mergeUptimeLocked gives a machine seen in the first listing after a
@@ -130,4 +153,5 @@ func (o *Orchestrator) settleUptimeLocked() {
 		o.removed = append(o.removed, m)
 	}
 	o.seedUptime = nil
+	o.trimRemovedLocked()
 }
