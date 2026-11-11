@@ -167,3 +167,48 @@ func TestCreateBlockedSizes(t *testing.T) {
 		t.Fatal("still blocked after the backoff")
 	}
 }
+
+// slowDestroy blocks destroys until released.
+type slowDestroy struct {
+	*fakeProvider
+	release chan struct{}
+	calls   int
+}
+
+func (s *slowDestroy) Destroy(ctx context.Context, id string) error {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	<-s.release
+	return s.fakeProvider.Destroy(ctx, id)
+}
+
+// Reconcile returns promptly while a slow destroy runs, and a second
+// reconcile does not repeat it.
+func TestReconcileDoesNotBlockOnSlowDestroy(t *testing.T) {
+	old := reconcileWait
+	reconcileWait = 50 * time.Millisecond
+	defer func() { reconcileWait = old }()
+	s := &slowDestroy{fakeProvider: newFake(), release: make(chan struct{})}
+	s.machines["m1"] = &provider.Machine{ID: "m1", State: provider.Failed, EnvHash: "e"}
+	o, err := New(testConfig("fake"), map[string]provider.Provider{"fake": s}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		start := time.Now()
+		if err := o.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if d := time.Since(start); d > 2*time.Second {
+			t.Fatalf("reconcile took %v", d)
+		}
+	}
+	s.mu.Lock()
+	calls := s.calls
+	s.mu.Unlock()
+	close(s.release)
+	if calls != 1 {
+		t.Fatalf("%d destroys, want 1", calls)
+	}
+}

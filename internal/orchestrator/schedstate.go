@@ -25,10 +25,15 @@ const (
 	// maxCreateBackoff and resets on the next ready machine.
 	baseCreateBackoff = 10 * time.Second
 	maxCreateBackoff  = 10 * time.Minute
+
 	// slotTimeout bounds slot preparation (prune, resize, restore) before
 	// a lease is handed out; on failure the session runs cold.
 	slotTimeout = 5 * time.Minute
 )
+
+// reconcileWait bounds how long Reconcile waits for its stops and
+// destroys (snapshot saves before a stop can take minutes); a var for tests.
+var reconcileWait = 5 * time.Second
 
 // provHealth is the scheduling state of a provider instance.
 type provHealth struct {
