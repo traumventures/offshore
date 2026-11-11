@@ -732,6 +732,79 @@ worker: a directory on the machine disk, backed by the grant's environment
 prefix, so a fresh machine reuses what earlier machines compiled. Without a
 store they stay machine-local.
 
+### Snapshots and lazy restore
+
+A build slot (and a machine cache per digest) can move between machines
+through the store. `internal/snapshot` saves a directory as content
+addressed chunks (BLAKE3; small files packed into ~8 MB chunks with
+content-defined boundaries, large files split) plus a manifest with every
+file's mode, size, mtime and chunk ranges (`repos/<repo>/snapshots/<unix>.json.gz`,
+newest named by `snapshots/latest`). A save reuses the chunk ranges of the
+slot's previous save for files whose size and mtime did not change, so it
+reads and uploads only what changed; chunks older than 12 h are uploaded
+again, so a snapshot stays restorable although the store expires objects
+after 24 h.
+
+A restore creates a new slot at once: directories, symlinks and sparse
+placeholders with the final sizes and the original mtimes (cargo compares
+mtimes, so a restored `target/` is fresh). File contents are filled on
+first access through a FUSE fill layer mounted on the slot's data
+directory (a loopback over the local directory that fetches a file before
+it is opened, truncated or renamed) and by a background fill; once
+complete and not in use, the mount is replaced by the filled directory. The
+live cache is always on local disk. Without FUSE the restore fills
+everything before it returns. The slot keeps its original creation time,
+so the 24 h bound holds across machines.
+
+The scheduler decides when (`orchestrator.SlotOps`): `SaveSlot` and
+`RestoreSlot` call the worker's slot stream with a fresh grant; the first
+session on a restored slot reports `usage.restored` and
+`usage.restore_seconds`. A worker draining at the end of its lifetime saves
+the slots of every repository it holds a grant for and lists them in
+`Status.Snapshots`. Machine caches with a digest are saved to
+`envs/<env>/digests/<name>/<digest>/` after their install, and other
+machines restore them instead of running the install.
+
+Measured with `test/bench/snapshot.sh` (this host, local directory store,
+small crate with serde, serde_json, itoa, libc):
+
+| step | result |
+| --- | --- |
+| `target/` | 125.7 MB, 189 files, 24 chunks |
+| cold build (sccache filling) | 8.36 s |
+| snapshot save, first / incremental (one crate changed) | 0.18 s / 0.02 s (24 / 1 chunks uploaded) |
+| restore: skeleton / first file / full fill | 0.00 s / 0.00 s / 0.09 s |
+| units rebuilt by `cargo build` after the restore | 0 |
+| rebuild from scratch with the warm sccache | 3.29 s |
+
+With a remote store the fill is bounded by download bandwidth (about 1 s per
+125 MB at 1 Gbit/s); point `BENCH_STORE` at a mounted bucket to measure it.
+
+#### Disks: growing, gp3 versus local NVMe
+
+`aws-ec2` implements `provider.DiskResizer`: the scheduler can grow a full
+machine's gp3 root volume (`ec2:ModifyVolume`, once per six hours, never
+shrinking) and the supervisor grows partition and file system
+(`growpart`, `xfs_growfs`/`resize2fs`) on its next check.
+
+Machines use gp3 root volumes (`disk_gb`, default 100; 3000 IOPS and
+125 MB/s baseline). Instance types with local NVMe (`c6id`, `m6id`, `c7gd`)
+are faster for target directories but lose their content on stop, so their
+warm state only survives through snapshots. To compare on a real machine
+(no cloud run is part of the tests):
+
+1. Start one machine per disk type (e.g. sizes on `c6i.2xlarge` and
+   `c6id.2xlarge`); for NVMe mount the instance store at the cache dir.
+2. Raw disk: `fio --name=rand --rw=randrw --bs=16k --size=4G --numjobs=8
+   --iodepth=32 --direct=1 --runtime=60 --group_reporting --filename=/cache/fio`
+   and `--rw=write --bs=1M` for sequential throughput.
+3. Builds: run the same `cargo build` cold, with warm sccache and warm slot
+   on each, and compare `task_end.usage` (`wall`, `cpu_stall_seconds`)
+   with `cloudsourced report --by size`.
+4. Restore: `test/bench/snapshot.sh` with `BENCH_STORE` on the machine
+   measures save and fill against each disk; gp3 throughput (125 MB/s
+   unless provisioned higher) bounds the fill of large slots.
+
 ### Compiler cache and linker
 
 A global cache with `tool = "sccache"` adds the pinned static sccache release

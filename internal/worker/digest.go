@@ -1,12 +1,14 @@
 package worker
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,9 +18,12 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/zeebo/blake3"
 
+	"github.com/traumventures/cloudsourced/internal/blobcache"
 	"github.com/traumventures/cloudsourced/internal/platform"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/sandbox"
+	"github.com/traumventures/cloudsourced/internal/snapshot"
+	"github.com/traumventures/cloudsourced/internal/store"
 )
 
 // Machine caches with a digest (e.g. node_modules per lockfile).
@@ -135,18 +140,18 @@ func (s *Worker) digestBinds(req proto.Exec, c proto.Cache, env []string, slot s
 }
 
 // ensureDigest generates a digest's content in the machine store.
-func (s *Worker) ensureDigest(req proto.Exec, c proto.Cache, env []string, store string, base []sandbox.Bind, out io.Writer) error {
-	l, _ := digestLocks.LoadOrStore(store, &sync.Mutex{})
+func (s *Worker) ensureDigest(req proto.Exec, c proto.Cache, env []string, store_ string, base []sandbox.Bind, out io.Writer) error {
+	l, _ := digestLocks.LoadOrStore(store_, &sync.Mutex{})
 	mu := l.(*sync.Mutex)
 	mu.Lock()
 	defer mu.Unlock()
-	if _, err := os.Stat(filepath.Join(store, "meta.json")); err == nil {
+	if _, err := os.Stat(filepath.Join(store_, "meta.json")); err == nil {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(store), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(store_), 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.MkdirTemp(filepath.Dir(store), ".install-")
+	tmp, err := os.MkdirTemp(filepath.Dir(store_), ".install-")
 	if err != nil {
 		return err
 	}
@@ -159,10 +164,29 @@ func (s *Worker) ensureDigest(req proto.Exec, c proto.Cache, env []string, store
 		}
 		binds = append(binds, sandbox.Bind{Src: dir, Dst: filepath.Join(req.Repo, filepath.Clean(p))})
 	}
-	fmt.Fprintf(out, "cloudsourced: cache %s: installing (%s)\n", c.Name, c.Install)
 	begin := time.Now()
-	if err := s.runInstall(req, c.Install, env, binds, out); err != nil {
-		return fmt.Errorf("install %q: %w", c.Install, err)
+	digestScope := ""
+	var envStore store.Store
+	if req.Store != nil && s.cfg.EnvHash != "" && req.Store.Allows(store.EnvScope(s.cfg.EnvHash)) {
+		digestScope = path.Join("digests", c.Name, filepath.Base(store_))
+		envStore, _ = store.Open(*req.Store, store.EnvScope(s.cfg.EnvHash), blobcache.MaxTTL)
+	}
+	restored := false
+	if envStore != nil {
+		if m, err := snapshot.Load(context.Background(), subStore{envStore, digestScope}, 0); err == nil {
+			f := snapshot.NewFiller(m, filepath.Join(tmp, "content"), subStore{envStore, digestScope}, filepath.Join(tmp, "chunks"))
+			if err := f.Skeleton(); err == nil && f.FillAll(context.Background(), 16) == nil {
+				restored = true
+				fmt.Fprintf(out, "cloudsourced: cache %s: restored from the store\n", c.Name)
+			}
+			f.Close()
+		}
+	}
+	if !restored {
+		fmt.Fprintf(out, "cloudsourced: cache %s: installing (%s)\n", c.Name, c.Install)
+		if err := s.runInstall(req, c.Install, env, binds, out); err != nil {
+			return fmt.Errorf("install %q: %w", c.Install, err)
+		}
 	}
 	ttl := c.TTLSeconds
 	if ttl <= 0 {
@@ -173,8 +197,18 @@ func (s *Worker) ensureDigest(req proto.Exec, c proto.Cache, env []string, store
 	if err := os.WriteFile(filepath.Join(tmp, "meta.json"), b, 0o644); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, store); err != nil {
+	if err := os.Rename(tmp, store_); err != nil {
 		return err
+	}
+	if envStore != nil && !restored {
+		// Other machines restore it instead of installing.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			defer cancel()
+			if _, _, err := snapshot.Save(ctx, filepath.Join(store_, "content"), subStore{envStore, digestScope}, snapshot.Options{}); err != nil {
+				s.log.Warn("snapshot of machine cache", "cache", c.Name, "err", err)
+			}
+		}()
 	}
 	fmt.Fprintf(out, "cloudsourced: cache %s: installed in %s (%d MB)\n", c.Name, time.Since(begin).Round(100*time.Millisecond), meta.Bytes>>20)
 	return nil
@@ -239,3 +273,22 @@ func (s *Worker) gcDigests(now time.Time) (removed int) {
 	}
 	return removed
 }
+
+// subStore is a store below a key prefix.
+type subStore struct {
+	st     store.Store
+	prefix string
+}
+
+func (p subStore) key(k string) string { return p.prefix + "/" + k }
+
+func (p subStore) Get(ctx context.Context, k string) (io.ReadCloser, blobcache.Info, error) {
+	return p.st.Get(ctx, p.key(k))
+}
+func (p subStore) Stat(ctx context.Context, k string) (blobcache.Info, error) {
+	return p.st.Stat(ctx, p.key(k))
+}
+func (p subStore) Put(ctx context.Context, k string, r io.Reader, n int64) error {
+	return p.st.Put(ctx, p.key(k), r, n)
+}
+func (p subStore) Delete(ctx context.Context, k string) error { return p.st.Delete(ctx, p.key(k)) }

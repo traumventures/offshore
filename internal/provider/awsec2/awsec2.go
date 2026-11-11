@@ -705,3 +705,36 @@ func (e *EC2) NativeStore(ctx context.Context, pool string) (store.Config, bool,
 	}
 	return store.Config{Name: e.Name(), Bucket: in.bucket, Region: e.region, Prefix: "cache/" + pool, RoleARN: in.storeRole}, true, nil
 }
+
+var _ provider.DiskResizer = (*EC2)(nil)
+
+// ResizeDisk implements provider.DiskResizer: it grows the machine's root
+// volume (gp3) to bytes; the supervisor grows the file system. EBS allows
+// one modification per volume every six hours, and never shrinking.
+func (e *EC2) ResizeDisk(ctx context.Context, id string, bytes int64) error {
+	is, err := e.instances(ctx, "", id)
+	if err != nil {
+		return err
+	}
+	if len(is) == 0 {
+		return fmt.Errorf("aws-ec2: machine %s not found", id)
+	}
+	vol := rootVolume(is[0])
+	if vol == "" {
+		return fmt.Errorf("aws-ec2: machine %s has no root EBS volume", id)
+	}
+	gb := int32((bytes + 1<<30 - 1) >> 30)
+	if _, err := e.ec2.ModifyVolume(ctx, &ec2.ModifyVolumeInput{VolumeId: aws.String(vol), Size: aws.Int32(gb)}); err != nil {
+		return fmt.Errorf("aws-ec2: resize %s to %d GiB: %w", vol, gb, err)
+	}
+	return nil
+}
+
+func rootVolume(i ec2types.Instance) string {
+	for _, m := range i.BlockDeviceMappings {
+		if aws.ToString(m.DeviceName) == aws.ToString(i.RootDeviceName) && m.Ebs != nil {
+			return aws.ToString(m.Ebs.VolumeId)
+		}
+	}
+	return ""
+}

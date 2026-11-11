@@ -326,6 +326,11 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${PoolStackName}-MachineRole-*"
                   - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${PoolStackName}-ReaperRole-*"
                   - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${PoolStackName}-StoreRole-*"
+              - Sid: GrowMachineDisks
+                # provider.DiskResizer: the scheduler grows a full cache disk.
+                Effect: Allow
+                Action: ec2:ModifyVolume
+                Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*"
               - Sid: WorkerStoreGrants
                 # Short-lived worker credentials for cache objects, narrowed
                 # per repository by a session policy.

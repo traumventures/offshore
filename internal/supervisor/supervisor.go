@@ -88,6 +88,13 @@ type SelfTerminator interface {
 	TerminateSelf(ctx context.Context) error
 }
 
+// DiskGrower is implemented by platforms whose disk the provider can grow
+// while the machine runs (provider.DiskResizer): the supervisor grows the
+// partition and file system to the disk every check.
+type DiskGrower interface {
+	GrowDisk(ctx context.Context) error
+}
+
 // PlatformFactory creates a platform for a spec.
 type PlatformFactory func(ctx context.Context, spec Spec) (Platform, error)
 
@@ -389,6 +396,12 @@ func (a *Supervisor) Run(ctx context.Context) error {
 		}
 		if d := a.Check(ctx); d != machine.Keep {
 			backoff = a.now().Add(time.Minute) // the machine is going down
+			continue
+		}
+		if g, ok := a.Platform.(DiskGrower); ok {
+			if err := g.GrowDisk(ctx); err != nil {
+				a.Log.Warn("growing the disk", "err", err)
+			}
 		}
 	}
 }

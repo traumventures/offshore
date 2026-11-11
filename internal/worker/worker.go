@@ -155,6 +155,8 @@ type Worker struct {
 	ccEndpoint string       // compiler cache WebDAV endpoint for sessions ("" = off)
 	rcStore    *tieredStore // its store
 	grants     grantCache   // latest store grants per repository
+	fills      fills        // lazy restores in progress
+	snapshots  []proto.SnapshotInfo
 
 	mu       sync.Mutex
 	mounts   map[string]*sourcefs.Projection
@@ -323,6 +325,7 @@ func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
 		s.mu.Lock()
 		if !s.draining {
 			s.log.Info("machine lifetime reached, draining")
+			go s.saveOnDrain()
 		}
 		s.draining = true
 		if s.drainReason == "" {
@@ -352,6 +355,11 @@ func (s *Worker) shutdown() {
 	for _, p := range mounts {
 		p.Unmount()
 	}
+	s.fills.mu.Lock()
+	for _, fl := range s.fills.m {
+		fl.unmount()
+	}
+	s.fills.mu.Unlock()
 }
 
 func (s *Worker) serveConn(ctx context.Context, conn *quic.Conn) {
@@ -522,6 +530,7 @@ func (s *Worker) statusOnly() proto.Status {
 	}
 	st.WarmRepos = s.slots.warmRepos(s.cfg.BuildTTL)
 	st.Disk = s.diskStatus()
+	st.Snapshots = append([]proto.SnapshotInfo(nil), s.snapshots...)
 	return st
 }
 

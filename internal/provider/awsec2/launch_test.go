@@ -111,3 +111,52 @@ func TestStoppedMachineIsWarm(t *testing.T) {
 		t.Fatalf("stopped machine: %+v", m)
 	}
 }
+
+func TestSplitPartitionAndRootVolume(t *testing.T) {
+	for dev, want := range map[string][2]string{
+		"/dev/nvme0n1p1": {"/dev/nvme0n1", "1"},
+		"/dev/xvda1":     {"/dev/xvda", "1"},
+		"/dev/nvme0n1":   {"/dev/nvme0n1", ""},
+		"/dev/mapper/x":  {"/dev/mapper/x", ""},
+	} {
+		d, p := splitPartition(dev)
+		if d != want[0] || p != want[1] {
+			t.Errorf("%s: %s %s", dev, d, p)
+		}
+	}
+	i := ec2types.Instance{RootDeviceName: aws.String("/dev/xvda"), BlockDeviceMappings: []ec2types.InstanceBlockDeviceMapping{
+		{DeviceName: aws.String("/dev/sdb"), Ebs: &ec2types.EbsInstanceBlockDevice{VolumeId: aws.String("vol-data")}},
+		{DeviceName: aws.String("/dev/xvda"), Ebs: &ec2types.EbsInstanceBlockDevice{VolumeId: aws.String("vol-root")}},
+	}}
+	if rootVolume(i) != "vol-root" {
+		t.Fatal(rootVolume(i))
+	}
+}
+
+func TestGrowDisk(t *testing.T) {
+	var calls []string
+	defer func(f func(context.Context, string, ...string) ([]byte, error)) { growCmd = f }(growCmd)
+	growCmd = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		switch name {
+		case "findmnt":
+			return []byte("/dev/nvme0n1p1 xfs\n"), nil
+		case "growpart":
+			if len(calls) > 3 {
+				return []byte("NOCHANGE: partition 1 is size 100"), errors.New("exit status 1")
+			}
+		}
+		return nil, nil
+	}
+	h := &host{}
+	if err := h.GrowDisk(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(calls, "; ") != "findmnt -n -o SOURCE,FSTYPE /; growpart /dev/nvme0n1 1; xfs_growfs -d /" {
+		t.Fatalf("calls %v", calls)
+	}
+	calls = []string{"", "", ""} // the next growpart reports NOCHANGE
+	if err := h.GrowDisk(context.Background()); err != nil || len(calls) != 5 {
+		t.Fatalf("no change: %v %v", err, calls)
+	}
+}
