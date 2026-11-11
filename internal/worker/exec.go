@@ -495,8 +495,8 @@ func (s *Worker) writeback(pc *proto.Conn, frames chan frame, req proto.Exec) er
 		if p == nil {
 			continue
 		}
-		for _, d := range p.Dirty() {
-			c := proto.Change{Root: root, Path: d.Path, Deleted: d.Deleted, Kind: d.Kind, Mode: d.Mode, Target: d.Target, BaseHash: d.BaseHash}
+		for _, d := range p.Changes() {
+			c := proto.Change{Root: root, Path: d.Path, Deleted: d.Deleted, Kind: d.Kind, Mode: d.Mode, Target: d.Target, BaseHash: d.BaseDigest}
 			if !d.BaseExists {
 				c.BaseHash = ""
 			} else if c.BaseHash == "" {
