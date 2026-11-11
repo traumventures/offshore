@@ -150,3 +150,35 @@ Cwb: 5.8 s user + 16.2 s sys. Pack of the 3.2 GB target into the CAS
   round-trip tax (+0.2 s no-op, +15..30 % incremental) is the floor. On the
   laptop (unprivileged, no passthrough, macOS) userspace overlay is fine for
   read-mostly output browsing / test archives, not as a build dir.
+
+## Rerun on the real implementation (anyfs, Nov 11 2026)
+
+Layouts E and F replace the prototype with `internal/anyfs` (`anyfsbench`:
+pages and a base layer in a directory store, local page tier, materialized
+files, read-only FUSE lower with passthrough, kernel overlay with
+`redirect_dir=on,metacopy=on`). A, Bmeta and Dpf were rerun in the same
+window for comparison (host load higher than in the first run, so the
+overlay layouts are slower relative to A than above). Raw lines:
+`results-anyfs-2026-11-11.jsonl`. Wall seconds:
+
+| layout | clean | restore | no-op | leaf (3x) | core (3x) | commit |
+|---|---|---|---|---|---|---|
+| A ext4 | 59.6 | - | 0.23 | 1.22 1.25 1.21 | 5.14 5.38 4.99 | - |
+| Bmeta prototype, local lower | - | 0.38 | 0.28 | 3.49 3.44 3.24 | 9.97 9.82 10.06 | - |
+| E anyfs, warm slot | - | 0.40 | 0.29 | 4.45 4.77 3.66 | 12.63 13.23 9.75 | 3.28 |
+| Dpf prototype, slow store + prefetch | - | 0.55 | 0.31 | 17.0 5.92 3.56 | 14.4 9.92 10.31 | - |
+| F anyfs, slow store (5 ms, 200 MB/s) + prefetch <= 64 KiB | - | 0.45 | 0.29 | 19.94 5.86 3.64 | 17.68 11.64 9.95 | 3.61 |
+
+- anyfs matches the prototype: restore 0.4 s (no-op on a 4.5 GB target),
+  incremental steady state equal within noise; the first build after a
+  cold restore is bandwidth bound (F leaf: 1.7 GB paged in, 11.4 s
+  waiting), afterwards like warm.
+- Pack of the 4.5 GB target into pages: 11.6 s (861 pages, sha-free
+  BLAKE3 + copy into the store). Commit of the session (scan of 5160
+  files, 3606 reused, 2.6 GB of changed files paged out to the store):
+  3.3-3.6 s.
+- F restore: 670 small files (8 MB) faulted by prefetch and the first
+  cargo reads, 1.1 s waiting in the background, restore step 0.45 s.
+- The overlay-over-FUSE incremental overhead vs. plain ext4 (+2-3x here,
+  +50 %/+21 % in the quieter first run) is the metadata round trip cost
+  of the FUSE lower under load; it is the same for prototype and anyfs.
