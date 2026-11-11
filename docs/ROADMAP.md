@@ -15,8 +15,14 @@ section 0 of [PLAN.md](PLAN.md).
   (at most 24 h), services, port forwarding, secrets per run.
 * Caches v2: `[cache.<name>]` with slot, machine (also per lockfile digest
   with remote install) and global scope (sccache, ccache, Go); pruning; the
-  object store (`[storage]`, scoped worker grants); snapshots with lazy
-  restore; disk growth on aws-ec2.
+  object store (`[storage]`, scoped worker grants); disk growth on aws-ec2.
+* anyfs, one storage core ([caches-and-storage.md](caches-and-storage.md#anyfs-one-storage-core)):
+  pages, layers and composable tier stacks (local -> volume -> store) with
+  a virtual memory model (faults, writeback, ARC reclaim, thrashing);
+  build slots are kernel overlays over committed layers (lazy restore and
+  move by mounting), source projection and output overlay are anyfs
+  configurations; access classes per path pattern; measured tier profiles
+  and working sets in the scheduler and simulator.
 * Outputs: eager globs, `offshore fetch`, writable output overlay with
   cargo freshness; rust-analyzer `local` and `lsp-remote`.
 * Tool adapters (cargo, go, node, generic); tests built remotely and run
@@ -38,6 +44,12 @@ section 0 of [PLAN.md](PLAN.md).
   agents and worktrees, prewarm and git hook.
 
 ## Later
+
+* **anyfs follow-ups**: apply the remaining access-class policies
+  (placement, per-class writeback delay, no writeback for ephemeral files,
+  cross-slot dedupe), track reads per session, commit busy slots, laptop
+  output content in anyfs pages (local -> peer -> store), passthrough for
+  the source projection.
 
 * **Users and quotas**: per-user API keys, quotas and cost limits on the
   control plane (today one global API key per pool).

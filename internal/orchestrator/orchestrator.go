@@ -181,6 +181,9 @@ type Machine struct {
 	sampledAt time.Time
 	// thrashing is the last reported thrash state (events on change).
 	thrashing bool
+	// sampledVM is the cache file system state of the last sample (the
+	// base of the page_fault, page_in and reclaim deltas).
+	sampledVM *proto.VMStats
 	Draining  bool
 	// PricePerHour comes from the pool size of the machine (0: unknown).
 	PricePerHour float64
@@ -650,6 +653,35 @@ func (o *Orchestrator) sampleLocked(id string, m *Machine) {
 		ev.VM = &vm
 	}
 	o.obs.log.Append(ev)
+	o.vmEventsLocked(id, m)
+}
+
+// vmEventsLocked logs the cache file system activity since the previous
+// sample: page_fault (Pages: faults), page_in (Bytes fetched from lower
+// tiers) and reclaim (Bytes dropped), each only when non zero. The worker
+// counts them cumulatively; a worker restart starts a new base.
+func (o *Orchestrator) vmEventsLocked(id string, m *Machine) {
+	cur := m.Status.VM
+	if cur == nil {
+		return
+	}
+	prev := m.sampledVM
+	c := *cur
+	m.sampledVM = &c
+	if prev == nil || cur.Faults < prev.Faults || cur.ReclaimBytes < prev.ReclaimBytes || cur.PageInBytes < prev.PageInBytes {
+		return
+	}
+	emit := func(typ string, pages, bytes int64) {
+		if pages > 0 || bytes > 0 {
+			ev := o.machineEventLocked(typ, id)
+			ev.Pages, ev.Bytes = pages, bytes
+			ev.Seconds = events.SampleInterval.Seconds()
+			o.obs.log.Append(ev)
+		}
+	}
+	emit(events.PageFault, cur.Faults-prev.Faults, 0)
+	emit(events.PageIn, 0, cur.PageInBytes-prev.PageInBytes)
+	emit(events.Reclaim, 0, cur.ReclaimBytes-prev.ReclaimBytes)
 }
 
 // vmOf maps a worker's cache file system state to the scheduler's view.

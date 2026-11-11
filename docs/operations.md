@@ -78,8 +78,12 @@ dependencies; `internal/metrics`):
   `offshore_worker_memory_used_bytes`,
   `offshore_worker_compiler_cache_total{counter}` (sccache counters),
   `offshore_worker_transfer_bytes_total{direction}` (fetch, writeback,
-  output), `offshore_worker_ready`, `_draining`, `_warm_repos`. Machine
-  counters restart with the worker.
+  output), `offshore_worker_ready`, `_draining`, `_warm_repos`, and the
+  cache file system in virtual memory terms
+  ([caches-and-storage.md](caches-and-storage.md#anyfs-one-storage-core)):
+  `offshore_cache_resident_bytes`, `_dirty_bytes`, `_working_set_bytes`,
+  `_fault_rate`, `_reclaim_bytes`, `_thrashing`. Machine counters restart
+  with the worker.
 * `offshore metrics` prints the daemon's metrics
   (`offshore_daemon_requests_total{op,result}`,
   `offshore_daemon_prepare_seconds{result}`,
@@ -229,7 +233,10 @@ cpu_seconds`, `used_memory`).
 
 Independent of tracing, the orchestrator writes
 an analysis event log (`events-YYYY-MM-DD.jsonl` in its state directory,
-`[telemetry] events_retention_days`, default 30) of task and machine events.
+`[telemetry] events_retention_days`, default 30) of task and machine events,
+including the cache file system's `page_fault` (Pages), `page_in` and
+`reclaim` (Bytes) per machine and sample interval, `writeback` per
+committed slot head and `thrash` when a machine starts thrashing.
 `offshore report [--since 7d] [--by agent,worktree] [--json]` shows cost per day, repository
 and size, per agent/worktree/branch/repo/user, utilisation and overprovisioning, queue wait p50/p95, warm vs.
 cold caches and estimator accuracy, machine samples per size and, from
