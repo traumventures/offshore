@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -196,6 +197,24 @@ func TestCostModelKeys(t *testing.T) {
 	for _, bad := range []string{"[scheduler]\ncost_optimization = 1.5\n", "[scheduler]\nspeed = 0.5\n", "[[scheduler.egress]]\nbandwidth = \"fast\"\n"} {
 		if _, err := loadUserFrom(t, bad); err == nil {
 			t.Fatalf("%q must be rejected", bad)
+		}
+	}
+}
+
+// providers.X.max_machines: unset is no own limit, 0 disables the
+// provider, negative or non-integer values are rejected.
+func TestProviderMaxMachinesZero(t *testing.T) {
+	base := "[pool]\nmax_machines = 4\n[providers.a]\ntype = \"local-docker\"\n%s\n[[providers.a.size]]\nname = \"s\"\ncpu = 2\nmemory = \"4G\"\n"
+	for _, tc := range []struct {
+		line string
+		ok   bool
+	}{{"", true}, {"max_machines = 0", true}, {"max_machines = 2", true}, {"max_machines = -1", false}, {"max_machines = 1.5", false}} {
+		u, err := loadUserFrom(t, fmt.Sprintf(base, tc.line))
+		if err == nil {
+			err = u.Validate()
+		}
+		if (err == nil) != tc.ok {
+			t.Errorf("%q: err %v", tc.line, err)
 		}
 	}
 }

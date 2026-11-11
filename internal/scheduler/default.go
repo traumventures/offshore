@@ -71,7 +71,7 @@ type Config struct {
 	MinMachines  int            // warm pool per recently used environment
 	WarmPool     []WarmWindow   // scheduled warm pool (e.g. working hours), in addition to MinMachines
 	MaxMachines  int            // pool size limit across all providers
-	ProviderMax  map[string]int // per-provider machine limit (0 / missing = no own limit)
+	ProviderMax  map[string]int // per-provider machine limit (missing = no own limit; 0 = provider disabled)
 	IdleStop     time.Duration  // stop machines idle that long
 	ExpiryMargin time.Duration  // machines expiring sooner get no new sessions
 
@@ -275,12 +275,19 @@ func (p Default) fitsAnySize(f Pool, t Task) bool {
 	return false
 }
 
+// Disabled reports whether prov has max_machines = 0: no machine of it is
+// created or started (running ones keep serving until they stop).
+func (c Config) Disabled(prov string) bool {
+	lim, ok := c.ProviderMax[prov]
+	return ok && lim <= 0
+}
+
 // allowedSizes returns the sizes whose provider is below its machine limit.
 func (p Default) allowedSizes(sizes []Size, perProvider map[string]int) []Size {
 	c := p.cfg()
 	var ss []Size
 	for _, s := range sizes {
-		if lim := c.ProviderMax[s.Provider]; lim > 0 && perProvider[s.Provider] >= lim {
+		if lim, ok := c.ProviderMax[s.Provider]; ok && perProvider[s.Provider] >= lim {
 			continue
 		}
 		ss = append(ss, s)
@@ -411,7 +418,7 @@ func (p Default) Plan(f Pool) []Action {
 		if m.State != Gone {
 			st.perProvider[m.Provider]++ // stopped machines keep their slot
 		}
-		if m.State == Stopped && p.usable(m, f.Now) && !f.Now.Before(m.StartBlocked) {
+		if m.State == Stopped && p.usable(m, f.Now) && !f.Now.Before(m.StartBlocked) && !p.cfg().Disabled(m.Provider) {
 			st.stopped[m.EnvHash] = append(st.stopped[m.EnvHash], m)
 		}
 	}

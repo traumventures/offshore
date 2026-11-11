@@ -623,6 +623,14 @@ func (u *PoolConfig) Validate() error {
 			}
 		}
 	}
+	for _, name := range u.ProviderNames() {
+		if v, ok := u.Providers[name]["max_machines"]; ok {
+			n, isInt := v.(int64)
+			if !isInt || n < 0 {
+				errs = append(errs, fmt.Sprintf("providers.%s.max_machines: need an integer >= 0 (0 disables the provider), got %v", name, v))
+			}
+		}
+	}
 	if f.MinMachines < 0 || f.MaxMachines < 1 || f.MinMachines > f.MaxMachines {
 		errs = append(errs, "pool: need 0 <= min_machines <= max_machines and max_machines >= 1")
 	}
