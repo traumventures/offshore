@@ -185,8 +185,10 @@ offshore outputs unmount    # unmount and discard local writes
 ### Cargo freshness
 
 Local cargo considers the remote build fresh when its fingerprints match.
-With `mode = "fuse"` every remote session of the repository aligns what
-cargo hashes:
+With `mode = "fuse"` every remote cargo session (commands of a tool with
+the cargo adapter, including `[prewarm] run`) aligns what cargo hashes; the
+cargo adapter supplies the tool homes and rustflags (`Plan.AlignOutputs`),
+other adapters need none:
 
 - Sources are projected at the local path (identical absolute paths, mtimes).
 - The image's `CARGO_HOME` and `RUSTUP_HOME` appear at the client's paths
