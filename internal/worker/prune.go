@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -401,21 +402,84 @@ func (s *Worker) enforceBudgets(slot string) {
 	s.enforceDiskBudget()
 }
 
-// enforceDiskBudget frees disk while it is above the machine budget:
-// reclaim of resident slot data (refetched on use) first, then of
-// faulted-in source contents (refetched from the laptop), then the policy
+// Disk watermarks: reclaim of resident data (refetched on use, never
+// build state) starts at diskLowWater of the budget and frees down to it;
+// slots are pruned only above the budget, also down to the low watermark.
+// At diskFullAt of the file system the machine admits no sessions (it
+// reports draining) until usage is below diskFullClear.
+const (
+	diskLowWater  = 0.85
+	diskFullAt    = 0.97
+	diskFullClear = 0.95
+)
+
+// diskTarget is the low watermark of a budget.
+func diskTarget(budget int64) int64 { return int64(float64(budget) * diskLowWater) }
+
+// checkBudgets runs every lifecycle tick: one statfs (no tree walk) and
+// the cache counters; the reclaim and prune walks run only when usage is
+// above the low watermark. Usage is the whole file system's, so images and
+// other data on the cache disk count against the budget.
+func (s *Worker) checkBudgets() {
+	if !s.budgetMu.TryLock() {
+		return
+	}
+	defer s.budgetMu.Unlock()
+	if s.cfs != nil {
+		if n := s.cfs.enforceCapacity(context.Background()); n > 0 {
+			s.log.Info("reclaimed resident slot data above the cache capacity", "freed", n)
+		}
+	}
+	total, used, ok := fsUsage(s.cfg.CacheDir)
+	if !ok || total <= 0 {
+		return
+	}
+	s.setDiskFull(float64(used) / float64(total))
+	budget := s.diskBudget()
+	if budget <= 0 || used <= diskTarget(budget) {
+		return
+	}
+	if !s.pruneMu.TryLock() {
+		return
+	}
+	defer s.pruneMu.Unlock()
+	s.enforceDiskBudget()
+}
+
+// setDiskFull updates the emergency state from the used share of the disk.
+func (s *Worker) setDiskFull(share float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case !s.diskFull && share >= diskFullAt:
+		s.diskFull = true
+		s.log.Warn("cache disk almost full: admitting no sessions", "used_share", share)
+	case s.diskFull && share < diskFullClear:
+		s.diskFull = false
+		s.log.Info("cache disk below the emergency threshold: admitting sessions again", "used_share", share)
+	}
+}
+
+// enforceDiskBudget frees disk above the low watermark of the budget:
+// reclaim of resident slot data (clean pages and materialized files, also
+// of leased slots: refetched on use) and of faulted-in source contents
+// (refetched from the laptop); above the budget itself also the policy
 // prune of the least recently used slots, then cold slots.
 func (s *Worker) enforceDiskBudget() {
 	budget := s.diskBudget()
 	if budget <= 0 {
 		return
 	}
+	target := diskTarget(budget)
 	over := func() int64 {
 		_, used, _ := fsUsage(s.cfg.CacheDir)
-		return used - budget
+		return used - target
 	}
 	if over() <= 0 || s.reclaimSlots(over) <= 0 || s.reclaimSources(over) <= 0 {
 		return
+	}
+	if _, used, _ := fsUsage(s.cfg.CacheDir); used <= budget {
+		return // below the budget: build state stays
 	}
 	refs := s.slots.list()
 	sort.Slice(refs, func(i, j int) bool { return refs[i].Meta.LastUsed < refs[j].Meta.LastUsed })

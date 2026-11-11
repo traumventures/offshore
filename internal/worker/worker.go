@@ -228,6 +228,9 @@ type Worker struct {
 	// drainReason describes a drain the server started on its own
 	// (expiry).
 	drainReason string
+	// diskFull: the cache disk is above the emergency threshold; no
+	// sessions are admitted (reported as draining) until it recovers.
+	diskFull bool
 
 	metrics *serverMetrics
 
@@ -235,6 +238,7 @@ type Worker struct {
 	// the periodic gc.
 	machineCacheBytes atomic.Int64
 	pruneMu           sync.Mutex // one prune at a time
+	budgetMu          sync.Mutex // one budget check at a time
 	machineBudgets    machineCacheBudgets
 }
 
@@ -376,7 +380,7 @@ func (s *Worker) provision(ctx context.Context) error {
 
 // lifecycle enforces the machine lifetime and collects expired build slots.
 func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
-	t := time.NewTicker(10 * time.Second)
+	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	lastGC := time.Now()
 	for {
@@ -386,6 +390,9 @@ func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
 		case <-t.C:
 		}
 		go s.maintainSlots(ctx)
+		// Disk and cache budgets every tick (statfs and counters are
+		// cheap): sessions can write tens of GB between GC rounds.
+		go s.checkBudgets()
 		if time.Since(lastGC) > 5*time.Minute {
 			s.slots.gc(s.cfg.BuildTTL)
 			s.gcDigests(time.Now())
@@ -576,7 +583,10 @@ func (s *Worker) statusOnly() proto.Status {
 	defer s.mu.Unlock()
 	st := proto.Status{
 		Machine: s.cfg.MachineID, EnvHash: s.cfg.EnvHash, Ready: s.ready,
-		CPU: s.cfg.CPU, Memory: s.cfg.Memory, Draining: s.draining, DrainReason: s.drainReason,
+		CPU: s.cfg.CPU, Memory: s.cfg.Memory, Draining: s.draining || s.diskFull, DrainReason: s.drainReason,
+	}
+	if s.diskFull && !s.draining {
+		st.DrainReason = "disk full"
 	}
 	if !s.cfg.ExpiresAt.IsZero() {
 		st.ExpiresAt = s.cfg.ExpiresAt.Unix()

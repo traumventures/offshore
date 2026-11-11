@@ -148,7 +148,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		return prepErr(errors.New("empty command"))
 	}
 	s.mu.Lock()
-	ready, draining := s.ready, s.draining
+	ready, draining, full := s.ready, s.draining, s.diskFull
 	s.mu.Unlock()
 	if !ready {
 		s.metrics.rejected.Inc("not_ready")
@@ -157,6 +157,10 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	if draining {
 		s.metrics.rejected.Inc("draining")
 		return prepErr(errors.New("machine is draining"))
+	}
+	if full {
+		s.metrics.rejected.Inc("disk_full")
+		return prepErr(errors.New("machine cache disk is full"))
 	}
 	// Barrier: every root must have applied the client's manifest version.
 	bctx, cancel := context.WithTimeout(ctx, 60*time.Second)
