@@ -37,7 +37,13 @@ type Scenario struct {
 //   - outage: the burst trace with provider "aws" out of capacity for the
 //     second hour;
 //   - disk: repositories with 40-80G slots and 25-50G working sets
-//     (tier stacks, thrashing, restores).
+//     (tier stacks, thrashing, restores);
+//   - warmbusy: the machine with a repository's warm slot is busy with
+//     a long build of it (8 cores, 12G) when short builds of the same
+//     repository arrive (4 cores, 5G), while another machine of the
+//     environment (warm for a second repository, short builds every few
+//     minutes) is idle: wait for the warm machine, restore the slot from
+//     the store on the idle one, start or create one, or build cold.
 func Scenarios(seed uint64) []Scenario {
 	r := rand.New(rand.NewPCG(seed, seed^0x5eed))
 	logn := func(mean float64) float64 { return math.Round(math.Max(mean*math.Exp(0.5*r.NormFloat64()-0.125), 5)) }
@@ -108,6 +114,24 @@ func Scenarios(seed uint64) []Scenario {
 	}
 	disk.sort()
 	out = append(out, Scenario{Name: "disk", Trace: disk, Tiers: true})
+
+	wb := Trace{Start: DefaultStart.Add(9 * time.Hour), End: 6 * 3600}
+	slotted := func(j Job, slot int64) Job {
+		j.SlotBytes, j.SlotGrowth, j.WorkingSet = Bytes(slot), Bytes(slot/40), Bytes(slot*3/8)
+		return j
+	}
+	for h := 0.0; h < 6; h++ {
+		at := h * 3600
+		wb.Jobs = append(wb.Jobs, slotted(job(at, "api", "rust", 1500+300*r.Float64(), 8, 12*gib), 8*gib))
+		for k := 1; k <= 4; k++ {
+			wb.Jobs = append(wb.Jobs, slotted(job(at+float64(k)*240+60*r.Float64(), "api", "rust", logn(120), 4, 5*gib), 8*gib))
+		}
+	}
+	for at := 30.0; at < 6*3600; at += 300 + 300*r.Float64() {
+		wb.Jobs = append(wb.Jobs, slotted(job(at, "web", "rust", logn(60), 2, 3*gib), 4*gib))
+	}
+	wb.sort()
+	out = append(out, Scenario{Name: "warmbusy", Trace: wb})
 	return out
 }
 

@@ -57,6 +57,7 @@ func TestMemoryBeyondPhysical(t *testing.T) {
 	// Requests fit (3G + 3G on 8G); peaks (5G + 5G) do not.
 	j := Job{Repo: "r", Env: "e", Duration: 300, CPU: 1, Memory: Bytes(3 * gib), PeakMemory: Bytes(5 * gib)}
 	o := opts(scheduler.Config{MaxMachines: 1})
+	o.MemoryRamp = -1 // peaks for the whole run
 	static := Run(jobs(j, j), o)
 	if static.OOMs != 4 || static.Completed != 1 || static.Failed != 1 {
 		t.Fatalf("static estimate: retries OOM again until they give up: %+v", static)
@@ -72,6 +73,22 @@ func TestMemoryBeyondPhysical(t *testing.T) {
 		t.Fatalf("swap expected: %+v", sw)
 	}
 	approx(t, "swap slowdown", sw.Slowdown, math.Pow(10.0/8, 2), 0.01)
+}
+
+// With the memory ramp a build reaches its peak at its end: two builds
+// whose peaks do not fit together run when one is near its end before
+// the other one grows, and are OOM killed when they peak together.
+func TestMemoryRamp(t *testing.T) {
+	j := Job{Repo: "r", Env: "e", Duration: 300, CPU: 1, Memory: Bytes(3 * gib), PeakMemory: Bytes(5 * gib)}
+	o := opts(scheduler.Config{MaxMachines: 1})
+	if r := Run(jobs(j, j), o); r.OOMs == 0 {
+		t.Fatalf("both peak at the same time: want an OOM kill, got %+v", r)
+	}
+	late := j
+	late.At, late.Duration, late.PeakMemory = 290, 20, Bytes(2*gib) // starts while the first is near its end
+	if r := Run(jobs(j, late), o); r.OOMs != 0 || r.Completed != 2 {
+		t.Fatalf("the second build is small: want no OOM, got %+v", r)
+	}
 }
 
 func TestWarmCacheHits(t *testing.T) {
