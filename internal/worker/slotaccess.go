@@ -116,3 +116,59 @@ func (c *cacheFS) coldByClass() {
 		c.files.Cold(coldOrder(r.access, ts))
 	}
 }
+
+// dedupeMin: files of a dedupe class (immutable, write-once) from this
+// size get pages of their own, keyed by their content digest, so the same
+// file in another slot or repository is the same page (stored once in the
+// machine's page pool and once per store prefix). Smaller files stay
+// packed (a page per tiny file would cost more than it saves).
+const dedupeMin = 16 << 10
+
+// pageHint is the tier hint of an access class policy.
+func pageHint(p access.Policy) anyfs.PageHint {
+	h := anyfs.PageHint{NoWriteback: p.NoWriteback, LocalOnly: p.LocalOnly, Expire: p.WritebackDelay}
+	if !p.NoWriteback && p.WritebackDelay == 0 {
+		h.Expire = -1 // write back at the next pass
+	}
+	return h
+}
+
+// mergeHint combines the hints of files sharing a page: the most eager
+// writeback wins, LocalOnly only if every file is.
+func mergeHint(a, b anyfs.PageHint) anyfs.PageHint {
+	out := anyfs.PageHint{LocalOnly: a.LocalOnly && b.LocalOnly, NoWriteback: a.NoWriteback && b.NoWriteback}
+	switch {
+	case a.NoWriteback:
+		out.Expire = b.Expire
+	case b.NoWriteback:
+		out.Expire = a.Expire
+	case a.Expire < 0 || b.Expire < 0:
+		out.Expire = -1
+	default:
+		out.Expire = min(a.Expire, b.Expire)
+	}
+	return out
+}
+
+// hintPages gives the pages of a commit's changed files the writeback
+// and placement policy of their access class.
+func (c *cacheFS) hintPages(r *repoFS, diff []anyfs.Node) {
+	hints := map[anyfs.Key]anyfs.PageHint{}
+	for i := range diff {
+		n := &diff[i]
+		if !n.IsFile() {
+			continue
+		}
+		h := pageHint(r.access.Policy(n.Path))
+		for _, p := range n.Pages {
+			v := h
+			if o, ok := hints[p.Key]; ok {
+				v = mergeHint(o, h)
+			}
+			hints[p.Key] = v
+		}
+	}
+	for k, h := range hints {
+		r.local.Hint(k, h)
+	}
+}

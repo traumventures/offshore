@@ -84,6 +84,9 @@ type Stats struct {
 	PageOutBytes int64 `json:"page_out_bytes"`
 	Writebacks   int64 `json:"writebacks"`
 	ReclaimBytes int64 `json:"reclaim_bytes"`
+	// SharedBytes are resident pages another tier holds too (linked from
+	// a shared pool: counted by both).
+	SharedBytes int64 `json:"shared_bytes,omitempty"`
 	// FaultRate is page faults per second (exponentially weighted).
 	FaultRate float64 `json:"fault_rate"`
 	// Thrashing is set while refaults show a working set larger than the
@@ -107,6 +110,7 @@ func (s Stats) Add(o Stats) Stats {
 	s.PageOutBytes += o.PageOutBytes
 	s.Writebacks += o.Writebacks
 	s.ReclaimBytes += o.ReclaimBytes
+	s.SharedBytes += o.SharedBytes
 	s.FaultRate += o.FaultRate
 	s.Thrashing = s.Thrashing || o.Thrashing
 	return s

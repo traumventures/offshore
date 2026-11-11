@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/traumventures/offshore/internal/medium"
@@ -22,7 +23,12 @@ type LocalOptions struct {
 	// Medium is the profile of the disk (default: medium "local").
 	Medium medium.Profile
 	// Window is the working set window (default 10 minutes).
-	Window   time.Duration
+	Window time.Duration
+	// Pool is a machine-wide directory of page files that several local
+	// tiers (repositories) share by hardlink: a page put into one tier
+	// that another already holds takes no extra disk (dedupe of content
+	// addressed pages). Empty: no sharing.
+	Pool     string
 	Observer Observer
 	Now      func() time.Time
 }
@@ -55,9 +61,24 @@ type lpage struct {
 	size   int64
 	state  State
 	pinned bool
+	shared bool // linked from the pool (another tier held it)
+	hint   PageHint
 	last   time.Time
 	inT2   bool
 	elem   *list.Element
+}
+
+// PageHint is the access-class policy of a resident page (set by the
+// owner after a commit, in memory only; a restart forgets it).
+type PageHint struct {
+	// Expire is the page's dirty expiry (0: the link's DirtyExpire,
+	// negative: written back at the next pass).
+	Expire time.Duration
+	// NoWriteback: never written back by the periodic writeback or dirty
+	// pressure, only by an explicit flush.
+	NoWriteback bool
+	// LocalOnly: never demoted to a lower tier on reclaim.
+	LocalOnly bool
 }
 
 type ghost struct {
@@ -100,6 +121,10 @@ func OpenLocal(opt LocalOptions) (*Local, error) {
 			return nil
 		}
 		pg := &lpage{key: k, size: fi.Size(), last: now}
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && opt.Pool != "" && st.Nlink > 2 {
+			pg.shared = true
+			l.st.SharedBytes += pg.size
+		}
 		if dirty[k] {
 			pg.state = Dirty
 			l.st.DirtyBytes += pg.size
@@ -117,6 +142,44 @@ func OpenLocal(opt LocalOptions) (*Local, error) {
 }
 
 func (l *Local) path(k Key) string { return filepath.Join(l.dir, string(k[:2]), string(k)) }
+
+func (l *Local) poolPath(k Key) string {
+	return filepath.Join(l.opt.Pool, string(k[:2]), string(k))
+}
+
+// removeFile deletes a page's file and its pool entry once no other tier
+// links it.
+func (l *Local) removeFile(k Key) {
+	os.Remove(l.path(k))
+	if l.opt.Pool == "" {
+		return
+	}
+	pp := l.poolPath(k)
+	if fi, err := os.Lstat(pp); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Nlink <= 1 {
+			os.Remove(pp)
+		}
+	}
+}
+
+// Hint sets the access-class policy of a resident page.
+func (l *Local) Hint(k Key, h PageHint) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if pg := l.pages[k]; pg != nil {
+		pg.hint = h
+	}
+}
+
+// PageHint returns a resident page's hint.
+func (l *Local) PageHint(k Key) (PageHint, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if pg := l.pages[k]; pg != nil {
+		return pg.hint, true
+	}
+	return PageHint{}, false
+}
 
 // Path returns the file holding a resident page ("" if not resident).
 func (l *Local) Path(k Key) string {
@@ -286,21 +349,32 @@ func (l *Local) Put(ctx context.Context, k Key, b []byte, s State) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	tmp := fmt.Sprintf("%s.%d.tmp", p, time.Now().UnixNano())
-	if err := os.WriteFile(tmp, b, 0o444); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, p); err != nil {
-		os.Remove(tmp)
-		return err
+	shared := l.opt.Pool != "" && os.Link(l.poolPath(k), p) == nil
+	if !shared {
+		tmp := fmt.Sprintf("%s.%d.tmp", p, time.Now().UnixNano())
+		if err := os.WriteFile(tmp, b, 0o444); err != nil {
+			os.Remove(tmp)
+			return err
+		}
+		if err := os.Rename(tmp, p); err != nil {
+			os.Remove(tmp)
+			return err
+		}
+		if l.opt.Pool != "" {
+			pp := l.poolPath(k)
+			os.MkdirAll(filepath.Dir(pp), 0o755)
+			os.Link(p, pp)
+		}
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.pages[k] != nil { // raced with another Put
 		return nil
 	}
-	pg := &lpage{key: k, size: int64(len(b)), state: s, last: l.opt.Now()}
+	pg := &lpage{key: k, size: int64(len(b)), state: s, last: l.opt.Now(), shared: shared}
+	if shared {
+		l.st.SharedBytes += pg.size
+	}
 	if g := l.ghosts[k]; g != nil {
 		// A refault: ARC adapts towards the list the ghost came from.
 		l.st.Refaults++
@@ -390,7 +464,7 @@ func (l *Local) DirtyKeys() []DirtyPage {
 	var out []DirtyPage
 	for k, pg := range l.pages {
 		if pg.state == Dirty {
-			out = append(out, DirtyPage{Key: k, Size: pg.size, Since: pg.last})
+			out = append(out, DirtyPage{Key: k, Size: pg.size, Since: pg.last, Hint: pg.hint})
 		}
 	}
 	return out
@@ -401,12 +475,13 @@ type DirtyPage struct {
 	Key   Key
 	Size  int64
 	Since time.Time
+	Hint  PageHint
 }
 
 // drop removes a page and its file without a ghost (locked).
 func (l *Local) drop(pg *lpage) {
 	l.unlink(pg)
-	os.Remove(l.path(pg.key))
+	l.removeFile(pg.key)
 }
 
 func (l *Local) unlink(pg *lpage) {
@@ -425,6 +500,9 @@ func (l *Local) unlink(pg *lpage) {
 	}
 	if pg.pinned {
 		l.st.PinnedBytes -= pg.size
+	}
+	if pg.shared {
+		l.st.SharedBytes -= pg.size
 	}
 }
 
@@ -453,13 +531,13 @@ func (l *Local) reclaimLocked(target int64) int64 {
 		if pg == nil {
 			break // everything dirty or pinned
 		}
-		if l.demote != nil {
+		if l.demote != nil && !pg.hint.LocalOnly {
 			if b, err := os.ReadFile(l.path(pg.key)); err == nil {
 				l.demote(pg.key, b)
 			}
 		}
 		l.unlink(pg)
-		os.Remove(l.path(pg.key))
+		l.removeFile(pg.key)
 		g := &ghost{size: pg.size, last: pg.last, inB2: pg.inT2}
 		if pg.inT2 {
 			g.elem = l.b2.PushBack(pg.key)
