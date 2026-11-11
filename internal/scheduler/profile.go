@@ -9,7 +9,9 @@ import (
 // the cost model. Zero fields are unknown; the model then uses defaults.
 type Profile struct {
 	// Warm and Cold are the median durations of runs with and without a
-	// reused build slot.
+	// reused build slot, without restore and thrash time (base run times:
+	// the model adds the restore and the thrashing predicted for the
+	// candidate machine).
 	Warm time.Duration `json:"warm,omitempty"`
 	Cold time.Duration `json:"cold,omitempty"`
 	// Spread is the ratio of the 80th percentile to the median of the run
@@ -32,13 +34,24 @@ type Profile struct {
 	// runs that reported it): what a lazy restore faults in before the
 	// build proceeds and what must fit the local tier to avoid thrashing.
 	WorkingSet int64 `json:"working_set,omitempty"`
-	Runs       int   `json:"runs,omitempty"`
+	// Thrash is the median thrash time of the runs that thrashed (what
+	// was subtracted from their durations; informational).
+	Thrash time.Duration `json:"thrash,omitempty"`
+	// Refetch is the refetch factor learned for the key: the median of
+	// refaulted bytes per byte of working set beyond the local capacity
+	// over its thrashing runs (0 = fewer than MinRefetchRuns samples; the
+	// model then uses the provider's or global calibration).
+	Refetch float64 `json:"refetch,omitempty"`
+	Runs    int     `json:"runs,omitempty"`
 }
 
 // Defaults the cost model assumes for unknown profiles.
 const (
 	DefaultRun         = 2 * time.Minute
 	DefaultColdPenalty = 0.5 // cold = warm * (1 + penalty)
+	// MinRefetchRuns is how many thrashing runs a key needs before its
+	// own refetch factor replaces the provider's.
+	MinRefetchRuns = 2
 )
 
 // WarmRun is the expected duration with a warm slot.
@@ -90,21 +103,34 @@ func medianInt(xs []int64) int64 {
 
 // profileOf derives a profile from observations (oldest first).
 func profileOf(rs []Usage) Profile {
-	var warm, cold, restore []time.Duration
+	var warm, cold, restore, thrash []time.Duration
 	coldBy := map[string][]time.Duration{}
 	var slots, growth, ws []int64
+	var refetch []float64
 	p := Profile{}
 	for _, u := range rs {
 		if u.OOM || u.Wall <= 0 {
 			continue
 		}
 		p.Runs++
+		th := time.Duration(u.ThrashSeconds * float64(time.Second))
+		if th > 0 {
+			thrash = append(thrash, th)
+		}
+		if u.RefaultBytes > 0 && u.LocalCapacity > 0 && u.WorkingSetBytes > u.LocalCapacity {
+			x := float64(u.RefaultBytes) / float64(u.WorkingSetBytes-u.LocalCapacity)
+			refetch = append(refetch, min(max(x, 0.1), 20)) // noise, partial windows
+		}
+		// The base run: the wall time without what the machine added
+		// (restore, thrashing); at least a tenth of the wall time against
+		// overstated reports.
+		base := func(d time.Duration) time.Duration { return max(d-th, u.Wall/10) }
 		if u.Warm || u.Restored {
-			warm = append(warm, u.Wall-time.Duration(u.RestoreSeconds*float64(time.Second)))
+			warm = append(warm, base(u.Wall-time.Duration(u.RestoreSeconds*float64(time.Second))))
 		} else {
-			cold = append(cold, u.Wall)
+			cold = append(cold, base(u.Wall))
 			if u.Provider != "" {
-				coldBy[u.Provider] = append(coldBy[u.Provider], u.Wall)
+				coldBy[u.Provider] = append(coldBy[u.Provider], base(u.Wall))
 			}
 		}
 		if u.Restored && u.RestoreSeconds > 0 {
@@ -136,6 +162,11 @@ func profileOf(rs []Usage) Profile {
 		p.Spread = max(p.Spread, x)
 	}
 	p.Warm, p.Cold, p.Restore = medianDur(warm), medianDur(cold), medianDur(restore)
+	p.Thrash = medianDur(thrash)
+	if len(refetch) >= MinRefetchRuns {
+		sort.Float64s(refetch)
+		p.Refetch = refetch[(len(refetch)-1)/2]
+	}
 	for prov, ds := range coldBy {
 		if p.ColdBy == nil {
 			p.ColdBy = map[string]time.Duration{}

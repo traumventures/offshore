@@ -201,7 +201,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		restored, restoreSecs = restoreUsage(m)
 	}
 	slotBefore := s.slots.size(slot)
-	faultsBefore := s.cfs.faultBytes()
+	faultsBefore, refaultsBefore := s.cfs.faultBytes(), s.cfs.refaultBytes()
 	slotAfter := int64(-1)
 	s.slots.update(slot, func(m *slotMeta) { m.Caches = slotCaches(req) })
 	defer func() {
@@ -385,6 +385,10 @@ loop:
 	} else {
 		exit.Usage.WorkingSetBytes = s.cfs.faultBytes() - faultsBefore + max(0, slotAfter-slotBefore)
 	}
+	// Thrashing: pages refaulted during the session (machine wide); the
+	// orchestrator turns them into thrash time with the size's stack.
+	exit.Usage.RefaultBytes = max(0, s.cfs.refaultBytes()-refaultsBefore)
+	exit.Usage.LocalCapacity = s.cfs.capacity()
 	exit.Usage.Restored, exit.Usage.RestoreSeconds = restored, restoreSecs
 	exit.Usage.ExitCode = exit.Code
 	if s.cg.oomKilled(cgDir) {

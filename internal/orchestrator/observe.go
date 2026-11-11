@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/provider"
 	"github.com/traumventures/offshore/internal/scheduler"
 	"github.com/traumventures/offshore/internal/tracing"
@@ -257,10 +258,39 @@ func (o *Orchestrator) Finish(ctx context.Context, leaseID, key string, u *sched
 	if usage.Provider == "" {
 		usage.Provider = ev.Provider
 	}
+	o.thrashUsage(ev.Provider, ev.Size, &usage)
 	*u = usage // the estimator learns cold durations per provider
 	ev.Usage = &usage
 	if tid := tracing.TraceID(ctx); tid != "" {
 		ev.TraceID = tid
 	}
 	o.obs.log.Append(ev)
+}
+
+// thrashUsage derives the session's thrash time from its refaulted bytes
+// with the tier stack of its size (unless the worker reported it), so the
+// estimator learns base run times without the thrashing, and fills in the
+// local capacity from the size when the worker did not report it.
+func (o *Orchestrator) thrashUsage(prov, size string, u *scheduler.Usage) {
+	if u.RefaultBytes <= 0 || (u.ThrashSeconds > 0 && u.LocalCapacity > 0) {
+		return
+	}
+	o.mu.Lock()
+	sizes := o.measuredSizes()
+	o.mu.Unlock()
+	for _, s := range sizes {
+		if s.Provider != prov || s.Name != size {
+			continue
+		}
+		if u.ThrashSeconds <= 0 {
+			u.ThrashSeconds = scheduler.RefaultTime(s.Stack, u.RefaultBytes).Seconds()
+		}
+		if u.LocalCapacity <= 0 {
+			u.LocalCapacity = s.Stack.Capacity
+		}
+		return
+	}
+	if u.ThrashSeconds <= 0 { // unknown size: the default bandwidth
+		u.ThrashSeconds = scheduler.RefaultTime(medium.Stack{}, u.RefaultBytes).Seconds()
+	}
 }

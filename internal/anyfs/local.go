@@ -464,6 +464,7 @@ func (l *Local) Put(ctx context.Context, k Key, b []byte, s State) error {
 	if g := l.ghosts[k]; g != nil {
 		// A refault: ARC adapts towards the list the ghost came from.
 		l.st.Refaults++
+		l.st.RefaultBytes += pg.size
 		if g.inB2 {
 			l.p = max(0, l.p-pg.size)
 			l.b2.Remove(g.elem)

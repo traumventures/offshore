@@ -931,6 +931,26 @@ func (c *cacheFS) vm() *proto.VMStats {
 // working set deltas).
 func (c *cacheFS) faultBytes() int64 { return c.files.Stats().PageInBytes }
 
+// refaultBytes is the bytes faulted in again after a reclaim so far
+// (machine wide; per session deltas are the session's thrashing).
+func (c *cacheFS) refaultBytes() int64 {
+	c.mu.Lock()
+	repos := make([]*repoFS, 0, len(c.repos))
+	for _, r := range c.repos {
+		repos = append(repos, r)
+	}
+	c.mu.Unlock()
+	n := c.files.Stats().RefaultBytes
+	for _, r := range repos {
+		t, _, _, _ := r.stack()
+		n += anyfs.StatsOf(t).RefaultBytes
+	}
+	return n
+}
+
+// capacity is the local tier's capacity (0 = unlimited/unknown).
+func (c *cacheFS) capacity() int64 { return c.opt.Capacity }
+
 // residentBytes is the disk held by pages and materialized files.
 func (c *cacheFS) residentBytes() int64 {
 	v := c.vm()

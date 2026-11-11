@@ -106,7 +106,11 @@ func TestLazyRestore(t *testing.T) {
 
 // The simulated cache file systems refault 12 times the excess; the
 // policy learns that factor from the thrash/page_in/reclaim events
-// (Report.Refetch) and the thrashing costs 6 times the default's.
+// (Report.Refetch) and the key's usage. With the default factor even
+// cost-optimised scheduling keeps thrashing on the cheap size; with 12
+// the first build thrashes 6 times as much and the next ones take the
+// bigger size (the learned base run no longer contains the thrash time,
+// so the bigger size is priced for the build alone).
 func TestRefetchCalibratedFromEvents(t *testing.T) {
 	tr := spaced(6, Job{Repo: "r", Env: "e", Duration: 600, CPU: 2, Memory: Bytes(2 * gib), PeakMemory: Bytes(gib), WorkingSet: Bytes(40 * gib)})
 	run := func(refetch float64) Report {
@@ -118,8 +122,8 @@ func TestRefetchCalibratedFromEvents(t *testing.T) {
 	if def.Refetch != scheduler.DefaultRefetch || def.Thrashed != 6 {
 		t.Fatalf("default: calibrated %v, thrashed %d", def.Refetch, def.Thrashed)
 	}
-	if high.Refetch != 12 || high.PageInBytes != 6*def.PageInBytes || high.ThrashTime < 5*def.ThrashTime {
-		t.Fatalf("factor 12: calibrated %v, page-in %d vs %d, thrash time %v vs %v", high.Refetch, high.PageInBytes, def.PageInBytes, high.ThrashTime, def.ThrashTime)
+	if high.Refetch != 12 || high.Thrashed != 1 || high.PageInBytes != def.PageInBytes || high.Created["big"] != 5 {
+		t.Fatalf("factor 12: calibrated %v, thrashed %d, page-in %d vs %d, created %v", high.Refetch, high.Thrashed, high.PageInBytes, def.PageInBytes, high.Created)
 	}
 }
 
@@ -133,5 +137,40 @@ func TestRestoreWithResize(t *testing.T) {
 	rep := Run(spaced(4, j), o)
 	if rep.Completed != 4 || rep.Restores != 3 || rep.Resizes < rep.Restores || rep.Thrashed > 1 {
 		t.Fatalf("want joint resize+restore: restores %d, resizes %d, thrashed %d, actions %v", rep.Restores, rep.Resizes, rep.Thrashed, rep.Actions)
+	}
+}
+
+// Thrashing builds on the cheap size: the estimator learns base run times
+// without the reported thrash time and each repository's own refetch
+// factor, so the policy predicts thrashing builds without counting the
+// thrashing twice: after MinRefetchRuns builds per repository the
+// predictions are exact, overall (with the first, unknown builds)
+// ThrashBias is near 1; counting the thrash twice (and the
+// provider factor for both) gave 1.50.
+func TestThrashPredictedOnce(t *testing.T) {
+	const n = 60
+	var js []Job
+	for i := 0; i < n; i++ {
+		j := Job{At: float64(i) * 3600, Repo: "light", Env: "e", Duration: 600, CPU: 2, Memory: Bytes(2 * gib), PeakMemory: Bytes(gib), WorkingSet: Bytes(40 * gib), Refetch: 0.5}
+		if i%2 == 1 {
+			j.Repo, j.Refetch = "heavy", 6
+		}
+		js = append(js, j)
+	}
+	tr := Trace{Start: DefaultStart, End: (n + 1) * 3600, Jobs: js}
+	o := opts(scheduler.Config{CostOptimization: 1})
+	h := scheduler.NewHistory("")
+	o.Sizes, o.MaxLifetime, o.Estimator = localSizes()[:1], time.Hour, h
+	rep := Run(tr, o)
+	if rep.Completed != n || rep.Thrashed != n {
+		t.Fatalf("completed %d, thrashed %d", rep.Completed, rep.Thrashed)
+	}
+	if rep.ThrashBias < 0.95 || rep.ThrashBias > 1.05 {
+		t.Fatalf("thrash bias %.2f, want about 1", rep.ThrashBias)
+	}
+	for repo, want := range map[string]float64{"light": 0.5, "heavy": 6} {
+		if p := h.Profile(repo); p.Refetch != want || p.Warm > 11*time.Minute {
+			t.Errorf("%s: refetch %v, warm %v", repo, p.Refetch, p.Warm)
+		}
 	}
 }

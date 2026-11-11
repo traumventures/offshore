@@ -223,3 +223,76 @@ func TestNoResizeForWorkingSetBelowFixedLocalTier(t *testing.T) {
 		}
 	}
 }
+
+// thrashRuns are warm runs of 10 minutes base time with a 40G working set
+// on the small size (20G local): each refaults refetch x 20G, which the
+// worker reports and the orchestrator turns into thrash seconds.
+func thrashRuns(h *History, key string, n int, refetch float64) (wall, thrash time.Duration) {
+	st := localSizes()[0].Stack
+	refault := int64(refetch * float64(20*gib))
+	thrash = RefaultTime(st, refault)
+	wall = 10*time.Minute + thrash
+	for i := 0; i < n; i++ {
+		h.Observe(key, Usage{Wall: wall, Warm: true, WorkingSetBytes: 40 * gib, LocalCapacity: 20 * gib,
+			RefaultBytes: refault, ThrashSeconds: thrash.Seconds(), Provider: "aws"})
+	}
+	return wall, thrash
+}
+
+// The learned run times exclude the observed thrashing and the model adds
+// the thrashing of the candidate machine once: on the same machine the
+// predicted run is the observed one, on a machine whose local tier holds
+// the working set the thrashing is gone (before: base + thrash learned,
+// plus the penalty again).
+func TestThrashNotCountedTwice(t *testing.T) {
+	h := NewHistory("")
+	wall, thrash := thrashRuns(h, "r", 5, 3)
+	p := h.Profile("r")
+	if p.Warm != 10*time.Minute || p.Thrash != thrash || p.Refetch != 3 {
+		t.Fatalf("profile: warm %v thrash %v refetch %v", p.Warm, p.Thrash, p.Refetch)
+	}
+	tk := task(4, 8)
+	tk.Profile = p
+	place := func(disk int64) Placement {
+		m := machine("m", res(8, 16), Resources{})
+		m.Provider, m.Size, m.Stack, m.WarmRepos = "aws", "small", StackOf(disk, localSizes()[0].Stack.Levels...), []string{"r"}
+		m.VM.Capacity = disk
+		// The provider calibration is off (factor 1): the key's own wins.
+		f := Pool{Now: now, Sizes: localSizes(), Machines: []Machine{m}, Refetch: map[string]float64{"aws": 1}}
+		return Default{Cfg: Config{CostOptimization: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1}}.Place(f, tk)
+	}
+	same := place(20 * gib)
+	if same.Kind != Assign || !strings.Contains(same.Reason, "thrashing") {
+		t.Fatalf("same machine: %+v", same)
+	}
+	if d := same.Run - wall; d < -time.Second || d > time.Second {
+		t.Fatalf("same machine: predicted %v, observed %v", same.Run, wall)
+	}
+	big := place(100 * gib)
+	if big.Run != 10*time.Minute || strings.Contains(big.Reason, "thrashing") {
+		t.Fatalf("bigger disk: predicted %v (%s), want the base 10m", big.Run, big.Reason)
+	}
+}
+
+// The refetch factor is learned per key: two keys on the same provider
+// keep their own factors; a key with fewer than MinRefetchRuns thrashing
+// runs uses the provider's calibration.
+func TestRefetchPerKey(t *testing.T) {
+	h := NewHistory("")
+	thrashRuns(h, "light", 3, 0.5)
+	thrashRuns(h, "heavy", 3, 8)
+	thrashRuns(h, "new", 1, 8)
+	f := Pool{Refetch: map[string]float64{"aws": 2}}
+	for key, want := range map[string]float64{"light": 0.5, "heavy": 8, "new": 2} {
+		tk := Task{Key: key, Profile: h.Profile(key)}
+		if got := refetchOf(f, "aws", tk); got != want {
+			t.Errorf("%s: refetch %v, want %v", key, got, want)
+		}
+	}
+	if got := refetchOf(Pool{Refetch: map[string]float64{"": 3}}, "oci", Task{}); got != 3 {
+		t.Errorf("global fallback: %v", got)
+	}
+	if got := refetchOf(Pool{}, "oci", Task{}); got != DefaultRefetch {
+		t.Errorf("default: %v", got)
+	}
+}

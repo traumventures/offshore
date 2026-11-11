@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/proto"
 	"github.com/traumventures/offshore/internal/scheduler"
 	"github.com/traumventures/offshore/internal/tracing"
@@ -145,5 +146,35 @@ func TestVMEvents(t *testing.T) {
 	}
 	if s := byType(evs, events.MachineSample); len(s) != 2 || s[1].VM == nil {
 		t.Fatalf("samples %+v", s)
+	}
+}
+
+// A session's refaulted bytes become thrash seconds with its size's tier
+// stack (and the size's local capacity) before the estimator learns from
+// the usage; reported thrash seconds are kept.
+func TestFinishDerivesThrashSeconds(t *testing.T) {
+	st := scheduler.StackOf(20*gib, medium.Default("aws-ec2", medium.Local), medium.Default("aws-ec2", medium.Store))
+	f := newFake()
+	o := newTestOrch(t, f, func(c *Config) { c.Sizes[0].Stack = st })
+	ctx := context.Background()
+	l, err := o.Acquire(ctx, req("r1"), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := &scheduler.Usage{Wall: 20 * time.Minute, WorkingSetBytes: 40 * gib, RefaultBytes: 60 * gib}
+	o.Finish(ctx, l.ID, "r1/cargo/build", u)
+	o.Release(l.ID)
+	want := scheduler.RefaultTime(st, 60*gib).Seconds()
+	if u.ThrashSeconds != want || u.LocalCapacity != 20*gib {
+		t.Fatalf("thrash %v (want %v), capacity %d", u.ThrashSeconds, want, u.LocalCapacity)
+	}
+	end := byType(readEvents(t, o), events.TaskEnd)
+	if len(end) != 1 || end[0].Usage.ThrashSeconds != want || end[0].Usage.RefaultBytes != 60*gib {
+		t.Fatalf("task_end %+v", end)
+	}
+	reported := scheduler.Usage{RefaultBytes: gib, ThrashSeconds: 7, LocalCapacity: 30 * gib}
+	o.thrashUsage("fake", o.cfg.Sizes[0].Name, &reported)
+	if reported.ThrashSeconds != 7 || reported.LocalCapacity != 30*gib {
+		t.Fatalf("reported values must be kept: %+v", reported)
 	}
 }

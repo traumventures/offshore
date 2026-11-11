@@ -5,7 +5,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"maps"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -46,6 +48,7 @@ func simCmd(args []string) error {
 	sweep := fs.Bool("sweep", false, "sweep cost_optimization 0..1 in steps of 0.1 and print the cost/time frontier")
 	resize := fs.Bool("resize", false, "machines can grow their disks (slot handling)")
 	refetch := fs.Float64("refetch", 0, "true refetch factor of the simulated cache file systems: refaulted bytes per byte of working set beyond the local disk (0 = the scheduler default); the policy calibrates it from the simulated events")
+	refetchSpread := fs.Float64("refetch-spread", 0, "spread of the true refetch factor across repositories: each repository's factor is refetch * F^u with u in [-1,1] from its name (0 = the same factor everywhere); the policy learns it per key")
 	wsFlag := fs.String("working-set", "", "working set of jobs that have none (e.g. 30G; stresses the tier stacks on a trace without cache data)")
 	slotFlag := fs.String("slot-bytes", "", "slot size after a cold build of jobs that have none (e.g. 20G; growth per warm build 5%)")
 	estimator := fs.String("estimator", "", "static | history (default: pool.estimator)")
@@ -164,6 +167,9 @@ func simCmd(args []string) error {
 			if j.WorkingSet == 0 {
 				j.WorkingSet = sim.Bytes(ws)
 			}
+			if *refetchSpread > 1 && j.Refetch == 0 {
+				j.Refetch = repoRefetch(j.Repo, *refetch, *refetchSpread)
+			}
 			if j.SlotBytes == 0 && slot > 0 {
 				j.SlotBytes, j.SlotGrowth = sim.Bytes(slot), sim.Bytes(slot/20)
 			}
@@ -235,7 +241,7 @@ func printReports(w *os.File, rs []sim.Report) {
 func printFrontier(w *os.File, path string, ratios []float64, rs []sim.Report) {
 	fmt.Fprintf(w, "%s: cost_optimization sweep (1 = cheapest, 0 = fastest result)\n", path)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "cost_optimization\tcost $\tvolumes $\tmachine-h\tturn p50\tturn p95\twait p95\twarm\trestores\tattaches\tresizes\tthrashed\trefetch\tflaps\tsizes\tpareto\t")
+	fmt.Fprintln(tw, "cost_optimization\tcost $\tvolumes $\tmachine-h\tturn p50\tturn p95\twait p95\twarm\trestores\tattaches\tresizes\tthrashed\trefetch\tbias\tflaps\tsizes\tpareto\t")
 	for i, r := range rs {
 		pareto := "*"
 		for j, o := range rs {
@@ -243,9 +249,9 @@ func printFrontier(w *os.File, path string, ratios []float64, rs []sim.Report) {
 				pareto = ""
 			}
 		}
-		fmt.Fprintf(tw, "%.1f\t%.2f\t%.2f\t%.1f\t%s\t%s\t%s\t%.0f%%\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t\n", ratios[i], r.Cost, r.VolumeCost, r.MachineHours,
+		fmt.Fprintf(tw, "%.1f\t%.2f\t%.2f\t%.1f\t%s\t%s\t%s\t%.0f%%\t%d\t%d\t%d\t%d\t%s\t%s\t%d\t%s\t%s\t\n", ratios[i], r.Cost, r.VolumeCost, r.MachineHours,
 			r.TurnP50.Round(time.Second), r.TurnP95.Round(time.Second), r.WaitP95.Round(time.Second), 100*r.WarmRate, r.Restores, r.VolumeAttaches,
-			r.Resizes, r.Thrashed, refetchOf(r.Refetch), r.Flaps, createdSizes(r.Created), pareto)
+			r.Resizes, r.Thrashed, refetchOf(r.Refetch), biasOf(r.ThrashBias), r.Flaps, createdSizes(r.Created), pareto)
 	}
 	tw.Flush()
 }
@@ -257,6 +263,28 @@ func refetchOf(f float64) string {
 		return "-"
 	}
 	return fmt.Sprintf("%.1f", f)
+}
+
+// biasOf formats the predicted/actual run ratio of thrashing builds
+// ("-" when none thrashed).
+func biasOf(b float64) string {
+	if b <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.2f", b)
+}
+
+// repoRefetch is a repository's true refetch factor for -refetch-spread:
+// base (0: the scheduler default) times spread^u, u in [-1,1] from a hash
+// of the name.
+func repoRefetch(repo string, base, spread float64) float64 {
+	if base <= 0 {
+		base = scheduler.DefaultRefetch
+	}
+	h := fnv.New32a()
+	h.Write([]byte(repo))
+	u := float64(h.Sum32()%2001)/1000 - 1
+	return base * math.Pow(spread, u)
 }
 
 // gbytes formats bytes as GB with one decimal ("-" for none).

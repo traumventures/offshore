@@ -31,7 +31,7 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 			assignable = true
 			o := option{cost: p.machineCost(f, m, t, f.Now, rc.run) + rc.cost, time: rc.run, tie: Score(t.RepoID, m.ID),
 				fit: leftover(p.Free(m), t.Request, p.admissible(m))}
-			consider(o, Placement{Kind: Assign, Machine: m.ID, Grant: p.Grant(t), Reason: rc.reason, Slot: rc.slot, Expected: t.Profile.High(rc.run)})
+			consider(o, Placement{Kind: Assign, Machine: m.ID, Grant: p.Grant(t), Reason: rc.reason, Slot: rc.slot, Expected: t.Profile.High(rc.run), Run: rc.run})
 		}
 	}
 	if !assignable {

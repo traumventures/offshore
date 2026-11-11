@@ -107,7 +107,10 @@ the composite profile (`scheduler.Size.Stack`, a `medium.Stack`; anyfs.Profile i
 - *thrashing*: when the working set exceeds the local capacity (the top
   tier: `VM.Capacity`, else the size's, else the disk budget), the build
   is charged `refetch x FaultTime(excess)` from the tier below the top.
-  The refetch factor (refaulted bytes per byte of excess) is calibrated
+  The refetch factor (refaulted bytes per byte of excess) is learned per
+  build key from the sessions' `task_end.usage` (`refault_bytes` /
+  (`working_set_bytes` - `local_capacity`), median of the thrashing runs,
+  `Profile.Refetch`, from 2 runs on). Without that it is calibrated
   from the event log (`events.Refetch`, fed live by the orchestrator and
   replayed from the last 24 h at start): while a machine thrashes
   (`thrash` event, or a `machine_sample` whose VM thrashes), its refaults
@@ -115,7 +118,18 @@ the composite profile (`scheduler.Size.Stack`, a `medium.Stack`; anyfs.Profile i
   `task_end`, a sample below capacity, stop or destroy) divided by the
   excess of the working set over the capacity is one sample of a decaying
   average (weight 0.3) per provider and over all providers
-  (`Pool.Refetch`; no data: 2). A machine that reports `VM.Thrashing` (or
+  (`Pool.Refetch`; no data: 2). Thrashing is counted once: the worker
+  reports the pages refaulted during a session (`refault_bytes`, machine
+  wide: an upper bound with concurrent sessions) and the local capacity,
+  the orchestrator turns them into `thrash_seconds` with the size's
+  stack (`RefaultTime`, the same fault time the penalty uses), and the
+  estimator learns warm/cold run times without them (base run times,
+  `Profile.Thrash` keeps the median for reference). The model then adds
+  the penalty of the candidate machine: on the machine the run thrashed
+  on the prediction equals the observed run, on a machine whose local
+  tier holds the working set the thrashing is gone (before, the learned
+  run times already contained the thrash time and the penalty came on
+  top). A machine that reports `VM.Thrashing` (or
   a working set above its capacity) gets this penalty for every placement.
   Against it the model weighs growing the disk (to 1.25 x the working set
   and twice that growth, priced until the machine expires; only when the
@@ -325,8 +339,15 @@ machines drain or are destroyed. It models what the policy cannot see:
   reports it and calibrates the factor from the simulated `thrash`,
   `reclaim`, `page_in` and `task_end` events like the orchestrator.
   Reports add `thrashed` builds, thrash time, page-in bytes and the
-  calibrated factor; the sweep adds resizes, thrashed, refetch and
-  machines created per size. `-working-set` and `-slot-bytes` give jobs
+  calibrated factor; the sweep adds resizes, thrashed, refetch, bias and
+  machines created per size. The simulated usage carries refaulted bytes,
+  local capacity and thrash seconds like the orchestrator derives them,
+  so the estimator learns base run times and per-key factors; `bias`
+  (`Report.ThrashBias`) is the policy's predicted run (`Placement.Run`)
+  over the actual run of the builds that thrashed or were expected to
+  (above 1: thrashing overestimated). Jobs may carry their own true
+  `refetch`; `-refetch-spread F` gives each repository `refetch x F^u`
+  (u in [-1,1] from its name) to exercise the per-key factor. `-working-set` and `-slot-bytes` give jobs
   without cache data a working set and slot (tier stress on real arrival
   patterns), `sim/testdata/pool-tiers.toml` the c7a sizes with local disks
   (30G/30G/100G/200G) over the store.
@@ -405,6 +426,40 @@ production event log, small/team week synthetic), before and after:
   factor 2: team week r=1 $83.66 / 18m3s / 133 thrashed versus $115.68 /
   33m20s / 966; r=0.5 $84.32 / 10m39s versus $86.00 / 13m55s; small week
   r=1 $34.06 / 14m43s versus $41.36 / 31m28s.
+
+### Thrash time counted once, refetch per key (Nov 2026)
+
+Before, learned run times contained the thrash time of the runs and the
+model added the thrash penalty again; the refetch factor was one per
+provider. Now runs are learned without their thrash time and the factor
+per key (see *thrashing* above). `offshore sim -sweep -policy default
+-config pool-tiers.toml -resize -estimator history -working-set 40G
+-slot-bytes 25G` on `team-week.json` / `small-week.json`, before → after
+(cost $ / turnaround p95 / thrashed / bias):
+
+- team week r=0.7: $80.79 / 12m12s / 113 / 1.11 → $80.30 / 12m10s / 55 /
+  0.72; r=0.8: $81.59 / 13m32s / 414 / 1.30 → $77.15 / 12m19s / 50 /
+  0.74; r=0.9: $78.23 / 14m25s / 393 / 1.23 → $78.54 / 13m46s / 164 /
+  0.79; r=1: $84.74 / 17m29s / 766 → $87.79 / 18m49s / 675; r <= 0.6
+  within ±$1 and ±30s.
+- small week r=0.8: $34.10 / 10m32s / 149 / 1.33 → $31.98 / 11m51s / 142
+  / 0.91; r=0.9: $33.76 / 15m17s / 435 / 1.24 → $30.87 / 10m24s / 111 /
+  0.96; r=1: $30.50 / 12m34s / 289 → $32.15 / 15m17s / 406; r=0.4–0.6
+  $41.14/38.96/36.57 → $40.42/39.12/37.02.
+- with per-repository factors (`-refetch 4 -refetch-spread 4`, factors
+  1–16): team week r=0.7 $83.11 / 11m55s / 20 → $82.01 / 11m1s / 7, r=0.9
+  $79.38 / 11m47s → $80.30 / 11m28s, r=1 $79.86 / 12m52s / 32 → $80.65 /
+  12m46s / 45; small week r=0.8 $40.47 / 9m19s → $38.90 / 9m12s, r=0.9
+  $39.48 / 10m8s → $37.00 / 9m32s, r=1 $38.40 / 12m0s → $32.54 / 10m0s.
+
+The bias of builds the policy expected to thrash is 1.02 cold and 0.93
+warm (small week r=1; restores 0.74, contention and restore time are not
+part of it); the rest of the bias below 1 in the table comes from builds
+whose working set was not known yet (first runs of a key, predicted
+without thrashing), restores and CPU contention. At r=1 the
+policy now sees thrashing at its real (lower) cost and accepts more of it
+on cheap sizes; elsewhere fewer builds thrash because predictions on
+fitting machines no longer carry the old thrash time.
 
 ## Calibrating the simulator from real runs
 
