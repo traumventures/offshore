@@ -13,10 +13,10 @@ import (
 
 var one = []scheduler.Size{{Provider: "p", Name: "m", Capacity: scheduler.Resources{CPU: 4, Memory: 8 * gib}, PricePerHour: 1}}
 
+// one1 limits the test provider to one machine.
+var one1 = map[string]scheduler.Limit{"p": {Machines: 1, Source: "test"}}
+
 func opts(cfg scheduler.Config) Options {
-	if cfg.MaxMachines == 0 {
-		cfg.MaxMachines = 4
-	}
 	if cfg.IdleStop == 0 {
 		cfg.IdleStop = 10 * time.Minute
 	}
@@ -46,7 +46,9 @@ func TestSingleJob(t *testing.T) {
 
 func TestCPUOvercommitSlowsDown(t *testing.T) {
 	j := Job{Repo: "r", Env: "e", Duration: 600, CPU: 4, Memory: Bytes(2 * gib), PeakMemory: Bytes(gib)}
-	r := Run(jobs(j, j), opts(scheduler.Config{CPUOvercommit: 2, MemoryOvercommit: 1, MaxMachines: 1}))
+	o := opts(scheduler.Config{CPUOvercommit: 2, MemoryOvercommit: 1})
+	o.Limits = one1
+	r := Run(jobs(j, j), o)
 	if r.Machines != 1 || r.Completed != 2 {
 		t.Fatalf("%+v", r)
 	}
@@ -56,7 +58,8 @@ func TestCPUOvercommitSlowsDown(t *testing.T) {
 func TestMemoryBeyondPhysical(t *testing.T) {
 	// Requests fit (3G + 3G on 8G); peaks (5G + 5G) do not.
 	j := Job{Repo: "r", Env: "e", Duration: 300, CPU: 1, Memory: Bytes(3 * gib), PeakMemory: Bytes(5 * gib)}
-	o := opts(scheduler.Config{MaxMachines: 1})
+	o := opts(scheduler.Config{})
+	o.Limits = one1
 	o.MemoryRamp = -1 // peaks for the whole run
 	static := Run(jobs(j, j), o)
 	if static.OOMs != 4 || static.Completed != 1 || static.Failed != 1 {
@@ -80,7 +83,8 @@ func TestMemoryBeyondPhysical(t *testing.T) {
 // the other one grows, and are OOM killed when they peak together.
 func TestMemoryRamp(t *testing.T) {
 	j := Job{Repo: "r", Env: "e", Duration: 300, CPU: 1, Memory: Bytes(3 * gib), PeakMemory: Bytes(5 * gib)}
-	o := opts(scheduler.Config{MaxMachines: 1})
+	o := opts(scheduler.Config{})
+	o.Limits = one1
 	if r := Run(jobs(j, j), o); r.OOMs == 0 {
 		t.Fatalf("both peak at the same time: want an OOM kill, got %+v", r)
 	}
@@ -107,7 +111,8 @@ func TestWarmCacheHits(t *testing.T) {
 func TestQueueTimeoutAndReject(t *testing.T) {
 	big := Job{Repo: "r", Env: "e", Duration: 60, CPU: 1, Memory: Bytes(64 * gib), PeakMemory: Bytes(gib)}
 	long := Job{Repo: "r", Env: "e", Duration: 3600, CPU: 4, Memory: Bytes(8 * gib), PeakMemory: Bytes(gib)}
-	o := opts(scheduler.Config{MaxMachines: 1})
+	o := opts(scheduler.Config{})
+	o.Limits = one1
 	o.QueueTimeout = 5 * time.Minute
 	r := Run(jobs(big, long, long), o)
 	if r.Rejected != 1 || r.TimedOut != 1 || r.Completed != 1 || r.Failed != 2 {
@@ -130,8 +135,7 @@ func TestDeterministic(t *testing.T) {
 	}
 	for _, variant := range []string{scheduler.VariantDefault, scheduler.VariantClassic} {
 		o := func() Options {
-			return Options{Policy: scheduler.Default{Cfg: scheduler.Config{Variant: variant, CPUOvercommit: 2, MemoryOvercommit: 1,
-				MaxMachines: 8, IdleStop: 20 * time.Minute, ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5}},
+			return Options{Policy: scheduler.Default{Cfg: scheduler.Config{Variant: variant, CPUOvercommit: 2, MemoryOvercommit: 1, IdleStop: 20 * time.Minute, ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5}},
 				Sizes: sizes, Estimator: scheduler.NewHistory("")}
 		}
 		r1, r2 := Run(a, o()), Run(a, o())
@@ -195,8 +199,7 @@ func TestSampleTraces(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := func(variant string, r float64) Report {
-		return Run(tr, Options{Policy: scheduler.Default{Cfg: scheduler.Config{Variant: variant, CPUOvercommit: 2, MemoryOvercommit: 1,
-			MaxMachines: 16, IdleStop: 20 * time.Minute, ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5,
+		return Run(tr, Options{Policy: scheduler.Default{Cfg: scheduler.Config{Variant: variant, CPUOvercommit: 2, MemoryOvercommit: 1, IdleStop: 20 * time.Minute, ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5,
 			CostOptimization: r, QueueTimeout: 10 * time.Minute}}, Sizes: sizes, Estimator: scheduler.NewHistory("")})
 	}
 	fast, cheap, classic := run(scheduler.VariantDefault, 0), run(scheduler.VariantDefault, 1), run(scheduler.VariantClassic, 0)

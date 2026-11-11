@@ -32,7 +32,7 @@ check "outputs mounted at the local build directory" contains "$out" "mounted $P
 
 step "lifecycle: idle stop, warm restart, lifetime expiry, cleanup"
 cs down >/dev/null
-write_config 24h 5m 0 2
+write_config 24h 5m 0
 # Pool settings change by explicit reload, without a restart.
 cs reconcile >/dev/null 2>&1; code=$?
 check "reconcile reloads the pool configuration" eq "$code" 0
@@ -77,10 +77,10 @@ check "outputs unmount" test -z "$(grep " $PROJ/target " /proc/self/mountinfo)"
 check "local build directory intact after unmount" test -x "$PROJ/target/debug/hello"
 
 step "fail open when no machine can be provisioned"
-write_config 24h 10m 0 2
+write_config 24h 10m 0
 sed -i 's/^command = .*/command = ["false"]/' "$POOLCFG"; restart_daemon
 out="$(cd "$PROJ" && OFFSHORE_REQUIRE_REMOTE= "$BIN" run sh -c 'echo ${OFFSHORE_SESSION:-local}' 2>&1)"
 check "falls back to local execution" contains "$out" "local"
 (cd "$PROJ" && "$BIN" run sh -c true >/dev/null 2>&1); code=$?
 check "OFFSHORE_REQUIRE_REMOTE turns fallback into an error" eq "$code" 125
-write_config 24h 10m 0 2; restart_daemon
+write_config 24h 10m 0; restart_daemon

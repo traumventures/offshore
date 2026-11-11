@@ -98,6 +98,7 @@ Resources:
               - ec2:DescribeTags
               - ec2:DescribeAvailabilityZones
               - ec2:DescribeAccountAttributes
+              - servicequotas:GetServiceQuota
             Resource: "*"
           - Sid: RunTaggedMachines
             Effect: Allow

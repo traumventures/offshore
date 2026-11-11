@@ -153,6 +153,17 @@ type Provider interface {
 	List(ctx context.Context, owner string) ([]Machine, error)
 }
 
+// Quota is implemented by providers that can read the account limits that
+// bound how many machines the pool may run (e.g. the EC2 vCPU quota).
+type Quota interface {
+	// Quota returns the vCPUs the pool's machines may hold in total: the
+	// account's limit minus what other instances of the account use (may
+	// be 0 or less: no more machines). ok is false when no limit is known.
+	// own are the vCPUs of the pool's running and starting machines,
+	// which the account's usage includes.
+	Quota(ctx context.Context, owner string, own float64) (vcpus float64, ok bool, err error)
+}
+
 // ImageSpec describes an environment image to build.
 type ImageSpec = image.Spec
 

@@ -126,7 +126,7 @@ func TestFailedImageBacksOffCreates(t *testing.T) {
 	mu.Lock()
 	n := prepares
 	mu.Unlock()
-	// One plan may create up to MaxMachines (3) machines at once; each
+	// One plan may create a few machines at once; each
 	// fails once, then the backoff holds.
 	if n < 1 || n > 3 || f.created != 0 {
 		t.Fatalf("%d image prepares, %d creates, want 1..3 and 0", n, f.created)
@@ -250,12 +250,12 @@ func TestAccountLimitDisablesProvider(t *testing.T) {
 	}
 }
 
-// A disabled provider (max_machines = 0) gets no machine, whatever the
+// A disabled provider (enabled = false) gets no machine, whatever the
 // policy plans.
 func TestDisabledProviderGetsNoMachine(t *testing.T) {
 	f := newFake()
 	o := newTestOrch(t, f, func(c *Config) {
-		c.Policy.ProviderMax = map[string]int{"fake": 0}
+		c.Policy.DisabledProviders = map[string]bool{"fake": true}
 		c.QueueTimeout = 300 * time.Millisecond
 	})
 	if _, err := o.Acquire(context.Background(), req("r"), io.Discard); err == nil {
@@ -284,7 +284,7 @@ func TestDisabledProviderDrainsExistingMachines(t *testing.T) {
 	f.startSession(l.MachineID, l.ID, 1, gib)
 	// A second idle machine of the provider.
 	o2 := newTestOrch(t, f, func(c *Config) {
-		c.Policy.ProviderMax = map[string]int{"fake": 0}
+		c.Policy.DisabledProviders = map[string]bool{"fake": true}
 		c.QueueTimeout = 300 * time.Millisecond
 	})
 	f.mu.Lock()

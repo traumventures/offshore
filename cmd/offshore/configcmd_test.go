@@ -45,7 +45,7 @@ func TestConfigCheckEmbeddedSingleFile(t *testing.T) {
 }
 
 func TestConfigCheckRemote(t *testing.T) {
-	p := writeCfg(t, "[control_plane]\nurl = \"https://cs.example.com\"\n[pool]\nmax_machines = 3\n")
+	p := writeCfg(t, "[control_plane]\nurl = \"https://cs.example.com\"\n[pool]\nmin_machines = 3\n")
 	t.Setenv("OFFSHORE_CONFIG", p)
 	out := runConfig(t, "check")
 	for _, want := range []string{

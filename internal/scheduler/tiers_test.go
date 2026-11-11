@@ -52,7 +52,7 @@ func TestPlanAvoidsSizesSmallerThanWorkingSet(t *testing.T) {
 		ws   int64
 		want string
 	}{{0.5, 40 * gib, "big"}, {0, 40 * gib, "big"}, {1, 40 * gib, "small"}, {0.5, 10 * gib, "small"}} {
-		pol := Default{Cfg: Config{MaxMachines: 3, CostOptimization: c.r, CPUOvercommit: 1, MemoryOvercommit: 1}}
+		pol := Default{Cfg: Config{CostOptimization: c.r, CPUOvercommit: 1, MemoryOvercommit: 1}}
 		got := creates(pol.Plan(Pool{Now: now, Sizes: localSizes(), Queue: queue(wsTask(c.ws))}))
 		if len(got) != 1 || got[0] != c.want {
 			t.Errorf("r=%v ws=%dG: got %v, want %s", c.r, c.ws>>30, got, c.want)

@@ -4,7 +4,6 @@
 # Sizes and on-demand prices of AWS c7a instances (us-east-1).
 [pool]
 id = "sim"
-max_machines = 16
 min_machines = 0
 idle_stop = "20m"
 max_lifetime = "24h"

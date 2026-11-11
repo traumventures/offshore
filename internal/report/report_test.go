@@ -147,7 +147,7 @@ func TestSimExportRoundTrip(t *testing.T) {
 		}
 	}
 	// The simulator accepts the trace.
-	rep := sim.Run(back, sim.Options{Name: "export", Policy: scheduler.Default{Cfg: scheduler.Config{MaxMachines: 2, CPUOvercommit: 1, MemoryOvercommit: 1, ExpiryMargin: 15 * time.Minute}},
+	rep := sim.Run(back, sim.Options{Name: "export", Policy: scheduler.Default{Cfg: scheduler.Config{CPUOvercommit: 1, MemoryOvercommit: 1, ExpiryMargin: 15 * time.Minute}},
 		Sizes: []scheduler.Size{{Name: "m16", Capacity: scheduler.Resources{CPU: 16, Memory: 32 * gi}, PricePerHour: 1}}, Estimator: scheduler.Static{}})
 	if rep.Jobs != 2 || rep.Completed != 2 {
 		t.Fatalf("simulation %+v", rep)

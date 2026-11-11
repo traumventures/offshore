@@ -21,8 +21,7 @@ func prodRun(t *testing.T, variant string) Report {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Run(tr, Options{Name: variant, Policy: scheduler.Default{Cfg: scheduler.Config{Variant: variant, CPUOvercommit: 2, MemoryOvercommit: 1,
-		MaxMachines: 4, IdleStop: 20 * time.Minute, ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5, CostOptimization: 0.5,
+	return Run(tr, Options{Name: variant, Policy: scheduler.Default{Cfg: scheduler.Config{Variant: variant, CPUOvercommit: 2, MemoryOvercommit: 1, IdleStop: 20 * time.Minute, ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5, CostOptimization: 0.5,
 		QueueTimeout: 10 * time.Minute}}, Sizes: prodSizes, Estimator: scheduler.NewHistory(""),
 		Boot: map[string]time.Duration{"": 80 * time.Second}, Start: map[string]time.Duration{"": 70 * time.Second}})
 }
@@ -60,8 +59,7 @@ func TestCheapestBeatsBinpack(t *testing.T) {
 			t.Fatal(err)
 		}
 		run := func(variant string, r float64) Report {
-			return Run(tr, Options{Policy: scheduler.Default{Cfg: scheduler.Config{Variant: variant, CPUOvercommit: 2, MemoryOvercommit: 1,
-				MaxMachines: 16, IdleStop: 20 * time.Minute, ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5,
+			return Run(tr, Options{Policy: scheduler.Default{Cfg: scheduler.Config{Variant: variant, CPUOvercommit: 2, MemoryOvercommit: 1, IdleStop: 20 * time.Minute, ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5,
 				CostOptimization: r, QueueTimeout: 2 * time.Minute}}, Sizes: sizes, Estimator: scheduler.Static{},
 				Boot: map[string]time.Duration{"": time.Minute}, Start: map[string]time.Duration{"": 20 * time.Second}})
 		}

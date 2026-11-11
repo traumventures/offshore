@@ -44,7 +44,7 @@ func testCert(t *testing.T, name string, parent *x509.Certificate, parentKey *ec
 // requirement: the API key alone is not enough, a certificate from another
 // CA is rejected, the right certificate plus key works.
 func TestControlPlaneMutualTLS(t *testing.T) {
-	u := &config.PoolConfig{Pool: config.Pool{ID: "t", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s", MaxMachines: 1,
+	u := &config.PoolConfig{Pool: config.Pool{ID: "t", MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s",
 		Scheduler: config.Scheduler{Estimator: "static", CPUOvercommit: 1, MemoryOvercommit: 1}},
 		Providers: map[string]map[string]any{"img": {"type": "test-img"}}}
 	state := t.TempDir()

@@ -114,6 +114,9 @@ type Task struct {
 	// Profile is what the estimator knows about runs of Key (durations,
 	// slot growth); zero = unknown.
 	Profile Profile
+	// Owner is who asked (agent session or user; empty: the repository):
+	// the default policy serves owners round robin.
+	Owner string
 }
 
 // State of a machine as seen by the scheduler.
@@ -192,9 +195,16 @@ type Machine struct {
 
 // Release is the expected end of a session and the reservation it frees.
 type Release struct {
-	At    time.Time
+	At    time.Time // expected end (pessimistic: the 80th percentile)
 	Res   Resources
 	Start time.Time // session start (zero: unknown)
+	// Run is the median run time of the session (0: unknown): with At it
+	// gives the distribution of the remaining time (see waitDist).
+	Run time.Duration
+	// MemMean and MemSD are the belief about the session's peak memory
+	// (mean and standard deviation; 0: unknown, the reservation is the
+	// mean): statistical admission packs on them (see Default.admits).
+	MemMean, MemSD int64
 }
 
 // Expected returns when r is expected at now: sessions running longer than
@@ -230,8 +240,14 @@ type Demand struct {
 	// Peak is the largest reservation (running plus queued) of the
 	// environment's sessions in the forecast window.
 	Peak Resources
+	// Load is the offered load: the time average of the reservation
+	// (running plus queued) over LoadWindow.
+	Load Resources
 	// LastScaleUp is the last create, start or undrain for it.
 	LastScaleUp time.Time
+	// LastStop is the last idle or consolidation stop of one of its
+	// machines (the default policy stops one at a time).
+	LastStop time.Time
 }
 
 // Warm reports whether the machine holds a build cache for repo.
@@ -274,6 +290,22 @@ type Pool struct {
 	// prepared): no machines of the environment are created on the
 	// provider before the time (backoff).
 	CreateBlocked map[string]time.Time
+	// ProviderLimit holds the hard limits of the providers' accounts
+	// (quota discovery, observed limit errors; missing: none known).
+	ProviderLimit map[string]Limit
+}
+
+// Limit is a hard limit of a provider account.
+type Limit struct {
+	// CPU is the vCPUs the pool's running and starting machines of the
+	// provider may hold in total (0: no limit), e.g. the account's vCPU
+	// quota minus what other instances use.
+	CPU float64
+	// Machines is how many machines (all but gone) the provider may hold
+	// (0: no limit).
+	Machines int
+	// Source says where it comes from ("quota", "limit error").
+	Source string
 }
 
 // CreateKey is the CreateBlocked key of an environment on a provider.

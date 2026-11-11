@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"math"
 	"sort"
 	"time"
 )
@@ -42,7 +43,13 @@ type Profile struct {
 	// over its thrashing runs (0 = fewer than MinRefetchRuns samples; the
 	// model then uses the provider's or global calibration).
 	Refetch float64 `json:"refetch,omitempty"`
-	Runs    int     `json:"runs,omitempty"`
+	// PeakMean and PeakSD are the mean and standard deviation of the
+	// runs' peak memory (from MinPeakRuns runs; 0: unknown): the belief
+	// statistical admission packs on (the reservation stays the
+	// estimator's contract).
+	PeakMean int64 `json:"peak_mean,omitempty"`
+	PeakSD   int64 `json:"peak_sd,omitempty"`
+	Runs     int   `json:"runs,omitempty"`
 }
 
 // Defaults the cost model assumes for unknown profiles.
@@ -52,6 +59,8 @@ const (
 	// MinRefetchRuns is how many thrashing runs a key needs before its
 	// own refetch factor replaces the provider's.
 	MinRefetchRuns = 2
+	// MinPeakRuns is how many runs give a peak memory belief.
+	MinPeakRuns = 3
 )
 
 // WarmRun is the expected duration with a warm slot.
@@ -107,12 +116,16 @@ func profileOf(rs []Usage) Profile {
 	coldBy := map[string][]time.Duration{}
 	var slots, growth, ws []int64
 	var refetch []float64
+	var peaks []float64
 	p := Profile{}
 	for _, u := range rs {
 		if u.OOM || u.Wall <= 0 {
 			continue
 		}
 		p.Runs++
+		if u.PeakMemory > 0 {
+			peaks = append(peaks, float64(u.PeakMemory))
+		}
 		th := time.Duration(u.ThrashSeconds * float64(time.Second))
 		if th > 0 {
 			thrash = append(thrash, th)
@@ -174,6 +187,20 @@ func profileOf(rs []Usage) Profile {
 		p.ColdBy[prov] = medianDur(ds)
 	}
 	p.SlotBytes, p.SlotGrowth = medianInt(slots), medianInt(growth)
+	if len(peaks) >= MinPeakRuns {
+		mean, v := 0.0, 0.0
+		for _, x := range peaks {
+			mean += x
+		}
+		mean /= float64(len(peaks))
+		for _, x := range peaks {
+			v += (x - mean) * (x - mean)
+		}
+		// Sample variance plus a small-sample bonus: the belief is wider
+		// while few runs are known (shrinks as 1/sqrt(n)).
+		sd := math.Sqrt(v/float64(len(peaks)-1)) + mean*0.25/math.Sqrt(float64(len(peaks)))
+		p.PeakMean, p.PeakSD = int64(mean), int64(sd)
+	}
 	if len(ws) > 0 {
 		sort.Slice(ws, func(i, j int) bool { return ws[i] < ws[j] })
 		p.WorkingSet = ws[min(len(ws)-1, int(0.8*float64(len(ws))))]

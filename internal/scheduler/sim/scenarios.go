@@ -122,7 +122,9 @@ func Scenarios(seed uint64) []Scenario {
 	}
 	for h := 0.0; h < 6; h++ {
 		at := h * 3600
-		wb.Jobs = append(wb.Jobs, slotted(job(at, "api", "rust", 1500+300*r.Float64(), 8, 12*gib), 8*gib))
+		long := slotted(job(at, "api", "rust", 1500+300*r.Float64(), 8, 12*gib), 8*gib)
+		long.Key = "api/workspace"
+		wb.Jobs = append(wb.Jobs, long)
 		for k := 1; k <= 4; k++ {
 			wb.Jobs = append(wb.Jobs, slotted(job(at+float64(k)*240+60*r.Float64(), "api", "rust", logn(120), 4, 5*gib), 8*gib))
 		}
@@ -143,6 +145,8 @@ type EvalPool struct {
 	Boot, Start map[string]time.Duration
 	Cfg         scheduler.Config
 	History     bool // history estimator (else static)
+	// Limits are hard provider limits (Options.Limits).
+	Limits map[string]scheduler.Limit
 }
 
 // Run simulates tr on the pool with policy variant and cost
@@ -161,13 +165,15 @@ func (p EvalPool) Spec(name string, tr Trace, variant string, r float64, down []
 		est = scheduler.NewHistory("")
 	}
 	return Spec{Trace: tr, Options: Options{Name: name, Policy: scheduler.Default{Cfg: cfg}, Sizes: p.Sizes, Estimator: est,
-		Boot: p.Boot, Start: p.Start, Down: down, Resize: resize, QueueTimeout: cfg.QueueTimeout}}
+		Boot: p.Boot, Start: p.Start, Down: down, Resize: resize, QueueTimeout: cfg.QueueTimeout, Limits: p.Limits}}
 }
 
 // EvalPools are the pool configurations of the evaluation: the c7a sample
 // pool (testdata/pool.toml), the same with local disks (pool-tiers.toml)
-// and the production pool of November 2026 (AWS x4/x8/x16, OCI
-// e5-8/e5-16, idle_stop 1m, history estimator, measured latencies).
+// and the production pool of 2026-11-12 (AWS x8 = m8a.2xlarge 8/30G
+// $0.58, x16 = c8a.4xlarge 16/30G $0.98; OCI disabled; idle_stop 1m,
+// history estimator, measured latencies). No pool has a machine limit
+// (the runaway guard bounds scale-out).
 func EvalPools() []EvalPool {
 	c7a := func(disks bool) []scheduler.Size {
 		var out []scheduler.Size
@@ -184,19 +190,19 @@ func EvalPools() []EvalPool {
 		}
 		return out
 	}
-	base := scheduler.Config{CPUOvercommit: 2, MemoryOvercommit: 1, MaxMachines: 16, IdleStop: 20 * time.Minute,
+	base := scheduler.Config{CPUOvercommit: 2, MemoryOvercommit: 1, IdleStop: 20 * time.Minute,
 		ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5, ConsolidateTarget: 0.75, QueueTimeout: 10 * time.Minute}
 	lat := func(d time.Duration) map[string]time.Duration { return map[string]time.Duration{"": d} }
 	prod := base
-	prod.MaxMachines, prod.IdleStop, prod.ProviderMax = 8, time.Minute, map[string]int{"aws": 4, "oci": 4}
+	// OCI is disabled (enabled = false: free-tier tenancy).
+	prod.IdleStop, prod.DisabledProviders = time.Minute, map[string]bool{"oci": true}
 	disk := int64(200) * gib
 	return []EvalPool{
 		{Name: "c7a", Sizes: c7a(false), Boot: lat(60 * time.Second), Start: lat(20 * time.Second), Cfg: base},
 		{Name: "tiers", Sizes: c7a(true), Boot: lat(60 * time.Second), Start: lat(20 * time.Second), Cfg: base, History: true},
 		{Name: "prod", Sizes: []scheduler.Size{
-			{Provider: "aws", Name: "x4", Capacity: scheduler.Resources{CPU: 4, Memory: 7 * gib, Disk: disk}, PricePerHour: 0.23},
-			{Provider: "aws", Name: "x8", Capacity: scheduler.Resources{CPU: 8, Memory: 15 * gib, Disk: disk}, PricePerHour: 0.46},
-			{Provider: "aws", Name: "x16", Capacity: scheduler.Resources{CPU: 16, Memory: 30 * gib, Disk: disk}, PricePerHour: 0.93},
+			{Provider: "aws", Name: "x8", Capacity: scheduler.Resources{CPU: 8, Memory: 30 * gib, Disk: disk}, PricePerHour: 0.58},
+			{Provider: "aws", Name: "x16", Capacity: scheduler.Resources{CPU: 16, Memory: 30 * gib, Disk: disk}, PricePerHour: 0.98},
 			{Provider: "oci", Name: "e5-8", Capacity: scheduler.Resources{CPU: 8, Memory: 30 * gib, Disk: disk}, PricePerHour: 0.19},
 			{Provider: "oci", Name: "e5-16", Capacity: scheduler.Resources{CPU: 16, Memory: 60 * gib, Disk: disk}, PricePerHour: 0.37},
 		}, Boot: map[string]time.Duration{"aws": 100 * time.Second, "oci": 330 * time.Second},

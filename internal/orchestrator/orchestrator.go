@@ -449,9 +449,6 @@ func fixConfig(cfg *Config) {
 			cfg.Policy.ExpiryMargin = cfg.MaxLifetime / 4
 		}
 	}
-	if cfg.Policy.MaxMachines == 0 {
-		cfg.Policy.MaxMachines = 1
-	}
 }
 
 // now is the decision time (see Clock).
@@ -1022,6 +1019,12 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 	}()
 	now := o.now()
 	task := scheduler.Task{ID: newID(8), EnvHash: req.EnvHash, RepoID: req.RepoID, Key: req.Key, Request: req.Need, Limit: req.Limit, Since: now}
+	// Fair queueing serves owners round robin: the agent's conversation,
+	// else the user (empty: the repository).
+	task.Owner = req.Labels[labels.AgentSession]
+	if task.Owner == "" {
+		task.Owner = req.Labels[labels.User]
+	}
 	if o.Profile != nil && req.Key != "" {
 		task.Profile = o.Profile(req.Key)
 	}
@@ -1074,7 +1077,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			if exp <= 0 {
 				exp = task.Profile.High(task.Profile.WarmRun())
 			}
-			o.leases[task.ID] = leaseInfo{start: o.now(), expected: exp}
+			o.leases[task.ID] = leaseInfo{start: o.now(), expected: exp, run: pl.Run, memMean: task.Profile.PeakMean, memSD: task.Profile.PeakSD}
 			env := m.EnvHash
 			o.mu.Unlock()
 			if pl.Slot.Kind != scheduler.SlotNone {
@@ -1700,6 +1703,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	if err := o.Refresh(ctx); err != nil {
 		return err
 	}
+	go o.refreshQuotas(context.WithoutCancel(ctx)) // bounded, at most every quotaRefresh
 	now := o.now()
 	o.mu.Lock()
 	var invariant []scheduler.Action
@@ -1711,7 +1715,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 		case m.State == provider.Failed:
 			invariant = append(invariant, scheduler.Action{Kind: scheduler.Destroy, Machine: m.ID, Reason: "failed"})
 		case o.cfg.Policy.Disabled(m.Provider) && !inFlight && m.State != provider.Starting && !busy && len(m.pending) == 0:
-			// max_machines = 0: the provider is disabled; its machines
+			// enabled = false: the provider is disabled; its machines
 			// finish their sessions and are destroyed.
 			invariant = append(invariant, scheduler.Action{Kind: scheduler.Destroy, Machine: m.ID, Reason: "provider disabled"})
 		case expired && m.State == provider.Running && busy:

@@ -14,10 +14,22 @@ import (
 // resizing a full disk), or wait for a machine (a warm slot freeing soon, a
 // machine starting) when that scores better.
 func (p Default) placeModel(f Pool, t Task) Placement {
+	if p.global() && exp("batch") {
+		if pl, ok := p.placeBatch(f, t); ok {
+			return pl
+		}
+	}
+	pl, _, _ := p.placeScored(f, t)
+	return pl
+}
+
+// placeScored is placeModel for t alone; it also returns the scored
+// options and the chosen index (-1 without options).
+func (p Default) placeScored(f Pool, t Task) (Placement, []option, int) {
 	if !p.fitsAnySize(f, t) {
 		reason := "task larger than every machine size"
 		d := p.decision(f, t.EnvHash, nil, -1, []Option{{Kind: OptReject, Rejected: reason}})
-		return Placement{Kind: Reject, Reason: reason, Decision: d}
+		return Placement{Kind: Reject, Reason: reason, Decision: d}, nil, -1
 	}
 	var opts []option
 	var pls []Placement
@@ -47,7 +59,7 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 			rejected = append(rejected, rejectOption(OptAssign, m, 0, RejSmaller))
 			continue
 		}
-		if !p.Free(m).Fits(t.Request) {
+		if !p.admits(f, m, t) {
 			continue // a wait option below
 		}
 		for _, rc := range p.runChoices(f, m, t) {
@@ -60,12 +72,11 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 	if !assignable {
 		reason := "no machine with free capacity"
 		wait := option{info: &Option{Kind: OptWaitCapacity, Reason: reason + " (scale-out decides)"}}
-		return Placement{Kind: Wait, Reason: reason, Decision: p.decision(f, t.EnvHash, []option{wait}, 0, rejected)}
+		return Placement{Kind: Wait, Reason: reason, Decision: p.decision(f, t.EnvHash, []option{wait}, 0, rejected)}, nil, -1
 	}
 	// Waiting for a busy or starting machine of the environment, not
 	// longer than getting a machine would take (option policy).
-	active, per := poolCounts(f)
-	bound, bounded := p.hedgeBound(f, t, active, per, idleMachine(f))
+	bound, bounded := p.hedgeBound(f, t, p.newPlanState(f), idleMachine(f))
 	for _, m := range f.Machines {
 		if m.EnvHash != t.EnvHash || m.Draining || !p.usable(m, f.Now) {
 			continue
@@ -85,6 +96,15 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 			continue
 		}
 		wait := at.Sub(f.Now)
+		// The bounds below use the pessimistic ETA; the score uses the
+		// expected wait over the distribution of the sessions' remaining
+		// times (default policy).
+		expWait := wait
+		if p.global() && exp("dist") {
+			if mean, ok := p.waitDist(f, m, t.Request); ok {
+				expWait = mean
+			}
+		}
 		if p.Cfg.QueueTimeout > 0 && f.Now.Sub(t.Since)+wait > p.Cfg.QueueTimeout*8/10 {
 			rejected = append(rejected, rejectOption(OptWaitMachine, m, wait, RejQueueTimeout))
 			continue
@@ -96,8 +116,8 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 		mm := m
 		mm.Reserved = Resources{} // runs after the sessions it waits for
 		for _, rc := range p.runChoices(f, mm, t) {
-			o := option{cost: p.machineCost(f, m, t, at, rc.run) + rc.cost, time: wait + rc.run, tie: Score(t.RepoID, m.ID), fit: math.Inf(1),
-				info: runOption(OptWaitMachine, m, t, rc, wait)}
+			o := option{cost: p.machineCost(f, m, t, f.Now.Add(expWait), rc.run) + rc.cost, time: expWait + rc.run, tie: Score(t.RepoID, m.ID), fit: math.Inf(1),
+				info: runOption(OptWaitMachine, m, t, rc, expWait)}
 			consider(o, Placement{Kind: Wait, Machine: m.ID, Reason: fmt.Sprintf("waiting %s for %s on %s", wait.Round(time.Second), rc.reason, m.ID)})
 		}
 	}
@@ -107,7 +127,7 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 		pl.Machine = ""
 	}
 	pl.Decision = p.decision(f, t.EnvHash, opts, i, rejected)
-	return pl
+	return pl, opts, i
 }
 
 // rawFits reports whether t fits the physical capacity of some size or
@@ -143,6 +163,7 @@ type tlMachine struct {
 	latency time.Duration // its start or boot latency
 	lastEnd time.Time     // end of its last planned session
 	planned int           // sessions the last timeline planned on it
+	guess   *Release      // release guessed (DefaultRun) for reservations without a lease estimate
 }
 
 // earliest returns the first time >= tm.ready at which need fits for run.
@@ -322,7 +343,8 @@ func (p Default) tlOf(f Pool, m Machine) *tlMachine {
 		covered = covered.Add(r.Res)
 	}
 	if rest := m.Reserved.Sub(covered); rest.CPU > 1e-9 || rest.Memory > 0 {
-		tm.deltas = append(tm.deltas, Release{At: f.Now.Add(DefaultRun), Res: Resources{CPU: math.Max(rest.CPU, 0), Memory: max(rest.Memory, 0)}})
+		g := Release{At: f.Now.Add(DefaultRun), Res: Resources{CPU: math.Max(rest.CPU, 0), Memory: max(rest.Memory, 0)}}
+		tm.deltas, tm.guess = append(tm.deltas, g), &g
 	}
 	return tm
 }
@@ -373,7 +395,7 @@ func (p Default) scaleOutModel(st *planState, env string) {
 	sort.SliceStable(stopped, func(i, j int) bool { return rv[stopped[i].ID] > rv[stopped[j].ID] })
 	bounds := map[string]time.Duration{}
 	for _, t := range tasks {
-		if b, ok := p.hedgeBound(f, t, st.active, st.perProvider, p.freeSlotPossible(st, env)); ok {
+		if b, ok := p.hedgeBound(f, t, st, p.freeSlotPossible(st, env)); ok {
 			bounds[t.ID] = b
 		}
 	}
@@ -390,7 +412,7 @@ func (p Default) scaleOutModel(st *planState, env string) {
 				Rejected: "not every queued task gets capacity in time"})
 		}
 		var cands []cand
-		if st.active < c.MaxMachines || p.freeSlotPossible(st, env) {
+		if p.room(st, env) || p.freeSlotPossible(st, env) {
 			nstop := min(len(stopped), 3)
 			if p.next() {
 				nstop = len(stopped) // every stopped machine competes (price, latency, warm slots)
@@ -402,7 +424,7 @@ func (p Default) scaleOutModel(st *planState, env string) {
 				tm.ready, tm.free, tm.deltas = f.Now.Add(tm.latency), p.admissible(m), nil
 				cands = append(cands, cand{Action{Kind: Start, Machine: m.ID, Reason: "queued demand"}, tm})
 			}
-			allowed := p.allowedSizes(f.SizesFor(env), st.perProvider)
+			allowed := p.allowedSizes(f.SizesFor(env), st)
 			if round == 0 {
 				rejected = append(rejected, p.sizeRejections(st, env, allowed)...)
 			}
@@ -431,8 +453,8 @@ func (p Default) scaleOutModel(st *planState, env string) {
 				}
 			}
 		}
-		if !(st.active < c.MaxMachines || p.freeSlotPossible(st, env)) && round == 0 {
-			rejected = append(rejected, Option{Kind: OptCreate, Rejected: "max_machines reached"})
+		if !(p.room(st, env) || p.freeSlotPossible(st, env)) && round == 0 {
+			rejected = append(rejected, Option{Kind: OptCreate, Rejected: RejGuard})
 		}
 		// Never queue longer than a start or create takes: once the oldest
 		// task has waited that long (scaled up a little towards cheapest),
@@ -468,8 +490,44 @@ func (p Default) scaleOutModel(st *planState, env string) {
 				break
 			}
 		}
+		// Default policy: a machine is only added for a request whose
+		// projected start (the queue list-scheduled in priority order on
+		// the machines there and on their way) is later than the machine
+		// takes plus the hedge margin; a request that starts sooner anyway
+		// cannot be helped by it.
+		var projected map[string]time.Time
+		if p.global() && !abl("nogate") {
+			projected = p.project(f, ms, prioritize(f.Now, tasks))
+		}
+		helps := func(lat time.Duration) bool {
+			if projected == nil {
+				return true
+			}
+			// Wait limit: the hedge bound; at cost_optimization 1 (only
+			// money) half the queue timeout, so that a request whose
+			// projection was optimistic still starts in time.
+			limit := 8 * time.Hour
+			if margin, ok := p.hedgeMargin(); ok {
+				limit = lat + margin
+			} else if c.QueueTimeout > 0 {
+				limit = c.QueueTimeout / 2
+			}
+			for _, t := range tasks {
+				at, ok := projected[t.ID]
+				if !ok || at.Sub(t.Since) > limit {
+					return true
+				}
+			}
+			return false
+		}
 		for i := range cands {
 			cd := &cands[i]
+			if !helps(cd.tm.latency) {
+				info := candOption(cd.act, cd.tm)
+				info.Rejected = RejNoViolation
+				rejected = append(rejected, *info)
+				continue
+			}
 			cost, total, _ := p.timeline(f, append(append([]*tlMachine(nil), base...), cd.tm), tasks, tail, bounds)
 			info := candOption(cd.act, cd.tm)
 			if cd.tm.planned == 0 {
@@ -489,21 +547,21 @@ func (p Default) scaleOutModel(st *planState, env string) {
 			bestC.act.Decision = p.decision(f, env, opts, chosen, rejected)
 		}
 		if bestC == nil {
-			if !feasible && len(cands) == 0 && st.active < c.MaxMachines {
+			if !feasible && len(cands) == 0 && p.room(st, env) {
 				// Providers at their machine limit: stopped machines of
 				// other environments hold their slots.
 				p.makeRoom(st, env)
 			}
 			return
 		}
-		if st.active >= c.MaxMachines && !p.freeSlot(st, env, tasks[0].Request) {
+		if !p.room(st, env) && !p.freeSlot(st, env, tasks[0].Request) {
 			return
 		}
-		st.acts = append(st.acts, bestC.act)
-		st.active++
+		st.acts = append(st.acts, p.note(st, env, bestC.act))
 		if bestC.act.Kind == Create {
-			st.perProvider[bestC.act.Size.Provider]++
+			st.create(bestC.act.Size)
 		} else {
+			st.grow(bestC.tm.m.Provider, bestC.tm.m.Capacity.CPU, bestC.tm.price)
 			for i, m := range stopped {
 				if m.ID == bestC.act.Machine {
 					stopped = append(stopped[:i:i], stopped[i+1:]...)

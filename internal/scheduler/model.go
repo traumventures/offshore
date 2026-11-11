@@ -454,6 +454,7 @@ func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 		}
 		rc := runChoice{run: restore + scale(t.Profile.WarmRun()), prep: restore, cost: float64(s.Bytes) / 1e9 * price,
 			slot: SlotAction{Kind: SlotRestore, Repo: t.RepoID, Snapshot: s}, reason: "restore snapshot from " + s.Store}
+		rc.cost += p.copyCost(f, m, t, s.Bytes) // a second warm copy while the warm machine keeps its own
 		add(rc, slotNeed(m, t, s.Bytes))
 	}
 	if src, ok := p.moveSource(f, m, t); ok {

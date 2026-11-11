@@ -48,6 +48,89 @@ type provHealth struct {
 	disabledAt  time.Time
 	boot        time.Duration // learned create -> ready latency (EWMA)
 	start       time.Duration // learned start -> ready latency (EWMA)
+	// quota is the account's vCPU limit for the pool (provider.Quota),
+	// if hasQuota; quotaAt when it was read.
+	quota    float64
+	hasQuota bool
+	quotaAt  time.Time
+	// capCPU caps the pool's vCPUs on the provider until capUntil after a
+	// limit error: at what it ran when the account said no more.
+	capCPU   float64
+	capUntil time.Time
+}
+
+// limitCap is how long a cap from a limit error holds before the
+// scheduler may try more machines on the provider again.
+const limitCap = time.Hour
+
+// quotaRefresh is how often provider quotas are read.
+const quotaRefresh = 10 * time.Minute
+
+// providerCPULocked is the vCPUs of the pool's running and starting
+// machines of prov.
+func (o *Orchestrator) providerCPULocked(prov string) float64 {
+	cpu := 0.0
+	for _, m := range o.machines {
+		if m.Provider == prov && (m.State == provider.Running || m.State == provider.Starting) {
+			cpu += m.CPU
+		}
+	}
+	return cpu
+}
+
+// limit is the hard limit of prov for the scheduler: the smaller of
+// the discovered quota and a cap after a limit error.
+func (h provHealth) limit(now time.Time) scheduler.Limit {
+	var l scheduler.Limit
+	if h.hasQuota {
+		// Limit.CPU 0 means none: a used-up quota is a tiny limit.
+		l = scheduler.Limit{CPU: max(h.quota, 1e-3), Source: "quota"}
+	}
+	if h.capCPU > 0 && now.Before(h.capUntil) && (l.CPU == 0 || h.capCPU < l.CPU) {
+		l = scheduler.Limit{CPU: h.capCPU, Source: "limit error"}
+	}
+	return l
+}
+
+// refreshQuotas reads the vCPU quotas of the providers that report them
+// (provider.Quota), at most every quotaRefresh.
+func (o *Orchestrator) refreshQuotas(ctx context.Context) {
+	now := o.now()
+	type job struct {
+		name string
+		q    provider.Quota
+		own  float64
+	}
+	var jobs []job
+	o.mu.Lock()
+	for name, p := range o.provs {
+		q, ok := p.(provider.Quota)
+		if !ok || o.cfg.Policy.Disabled(name) || now.Sub(o.health[name].quotaAt) < quotaRefresh {
+			continue
+		}
+		h := o.health[name]
+		h.quotaAt = now
+		o.health[name] = h
+		jobs = append(jobs, job{name, q, o.providerCPULocked(name)})
+	}
+	o.mu.Unlock()
+	for _, j := range jobs {
+		qctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		v, ok, err := j.q.Quota(qctx, o.cfg.Owner, j.own)
+		cancel()
+		if err != nil {
+			o.log.Warn("provider quota unknown", "provider", j.name, "err", err)
+			continue
+		}
+		o.mu.Lock()
+		h := o.health[j.name]
+		if h.quota != v || h.hasQuota != ok {
+			o.log.Info("provider quota", "provider", j.name, "vcpus", v, "known", ok, "own", j.own)
+		}
+		h.quota, h.hasQuota = v, ok
+		o.health[j.name] = h
+		o.mu.Unlock()
+	}
 }
 
 // createBackoff blocks creates of an environment on a provider after a
@@ -61,7 +144,11 @@ type createBackoff struct {
 // leaseInfo is the expected end of a lease's session.
 type leaseInfo struct {
 	start    time.Time
-	expected time.Duration
+	expected time.Duration // pessimistic run (release forecast)
+	run      time.Duration // median run (0: unknown)
+	// memMean, memSD: the peak memory belief at placement (statistical
+	// admission).
+	memMean, memSD int64
 }
 
 func ewma(old, v time.Duration) time.Duration {
@@ -92,6 +179,15 @@ func (o *Orchestrator) providerFailedLocked(prov string, err error) bool {
 				"provider", prov, "class", class, "err", err)
 		}
 		o.obs.log.Append(events.Event{Type: events.ProviderDown, Provider: prov, Error: err.Error(), ErrorClass: string(class), Reason: "disabled"})
+		return true
+	case class == provider.ClassQuota && o.providerCPULocked(prov) > 0:
+		// The account allows no more than the pool runs now: cap the
+		// provider there (not disabled, no cooldown); the cap lapses
+		// after limitCap so a raised limit is used again.
+		h.capCPU, h.capUntil = o.providerCPULocked(prov), o.now().Add(limitCap)
+		o.health[prov] = h
+		o.log.Warn("provider at its account limit, capped at its current vCPUs", "provider", prov, "vcpus", h.capCPU, "until", h.capUntil, "err", err)
+		o.obs.log.Append(events.Event{Type: events.ProviderDown, Provider: prov, Error: err.Error(), ErrorClass: string(class), Reason: "capped", Seconds: limitCap.Seconds()})
 		return true
 	case class.CoolsDown():
 		if h.cooldown <= 0 {
@@ -222,6 +318,12 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 	for name := range o.provs {
 		h := o.health[name]
 		f.Providers[name] = scheduler.ProviderState{Boot: h.boot, Start: h.start, Down: h.down, Store: name}
+		if l := h.limit(f.Now); l != (scheduler.Limit{}) {
+			if f.ProviderLimit == nil {
+				f.ProviderLimit = map[string]scheduler.Limit{}
+			}
+			f.ProviderLimit[name] = l
+		}
 	}
 	f.CreateBlocked = map[string]time.Time{}
 	for key, b := range o.createFail {
@@ -255,7 +357,8 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 			for _, se := range m.Status.Sessions {
 				r := scheduler.Release{Res: scheduler.Resources{CPU: se.CPU, Memory: se.Memory}, Start: time.Unix(se.Started, 0)}
 				if li, ok := o.leases[se.Lease]; ok && se.Lease != "" {
-					r.At, seen[se.Lease] = li.start.Add(li.expected), true
+					r.At, r.Run, seen[se.Lease] = li.start.Add(li.expected), li.run, true
+					r.MemMean, r.MemSD = li.memMean, li.memSD
 				} else {
 					r.At = r.Start.Add(scheduler.DefaultRun)
 				}
@@ -267,7 +370,7 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 				continue
 			}
 			if li, ok := o.leases[lid]; ok {
-				sm.Releases = append(sm.Releases, scheduler.Release{At: li.start.Add(li.expected), Res: pl.res, Start: li.start})
+				sm.Releases = append(sm.Releases, scheduler.Release{At: li.start.Add(li.expected), Res: pl.res, Start: li.start, Run: li.run, MemMean: li.memMean, MemSD: li.memSD})
 			}
 		}
 	}
@@ -289,6 +392,9 @@ func (o *Orchestrator) planLocked() []scheduler.Action {
 		}
 		if m := o.machines[a.Machine]; (a.Kind == scheduler.Start || a.Kind == scheduler.Undrain) && m != nil && o.cfg.Policy.Disabled(m.Provider) {
 			continue
+		}
+		if strings.Contains(a.Reason, "capacity exception") {
+			o.log.Warn("capacity exception: scaling out beyond the runaway guard", "action", a.Kind, "provider", a.Size.Provider, "machine", a.Machine, "reason", a.Reason)
 		}
 		kept = append(kept, a)
 	}

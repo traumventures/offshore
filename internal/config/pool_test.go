@@ -27,7 +27,6 @@ func TestUserMultiProvider(t *testing.T) {
 [providers.local]
 type      = "local-docker"
 command      = ["sudo", "-n", "docker"]
-max_machines = 4
 
 [providers.other]
 type = "local-docker"
@@ -83,7 +82,7 @@ func TestUserMemoryOvercommitNeedsSafety(t *testing.T) {
 func TestUserSchedulingKeys(t *testing.T) {
 	u, err := loadUserFrom(t, `
 [pool]
-max_machines = 4
+min_machines = 1
 
 [scheduler]
 policy = "binpack"
@@ -116,7 +115,7 @@ timezone = "Europe/Berlin"
 		"\n[scheduler]\n\n[[scheduler.warm_pool]]\ndays = [\"funday\"]\nfrom = \"08:00\"\nto = \"10:00\"\nmachines = 1\n",
 		"\n[scheduler]\n\n[[scheduler.warm_pool]]\nfrom = \"8am\"\nto = \"10:00\"\nmachines = 1\n",
 		"\n[scheduler]\n\n[[scheduler.warm_pool]]\nfrom = \"08:00\"\nto = \"08:00\"\nmachines = 1\n",
-		"\n[scheduler]\n\n[[scheduler.warm_pool]]\nfrom = \"08:00\"\nto = \"10:00\"\nmachines = 9\n",
+		"\n[scheduler]\n\n[[scheduler.warm_pool]]\nfrom = \"08:00\"\nto = \"10:00\"\nmachines = -1\n",
 		"\n[scheduler]\n\n[[scheduler.warm_pool]]\nfrom = \"08:00\"\nto = \"10:00\"\nmachines = 1\ntimezone = \"Mars/Olympus\"\n",
 	} {
 		if _, err := loadUserFrom(t, bad); err == nil {
@@ -131,7 +130,7 @@ func TestPoolSchema(t *testing.T) {
 	f, err := LoadPool(writeFile(t, `
 [pool]
 id = "team"
-max_machines = 3
+max_spend_per_hour = 3
 
 [scheduler]
 policy = "classic"
@@ -201,20 +200,22 @@ func TestCostModelKeys(t *testing.T) {
 	}
 }
 
-// providers.X.max_machines: unset is no own limit, 0 disables the
-// provider, negative or non-integer values are rejected.
-func TestProviderMaxMachinesZero(t *testing.T) {
-	base := "[pool]\nmax_machines = 4\n[providers.a]\ntype = \"local-docker\"\n%s\n[[providers.a.size]]\nname = \"s\"\ncpu = 2\nmemory = \"4G\"\n"
+// providers.X.enabled = false disables a provider; machine counts are
+// not configurable (max_machines is rejected), and neither is a negative
+// max_spend_per_hour.
+func TestProviderEnabled(t *testing.T) {
+	base := "[pool]\n%s\n[providers.a]\ntype = \"local-docker\"\n%s\n[[providers.a.size]]\nname = \"s\"\ncpu = 2\nmemory = \"4G\"\n"
 	for _, tc := range []struct {
-		line string
-		ok   bool
-	}{{"", true}, {"max_machines = 0", true}, {"max_machines = 2", true}, {"max_machines = -1", false}, {"max_machines = 1.5", false}} {
-		u, err := loadUserFrom(t, fmt.Sprintf(base, tc.line))
+		pool, line string
+		ok         bool
+	}{{"", "", true}, {"", "enabled = false", true}, {"", "enabled = true", true}, {"", "enabled = 0", false},
+		{"", "max_machines = 2", false}, {"max_machines = 4", "", false}, {"max_spend_per_hour = 1.5", "", true}, {"max_spend_per_hour = -1", "", false}} {
+		u, err := loadUserFrom(t, fmt.Sprintf(base, tc.pool, tc.line))
 		if err == nil {
 			err = u.Validate()
 		}
 		if (err == nil) != tc.ok {
-			t.Errorf("%q: err %v", tc.line, err)
+			t.Errorf("%q %q: err %v", tc.pool, tc.line, err)
 		}
 	}
 }

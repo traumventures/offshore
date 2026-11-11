@@ -74,10 +74,13 @@ aws service-quotas request-service-quota-increase --service-code ec2 \
   --quota-code L-1216C47A --desired-value 64
 ```
 
-Set `pool.max_machines` (or the provider's `max_machines`) so that
-`max_machines × vCPUs of the largest size` stays below the quota; a quota
-error makes the scheduler take the provider out of scale-out for a cooldown
-(2 minutes, doubling up to 30) instead of retrying in a loop.
+The control plane reads this quota every 10 minutes
+(`servicequotas:GetServiceQuota`, granted by `deploy/aws/iam.yaml` and
+`deploy/aws/controlplane.yaml`) and subtracts the vCPUs of the account's
+other running On-Demand standard instances: the pool never asks for more.
+A quota error anyway (another workload started in between) caps the
+provider at the vCPUs the pool runs there for an hour instead of retrying
+in a loop. There is no machine count to configure.
 
 ## 3. Pool configuration
 
@@ -85,7 +88,6 @@ In the client file (embedded mode) or the control plane's pool file:
 
 ```toml
 [pool]
-max_machines = 4
 idle_stop    = "20m"
 max_lifetime = "24h"
 
@@ -244,7 +246,7 @@ on deletion.
 | symptom | cause and fix |
 |---|---|
 | `AccessDenied` / `UnauthorizedOperation` | the profile does not use the operator role, or the stack name does not match `StackPrefix*`; creating or updating the shared stack needs `offshore-operator-stack` |
-| `VcpuLimitExceeded` | vCPU quota (step 2); lower `max_machines` or request more |
+| `VcpuLimitExceeded` | vCPU quota (step 2) used up by other instances; the provider is capped at its current vCPUs for an hour; request more |
 | `InsufficientInstanceCapacity`, `Unsupported` | list more `instance_types` for the size; the provider is put on cooldown when all fail |
 | run hangs at connect, then falls back locally | UDP 7443 blocked, or the client's address is not in `allow_cidrs`. A shared control plane requires `allow_cidrs` (it will not start without it) and reconciles the security group to exactly that list; an embedded orchestrator without it adds its own public IP when it starts and keeps other rules |
 | `store grant failed … AssumeRole` | the orchestrator assumes `StoreRole` with the provider's `profile` credentials; root credentials cannot assume roles, use the operator user or role |

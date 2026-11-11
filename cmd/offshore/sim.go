@@ -53,7 +53,7 @@ func simCmd(args []string) error {
 	fs := flag.NewFlagSet("sim", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(fs.Output(), simUsage); fs.PrintDefaults() }
 	cfgPath := fs.String("config", "", "pool configuration (TOML, [pool] section); default: the active pool configuration")
-	policies := fs.String("policy", "default,binpack,classic", "comma separated policies to compare (default, costmodel, binpack, classic)")
+	policies := fs.String("policy", "default,binpack,classic", "comma separated policies to compare (default, option, costmodel, binpack, classic)")
 	costOpt := fs.String("cost-optimization", "", "comma separated cost_optimization values for the default policy (default: the pool's)")
 	sweep := fs.Bool("sweep", false, "sweep cost_optimization 0..1 in steps of 0.1 and print the cost/time frontier")
 	resize := fs.Bool("resize", false, "machines can grow their disks (slot handling)")
@@ -181,14 +181,14 @@ func simCmd(args []string) error {
 	for _, name := range strings.Split(*policies, ",") {
 		name = strings.TrimSpace(name)
 		switch name {
-		case scheduler.VariantDefault, scheduler.VariantCostModel:
+		case scheduler.VariantDefault, scheduler.VariantOption, scheduler.VariantCostModel:
 			for _, r := range ratios {
 				variants = append(variants, variant{name, r})
 			}
 		case scheduler.VariantBinpack, scheduler.VariantClassic:
 			variants = append(variants, variant{name, 0})
 		default:
-			return fmt.Errorf("unknown policy %q (default, costmodel, binpack, classic)", name)
+			return fmt.Errorf("unknown policy %q (default, option, costmodel, binpack, classic)", name)
 		}
 	}
 	seeds := []uint64{*seed}
@@ -239,7 +239,7 @@ func simCmd(args []string) error {
 				pc.ConsolidateBelow = 0
 			}
 			policy := v.name
-			if v.name == scheduler.VariantDefault || v.name == scheduler.VariantCostModel {
+			if v.name != scheduler.VariantBinpack && v.name != scheduler.VariantClassic {
 				policy += fmt.Sprintf(" r=%.2g", v.r)
 			}
 			var e scheduler.Estimator = scheduler.Static{}

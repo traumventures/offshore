@@ -14,7 +14,8 @@ import (
 // task_placed and task_end, and waiting requests list them in Queue.
 func TestLabelsInEventsAndQueue(t *testing.T) {
 	f := newFake()
-	o := newTestOrch(t, f, func(c *Config) { c.Policy.MaxMachines = 1; c.QueueTimeout = 3 * time.Second })
+	o := newTestOrch(t, f, func(c *Config) { c.QueueTimeout = 3 * time.Second })
+	limitVCPU(o, "fake", 4)
 	ctx := context.Background()
 	lbl := map[string]string{"agent": "codex", "worktree": "/w/a", "Bad Key": "x", "branch": "main"}
 	var first Lease

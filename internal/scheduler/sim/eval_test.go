@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // evalCase is one trace on one pool of the evaluation matrix.
@@ -20,6 +22,23 @@ type evalCase struct {
 	resize bool
 }
 
+// evalLimits are provider machine limits from OFFSHORE_EVAL_LIMIT
+// (provider:machines,...), e.g. aws:4 for the machine limit production
+// had before the runaway guard.
+func evalLimits() map[string]scheduler.Limit {
+	s := os.Getenv("OFFSHORE_EVAL_LIMIT")
+	if s == "" {
+		return nil
+	}
+	out := map[string]scheduler.Limit{}
+	for _, kv := range strings.Split(s, ",") {
+		prov, n, _ := strings.Cut(kv, ":")
+		m, _ := strconv.Atoi(n)
+		out[prov] = scheduler.Limit{Machines: m, Source: "eval"}
+	}
+	return out
+}
+
 // evalCases are the evaluation traces: the sample traces, the production
 // exports (nov10: the old control plane's day, nov11: today's with the
 // waiting regression) and the adversarial scenarios, each on the pools it
@@ -27,6 +46,7 @@ type evalCase struct {
 func evalCases(t testing.TB) []evalCase {
 	pools := map[string]EvalPool{}
 	for _, p := range EvalPools() {
+		p.Limits = evalLimits()
 		pools[p.Name] = p
 	}
 	var cs []evalCase
@@ -138,13 +158,13 @@ func TestEvalTable(t *testing.T) {
 		reports[i] = all[i*len(runs) : (i+1)*len(runs)]
 	}
 	var b strings.Builder
-	fmt.Fprintln(&b, "| case | policy | cost $ | idle h | turn p50 | turn p95 | wait p95 | cold | flaps | late | regret p95 | failed |")
-	fmt.Fprintln(&b, "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+	fmt.Fprintln(&b, "| case | policy | cost $ | idle h | turn p50 | turn p95 | wait p95 | cold | flaps | late | regret p95 | failed | OOMs | machines | max running | mem util |")
+	fmt.Fprintln(&b, "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
 	for i, c := range cases {
 		for _, r := range reports[i] {
-			fmt.Fprintf(&b, "| %s | %s | %.2f | %.1f | %s | %s | %s | %.0f%% | %d | %d | %s | %d |\n", c.name, r.Name, r.Cost, r.IdleHours,
+			fmt.Fprintf(&b, "| %s | %s | %.2f | %.1f | %s | %s | %s | %.0f%% | %d | %d | %s | %d | %d | %d | %d | %.0f%% |\n", c.name, r.Name, r.Cost, r.IdleHours,
 				r.TurnP50.Round(time.Second), r.TurnP95.Round(time.Second), r.WaitP95.Round(time.Second), 100*r.ColdRate, r.Flaps, r.Late,
-				r.RegretP95.Round(time.Second), r.Failed)
+				r.RegretP95.Round(time.Second), r.Failed, r.OOMs, r.Machines, r.MaxRunning, 100*r.MemUtil)
 		}
 	}
 	if out := os.Getenv("OFFSHORE_EVAL_OUT"); out != "" {

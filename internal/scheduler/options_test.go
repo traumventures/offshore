@@ -19,7 +19,7 @@ var prodProviders = map[string]ProviderState{"aws": {Start: 16 * time.Second, Bo
 	"oci": {Start: 60 * time.Second, Boot: 330 * time.Second}}
 
 func prodPolicy(r float64) Default {
-	return Default{Cfg: Config{CostOptimization: r, MaxMachines: 8, CPUOvercommit: 2, MemoryOvercommit: 1,
+	return Default{Cfg: Config{CostOptimization: r, CPUOvercommit: 2, MemoryOvercommit: 1,
 		QueueTimeout: 10 * time.Minute, IdleStop: time.Minute}}
 }
 
@@ -91,7 +91,7 @@ func TestStartWarmStoppedOverCheapCreate(t *testing.T) {
 func TestPhysicalFit(t *testing.T) {
 	small := machine("small", res(4, 8), Resources{})
 	small.Size = "x4"
-	p := Default{Cfg: Config{CPUOvercommit: 2, MemoryOvercommit: 1, MaxMachines: 4}}
+	p := Default{Cfg: Config{CPUOvercommit: 2, MemoryOvercommit: 1}}
 	sizes := []Size{{Provider: "p", Name: "x4", Capacity: res(4, 8), PricePerHour: 0.2}, {Provider: "p", Name: "x8", Capacity: res(8, 16), PricePerHour: 0.4}}
 	f := Pool{Now: now, Sizes: sizes, Machines: []Machine{small}}
 	if pl := p.Place(f, task(6, 4)); pl.Kind != Wait {
@@ -122,7 +122,7 @@ func TestHedgeBound(t *testing.T) {
 	tk := task(4, 8)
 	tk.Profile = Profile{Warm: time.Minute, Cold: 10 * time.Minute, Spread: 1}
 	f := Pool{Now: now, Sizes: priced, Machines: []Machine{b, idle}, Providers: map[string]ProviderState{"p": {Boot: time.Minute}}}
-	cfg := Config{CPUOvercommit: 1, MemoryOvercommit: 1, MaxMachines: 4, QueueTimeout: 10 * time.Minute}
+	cfg := Config{CPUOvercommit: 1, MemoryOvercommit: 1, QueueTimeout: 10 * time.Minute}
 	for _, c := range []struct {
 		r    float64
 		wait bool
@@ -133,8 +133,9 @@ func TestHedgeBound(t *testing.T) {
 			t.Fatalf("r=%v: wait for the warm slot in 3m = %v, got %+v", c.r, c.wait, pl)
 		}
 	}
-	// No machine can be created: the bound does not apply.
-	cfg.CostOptimization, cfg.MaxMachines = 0.5, 2
+	// No machine can be created (spend circuit breaker): the bound does
+	// not apply.
+	cfg.CostOptimization, cfg.MaxSpendPerHour = 0.5, 0.01
 	if pl := (Default{Cfg: cfg}).Place(f, tk); pl.Kind != Wait || !strings.Contains(pl.Reason, "warm slot") {
 		t.Fatalf("pool full: waiting for the warm slot is allowed, got %+v", pl)
 	}

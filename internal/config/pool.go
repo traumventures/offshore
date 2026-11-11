@@ -70,10 +70,14 @@ type Pool struct {
 	MachineCPU    float64 `toml:"machine_cpu"`
 	MachineMemory string  `toml:"machine_memory"`
 	MinMachines   int     `toml:"min_machines"` // warm pool per recently used environment
-	MaxMachines   int     `toml:"max_machines"`
-	IdleStop      string  `toml:"idle_stop"`
-	MaxLifetime   string  `toml:"max_lifetime"`
-	QueueTimeout  string  `toml:"queue_timeout"`
+	// MaxSpendPerHour is a circuit breaker: no machine is created or
+	// started while the running and starting machines cost that much per
+	// hour (0 = off). The pool has no machine count limit: the scheduler
+	// bounds scale-out itself (docs/scheduling.md).
+	MaxSpendPerHour float64 `toml:"max_spend_per_hour"`
+	IdleStop        string  `toml:"idle_stop"`
+	MaxLifetime     string  `toml:"max_lifetime"`
+	QueueTimeout    string  `toml:"queue_timeout"`
 	// Provision are the machine setup steps ([[machine.setup]]).
 	Provision []ProvisionStep `toml:"-"`
 	// Sizes are the machine types of all providers ([[providers.NAME.size]]).
@@ -88,7 +92,7 @@ type Pool struct {
 // overcommitting memory needs soft limits and swap, otherwise tasks may be
 // OOM killed.
 type Scheduler struct {
-	Policy string `toml:"policy"` // "default" (option policy) | "costmodel" | "binpack" | "classic"
+	Policy string `toml:"policy"` // "default" (batch option policy) | "option" | "costmodel" | "binpack" | "classic"
 	// CostOptimization is the cost model's knob, 0..1 (default 0.5): 1
 	// optimises purely for cost, 0 purely for time to result.
 	CostOptimization *float64 `toml:"cost_optimization"`
@@ -319,7 +323,7 @@ func PoolConfigPath() string {
 //
 // Schema:
 //
-//	[pool]                  id, machine_cpu/memory, min/max_machines, lifetimes
+//	[pool]                  id, machine_cpu/memory, min_machines, max_spend_per_hour, lifetimes
 //	[scheduler]             policy, estimator, overcommit, pressure, consolidation
 //	[[scheduler.warm_pool]] scheduled warm machines
 //	[[machine.setup]]       run = "..." once per machine
@@ -416,9 +420,6 @@ func (u *PoolConfig) applyDefaults() {
 	}
 	if f.MachineMemory == "" {
 		f.MachineMemory = "16G"
-	}
-	if f.MaxMachines == 0 {
-		f.MaxMachines = 4
 	}
 	if f.IdleStop == "" {
 		f.IdleStop = "20m"
@@ -520,8 +521,8 @@ func (u *PoolConfig) Validate() error {
 			errs = append(errs, "pool."+name+": "+err.Error())
 		}
 	}
-	if f.Policy != "default" && f.Policy != "costmodel" && f.Policy != "binpack" && f.Policy != "classic" {
-		errs = append(errs, fmt.Sprintf("pool.policy: unsupported %q (default, costmodel, binpack, classic)", f.Policy))
+	if f.Policy != "default" && f.Policy != "option" && f.Policy != "costmodel" && f.Policy != "binpack" && f.Policy != "classic" {
+		errs = append(errs, fmt.Sprintf("pool.policy: unsupported %q (default, option, costmodel, binpack, classic)", f.Policy))
 	}
 	if f.ConsolidateBelow != nil && (*f.ConsolidateBelow < 0 || *f.ConsolidateBelow > 1) {
 		errs = append(errs, "pool.consolidate_below: must be between 0 (off) and 1")
@@ -564,8 +565,8 @@ func (u *PoolConfig) Validate() error {
 		if _, _, _, _, err := w.Parse(); err != nil {
 			errs = append(errs, fmt.Sprintf("pool.warm_pool[%d]: %v", i, err))
 		}
-		if w.Machines < 0 || w.Machines > f.MaxMachines {
-			errs = append(errs, fmt.Sprintf("pool.warm_pool[%d].machines: need 0 <= machines <= max_machines", i))
+		if w.Machines < 0 {
+			errs = append(errs, fmt.Sprintf("pool.warm_pool[%d].machines: need machines >= 0", i))
 		}
 	}
 	if f.Estimator != "history" && f.Estimator != "static" {
@@ -624,15 +625,20 @@ func (u *PoolConfig) Validate() error {
 		}
 	}
 	for _, name := range u.ProviderNames() {
-		if v, ok := u.Providers[name]["max_machines"]; ok {
-			n, isInt := v.(int64)
-			if !isInt || n < 0 {
-				errs = append(errs, fmt.Sprintf("providers.%s.max_machines: need an integer >= 0 (0 disables the provider), got %v", name, v))
+		if _, ok := u.Providers[name]["max_machines"]; ok {
+			errs = append(errs, fmt.Sprintf("providers.%s.max_machines: no longer supported: machine counts are not configured (the scheduler bounds scale-out, the account's quotas are discovered); disable a provider with enabled = false", name))
+		}
+		if v, ok := u.Providers[name]["enabled"]; ok {
+			if _, isBool := v.(bool); !isBool {
+				errs = append(errs, fmt.Sprintf("providers.%s.enabled: need true or false, got %v", name, v))
 			}
 		}
 	}
-	if f.MinMachines < 0 || f.MaxMachines < 1 || f.MinMachines > f.MaxMachines {
-		errs = append(errs, "pool: need 0 <= min_machines <= max_machines and max_machines >= 1")
+	if f.MinMachines < 0 {
+		errs = append(errs, "pool.min_machines: need >= 0")
+	}
+	if f.MaxSpendPerHour < 0 {
+		errs = append(errs, "pool.max_spend_per_hour: need >= 0 (0 = off)")
 	}
 	for _, name := range slices.Sorted(maps.Keys(u.Volumes)) {
 		prefix := "providers." + name + ".volume"

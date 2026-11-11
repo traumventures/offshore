@@ -19,6 +19,7 @@ import (
 	"github.com/traumventures/offshore/internal/envbuild"
 	"github.com/traumventures/offshore/internal/orchestrator"
 	"github.com/traumventures/offshore/internal/pool"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // Check states of `offshore doctor`.
@@ -349,7 +350,8 @@ func checkDaemon(pingErr error) check {
 }
 
 // checkCapacity reports the machines of the pool and, in embedded mode,
-// its limits. Provider quotas are not visible to the client.
+// the spend circuit breaker. Provider quotas are not visible to the
+// client.
 func checkCapacity(c *config.Client, ms []orchestrator.Machine, known bool) check {
 	r := check{Name: "capacity", Status: checkOK}
 	if !known {
@@ -358,12 +360,16 @@ func checkCapacity(c *config.Client, ms []orchestrator.Machine, known bool) chec
 	}
 	up, ready := 0, 0
 	byProv := map[string]int{}
+	spend := 0.0
 	for _, m := range ms {
 		if !m.Removed.IsZero() {
 			continue
 		}
 		up++
 		byProv[m.Provider]++
+		if m.State == provider.Running || m.State == provider.Starting {
+			spend += m.PricePerHour
+		}
 		if m.Status != nil && m.Status.Ready && !m.Status.Draining {
 			ready++
 		}
@@ -377,10 +383,10 @@ func checkCapacity(c *config.Client, ms []orchestrator.Machine, known bool) chec
 		r.Detail += ": " + strings.Join(parts, ", ")
 	}
 	if c != nil && c.Embedded() {
-		if fc, err := config.LoadPool(config.PoolConfigPath()); err == nil && fc.Pool.MaxMachines > 0 {
-			r.Detail += fmt.Sprintf("; max_machines %d", fc.Pool.MaxMachines)
-			if up >= fc.Pool.MaxMachines {
-				r.Status, r.Hint = checkWarn, "the pool is at max_machines: new work queues until a machine frees up"
+		if fc, err := config.LoadPool(config.PoolConfigPath()); err == nil && fc.Pool.MaxSpendPerHour > 0 {
+			r.Detail += fmt.Sprintf("; $%.2f/h of max_spend_per_hour $%.2f", spend, fc.Pool.MaxSpendPerHour)
+			if spend >= fc.Pool.MaxSpendPerHour {
+				r.Status, r.Hint = checkWarn, "the pool is at max_spend_per_hour: new work queues until a machine stops"
 			}
 		}
 	} else {

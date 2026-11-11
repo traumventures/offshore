@@ -21,6 +21,10 @@ const (
 	// same candidates scored relative to the cheapest and fastest of each
 	// decision. Kept for comparison in the simulator.
 	VariantCostModel = "costmodel"
+	// VariantOption is the option policy of c5191aa: per-request greedy
+	// placement, waits scored at their pessimistic ETA, no copy cost for
+	// restoring a slot that is warm elsewhere. Kept for comparison.
+	VariantOption = "option"
 	// VariantBinpack is the policy before the cost model: warm cache
 	// first, best-fit packing, sizes by cost per unit of queued demand and
 	// consolidation by the present reservation. Kept for comparison in the
@@ -68,12 +72,17 @@ type Config struct {
 	// LimitJobs passes the reserved CPU as build parallelism hint.
 	LimitJobs bool
 
-	MinMachines  int            // warm pool per recently used environment
-	WarmPool     []WarmWindow   // scheduled warm pool (e.g. working hours), in addition to MinMachines
-	MaxMachines  int            // pool size limit across all providers
-	ProviderMax  map[string]int // per-provider machine limit (missing = no own limit; 0 = provider disabled)
-	IdleStop     time.Duration  // stop machines idle that long
-	ExpiryMargin time.Duration  // machines expiring sooner get no new sessions
+	MinMachines  int           // warm pool per recently used environment
+	WarmPool     []WarmWindow  // scheduled warm pool (e.g. working hours), in addition to MinMachines
+	IdleStop     time.Duration // stop machines idle that long
+	ExpiryMargin time.Duration // machines expiring sooner get no new sessions
+	// DisabledProviders are providers with enabled = false: no machine of
+	// them is created or started (running ones are destroyed when idle).
+	DisabledProviders map[string]bool
+	// MaxSpendPerHour is a circuit breaker on the hourly price of the
+	// running and starting machines (0 = off): no create or start beyond
+	// it, whatever the queue.
+	MaxSpendPerHour float64
 
 	// ConsolidateBelow drains the least loaded busy machine of an
 	// environment when the reserved share of the environment's machines is
@@ -118,7 +127,12 @@ func (p Default) model() bool {
 }
 
 // next reports whether the option policy decides (see options.go).
-func (p Default) next() bool { return p.Cfg.Variant == VariantDefault || p.Cfg.Variant == "" }
+func (p Default) next() bool { return p.global() || p.Cfg.Variant == VariantOption }
+
+// global reports whether the default policy's batch decisions apply
+// (see batch.go): queue-wide assignment, wait ETAs as distributions,
+// the copy cost of restoring a slot warm elsewhere.
+func (p Default) global() bool { return p.Cfg.Variant == VariantDefault || p.Cfg.Variant == "" }
 
 // Admissible capacity of a machine under overcommit.
 func (p Default) admissible(m Machine) Resources {
@@ -275,30 +289,14 @@ func (p Default) fitsAnySize(f Pool, t Task) bool {
 	return false
 }
 
-// Disabled reports whether prov has max_machines = 0: no machine of it is
-// created or started (running ones keep serving until they stop).
-func (c Config) Disabled(prov string) bool {
-	lim, ok := c.ProviderMax[prov]
-	return ok && lim <= 0
-}
-
-// allowedSizes returns the sizes whose provider is below its machine limit.
-func (p Default) allowedSizes(sizes []Size, perProvider map[string]int) []Size {
-	c := p.cfg()
-	var ss []Size
-	for _, s := range sizes {
-		if lim, ok := c.ProviderMax[s.Provider]; ok && perProvider[s.Provider] >= lim {
-			continue
-		}
-		ss = append(ss, s)
-	}
-	return ss
-}
+// Disabled reports whether prov is disabled (enabled = false): no machine
+// of it is created or started.
+func (c Config) Disabled(prov string) bool { return c.DisabledProviders[prov] }
 
 // smallestSize returns the cheapest size that fits need, or the largest,
-// among sizes whose provider is below its machine limit.
-func (p Default) smallestSize(sizes []Size, need Resources, perProvider map[string]int) (Size, bool) {
-	ss := p.allowedSizes(sizes, perProvider)
+// among the allowed sizes (see allowedSizes).
+func (p Default) smallestSize(sizes []Size, need Resources, st *planState) (Size, bool) {
+	ss := p.allowedSizes(sizes, st)
 	sort.SliceStable(ss, func(i, j int) bool {
 		if ss[i].PricePerHour != ss[j].PricePerHour {
 			return ss[i].PricePerHour < ss[j].PricePerHour
@@ -337,10 +335,11 @@ func pack(free Resources, tasks []Task) (packed Resources, rest []Task) {
 // when it is cheaper per unit. Unknown prices (0) prefer the size that
 // absorbs the most demand, then the smaller one.
 //
-// slots is the number of machines that may still be created. Sizes that
-// would need more machines than that to absorb the demand are only chosen
-// when no size can: then the size absorbing the most wins.
-func (p Default) bestSize(sizes []Size, tasks []Task, perProvider map[string]int, slots int) (Size, []Task, bool) {
+// slots is the number of machines that may still be created (runaway
+// guard). Sizes that would need more machines than that to absorb the
+// demand are only chosen when no size can: then the size absorbing the
+// most wins.
+func (p Default) bestSize(sizes []Size, tasks []Task, st *planState, slots int) (Size, []Task, bool) {
 	total := Resources{}
 	for _, t := range tasks {
 		total = total.Add(t.Request)
@@ -353,7 +352,7 @@ func (p Default) bestSize(sizes []Size, tasks []Task, perProvider map[string]int
 		feasible bool
 	}
 	var cs []cand
-	for _, s := range p.allowedSizes(sizes, perProvider) {
+	for _, s := range p.allowedSizes(sizes, st) {
 		if s.Capacity.CPU <= 0 || s.Capacity.Memory <= 0 {
 			continue
 		}
@@ -397,8 +396,12 @@ func (p Default) bestSize(sizes []Size, tasks []Task, perProvider map[string]int
 type planState struct {
 	f           Pool
 	acts        []Action
-	active      int                  // machines that count against MaxMachines
-	perProvider map[string]int       // machines that count against ProviderMax
+	active      int                  // running and starting machines (runaway guard)
+	perProvider map[string]int       // machines per provider but gone (Limit.Machines)
+	cpu         map[string]float64   // vCPUs of running and starting machines per provider (Limit.CPU)
+	spend       float64              // hourly price of running and starting machines
+	guard       int                  // runaway guard: active machines without a capacity exception
+	exception   map[string]string    // environments whose requests wait too long: reason
 	stopped     map[string][]Machine // usable stopped machines per environment
 	queued      map[string][]Task    // queued tasks per environment
 	envs        []string             // environments with queued tasks, in queue order
@@ -410,24 +413,7 @@ func (p Default) usable(m Machine, now time.Time) bool {
 
 // Plan implements Policy.
 func (p Default) Plan(f Pool) []Action {
-	st := &planState{f: f, perProvider: map[string]int{}, stopped: map[string][]Machine{}, queued: map[string][]Task{}}
-	for _, m := range f.Machines {
-		if m.State == Running || m.State == Starting {
-			st.active++
-		}
-		if m.State != Gone {
-			st.perProvider[m.Provider]++ // stopped machines keep their slot
-		}
-		if m.State == Stopped && p.usable(m, f.Now) && !f.Now.Before(m.StartBlocked) && !p.cfg().Disabled(m.Provider) {
-			st.stopped[m.EnvHash] = append(st.stopped[m.EnvHash], m)
-		}
-	}
-	for _, t := range f.Queue {
-		if _, ok := st.queued[t.EnvHash]; !ok {
-			st.envs = append(st.envs, t.EnvHash)
-		}
-		st.queued[t.EnvHash] = append(st.queued[t.EnvHash], t)
-	}
+	st := p.newPlanState(f)
 	for _, env := range st.envs {
 		switch {
 		case p.classic():
@@ -446,12 +432,13 @@ func (p Default) Plan(f Pool) []Action {
 		p.consolidate(st, running)
 	}
 	p.warmPool(st, running)
+	p.enforceLimits(st)
 	return st.acts
 }
 
 // scaleOutClassic covers the aggregate queued demand of env.
 func (p Default) scaleOutClassic(st *planState, env string) {
-	c, f := p.cfg(), st.f
+	f := st.f
 	demand, largest := Resources{}, Resources{}
 	for _, t := range st.queued[env] {
 		demand = demand.Add(t.Request)
@@ -474,32 +461,31 @@ func (p Default) scaleOutClassic(st *planState, env string) {
 	}
 	need := demand.Sub(incoming)
 	for need.Memory > 0 || need.CPU > 0 {
-		if s := st.stopped[env]; len(s) > 0 && st.active < c.MaxMachines {
+		if !p.room(st, env) {
+			break
+		}
+		if s := st.stopped[env]; len(s) > 0 {
 			sort.SliceStable(s, func(i, j int) bool { return Score(firstRepo, s[i].ID) > Score(firstRepo, s[j].ID) })
-			st.acts = append(st.acts, Action{Kind: Start, Machine: s[0].ID, Reason: "queued demand"})
+			st.acts = append(st.acts, p.note(st, env, Action{Kind: Start, Machine: s[0].ID, Reason: "queued demand"}))
 			need = need.Sub(p.admissible(s[0]))
+			st.grow(s[0].Provider, s[0].Capacity.CPU, priceOf(f, s[0]))
 			st.stopped[env] = s[1:]
-			st.active++
 			continue
 		}
-		if st.active >= c.MaxMachines {
+		want := Resources{CPU: math.Max(need.CPU, largest.CPU), Memory: max(need.Memory, largest.Memory)}
+		size, ok := p.smallestSize(f.SizesFor(env), want, st)
+		if !ok || size.Capacity.CPU <= 0 || size.Capacity.Memory <= 0 {
 			p.makeRoom(st, env)
 			break
 		}
-		want := Resources{CPU: math.Max(need.CPU, largest.CPU), Memory: max(need.Memory, largest.Memory)}
-		size, ok := p.smallestSize(f.SizesFor(env), want, st.perProvider)
-		if !ok || size.Capacity.CPU <= 0 || size.Capacity.Memory <= 0 {
-			break
-		}
-		st.acts = append(st.acts, Action{Kind: Create, EnvHash: env, Size: size, Reason: "queued demand"})
+		st.acts = append(st.acts, p.note(st, env, Action{Kind: Create, EnvHash: env, Size: size, Reason: "queued demand"}))
 		need = need.Sub(p.sizeAdmissible(size))
-		st.active++
-		st.perProvider[size.Provider]++
+		st.create(size)
 	}
 }
 
-// makeRoom destroys a stopped machine of another environment when the
-// pool (classic) or a provider is at its limit.
+// makeRoom destroys a stopped machine of another environment when a
+// provider is at its machine limit.
 func (p Default) makeRoom(st *planState, env string) {
 	envs := make([]string, 0, len(st.stopped))
 	for e := range st.stopped {
@@ -519,7 +505,7 @@ func (p Default) makeRoom(st *planState, env string) {
 // its way, then into machines it undrains or starts, and creates machines
 // for the rest, choosing sizes by cost per unit of absorbed demand.
 func (p Default) scaleOut(st *planState, env string) {
-	c, f := p.cfg(), st.f
+	f := st.f
 	tasks := append([]Task(nil), st.queued[env]...)
 	sort.SliceStable(tasks, func(i, j int) bool {
 		if tasks[i].Request.Memory != tasks[j].Request.Memory {
@@ -558,7 +544,7 @@ func (p Default) scaleOut(st *planState, env string) {
 	s := st.stopped[env]
 	sort.SliceStable(s, func(i, j int) bool { return Score(firstRepo, s[i].ID) > Score(firstRepo, s[j].ID) })
 	for len(tasks) > 0 && len(s) > 0 {
-		if st.active >= c.MaxMachines && !p.freeSlot(st, env, tasks[0].Request) {
+		if !p.room(st, env) && !p.freeSlot(st, env, tasks[0].Request) {
 			break
 		}
 		m := s[0]
@@ -569,40 +555,39 @@ func (p Default) scaleOut(st *planState, env string) {
 		}
 		// With few machine slots left, a small stopped machine must not
 		// take a slot a larger new machine needs.
-		if slots := c.MaxMachines - st.active; p.machinesNeeded(f.SizesFor(env), rest, st.perProvider) > slots-1 {
+		if slots := p.slots(st, env); p.machinesNeeded(f.SizesFor(env), rest, st) > slots-1 {
 			continue
 		}
 		tasks = rest
-		st.acts = append(st.acts, Action{Kind: Start, Machine: m.ID, Reason: "queued demand"})
-		st.active++
+		st.acts = append(st.acts, p.note(st, env, Action{Kind: Start, Machine: m.ID, Reason: "queued demand"}))
+		st.grow(m.Provider, m.Capacity.CPU, priceOf(f, m))
 	}
 	st.stopped[env] = s
 	for len(tasks) > 0 {
-		if st.active >= c.MaxMachines && !p.freeSlot(st, env, tasks[0].Request) {
+		if !p.room(st, env) && !p.freeSlot(st, env, tasks[0].Request) {
 			return
 		}
-		size, rest, ok := p.bestSize(f.SizesFor(env), tasks, st.perProvider, c.MaxMachines-st.active)
+		size, rest, ok := p.bestSize(f.SizesFor(env), tasks, st, p.slots(st, env))
 		if !ok {
 			// Providers at their machine limit: stopped machines of other
 			// environments hold their slots.
 			p.makeRoom(st, env)
 			return
 		}
-		st.acts = append(st.acts, Action{Kind: Create, EnvHash: env, Size: size, Reason: "queued demand"})
+		st.acts = append(st.acts, p.note(st, env, Action{Kind: Create, EnvHash: env, Size: size, Reason: "queued demand"}))
 		tasks = rest
-		st.active++
-		st.perProvider[size.Provider]++
+		st.create(size)
 	}
 }
 
 // machinesNeeded estimates how many machines of the largest allowed size
 // tasks need.
-func (p Default) machinesNeeded(sizes []Size, tasks []Task, perProvider map[string]int) int {
+func (p Default) machinesNeeded(sizes []Size, tasks []Task, st *planState) int {
 	if len(tasks) == 0 {
 		return 0
 	}
 	var largest Resources
-	for _, s := range p.allowedSizes(sizes, perProvider) {
+	for _, s := range p.allowedSizes(sizes, st) {
 		if a := p.sizeAdmissible(s); a.CPU*float64(a.Memory) > largest.CPU*float64(largest.Memory) {
 			largest = a
 		}
@@ -618,7 +603,7 @@ func (p Default) machinesNeeded(sizes []Size, tasks []Task, perProvider map[stri
 }
 
 // freeSlot stops an empty running machine to make room for a new one when
-// the pool is at MaxMachines: first one of an environment without queued
+// the pool is at its runaway guard: first one of an environment without queued
 // work, then one of env that is too small for need. Machines kept by the
 // warm pool are spared.
 func (p Default) freeSlot(st *planState, env string, need Resources) bool {
@@ -669,6 +654,7 @@ func (p Default) warmTarget(f Pool, env string) int {
 // running machines per environment afterwards.
 func (p Default) idleStop(st *planState) map[string]int {
 	c, f := p.cfg(), st.f
+	stoppedNow := map[string]bool{}
 	running := map[string]int{}
 	for _, m := range f.Machines {
 		if (m.State == Running || m.State == Starting) && p.usable(m, f.Now) {
@@ -701,6 +687,16 @@ func (p Default) idleStop(st *planState) map[string]int {
 				st.acts = append(st.acts, Action{Kind: Undrain, Machine: m.ID, Reason: why})
 			}
 			continue
+		}
+		// Experiment "decay": an environment's idle machines stop one at
+		// a time, at most one a minute, so that after a burst the pool
+		// shrinks gradually (cost +0.5 % in the simulator: off).
+		if !consolidated && p.global() && exp("decay") && p.usable(m, f.Now) {
+			last := f.Demand[m.EnvHash].LastStop
+			if stoppedNow[m.EnvHash] || !last.IsZero() && f.Now.Sub(last) < StopDecay {
+				continue
+			}
+			stoppedNow[m.EnvHash] = true
 		}
 		running[m.EnvHash]--
 		reason := "idle"
@@ -776,26 +772,25 @@ func (p Default) consolidate(st *planState, running map[string]int) {
 // warmPool starts or creates machines up to the warm target of every
 // recently used environment.
 func (p Default) warmPool(st *planState, running map[string]int) {
-	c, f := p.cfg(), st.f
+	f := st.f
 	var recent []string
 	for env := range f.Recent {
 		recent = append(recent, env)
 	}
 	sort.Strings(recent)
 	for _, env := range recent {
-		for running[env] < p.warmTarget(f, env) && st.active < c.MaxMachines {
+		for running[env] < p.warmTarget(f, env) {
 			if s := st.stopped[env]; len(s) > 0 {
 				st.acts = append(st.acts, Action{Kind: Start, Machine: s[0].ID, Reason: "warm pool"})
 				st.stopped[env] = s[1:]
-				st.active++
+				st.grow(s[0].Provider, s[0].Capacity.CPU, priceOf(f, s[0]))
 			} else {
-				size, ok := p.smallestSize(f.SizesFor(env), Resources{}, st.perProvider)
+				size, ok := p.smallestSize(f.SizesFor(env), Resources{}, st)
 				if !ok {
 					break
 				}
 				st.acts = append(st.acts, Action{Kind: Create, EnvHash: env, Size: size, Reason: "warm pool"})
-				st.active++
-				st.perProvider[size.Provider]++
+				st.create(size)
 			}
 			running[env]++
 		}
