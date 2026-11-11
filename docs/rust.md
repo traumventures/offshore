@@ -33,9 +33,9 @@ incremental rebuild after changing one `const` string in `app-api`
 
 Linking a binary (`cargo build -p app-server --bin app-server`, linker
 switched through the `cc` shim so nothing else rebuilds): relink after
-touching `main.rs` mold 3.8 s, wild 2.1 s, rust-lld 3.2 s; after the
-`app-api` edit mold 34.1 s, wild 28.7 s, rust-lld 30.0 s (single
-samples).
+touching `main.rs` mold 2.4 s, wild 1.9 s, rust-lld 3.3 s; after the
+`app-api` edit mold 28.9 s, wild 28.5 s, rust-lld 30.0 s (means of 2-3
+runs, first mold run excluded as page-cache warm-up).
 
 Reading: the incremental rebuild of the large `app-api` crate runs on
 one core (~100 % CPU) in the front end, so codegen-side options
@@ -68,8 +68,9 @@ session; set `[resources] cpu` accordingly.
 `[environment] linker = "mold" | "lld" | "wild"`, see
 [caches-and-storage.md](caches-and-storage.md#linker). `wild` installs
 the pinned static release of [wild](https://github.com/wild-linker/wild)
-and is the fastest of the three on large binaries; it is younger than
-mold, so keep mold where a link fails.
+and relinks the 1 GB-class `app-server` debug binary about 0.5 s faster
+than mold (1.9 vs 2.4 s); it is younger than mold, so keep mold where a
+link fails. The default rust-lld is the slowest of the three (3.3 s).
 
 ## headstart toolchain
 
