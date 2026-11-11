@@ -10,6 +10,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/traumventures/offshore/internal/events"
 	"github.com/traumventures/offshore/internal/manifest"
 	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/metrics"
@@ -377,6 +378,53 @@ type DiskStatus struct {
 	// SlotBytes is the size of each repository's build slot (repo id ->
 	// bytes).
 	SlotBytes map[string]int64 `json:"slot_bytes,omitempty"`
+	// Items break the disk down: build slots, each repository's local
+	// page tier, materialized files, source contents, machine and global
+	// caches, and the rest of the file system ("other").
+	Items []StorageItem `json:"items,omitempty"`
+}
+
+// Storage item kinds.
+const (
+	StorageSlot         = "slot"          // a build slot (upper and metadata)
+	StoragePages        = "pages"         // a repository's local page tier
+	StorageFiles        = "files"         // materialized files of the cache file system
+	StorageSource       = "source"        // faulted-in source contents
+	StorageMachineCache = "machine-cache" // a machine scope cache ([cache.<name>] scope machine, deps)
+	StorageGlobal       = "global"        // a global result cache's local tier (sccache, ccache, go)
+	StorageOther        = "other"         // the rest of the file system (images, system)
+)
+
+// StorageItem is one consumer of the cache disk.
+type StorageItem struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`           // slot path, cache name, ...
+	Repo string `json:"repo,omitempty"` // repository id (slot, pages)
+	// Worktree and Branch are the labels of the slot's last session.
+	Worktree string `json:"worktree,omitempty"`
+	Branch   string `json:"branch,omitempty"`
+	Bytes    int64  `json:"bytes"`              // on disk (slots: measured at the last session end)
+	Resident int64  `json:"resident,omitempty"` // local pages/files resident
+	Stored   int64  `json:"stored,omitempty"`   // bytes of the repository's head in the store
+	Dirty    int64  `json:"dirty,omitempty"`    // not yet written back
+	LastUsed int64  `json:"last_used,omitempty"`
+	// Committed is the unix time of the slot's last commit, StoreAt of
+	// the repository head the machine flushed to the store.
+	Committed  int64 `json:"committed,omitempty"`
+	StoreAt    int64 `json:"store_at,omitempty"`
+	Leased     bool  `json:"leased,omitempty"`
+	WorkingSet int64 `json:"working_set,omitempty"`
+	// Classes are the bytes of the repository's committed head by access
+	// class; TopDirs its largest directories (pages items, measured with
+	// the periodic machine cache measurement).
+	Classes map[string]int64 `json:"classes,omitempty"`
+	TopDirs []DirSize        `json:"top_dirs,omitempty"`
+}
+
+// DirSize is the size of a directory.
+type DirSize struct {
+	Path  string `json:"path"`
+	Bytes int64  `json:"bytes"`
 }
 
 // CacheFSStatus is the cache medium's file system (see internal/hostfs).
@@ -457,6 +505,9 @@ type Session struct {
 	// it consumed so far (busy cores = delta / wall delta).
 	UsedMemory int64   `json:"used_memory,omitempty"`
 	CPUSeconds float64 `json:"cpu_seconds,omitempty"`
+	// Samples are the session's last cgroup samples (every 5 s, the last
+	// minute); the orchestrator logs the new ones as session_sample.
+	Samples []events.Sample `json:"samples,omitempty"`
 }
 
 // Fetch requests output files from the most recent build slot of a repo.

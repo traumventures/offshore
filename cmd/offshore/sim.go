@@ -6,25 +6,35 @@ import (
 	"flag"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"maps"
 	"math"
 	"os"
+	"path/filepath"
+	"runtime/debug"
+	"runtime/pprof"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"text/tabwriter"
 	"time"
 
 	"github.com/traumventures/offshore/internal/config"
 	"github.com/traumventures/offshore/internal/pool"
+	"github.com/traumventures/offshore/internal/report"
 	"github.com/traumventures/offshore/internal/scheduler"
 	"github.com/traumventures/offshore/internal/scheduler/sim"
 )
 
 const simUsage = `Usage:
-  offshore sim [flags] <trace.json|trace.csv>...
-      replay traces against the pool configuration and compare policies
+  offshore sim [flags] <source>...
+      replay traces against the pool configuration and compare policies;
+      a source is a trace (.json, .csv), an event log (events-DAY.jsonl,
+      converted like sim export), gen:team or gen:small (a synthetic trace
+      per -seeds), scenarios or scenario:NAME (the adversarial scenarios
+      per -seeds). Runs go in parallel (-parallel); -table prints one
+      compact row per run plus means over seeds, e.g.
+      offshore sim -seeds 1-8 -policy default,classic -table gen:team scenarios
   offshore sim -sweep <trace>...
       sweep [scheduler] cost_optimization from 0 (fastest) to 1 (cheapest)
       and print the cost/time frontier of the default policy
@@ -62,11 +72,36 @@ func simCmd(args []string) error {
 	seed := fs.Uint64("seed", 1, "random seed of the synthetic trace")
 	days := fs.Int("days", 5, "days of the synthetic trace (starting Monday 2026-11-09)")
 	tz := fs.String("tz", "UTC", "time zone of the synthetic working hours")
+	seedsFlag := fs.String("seeds", "", "seeds of the synthetic sources gen:PROFILE, scenarios and scenario:NAME: 1,2,5 or 1-8 (default: -seed)")
+	parallel := fs.Int("parallel", sim.DefaultParallel(), "simulations to run concurrently (default: CPUs - 1)")
+	table := fs.Bool("table", false, "print one compact row per run (and the mean over seeds per trace and policy)")
+	noCache := fs.Bool("no-cache", false, "parse trace files and event logs again instead of using the binary cache")
+	cpuProfile := fs.String("cpuprofile", "", "write a CPU profile of the simulation to this file")
+	memProfile := fs.String("memprofile", "", "write an allocation profile of the simulation to this file")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
 		return err
+	}
+	if *cpuProfile != "" {
+		f, err := os.Create(*cpuProfile)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			return err
+		}
+		defer pprof.StopCPUProfile()
+	}
+	if *memProfile != "" {
+		defer func() {
+			if f, err := os.Create(*memProfile); err == nil {
+				pprof.Lookup("allocs").WriteTo(f, 0)
+				f.Close()
+			}
+		}()
 	}
 	if *gen != "" {
 		repos, ok := sim.Profiles[*profile]
@@ -156,12 +191,32 @@ func simCmd(args []string) error {
 			return fmt.Errorf("unknown policy %q (default, option, costmodel, binpack, classic)", name)
 		}
 	}
-	var reports []sim.Report
-	for _, path := range fs.Args() {
-		tr, err := sim.Load(path)
+	seeds := []uint64{*seed}
+	if *seedsFlag != "" {
+		if seeds, err = parseSeeds(*seedsFlag); err != nil {
+			return fmt.Errorf("-seeds: %w", err)
+		}
+	}
+	if *noCache {
+		os.Setenv("OFFSHORE_SIM_CACHE", "")
+	}
+	var inputs []simInput
+	for _, src := range fs.Args() {
+		in, err := loadInputs(src, seeds, *days, *tz, *cold)
 		if err != nil {
 			return err
 		}
+		inputs = append(inputs, in...)
+	}
+	type runMeta struct {
+		in     int // index in inputs
+		policy string
+	}
+	var specs []sim.Spec
+	var metas []runMeta
+	for k, in := range inputs {
+		tr := in.trace
+		tr.Jobs = slices.Clone(tr.Jobs)
 		for i := range tr.Jobs {
 			j := &tr.Jobs[i]
 			if j.WorkingSet == 0 {
@@ -174,9 +229,7 @@ func simCmd(args []string) error {
 				j.SlotBytes, j.SlotGrowth = sim.Bytes(slot), sim.Bytes(slot/20)
 			}
 		}
-		runs := make([]sim.Report, len(variants))
-		var wg sync.WaitGroup
-		for i, v := range variants {
+		for _, v := range variants {
 			pc := oc.Policy
 			pc.Variant, pc.CostOptimization = v.name, v.r
 			if pc.ExpiryMargin == 0 {
@@ -185,40 +238,210 @@ func simCmd(args []string) error {
 			if v.name == scheduler.VariantClassic {
 				pc.ConsolidateBelow = 0
 			}
-			label := path + " " + v.name
+			policy := v.name
 			if v.name != scheduler.VariantBinpack && v.name != scheduler.VariantClassic {
-				label += fmt.Sprintf(" r=%.2g", v.r)
+				policy += fmt.Sprintf(" r=%.2g", v.r)
 			}
 			var e scheduler.Estimator = scheduler.Static{}
 			if est == "history" {
 				e = scheduler.NewHistory("")
 			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				runs[i] = sim.Run(tr, sim.Options{
-					Name: label, Policy: scheduler.Default{Cfg: pc}, Sizes: oc.Sizes, Estimator: e,
-					Boot: bootLat, Start: startLat, MaxLifetime: oc.MaxLifetime, ColdPenalty: *cold,
-					Swap: oc.Swap, QueueTimeout: *timeout, Resize: *resize, Refetch: *refetch,
-				})
-			}()
-		}
-		wg.Wait()
-		reports = append(reports, runs...)
-		if *sweep && !*asJSON {
-			printFrontier(os.Stdout, path, ratios, runs)
+			specs = append(specs, sim.Spec{Trace: tr, Options: sim.Options{
+				Name: in.label() + " " + policy, Policy: scheduler.Default{Cfg: pc}, Sizes: oc.Sizes, Estimator: e,
+				Boot: bootLat, Start: startLat, MaxLifetime: oc.MaxLifetime, ColdPenalty: *cold,
+				Swap: oc.Swap, QueueTimeout: *timeout, Resize: *resize, Refetch: *refetch, Down: in.down,
+			}})
+			metas = append(metas, runMeta{k, policy})
 		}
 	}
-	if *sweep && !*asJSON {
-		return nil
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(400) // short lived simulations: trade memory for less GC
 	}
-	if *asJSON {
+	began := time.Now()
+	reports := sim.RunAll(specs, *parallel)
+	fmt.Fprintf(os.Stderr, "sim: %d runs in %s (parallel %d)\n", len(specs), time.Since(began).Round(time.Millisecond), min(max(*parallel, 1), max(len(specs), 1)))
+	switch {
+	case *asJSON:
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(reports)
+	case *table:
+		rows := make([]tableRow, len(reports))
+		for i, r := range reports {
+			in := inputs[metas[i].in]
+			rows[i] = tableRow{trace: in.name, seed: in.seed, seeded: in.seeded, policy: metas[i].policy, r: r}
+		}
+		printTable(os.Stdout, rows)
+	case *sweep:
+		for k, in := range inputs {
+			printFrontier(os.Stdout, in.label(), ratios, reports[k*len(variants):(k+1)*len(variants)])
+		}
+	default:
+		printReports(os.Stdout, reports)
 	}
-	printReports(os.Stdout, reports)
 	return nil
+}
+
+// simInput is a trace to simulate: a file or a synthetic trace of a seed.
+type simInput struct {
+	name   string
+	seed   uint64
+	seeded bool // synthetic: seed matters
+	trace  sim.Trace
+	down   []sim.Outage
+}
+
+func (in simInput) label() string {
+	if in.seeded {
+		return fmt.Sprintf("%s seed=%d", in.name, in.seed)
+	}
+	return in.name
+}
+
+// loadInputs resolves a source of the sim command: a trace file (.json,
+// .csv), an event log (.jsonl, converted like sim export), gen:PROFILE
+// (a synthetic workday trace per seed), scenarios or scenario:NAME (the
+// adversarial evaluation scenarios per seed). Files are parsed once and
+// cached (sim.Cached).
+func loadInputs(src string, seeds []uint64, days int, tz string, cold float64) ([]simInput, error) {
+	switch {
+	case strings.HasPrefix(src, "gen:"):
+		profile := strings.TrimPrefix(src, "gen:")
+		repos, ok := sim.Profiles[profile]
+		if !ok {
+			return nil, fmt.Errorf("%s: unknown profile %q (team, small)", src, profile)
+		}
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			return nil, err
+		}
+		var out []simInput
+		for _, sd := range seeds {
+			tr := sim.Generate(sim.GenOptions{Seed: sd, Days: days, Location: loc, Repos: repos,
+				Start: time.Date(2026, 11, 9, 0, 0, 0, 0, loc)})
+			out = append(out, simInput{name: src, seed: sd, seeded: true, trace: tr})
+		}
+		return out, nil
+	case src == "scenarios" || strings.HasPrefix(src, "scenario:"):
+		want := strings.TrimPrefix(src, "scenario:")
+		var out []simInput
+		for _, sd := range seeds {
+			for _, sc := range sim.Scenarios(sd) {
+				if src == "scenarios" || sc.Name == want {
+					out = append(out, simInput{name: "scenario:" + sc.Name, seed: sd, seeded: true, trace: sc.Trace, down: sc.Down})
+				}
+			}
+		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("%s: no such scenario", src)
+		}
+		return out, nil
+	case strings.EqualFold(filepath.Ext(src), ".jsonl"):
+		o := report.ExportOptions{ColdPenalty: max(cold, 0)}
+		tr, err := sim.Cached(src, fmt.Sprintf("events cold=%g", o.ColdPenalty), func() (sim.Trace, error) {
+			return report.SimTraceFile(src, o)
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(tr.Jobs) == 0 {
+			return nil, fmt.Errorf("%s: no finished tasks", src)
+		}
+		return []simInput{{name: src, trace: tr}}, nil
+	default:
+		tr, err := sim.Cached(src, "trace", func() (sim.Trace, error) { return sim.Load(src) })
+		if err != nil {
+			return nil, err
+		}
+		return []simInput{{name: src, trace: tr}}, nil
+	}
+}
+
+// parseSeeds parses "1,2,5" and ranges "1-8".
+func parseSeeds(s string) ([]uint64, error) {
+	var out []uint64
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		lo, hi, isRange := strings.Cut(part, "-")
+		a, err := strconv.ParseUint(lo, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		b := a
+		if isRange {
+			if b, err = strconv.ParseUint(hi, 10, 64); err != nil {
+				return nil, err
+			}
+		}
+		if b < a || b-a > 10000 {
+			return nil, fmt.Errorf("bad range %q", part)
+		}
+		for x := a; x <= b; x++ {
+			out = append(out, x)
+		}
+	}
+	return out, nil
+}
+
+type tableRow struct {
+	trace  string
+	seed   uint64
+	seeded bool
+	policy string
+	r      sim.Report
+}
+
+// printTable prints one compact row per run and, for traces simulated
+// with several seeds, the mean over the seeds per trace and policy.
+func printTable(w io.Writer, rows []tableRow) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
+	fmt.Fprintln(tw, "trace\tseed\tpolicy\tcost $\tmach-h\tturn p50\tturn p95\twait p95\twarm\tcold\tflaps\tlate\tregret p95\tfailed\t")
+	line := func(trace, seed, policy string, cost, mh float64, t50, t95, w95 time.Duration, warm, coldR, flaps, late float64, reg time.Duration, failed float64) {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%.2f\t%.1f\t%s\t%s\t%s\t%.0f%%\t%.0f%%\t%.3g\t%.3g\t%s\t%.3g\t\n", trace, seed, policy, cost, mh,
+			t50.Round(time.Second), t95.Round(time.Second), w95.Round(time.Second), 100*warm, 100*coldR, flaps, late, reg.Round(time.Second), failed)
+	}
+	type key struct{ trace, policy string }
+	var order []key
+	groups := map[key][]sim.Report{}
+	for _, x := range rows {
+		seed := "-"
+		if x.seeded {
+			seed = strconv.FormatUint(x.seed, 10)
+			k := key{x.trace, x.policy}
+			if _, ok := groups[k]; !ok {
+				order = append(order, k)
+			}
+			groups[k] = append(groups[k], x.r)
+		}
+		r := x.r
+		line(x.trace, seed, x.policy, r.Cost, r.MachineHours, r.TurnP50, r.TurnP95, r.WaitP95, r.WarmRate, r.ColdRate,
+			float64(r.Flaps), float64(r.Late), r.RegretP95, float64(r.Failed))
+	}
+	for _, k := range order {
+		g := groups[k]
+		if len(g) < 2 {
+			continue
+		}
+		n := float64(len(g))
+		mean := func(f func(sim.Report) float64) float64 {
+			var s float64
+			for _, r := range g {
+				s += f(r)
+			}
+			return s / n
+		}
+		dur := func(f func(sim.Report) time.Duration) time.Duration {
+			return time.Duration(mean(func(r sim.Report) float64 { return float64(f(r)) }))
+		}
+		line(k.trace, fmt.Sprintf("mean/%d", len(g)), k.policy,
+			mean(func(r sim.Report) float64 { return r.Cost }), mean(func(r sim.Report) float64 { return r.MachineHours }),
+			dur(func(r sim.Report) time.Duration { return r.TurnP50 }), dur(func(r sim.Report) time.Duration { return r.TurnP95 }),
+			dur(func(r sim.Report) time.Duration { return r.WaitP95 }),
+			mean(func(r sim.Report) float64 { return r.WarmRate }), mean(func(r sim.Report) float64 { return r.ColdRate }),
+			mean(func(r sim.Report) float64 { return float64(r.Flaps) }), mean(func(r sim.Report) float64 { return float64(r.Late) }),
+			dur(func(r sim.Report) time.Duration { return r.RegretP95 }), mean(func(r sim.Report) float64 { return float64(r.Failed) }))
+	}
+	tw.Flush()
 }
 
 // printReports writes reports as a table.

@@ -9,7 +9,7 @@ import (
 // Every subcommand dispatched by run has a help text.
 func TestEveryCommandHasHelp(t *testing.T) {
 	for _, c := range []string{"run", "worker", "supervisor", "gocacheprog", "sandbox-init", "controlplane", "sim", "report",
-		"daemon", "status", "top", "prewarm", "hooks", "why", "metrics", "down", "reconcile", "shim", "fetch", "debug",
+		"daemon", "status", "top", "provider", "prewarm", "hooks", "why", "metrics", "down", "reconcile", "shim", "fetch", "debug",
 		"env", "init", "doctor", "editor", "outputs", "config", "version", "help"} {
 		if commandHelp[c] == "" {
 			t.Errorf("%s: no help text", c)

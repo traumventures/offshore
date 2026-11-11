@@ -57,6 +57,7 @@ type Focus int
 const (
 	FocusSessions Focus = iota
 	FocusMachines
+	FocusStorage
 )
 
 // Windows are the zoom levels of the history graphs (+/-).
@@ -74,6 +75,7 @@ type View struct {
 	// table rows; MSelected and MOffset those of the machine table.
 	Selected, Offset   int
 	MSelected, MOffset int
+	SSelected, SOffset int // storage rows
 	Width              int
 	Height             int // 0: unlimited (print every row)
 	// Detail is the open detail view ("" none, "machine:<id>",
@@ -315,7 +317,13 @@ func ComputeLayout(height, machines, storage, sessions int) Layout {
 	}
 	l.Machines = min(max(machines, 1), max(rest/2, 1))
 	l.Sessions = max(rest-l.Machines, 1)
-	// Fewer sessions than room: give the rest to the graphs.
+	// Fewer sessions than room: give the rest to the storage panel, then
+	// to the graphs.
+	if sessions > 0 && l.Storage > 0 && l.Storage < storage && l.Sessions > sessions+2 {
+		g := min(l.Sessions-(sessions+2), storage-l.Storage)
+		l.Storage += g
+		l.Sessions -= g
+	}
 	if sessions > 0 && l.Sessions > sessions+2 {
 		spare := l.Sessions - (sessions + 2)
 		g := min(spare, maxGraph-l.Graph)
@@ -361,10 +369,13 @@ func normalize(v View) View {
 }
 
 func helpLine(v View) string {
+	if v.Focus == FocusStorage {
+		return "↑/↓ select  Tab sessions  Enter detail  +/- window  q quit"
+	}
 	if v.Focus == FocusMachines {
 		return "↑/↓ select  Tab sessions  Enter detail  s/c/m/d/p/a/n sort  r reverse  +/- window  q quit"
 	}
-	return "↑/↓ select  Tab machines  Enter detail  e/c/m/w/n/u sort  r reverse  +/- window  q quit"
+	return "↑/↓ select  Tab machines/storage  Enter detail  e/c/m/w/n/u sort  r reverse  +/- window  q quit"
 }
 
 func header(s Snapshot, v View, st Styles) string {
@@ -402,14 +413,13 @@ func graphs(s Snapshot, h *History, v View, st Styles, rows int) string {
 		last = h.Pool[n-1]
 	}
 	at := func(p Point) time.Time { return p.T }
-	maxOf := func(f func(Point) float64) float64 {
-		m := 0.0
-		for _, p := range h.Pool {
-			if p.T.After(s.Time.Add(-v.Window)) {
-				m = math.Max(m, f(p))
-			}
+	// Each sample is drawn as a share of the capacity active at that
+	// moment: a machine that was removed must not keep the axis high.
+	ratio := func(x, c float64) float64 {
+		if c <= 0 {
+			return 0
 		}
-		return m
+		return x / c
 	}
 	type g struct {
 		title string
@@ -417,10 +427,10 @@ func graphs(s Snapshot, h *History, v View, st Styles, rows int) string {
 		top   float64
 	}
 	gs := []g{
-		{fmt.Sprintf("CPU busy %.1f / %.0f cores (reserved %.1f)", last.BusyCPU, last.CapCPU, last.ReservedCPU), func(p Point) float64 { return p.BusyCPU },
-			maxOf(func(p Point) float64 { return p.CapCPU })},
-		{fmt.Sprintf("Memory %s / %s", human(last.UsedMem), human(last.CapMem)), func(p Point) float64 { return float64(p.UsedMem) },
-			maxOf(func(p Point) float64 { return float64(p.CapMem) })},
+		{fmt.Sprintf("CPU busy %.1f / %.0f cores (reserved %.1f)", last.BusyCPU, last.CapCPU, last.ReservedCPU),
+			func(p Point) float64 { return ratio(p.BusyCPU, p.CapCPU) }, 1},
+		{fmt.Sprintf("Memory %s / %s", human(last.UsedMem), human(last.CapMem)),
+			func(p Point) float64 { return ratio(float64(p.UsedMem), float64(p.CapMem)) }, 1},
 	}
 	var panels []string
 	for i, x := range gs {
@@ -475,12 +485,25 @@ var machineCols = []Col{
 // machineState is the displayed state of a machine.
 func machineState(m orchestrator.Machine, now time.Time) string {
 	state := string(m.State)
+	if booting(m) {
+		// Up at the provider but the worker does not answer or is still
+		// setting up: no capacity yet.
+		since := m.CreatedAt
+		if n := len(m.Uptime); n > 0 && m.Uptime[n-1].End.IsZero() {
+			since = m.Uptime[n-1].Start
+		}
+		if since.IsZero() {
+			return "booting"
+		}
+		return "booting " + short(now.Sub(since).Round(time.Second))
+	}
 	if st0 := m.Status; st0 != nil && m.State == provider.Running {
 		switch {
-		case !st0.Ready:
-			state = "provisioning"
 		case st0.Draining || m.Draining:
 			state = "draining"
+			if st0.DrainReason != "" {
+				state += " (" + st0.DrainReason + ")"
+			}
 		case len(st0.Sessions) == 0 && st0.IdleSince > 0:
 			state = "idle " + short(now.Sub(time.Unix(st0.IdleSince, 0)))
 		case len(st0.Sessions) > 0:
@@ -490,6 +513,12 @@ func machineState(m orchestrator.Machine, now time.Time) string {
 	return state
 }
 
+// booting reports a machine that is starting or running at the provider
+// whose worker is not ready (not answering, setting up).
+func booting(m orchestrator.Machine) bool {
+	return m.Removed.IsZero() && (m.State == provider.Starting || m.State == provider.Running && (m.Status == nil || !m.Status.Ready))
+}
+
 func machineRow(m orchestrator.Machine, now time.Time, st Styles) []Cell {
 	size := m.Labels[provider.LabelSize]
 	if size == "" {
@@ -497,8 +526,7 @@ func machineRow(m orchestrator.Machine, now time.Time, st Styles) []Cell {
 	}
 	row := []Cell{C(m.ID), C(m.Provider + "/" + size), C(machineState(m, now)), C(""), C(""), C(""), C("-"), C(fmt.Sprintf("%.2f", m.PricePerHour)),
 		C(""), C(""), C(""), C("")}
-	active := m.State == provider.Running || m.State == provider.Starting
-	if active {
+	if (m.State == provider.Running || m.State == provider.Starting) && !booting(m) {
 		busy, mem := 0.0, int64(0)
 		if st0 := m.Status; st0 != nil {
 			busy, mem = st0.Measured.CPU, st0.Measured.Memory
@@ -546,7 +574,7 @@ func machinesPanel(s Snapshot, ms []orchestrator.Machine, v View, st Styles, n i
 	for i := off; i < len(rows) && i < off+limit; i++ {
 		line := fit(renderRow(machineCols, ws, rows[i], st), inner)
 		if i == sel && v.Focus == FocusMachines && v.Height > 0 {
-			line = st.Selected.Render(pad(line, inner))
+			line = st.Selected.Render(pad(ansi.Strip(line), inner))
 		}
 		lines = append(lines, line)
 	}
@@ -681,7 +709,7 @@ func sessionsPanel(rows []SRow, v View, st Styles, n int) string {
 		}
 		line = fit(line, inner)
 		if i == sel && v.Focus == FocusSessions && v.Height > 0 {
-			line = st.Selected.Render(pad(line, inner))
+			line = st.Selected.Render(pad(ansi.Strip(line), inner))
 		}
 		lines = append(lines, line)
 	}
@@ -707,144 +735,6 @@ func countKind(rows []SRow, k string) int {
 		}
 	}
 	return n
-}
-
-// storageRow is one build slot (machine, repo) or a repository head
-// without a slot on any running machine.
-type storageRow struct {
-	Repo, Machine string
-	Slot          int64 // slot bytes on the machine (0: none)
-	Head          int64 // newest head bytes in the store
-	HeadAt        time.Time
-	Store         string
-	MachineHead   time.Time // newest head committed from this machine
-}
-
-// storageRows lists the build slots of running machines and the store
-// heads of their repositories.
-func storageRows(s Snapshot) []storageRow {
-	type head struct {
-		bytes int64
-		at    time.Time
-		store string
-	}
-	heads := map[string]head{}
-	mheads := map[[2]string]time.Time{}
-	for _, m := range s.Up() {
-		if m.Status == nil {
-			continue
-		}
-		for _, hd := range m.Status.Heads {
-			at := time.Unix(hd.At, 0)
-			if cur, ok := heads[hd.Repo]; !ok || at.After(cur.at) {
-				heads[hd.Repo] = head{hd.Bytes, at, hd.Store}
-			}
-			k := [2]string{m.ID, hd.Repo}
-			if at.After(mheads[k]) {
-				mheads[k] = at
-			}
-		}
-	}
-	var out []storageRow
-	seen := map[string]bool{}
-	for _, m := range s.Up() {
-		if m.Status == nil || m.Status.Disk == nil {
-			continue
-		}
-		for repo, b := range m.Status.Disk.SlotBytes {
-			hd := heads[repo]
-			out = append(out, storageRow{Repo: repo, Machine: m.ID, Slot: b, Head: hd.bytes, HeadAt: hd.at, Store: hd.store, MachineHead: mheads[[2]string{m.ID, repo}]})
-			seen[repo] = true
-		}
-	}
-	for repo, hd := range heads {
-		if !seen[repo] {
-			out = append(out, storageRow{Repo: repo, Head: hd.bytes, HeadAt: hd.at, Store: hd.store})
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Slot != out[j].Slot {
-			return out[i].Slot > out[j].Slot
-		}
-		if out[i].Repo != out[j].Repo {
-			return out[i].Repo < out[j].Repo
-		}
-		return out[i].Machine < out[j].Machine
-	})
-	return out
-}
-
-var storageCols = []Col{
-	{Title: "REPO"}, {Title: "MACHINE"}, {Title: "SLOT", Right: true}, {Title: "HEAD", Right: true},
-	{Title: "COMMITTED", Right: true}, {Title: "LAG", Right: true, Drop: 2}, {Title: "STORE", Drop: 1},
-}
-
-func storageCells(r storageRow, now time.Time) []Cell {
-	dash := func(s string) string {
-		if s == "" {
-			return "-"
-		}
-		return s
-	}
-	slot, head, committed, lag := "-", "-", "-", "-"
-	if r.Slot > 0 {
-		slot = human(r.Slot)
-	}
-	if r.Head > 0 {
-		head = human(r.Head)
-	}
-	if !r.HeadAt.IsZero() {
-		committed = short(now.Sub(r.HeadAt)) + " ago"
-	}
-	if r.Machine != "" && !r.HeadAt.IsZero() {
-		if r.MachineHead.IsZero() {
-			lag = "not committed"
-		} else {
-			lag = short(r.HeadAt.Sub(r.MachineHead))
-		}
-	}
-	return []Cell{C(trunc(r.Repo, 20)), C(dash(r.Machine)), C(slot), C(head), C(committed), C(lag), C(dash(r.Store))}
-}
-
-func storagePanel(s Snapshot, h *History, rows []storageRow, v View, st Styles, n int) string {
-	inner := v.Width - 2
-	cells := make([][]Cell, len(rows))
-	stored := map[string]int64{}
-	for i, r := range rows {
-		cells[i] = storageCells(r, s.Time)
-		if r.Head > stored[r.Repo] {
-			stored[r.Repo] = r.Head
-		}
-	}
-	var total int64
-	for _, b := range stored {
-		total += b
-	}
-	var pin, wb float64
-	for _, m := range s.Up() {
-		if ps := h.Machine[m.ID]; running(m) && len(ps) > 0 {
-			pin += ps[len(ps)-1].PageIn
-			wb += ps[len(ps)-1].Writeback
-		}
-	}
-	ws := layoutCols(storageCols, cells, inner)
-	lines := []string{st.Header.Render(fit(renderHeader(storageCols, ws, nil), inner))}
-	limit := n
-	if v.Height <= 0 {
-		limit = len(rows)
-	}
-	for i := 0; i < len(rows) && i < limit; i++ {
-		lines = append(lines, fit(renderRow(storageCols, ws, cells[i], st), inner))
-	}
-	title := fmt.Sprintf("Storage  store %s in %d repos  page-in %s/s  writeback %s/s", human(total), len(stored), human(int64(pin)), human(int64(wb)))
-	if len(rows) > limit {
-		title += fmt.Sprintf("  (%d more)", len(rows)-limit)
-	}
-	pad := 0
-	if v.Height > 0 {
-		pad = limit + 1
-	}
-	return panel(st.Title.Render(fit(title, inner)), lines, pad, inner, st)
 }
 
 var blocks = []rune(" ▁▂▃▄▅▆▇█")

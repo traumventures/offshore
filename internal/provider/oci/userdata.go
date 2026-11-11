@@ -119,7 +119,9 @@ func userData(spec provider.MachineSpec, region string, in *infra, binURL, image
 	// The supervisor creates the containers, starts them on every boot and
 	// enforces expiry and idle stop. Containers must not reach the
 	// metadata service (it hands out the instance principal): DOCKER-USER
-	// rejects forwarded traffic to link-local addresses.
+	// rejects forwarded traffic to link-local addresses, except DNS to the
+	// VCN resolver (169.254.169.254:53, the containers' nameserver): without
+	// it no name resolves in a container (store, crates, sccache).
 	w(`cat > /etc/systemd/system/offshore-supervisor.service <<'EOF'
 [Unit]
 Description=offshore supervisor
@@ -128,6 +130,7 @@ Wants=network-online.target
 Requires=docker.service
 [Service]
 ExecStartPre=/bin/sh -c 'iptables -C DOCKER-USER -d 169.254.0.0/16 -j REJECT 2>/dev/null || iptables -I DOCKER-USER -d 169.254.0.0/16 -j REJECT'
+ExecStartPre=/bin/sh -c 'for p in udp tcp; do iptables -C DOCKER-USER -d 169.254.169.254/32 -p $p --dport 53 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -d 169.254.169.254/32 -p $p --dport 53 -j ACCEPT; done'
 ExecStart=%s supervisor
 Restart=always
 RestartSec=5

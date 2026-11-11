@@ -75,7 +75,8 @@ const prefetchSmall = 64 << 10
 type cacheFSOptions struct {
 	// Mode forces a mount mode (nil: probe the host).
 	Mode *fsMode
-	// Capacity bounds each repository's local page tier (0: unbounded).
+	// Capacity bounds the local tiers (materialized files and pages) of
+	// all repositories together (0: unbounded); see enforceCapacity.
 	Capacity int64
 	// Idle is how long a slot stays unused before it is committed
 	// ([writeback] dirty_expire, default 30s).
@@ -1006,6 +1007,38 @@ func (c *cacheFS) reclaim(ctx context.Context, want int64) int64 {
 		freed += n
 	}
 	return freed
+}
+
+// resident is the machine-wide resident bytes of the local tiers
+// (materialized files plus each repository's pages, shared pages once).
+func (c *cacheFS) resident() int64 {
+	c.mu.Lock()
+	repos := make([]*repoFS, 0, len(c.repos))
+	for _, r := range c.repos {
+		repos = append(repos, r)
+	}
+	c.mu.Unlock()
+	n := c.files.Stats().ResidentBytes
+	for _, r := range repos {
+		st := r.local.Stats()
+		n += st.ResidentBytes - st.SharedBytes
+	}
+	return n
+}
+
+// enforceCapacity reclaims resident data above the capacity. Capacity
+// bounds the local tiers of all repositories together (each repository's
+// tier alone is bounded by it too): per repository only, a machine with
+// several repositories held a multiple of it.
+func (c *cacheFS) enforceCapacity(ctx context.Context) int64 {
+	if c.opt.Capacity <= 0 {
+		return 0
+	}
+	over := c.resident() - c.opt.Capacity
+	if over <= 0 {
+		return 0
+	}
+	return c.reclaim(ctx, over)
 }
 
 // vm reports the slot file system in virtual memory terms.

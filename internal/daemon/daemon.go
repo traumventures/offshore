@@ -226,6 +226,8 @@ type Request struct {
 	Lease string   `json:"lease,omitempty"`
 	// Machine is the machine of Lease (op "unreachable").
 	Machine string `json:"machine,omitempty"`
+	// Provider is the provider of op "provider-reset".
+	Provider string `json:"provider,omitempty"`
 	// Wait makes op "env-build" run the build and stream its progress.
 	Wait bool `json:"wait,omitempty"`
 	// Usage reports what a finished session consumed (op "release").
@@ -397,6 +399,18 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 			return nil, errors.New("the pool cannot list its queue")
 		}
 		return src.Queue(ctx)
+	case "providers", "provider-reset", "session-samples":
+		src, ok := d.pool.(pool.InsightSource)
+		if !ok {
+			return nil, errors.New("the pool reports no provider health or session samples")
+		}
+		switch req.Op {
+		case "providers":
+			return src.Providers(ctx)
+		case "provider-reset":
+			return nil, src.ResetProvider(ctx, req.Provider)
+		}
+		return src.SessionSamples(ctx, req.Lease, req.Since)
 	case "reconcile":
 		if d.reload != nil {
 			// Explicit reload of the pool configuration (embedded mode).

@@ -23,6 +23,8 @@ func detail(s Snapshot, h *History, v View, rates map[string]float64, st Styles)
 		body = machineDetail(s, h, v, rates, st, id)
 	case "session":
 		body = sessionDetail(s, h, v, rates, st, id)
+	case "storage":
+		body = storageDetail(s, h, v, st, id)
 	}
 	return header(s, v, st) + "\n" + body + st.Dim.Render(fit("Esc/q back  ↑/↓ other rows  +/- window", v.Width))
 }
@@ -158,9 +160,9 @@ func machineDetail(s Snapshot, h *History, v View, rates map[string]float64, st 
 	var slots []string
 	if m.Status != nil && m.Status.Disk != nil {
 		for _, r := range storageRows(s) {
-			if r.Machine == id {
-				c := storageCells(r, s.Time)
-				slots = append(slots, fmt.Sprintf("slot %s %s  head %s committed %s  lag %s", c[0].Text, c[2].Text, c[3].Text, c[4].Text, c[5].Text))
+			if r.Machine == id && !r.Header && r.Item.Kind == proto.StorageSlot {
+				it := r.Item
+				slots = append(slots, fmt.Sprintf("%-9s %s  committed %s  store %s  lag %s", hum0(it.Bytes), itemName(it), ago(s.Time, it.Committed), hum0(it.Stored), storeLag(it)))
 			}
 		}
 	}
@@ -334,11 +336,19 @@ func sessionDetail(s Snapshot, h *History, v View, rates map[string]float64, st 
 		if row != nil {
 			topC, topM = row.ResCPU, float64(row.ResMem)
 		}
+		resC, resM := topC, topM
+		// A session may burst above its reservation; never clip the peak.
+		for _, p := range sp {
+			if p.T.After(s.Time.Add(-v.Window)) {
+				topC = max(topC, p.BusyCPU)
+				topM = max(topM, float64(p.UsedMem))
+			}
+		}
 		gs := []graphSpec{
-			{fmt.Sprintf("CPU %.1f cores", last.BusyCPU), topC, func(n int) ([]float64, []bool) {
+			{fmt.Sprintf("CPU %.1f cores (reserved %.1f)", last.BusyCPU, resC), topC, func(n int) ([]float64, []bool) {
 				return Series(sp, at, func(p SPoint) float64 { return p.BusyCPU }, s.Time, v.Window, n)
 			}},
-			{fmt.Sprintf("Memory %s", human(last.UsedMem)), topM, func(n int) ([]float64, []bool) {
+			{fmt.Sprintf("Memory %s (reserved %s)", human(last.UsedMem), human(int64(resM))), topM, func(n int) ([]float64, []bool) {
 				return Series(sp, at, func(p SPoint) float64 { return float64(p.UsedMem) }, s.Time, v.Window, n)
 			}},
 		}

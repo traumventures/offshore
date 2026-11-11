@@ -91,6 +91,9 @@ func (s *Worker) compilerCacheEnv(req proto.Exec, session string, has func(strin
 			[2]string{"SCCACHE_DIR", dir},
 			[2]string{"SCCACHE_SERVER_UDS", filepath.Join(dir, "server.sock")},
 			[2]string{"SCCACHE_IDLE_TIMEOUT", "0"}, // lives as long as the session
+			// A cache that fails must never fail the build: sccache
+			// compiles locally when its server or storage errors.
+			[2]string{"SCCACHE_IGNORE_SERVER_IO_ERROR", "1"},
 		)
 		if p := ttlPrefix(cc); p != "" {
 			out = append(out, [2]string{"SCCACHE_WEBDAV_KEY_PREFIX", strings.TrimSuffix(p, "/")})

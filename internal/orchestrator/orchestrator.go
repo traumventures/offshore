@@ -665,6 +665,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 // sampleLocked writes a machine_sample event from the machine's current
 // status, at most every events.SampleInterval.
 func (o *Orchestrator) sampleLocked(id string, m *Machine) {
+	o.sessionSamplesLocked(id, m)
 	st := m.Status
 	if st == nil || !st.Ready || m.StatusAt.Sub(m.sampledAt) < events.SampleInterval-time.Second {
 		return

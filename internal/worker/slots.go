@@ -124,6 +124,9 @@ type slotMeta struct {
 	// Head's tree then, later changes have a newer ctime in the upper
 	// directory (incremental commits).
 	Scanned int64 `json:"scanned_ns,omitempty"`
+	// Worktree and Branch are the labels of the last session.
+	Worktree string `json:"worktree,omitempty"`
+	Branch   string `json:"branch,omitempty"`
 }
 
 // slotCache is a slot-scope cache path with its pruning settings.
