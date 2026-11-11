@@ -85,6 +85,9 @@ cleanup() {
   timed cs down
   timed cs daemon stop
   timed stop_cp
+  # The pool's directory store (layers and pages) outlives "down" on
+  # purpose; the test pool is gone, so is its store.
+  timed docker_ volume rm -f "cs-store-$OWNER"
   local left
   left="$(docker_ ps -aq --filter "label=offshore.pool=$OWNER" | wc -l)"
   left=$((left + $(docker_ volume ls -q --filter "label=offshore.pool=$OWNER" | wc -l)))

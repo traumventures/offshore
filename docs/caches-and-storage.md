@@ -41,10 +41,14 @@ ttl   = "12h"               # optional, at most 24h
 ## Build slots
 
 A session leases a slot of its repository exclusively, so parallel builds
-of one repository never block each other. Slots are reused warm and never
-older than the shortest slot-cache `ttl` (default 24 h, recorded per slot,
-so repositories with different TTLs share machines). New slots are cloned
-by reflink when the file system supports it, otherwise created cold.
+of one repository never block each other. A slot is a mount of the cache
+file system (see [anyfs](#anyfs-one-storage-core) and
+[build slots on anyfs](#build-slots-on-anyfs-commit-writeback-lazy-restore)):
+a private upper directory over the repository's committed layers, so a
+second slot of the same repository is another overlay over the same
+layers, not a copy. Slots are never older than the shortest slot-cache
+`ttl` (default 24 h, measured from the oldest data in the layer chain,
+recorded per slot, so repositories with different TTLs share machines).
 Machines live at most `max_lifetime`, which also caps the slot TTL. The
 scheduler prefers machines that hold a warm slot of the repository
 ([scheduling.md](scheduling.md)).
@@ -223,6 +227,86 @@ sessions use as `CARGO_TARGET_<host triple>_LINKER` unless set (with
 [tools.md](tools.md#cargo-freshness)). `RUSTFLAGS` and `rustflags` from
 `.cargo/config.toml` stay untouched; a `target.<triple>.linker` in
 `.cargo/config.toml` is overridden by it.
+
+## anyfs: one storage core
+
+Build slots on workers, the source projection on workers and the output
+overlay on laptops are configurations of one storage core,
+`internal/anyfs`:
+
+- **Tree** (manifest): every path with kind, mode, size, mtime, the BLAKE3
+  digest of its content and the **pages** holding it. Pages (about 8 MiB)
+  are content addressed; small files (up to 1 MiB) are packed together with
+  content defined boundaries, large files split.
+- **Layer**: a committed delta of a tree (changed nodes, whiteouts, opaque
+  directories) with a parent; a chain of layers folds into a tree,
+  compaction folds a chain into a new base. Layer objects and named
+  **heads** live next to the pages in the store.
+- **Tier**: stores pages (`Get`, `Put`, `Has`, `Reclaim`, `Profile`): the
+  local disk, a volume, the object store, a peer over QUIC.
+  `Link(upper, lower)` makes a pair of tiers a tier again, so stacks fold
+  recursively, like a CPU cache hierarchy: `local -> volume -> store` on a
+  worker with a cache volume, `local -> store` by default, the laptop's
+  `local -> peer (the remote slot)` and the worker's source
+  `local -> peer (the laptop)`.
+- **Files** materializes node contents as whole local read-only files
+  (shared per digest), the page cache the FUSE lower hands to the kernel.
+
+Each link has a policy:
+
+| policy | values | default |
+| --- | --- | --- |
+| inclusion | inclusive (pages faulted in stay below too) or exclusive (victim cache: faulted pages move up, reclaimed pages are demoted) | inclusive; exclusive for `local` over `volume` |
+| write | write-through or write-back | write-back: new pages stay dirty locally until `[writeback] dirty_expire` or `dirty_ratio` |
+| readahead | concurrent background page-ins of `Prefetch` | 8 |
+| reclaim | ARC: pages touched once are reclaimed before pages touched again, so a clean build streaming through new pages does not evict the hot set; ghost entries adapt the balance and detect refaults | always |
+| promote | keep faulted pages in the upper tier | on |
+
+**Virtual memory model.** The local disk is RAM, lower tiers are swap and
+the store is the backing store. Names in code, events and metrics follow
+it:
+
+| term | meaning |
+| --- | --- |
+| page | the unit of transfer and caching (a chunk of the store) |
+| resident | held by the local tier (pages and materialized files) |
+| clean / dirty | held below too (reclaim is free) / must be written back first |
+| page fault | a lookup missed the upper tier; content is fetched (page-in) from below |
+| writeback / page-out | dirty pages written to the tier below (a commit) / pages demoted |
+| reclaim | resident clean pages dropped under pressure (faulted in again on use) |
+| pin | a page that is never reclaimed |
+| working set | bytes touched within a window (10 min) |
+| thrashing | the working set exceeds the local capacity and recently reclaimed pages fault back in; the scheduler answers with a bigger disk or machine |
+
+Events: `page_fault`, `page_in`, `reclaim` (per machine, deltas between
+samples), `writeback` (per committed head), `thrash` (when a machine starts
+thrashing); `page_out` is defined for demotions to a volume. Metrics:
+`offshore_cache_resident_bytes`, `_dirty_bytes`, `_working_set_bytes`,
+`_fault_rate`, `_reclaim_bytes`, `_thrashing`; `offshore top` shows
+resident/capacity, dirty, working set, faults/s and `THRASH` per machine.
+
+### Mount layouts and kernel requirements
+
+| where | layout | needs |
+| --- | --- | --- |
+| worker build slot | kernel overlayfs (`redirect_dir=on,metacopy=on`): upper on the cache disk, lower = read-only FUSE over the committed chain with passthrough | `CAP_SYS_ADMIN` in the initial user namespace (machine containers run with `--cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor=unconfined`), FUSE passthrough needs Linux >= 6.9 (without it reads go through the daemon), upper/work and the file cache on a real file system (the cache volume, not the container's overlay root) |
+| worker build slot, unprivileged | userspace overlay (FUSE) over the same lower | `/dev/fuse` |
+| worker without FUSE | plain directory; commits scan it, a slot over a chain is extracted eagerly | nothing |
+| worker source projection | read-write anyfs FUSE (`WritableFS`) over the synced manifest, contents fetched per digest from the laptop; local writes are written back with conflict detection | `/dev/fuse` |
+| laptop output overlay (`target/`) | userspace overlay: upper in the client state, whiteouts, newest-mtime merge over the remote slot (lazy listings over QUIC, contents in the client CAS) | `/dev/fuse` (no privileges) |
+
+Why these choices (measured in `test/bench/tiers`): with passthrough no
+read or write reaches the daemon; writeback cache would disable
+passthrough, so it is never requested; flush, xattr and statx requests are
+answered with ENOSYS once (halves the metadata round trips); the lower
+fetches on the first read, never on open (overlayfs copy-up opens lower
+files for their attributes); `metacopy` makes cargo's re-hardlinking of
+uplifted artifacts metadata only (restore 0.4 s instead of 6-9 s);
+`redirect_dir` lets rustc rename incremental directories from the lower.
+A read-write FUSE costs +15-30 % on incremental builds, so build slots use
+the kernel overlay wherever possible. Live files are never hardlinked into
+the file cache (cargo writes fingerprints in place): commits copy or
+reflink.
 
 ## Build slots on anyfs: commit, writeback, lazy restore
 
@@ -405,6 +489,7 @@ machine:
    `offshore report`.
 4. Restore: `offshore` slot save on one machine and restore on the other
    (`snapshot_save`/`snapshot_restore` events) plus `test/bench/tiers`
+   (layouts E and F use the real anyfs implementation)
    for the fault path against each disk.
 
 ## Lifetimes

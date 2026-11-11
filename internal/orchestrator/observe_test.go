@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/proto"
 	"github.com/traumventures/offshore/internal/scheduler"
 	"github.com/traumventures/offshore/internal/tracing"
 	"github.com/traumventures/offshore/internal/tracing/tracingtest"
@@ -117,5 +118,32 @@ func TestReconcileActionEvents(t *testing.T) {
 	ds := tracingtest.Find(rec, "pool.destroy")
 	if rs == nil || ds == nil || ds.Parent().SpanID() != rs.SpanContext().SpanID() {
 		t.Fatalf("pool.destroy must be a child of orchestrator.reconcile")
+	}
+}
+
+// TestVMEvents: samples log the cache file system activity since the
+// previous sample as page_fault, page_in and reclaim events.
+func TestVMEvents(t *testing.T) {
+	o := newTestOrch(t, newFake(), nil)
+	m := &Machine{Status: &proto.Status{Ready: true, VM: &proto.VMStats{Faults: 10, PageInBytes: 100}}}
+	o.mu.Lock()
+	m.StatusAt = time.Now()
+	o.sampleLocked("m1", m)
+	m.Status = &proto.Status{Ready: true, VM: &proto.VMStats{Faults: 15, PageInBytes: 700, ReclaimBytes: 50}}
+	m.StatusAt = m.StatusAt.Add(events.SampleInterval)
+	o.sampleLocked("m1", m)
+	o.mu.Unlock()
+	evs := readEvents(t, o)
+	if f := byType(evs, events.PageFault); len(f) != 1 || f[0].Pages != 5 {
+		t.Fatalf("page_fault %+v", f)
+	}
+	if p := byType(evs, events.PageIn); len(p) != 1 || p[0].Bytes != 600 {
+		t.Fatalf("page_in %+v", p)
+	}
+	if r := byType(evs, events.Reclaim); len(r) != 1 || r[0].Bytes != 50 {
+		t.Fatalf("reclaim %+v", r)
+	}
+	if s := byType(evs, events.MachineSample); len(s) != 2 || s[1].VM == nil {
+		t.Fatalf("samples %+v", s)
 	}
 }
