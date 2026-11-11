@@ -9,10 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/traumventures/cloudsourced/internal/adapter"
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -79,17 +79,14 @@ func mainRun(tr *runTrace, tool string, args []string) int {
 	if !ok {
 		return local(fmt.Sprintf("no [tool.%s] section in %s", tool, config.RepoFileName))
 	}
-	if why, ok := remoteAllowed(profile, tool, args); !ok {
-		return local(why)
+	plan := adapter.Classify(adapter.Command{Tool: tool, Args: args, Config: profile})
+	rec.Adapter, rec.Phases = plan.Adapter, plan.String()
+	if !plan.Remote() {
+		return local(plan.Why)
 	}
-	rec.Mode, rec.Why = events.Remote, "[tool."+tool+"] allows remote execution"
-	var code int
-	if plan := planSplit(profile, tool, args); plan != nil {
-		rec.Why = "[tool." + tool + "] split: remote build, local test run"
-		code, err = runSplit(tr.ctx, repo, profile, tool, args, cwd, rec, plan)
-	} else {
-		code, err = runRemote(tr.ctx, repo, profile, tool, args, cwd, rec, remoteRun{})
-	}
+	rec.Mode, rec.Why = events.Remote, plan.Why
+	rt := &phaseRuntime{repo: repo, profile: profile, tool: tool, args: args, cwd: cwd, rec: rec}
+	code, err := plan.Execute(tr.ctx, rt)
 	if err != nil {
 		var fb *fallback
 		if errors.As(err, &fb) {
@@ -127,60 +124,8 @@ type fallback struct{ err error }
 
 func (f *fallback) Error() string { return f.err.Error() }
 
-// subcommand returns the first non-flag argument (skipping "+toolchain").
-func subcommand(args []string) string {
-	for _, a := range args {
-		if strings.HasPrefix(a, "-") || strings.HasPrefix(a, "+") {
-			continue
-		}
-		return a
-	}
-	return ""
-}
-
-// remoteAllowed decides whether a subcommand may run remotely; the reason
-// explains a local decision.
-func remoteAllowed(p config.Tool, tool string, args []string) (string, bool) {
-	sub := subcommand(args)
-	for _, l := range p.Local {
-		if l == sub {
-			return fmt.Sprintf("subcommand %q is listed in [tool.%s] local", sub, tool), false
-		}
-	}
-	if len(p.Remote) == 0 {
-		return "", true
-	}
-	for _, r := range p.Remote {
-		if r == sub || r == "*" {
-			return "", true
-		}
-	}
-	return fmt.Sprintf("subcommand %q is not listed in [tool.%s] remote", sub, tool), false
-}
-
-// RealBinary finds tool in PATH, skipping cloudsourced shims.
-func RealBinary(tool string) (string, error) {
-	self, _ := os.Executable()
-	selfReal, _ := filepath.EvalSymlinks(self)
-	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-		if dir == "" {
-			dir = "."
-		}
-		cand := filepath.Join(dir, tool)
-		fi, err := os.Stat(cand)
-		if err != nil || fi.IsDir() || fi.Mode()&0o111 == 0 {
-			continue
-		}
-		if r, err := filepath.EvalSymlinks(cand); err == nil && r == selfReal {
-			continue
-		}
-		return cand, nil
-	}
-	return "", fmt.Errorf("%s: command not found", tool)
-}
-
 func execLocal(tool string, args []string) int {
-	bin, err := RealBinary(tool)
+	bin, err := adapter.RealBinary(tool)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 127

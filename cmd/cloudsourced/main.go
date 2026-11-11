@@ -28,6 +28,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/labels"
 	"github.com/traumventures/cloudsourced/internal/logs"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
+	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/proxy"
 	"github.com/traumventures/cloudsourced/internal/sandbox"
@@ -651,7 +652,7 @@ func fetch(globs []string) error {
 		return err
 	}
 	defer conn.CloseWithError(0, "")
-	files, err := proxy.FetchOutputs(ctx, conn, prep.Token, prep.RepoID, root, globs)
+	files, err := proxy.FetchOutputs(ctx, conn, prep.Token, prep.RepoID, root, globs, proto.CompressZstd)
 	if err != nil {
 		return err
 	}

@@ -209,3 +209,32 @@ func TestEnvPatterns(t *testing.T) {
 		t.Errorf("%v", got)
 	}
 }
+
+func TestGoAndBunRepository(t *testing.T) {
+	d, repo, out := generate(t, "gobun")
+	if strings.Join(d.Adapters, ",") != "go,node" {
+		t.Fatalf("adapters %v", d.Adapters)
+	}
+	if repo.Environment.Image != "golang:1.26-trixie" {
+		t.Errorf("image %q", repo.Environment.Image)
+	}
+	byName := map[string]config.Cache{}
+	for _, c := range repo.Caches {
+		byName[c.Name] = c
+	}
+	if c := byName["go-build"]; c.Scope != config.ScopeGlobal || c.Tool != config.CacheToolGo {
+		t.Errorf("go-build %+v", c)
+	}
+	if c := byName["go-mod"]; c.Scope != config.ScopeMachine {
+		t.Errorf("go-mod %+v", c)
+	}
+	if c := byName["node-modules"]; c.Scope != config.ScopeMachine || c.Install != "bun install --frozen-lockfile" || len(c.Digest) != 2 {
+		t.Errorf("node-modules %+v", c)
+	}
+	if _, ok := repo.Tools["go"]; !ok {
+		t.Errorf("no [tool.go]\n%s", out)
+	}
+	if _, ok := repo.Tools["bun"]; !ok {
+		t.Errorf("no [tool.bun]\n%s", out)
+	}
+}

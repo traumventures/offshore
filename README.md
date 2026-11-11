@@ -90,6 +90,10 @@ repository (git top level) and `cloudsourced init --write` writes it
 (`--force` replaces an existing one). It is derived from what the repository
 already declares, with a comment explaining every detected item:
 
+* the ecosystems (tool adapters: cargo, go via `go.mod`/`go.work`, node via
+  `package.json`) and their default caches as `[cache.<name>]` (see "Tool
+  adapters"), plus `[tool.go]`/`[tool.<package manager>]` sections and a
+  `golang:<go directive>` or bun/node image when there is no Rust;
 * the Cargo workspace (repository root or a subdirectory such as `app/`),
   its `rust-toolchain(.toml)`, the build cache `<workspace>/target`;
 * from the GitHub Actions jobs that build the workspace (including local
@@ -416,6 +420,7 @@ local = ["publish", "login", "install", "new", "init", "add", "remove"]
 eager = ["target/debug/myapp"]              # copied back after every run
 env   = ["RUSTFLAGS", "CARGO_TERM_*", "RUST_LOG", "RUST_BACKTRACE"]
 # split = ["test", "nextest"]               # default: remote build, local test run
+# adapter = "cargo"                         # default from the tool name
 
 [tool.npm]
 ports = [8080, "3000:3001"]  # forward 127.0.0.1:local -> session port while it runs
@@ -744,46 +749,90 @@ libraries and build script outputs must be available locally:
   (`rust-toolchain.toml`), otherwise rust-analyzer's proc-macro server
   rejects the libraries.
 
+### Tool adapters
+
+Every proxied command goes through the adapter of its tool
+(`internal/adapter`): it classifies the command line into phases — `deps`,
+`build`, `run` — each `local` or `remote`, names the artifacts a phase
+produces with their cache scope (slot, machine, global, or transferred
+here for a local phase) and what a local phase needs. `[tool.X]` stays the
+per-tool configuration (`local`, `remote`, `env`, `eager`, `ports`,
+`split`); `adapter = "cargo" | "go" | "node" | "generic"` picks the
+adapter, by default from the tool name (cargo; go; bun, bunx, npm, npx,
+pnpm, yarn; anything else generic). `cloudsourced why` shows the adapter
+and the phases of a run (`adapter`, `phases` in `runs.jsonl`).
+
+| adapter | remote as typed | split: remote build, local run | default caches (`init`) |
+|---|---|---|---|
+| cargo | build, check, clippy, run, ... | `cargo test`, `cargo nextest run` | `target` slot (prune rust), `deps` machine, `sccache` global |
+| go | build, vet, run, mod, ... | `go test` | `go-build` global (GOCACHEPROG), `go-mod` machine, `go-out` slot |
+| node | install/ci/add (deps), scripts, tests | — (`local = ["test", "run dev"]` runs them here) | `node-modules` machine, digest of the lockfile, install command |
+| generic | everything not in `local` | — | — |
+
+Local platform checks (OS, architecture, C library family and version,
+dynamic loader, shared libraries) use `internal/platform`, which also feeds
+the environment image hash (`platform=linux/<arch>`) and the cache key of
+machine caches (`Platform.CacheKey()`: OS/arch/libc without version).
+`CLOUDSOURCED_PLATFORM=linux/amd64/glibc-2.39` overrides the detection.
+
 ### Tests: remote build, local run
 
-`cargo test` and `cargo nextest run` are split: the test binaries are built
-remotely and run on this machine, with the local environment and local
-services (e.g. the developer's Postgres via `APP_TEST_DATABASE_URL`). Type
-the command as usual (`cargo nextest run -p app-store foo`, `cargo test foo
--- --nocapture`); output and exit code are those of a local run.
+`cargo test`, `cargo nextest run` and `go test` are split: the test
+binaries are built remotely and run on this machine, with the local
+environment and local services (e.g. the developer's Postgres via
+`APP_TEST_DATABASE_URL`). Type the command as usual (`cargo nextest run
+-p app-store foo`, `cargo test foo -- --nocapture`, `go test -run X
+./...`); output and exit code are those of a local run.
 
 * **cargo test**: the remote phase runs `cargo test --no-run
   --message-format=json-render-diagnostics` with the build options; the
   executables it reports are transferred and run in cargo's order with
   cargo's working directory (package root), environment (`CARGO_MANIFEST_DIR`,
-  `CARGO_PKG_*`, `CARGO_BIN_EXE_*`), arguments (test name, `--quiet` with
-  `-q`, everything after `--`), status lines and `error: test failed, to
-  rerun pass ...` messages, `--no-fail-fast` summary and exit code 101.
-  Doc tests are compiled while they run, so they run remotely afterwards
-  (`cargo test --doc` with the same options), as cargo runs them last.
+  `CARGO_PKG_*`, `CARGO_BIN_EXE_*`, cargo `[env]` configuration including
+  `force` and `relative`, the build script's `rustc-env` values and
+  `OUT_DIR`, whose files are transferred too), arguments (test name,
+  `--quiet` with `-q`, everything after `--`), status lines and `error: test
+  failed, to rerun pass ...` messages, `--no-fail-fast` summary and exit
+  code 101. Doc tests are compiled while they run, so they run remotely
+  afterwards (`cargo test --doc` with the same options), as cargo runs them
+  last.
 * **nextest**: the remote phase runs `cargo nextest archive` with the cargo
   build options (`-p`, `--workspace`, features, `--cargo-profile`, ...); the
   zstd archive is transferred and `cargo nextest run --archive-file ...`
   runs locally with the filters, runner and reporter options, `-P`/
   `--profile`, `-- args` and `NEXTEST_*` variables. Configuration options
   (`--config-file`, `-P`) go to both.
+* **go test**: the remote phase lists the packages and runs `go test -c`
+  per package with the build flags (`-race`, `-tags`, ...; results come
+  from the global go cache); the binaries run locally in their package
+  directories with the test flags as `-test.*` (`-run`, `-v`, `-count`,
+  `-timeout`, ..., `-args`), printing go test's `ok`/`FAIL`/`?` lines and
+  exiting 1 on failure. The binaries travel in the first slot-scope cache
+  directory (`init` proposes `[cache.go-out] paths = [".cloudsourced-build"]`).
 
 Commands that do not run tests (`--no-run`, `--doc`, `--message-format`,
-`nextest list`, `nextest archive`, reuse options such as `--archive-file`)
-and unknown options run remotely as typed. The tests run remotely instead,
+`nextest list`, `nextest archive`, reuse options such as `--archive-file`;
+`go test -json`, `-c`, `-o`, `-cover*`, profiles, `-fuzz`, `-list`) and
+unknown options run remotely as typed. The tests run remotely instead,
 with one line saying why, when this machine cannot execute the binaries:
-another OS or architecture, an older glibc than the environment image, a
-missing shared library or dynamic loader (checked on the ELF files), no
-local `cargo-nextest`, nextest failing to list the tests locally (exit 104),
-or test binaries outside the `[cache.build]` paths.
+another OS or architecture, another C library or an older glibc than the
+environment image, a missing shared library or dynamic loader (checked on
+the ELF files), no local `cargo-nextest`, no `cargo-nextest` in the
+environment image, nextest failing to list the tests locally (exit 104),
+or test binaries outside the slot-scope cache paths.
 
-`[tool.cargo] split = ["test", "nextest"]` is the default; `split = []`
-turns it off for a repository, `CLOUDSOURCED_SPLIT=0` for one run.
-Binaries are transferred over the session that built them (only files whose
-content changed); the transport sits behind one interface so the target
-overlay can replace it. Not reproduced locally: cargo `[env]` configuration
-and build-script `rustc-env` values at test run time, and files a test reads
-from `OUT_DIR` at run time.
+`split` lists what is split (cargo: `["test", "nextest"]`, go: `["test"]`,
+both the default); `split = []` turns it off for a tool,
+`CLOUDSOURCED_SPLIT=0` for one run. Transport: with `[outputs] mode =
+"fuse"` the binaries appear through the output overlay
+(`daemon.EnsureOutputs` after the build's release, nothing is copied);
+otherwise they are fetched over the session that built them, zstd
+compressed, only files whose content changed (`cloudsourced fetch` uses
+zstd too). Not reproduced locally: files a test reads at run time from
+outside `OUT_DIR` and the build directories (e.g. generated next to the
+sources by a remote build script), cargo `[env]` set by `--config` on the
+command line, and nextest's own handling of build-script values (whatever
+`cargo nextest run --archive-file` does locally).
 
 ## Compatibility
 

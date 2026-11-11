@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -127,17 +128,53 @@ type Tool struct {
 	// Ports are forwarded from 127.0.0.1 locally into the session while
 	// it runs: 8080 or "local:remote" (e.g. "3000:3001").
 	Ports []any `toml:"ports"`
+	// Adapter selects the tool adapter (internal/adapter): "cargo", "go",
+	// "node" or "generic". Unset: by tool name (cargo; go; bun, npm,
+	// pnpm, yarn, npx, bunx; anything else generic).
+	Adapter string `toml:"adapter"`
 	// Split lists test subcommands that are split into a remote build and
-	// a local test run (only cargo: "test", "nextest"). Unset means both
-	// for cargo; an empty list runs tests remotely like any command.
+	// a local test run (adapter cargo: "test", "nextest"; go: "test").
+	// Unset means all the adapter supports; an empty list runs tests
+	// remotely like any command.
 	Split *[]string `toml:"split"`
 }
 
-// Split test subcommands of cargo.
+// Adapter names.
+const (
+	AdapterCargo   = "cargo"
+	AdapterGo      = "go"
+	AdapterNode    = "node"
+	AdapterGeneric = "generic"
+)
+
+// Split test subcommands.
 const (
 	SplitCargoTest    = "test"    // cargo test
 	SplitCargoNextest = "nextest" // cargo nextest run
+	SplitGoTest       = "test"    // go test
 )
+
+// splitSupported lists the split subcommands per adapter.
+var splitSupported = map[string][]string{
+	AdapterCargo: {SplitCargoTest, SplitCargoNextest},
+	AdapterGo:    {SplitGoTest},
+}
+
+// AdapterName returns the adapter of a tool: Adapter, else by tool name.
+func (t Tool) AdapterName(tool string) string {
+	if t.Adapter != "" {
+		return t.Adapter
+	}
+	switch tool {
+	case "cargo":
+		return AdapterCargo
+	case "go":
+		return AdapterGo
+	case "bun", "bunx", "npm", "npx", "pnpm", "yarn":
+		return AdapterNode
+	}
+	return AdapterGeneric
+}
 
 // SplitSubcommands returns the subcommands of tool split into a remote
 // build and a local test run.
@@ -145,10 +182,7 @@ func (t Tool) SplitSubcommands(tool string) []string {
 	if t.Split != nil {
 		return *t.Split
 	}
-	if tool == "cargo" {
-		return []string{SplitCargoTest, SplitCargoNextest}
-	}
-	return nil
+	return splitSupported[t.AdapterName(tool)]
 }
 
 // Service is an auxiliary container started next to every machine of the
@@ -398,10 +432,16 @@ func (r *Repo) Validate() error {
 		if _, err := ParsePorts(t.Ports); err != nil {
 			errs = append(errs, fmt.Sprintf("tool.%s.ports: %v", name, err))
 		}
+		switch t.Adapter {
+		case "", AdapterCargo, AdapterGo, AdapterNode, AdapterGeneric:
+		default:
+			errs = append(errs, fmt.Sprintf("tool.%s.adapter: unsupported %q (cargo, go, node, generic)", name, t.Adapter))
+		}
 		if t.Split != nil {
+			supported := splitSupported[t.AdapterName(name)]
 			for _, s := range *t.Split {
-				if name != "cargo" || (s != SplitCargoTest && s != SplitCargoNextest) {
-					errs = append(errs, fmt.Sprintf("tool.%s.split: unsupported %q (only tool.cargo: %q, %q)", name, s, SplitCargoTest, SplitCargoNextest))
+				if !slices.Contains(supported, s) {
+					errs = append(errs, fmt.Sprintf("tool.%s.split: unsupported %q (adapter %s supports %v)", name, s, t.AdapterName(name), supported))
 				}
 			}
 		}

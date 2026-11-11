@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/traumventures/cloudsourced/internal/adapter"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -46,14 +47,27 @@ type Detection struct {
 	Secrets  []KV
 	GitDeps  []string // git dependency URLs found in Cargo manifests
 
-	BuildCache []string
-	DepsCache  []string
+	// Adapters are the detected ecosystems (internal/adapter names);
+	// Caches merges their default caches.
+	Adapters []string
+	Caches   []adapter.Cache
+	// Tools are [tool.X] sections besides cargo's.
+	Tools []ToolSection
+
 	CargoLocal []string
 	CargoEnv   []string
 	EnvWhy     string
 
 	// Notes are detected items that were deliberately not adopted.
 	Notes []string
+}
+
+// ToolSection is a [tool.X] section of a detected ecosystem.
+type ToolSection struct {
+	Name    string
+	Comment string
+	Env     []string
+	Local   []string
 }
 
 // Step is an environment setup step.
@@ -116,11 +130,10 @@ func Detect(root string) (*Detection, error) {
 	if d.Rust {
 		d.detectToolchain()
 		d.Linker = "mold"
-		d.BuildCache = []string{filepath.ToSlash(filepath.Join(d.Workspace, "target"))}
-		d.DepsCache = []string{"$CARGO_HOME/registry", "$CARGO_HOME/git"}
 		d.CargoLocal = CargoLocal
 		d.CargoEnv = []string{"RUSTFLAGS", "CARGO_TERM_*", "RUST_LOG", "RUST_BACKTRACE"}
 	}
+	d.detectAdapters()
 	ci := d.scanWorkflows()
 	if !ci.found {
 		d.scanDockerfiles(ci)
@@ -704,6 +717,10 @@ func (d *Detection) applyCI(ci *ciFacts) {
 		}
 	case d.Rust:
 		d.Image, d.ImageWhy = "rust:1-slim-trixie", "default Rust image (no CI container or Dockerfile found)"
+	case d.has("go"):
+		d.Image, d.ImageWhy = goImage(d.Root), "default Go image for the go directive of go.mod (no CI container or Dockerfile found)"
+	case d.has("node"):
+		d.Image, d.ImageWhy = nodeImage(d.Root), "default image of the package manager (no CI container or Dockerfile found)"
 	default:
 		d.Image, d.ImageWhy = "debian:trixie-slim", "default image (no Cargo workspace found)"
 	}

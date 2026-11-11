@@ -30,19 +30,23 @@ const (
 
 // Run is one proxied command.
 type Run struct {
-	Time  time.Time `json:"time"`
-	Repo  string    `json:"repo,omitempty"`
-	Cwd   string    `json:"cwd,omitempty"`
-	Tool  string    `json:"tool"`
-	Args  []string  `json:"args,omitempty"`
-	Mode  string    `json:"mode"`            // local | remote | failed
-	Why   string    `json:"why"`             // decision reason
-	Error string    `json:"error,omitempty"` // failure after the remote start
-	Exit  *int      `json:"exit,omitempty"`  // unknown for local runs (exec)
-	Ports []string  `json:"ports,omitempty"` // forwarded ports local:remote
-	Lease string    `json:"lease,omitempty"` // pool lease id
-	Slot  string    `json:"slot,omitempty"`  // build slot on the machine
-	Warm  bool      `json:"warm,omitempty"`  // build slot was warm
+	Time time.Time `json:"time"`
+	Repo string    `json:"repo,omitempty"`
+	Cwd  string    `json:"cwd,omitempty"`
+	Tool string    `json:"tool"`
+	Args []string  `json:"args,omitempty"`
+	Mode string    `json:"mode"` // local | remote | failed
+	Why  string    `json:"why"`  // decision reason
+	// Adapter is the tool adapter, Phases its plan ("build@remote ... |
+	// run@local").
+	Adapter string   `json:"adapter,omitempty"`
+	Phases  string   `json:"phases,omitempty"`
+	Error   string   `json:"error,omitempty"` // failure after the remote start
+	Exit    *int     `json:"exit,omitempty"`  // unknown for local runs (exec)
+	Ports   []string `json:"ports,omitempty"` // forwarded ports local:remote
+	Lease   string   `json:"lease,omitempty"` // pool lease id
+	Slot    string   `json:"slot,omitempty"`  // build slot on the machine
+	Warm    bool     `json:"warm,omitempty"`  // build slot was warm
 	// LostMachine is the machine of a first attempt that was lost while
 	// the command ran; the run was repeated once on Machine.
 	LostMachine string `json:"lost_machine,omitempty"`
