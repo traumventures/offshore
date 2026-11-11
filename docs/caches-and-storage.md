@@ -289,7 +289,7 @@ resident/capacity, dirty, working set, faults/s and `THRASH` per machine.
 
 | where | layout | needs |
 | --- | --- | --- |
-| worker build slot | kernel overlayfs (`redirect_dir=on,metacopy=on`): upper on the cache disk, lower = read-only FUSE over the committed chain with passthrough | `CAP_SYS_ADMIN` in the initial user namespace (machine containers run with `--cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor=unconfined`), FUSE passthrough needs Linux >= 6.9 (without it reads go through the daemon), upper/work and the file cache on a real file system (the cache volume, not the container's overlay root) |
+| worker build slot | kernel overlayfs (`redirect_dir=on,metacopy=on`): upper on the cache disk over a local metadata layer (metacopy files redirecting to content digests) and two data-only layers: the file cache, then a read-only FUSE digest view (passthrough) for content that is not resident | `CAP_SYS_ADMIN` in the initial user namespace (machine containers run with `--cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor=unconfined`), FUSE passthrough needs Linux >= 6.9 (without it reads go through the daemon), upper/work and the file cache on a real file system (the cache volume, not the container's overlay root) |
 | worker build slot, unprivileged | userspace overlay (FUSE) over the same lower | `/dev/fuse` |
 | worker without FUSE | plain directory; commits scan it, a slot over a chain is extracted eagerly | nothing |
 | worker source projection | read-write anyfs FUSE (`WritableFS`) over the synced manifest, contents fetched per digest from the laptop; local writes are written back with conflict detection | `/dev/fuse` |
@@ -313,15 +313,29 @@ reflink.
 Build slots are mounts of the cache file system (`internal/anyfs`,
 `internal/worker/cachefs.go`). A slot's data directory (what slot caches
 bind into sessions) is a kernel overlayfs (`redirect_dir=on,metacopy=on`):
-a slot-local upper directory over a read-only FUSE lower that serves the
-tree of the repository's committed **layer chain**. File contents are
+a slot-local upper directory over the tree of the repository's committed
+**layer chain**, stacked as three lower layers (`anyfs.MountSlot`): a
+local **metadata layer** (`<slot>/meta`, written at mount, ~0.1 s per 6k
+nodes: directories, symlinks, and every file as a sparse metacopy file
+with mode, size and mtime whose `trusted.overlay.redirect` names its
+content `/ab/<digest>`), then as data-only layers the file cache and a
+read-only FUSE **digest view** (`<slot>/lower`). overlayfs looks a file's
+content up in the data-only layers in order: resident content is a local
+file (no FUSE round trip for lookups, opens or reads), only misses reach
+the daemon, which faults the content in. A file reclaimed from the cache
+falls through to the digest view on its next lookup. File contents are
 materialized on first read (never on open) by a machine-wide file cache
 (`<cache>/anyfs/files`) from **pages** (content addressed, small files
 packed) of the repository's tier stack: a local page tier
 (`<cache>/anyfs/repos/<repo>/local`, ARC, capacity half the disk budget)
 over the repository's store prefix (`repos/<repo>/` of the store grant).
-Resident files reach the kernel with FUSE passthrough; files up to 64 KiB
-are prefetched at mount. Without CAP_SYS_ADMIN the userspace overlay serves
+Files faulted in through the digest view reach the kernel with FUSE
+passthrough; files up to 64 KiB are prefetched at mount. Incremental
+builds on a warm slot cost about the same as on the plain cache disk
+(xfs: leaf/core within a few percent, see `test/bench/tiers/README.md`;
+an ext4 upper is slower because ext4 flushes a file renamed over an
+existing inode, and overlay turns deletions of lower files into
+whiteouts that rustc's output renames replace). Without CAP_SYS_ADMIN the userspace overlay serves
 the same union (logged at start); without `/dev/fuse` slots are plain
 directories (commits scan them, a new slot over a chain is extracted).
 
