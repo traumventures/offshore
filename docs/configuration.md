@@ -158,7 +158,7 @@ Volumes are off by default (`medium = "local"`).
 
 Each medium has a capability profile with approximate defaults per provider
 type (see [caches and storage](caches-and-storage.md#capability-profiles));
-`[providers.NAME.profile.MEDIUM]` (`MEDIUM` = `local`, `volume`, `store`)
+`[providers.NAME.media.MEDIUM]` (`MEDIUM` = `local`, `volume`, `store`)
 overrides single values: `throughput` (per second, `"500M"`), `iops`,
 `latency` (`"1ms"`), `price_per_gb_month`, `request_per_1k`,
 `egress_per_gb`, `attach`, `provision` (durations), `max_size`,
@@ -170,7 +170,7 @@ type = "aws-ec2"
 [providers.aws.volume]
 throughput = 250
 keep_detached = true
-[providers.aws.profile.volume]
+[providers.aws.media.volume]
 price_per_gb_month = 0.0952   # eu-central-1 gp3
 [[providers.aws.size]]
 name = "c7a.4xlarge"

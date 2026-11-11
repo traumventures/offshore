@@ -31,7 +31,7 @@ type PoolConfig struct {
 	// ([providers.NAME.volume]).
 	Volumes map[string]VolumeConfig `toml:"-"`
 	// Profiles override capability profiles of the providers' media
-	// ([providers.NAME.profile.MEDIUM]).
+	// ([providers.NAME.media.MEDIUM]).
 	Profiles map[string]map[string]ProfileConfig `toml:"-"`
 	// Storage overrides the providers' native object stores.
 	Storage Storage `toml:"storage"`
@@ -355,7 +355,7 @@ func LoadPool(path string) (*PoolConfig, error) {
 }
 
 // splitProviders separates the [[providers.NAME.size]],
-// [providers.NAME.volume] and [providers.NAME.profile.MEDIUM] tables from
+// [providers.NAME.volume] and [providers.NAME.media.MEDIUM] tables from
 // the provider options.
 func splitProviders(in map[string]map[string]any) (map[string]map[string]any, []Size, map[string]VolumeConfig, map[string]map[string]ProfileConfig, error) {
 	var sizes []Size
@@ -367,10 +367,10 @@ func splitProviders(in map[string]map[string]any) (map[string]map[string]any, []
 		var t struct {
 			Size    []Size                   `toml:"size"`
 			Volume  *VolumeConfig            `toml:"volume"`
-			Profile map[string]ProfileConfig `toml:"profile"`
+			Profile map[string]ProfileConfig `toml:"media"`
 		}
 		sub := map[string]any{}
-		for _, k := range []string{"size", "volume", "profile"} {
+		for _, k := range []string{"size", "volume", "media"} {
 			if raw, ok := opts[k]; ok {
 				delete(opts, k)
 				sub[k] = raw
@@ -638,7 +638,7 @@ func (u *PoolConfig) Validate() error {
 	}
 	for _, name := range slices.Sorted(maps.Keys(u.Profiles)) {
 		for _, med := range slices.Sorted(maps.Keys(u.Profiles[name])) {
-			prefix := "providers." + name + ".profile." + med
+			prefix := "providers." + name + ".media." + med
 			if med != MediumLocal && med != MediumVolume && med != medium.Store {
 				errs = append(errs, fmt.Sprintf("%s: unknown medium (local, volume, store)", prefix))
 			}
