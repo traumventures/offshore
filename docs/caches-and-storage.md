@@ -94,9 +94,16 @@ mounts only writes count). Pruning runs in stages until the slot fits:
    recently read ones, never those of the latest run;
 3. the whole slot (cold; the next session starts a new one).
 
-`prune = "none"` leaves only the TTL and the machine budget. Over the
-machine budget the least recently used slots get the policy prune (stages 1
-and 2) first, then go cold. The orchestrator can prune a repository's slots
+`prune = "none"` leaves only the TTL and the machine budget. The worker
+checks the cache disk every 5 s (one statfs of the whole file system, so
+images and other data on it count against the budget): above 85% of the
+budget it reclaims resident data that is refetched on use (clean pages and
+materialized files, also of leased slots, then faulted-in sources) down to
+85%; only above the budget itself the least recently used idle slots get the
+policy prune (stages 1 and 2), then go cold, also down to 85%. At 97% of the
+disk the machine admits no new sessions and reports draining (`drain_reason
+"disk full"`) until usage is below 95%. The local tiers of all repositories
+together (pages plus materialized files) are bounded by half the budget. The orchestrator can prune a repository's slots
 on demand through the worker's slot stream (`proto.KindSlot`, admin token;
 `orchestrator.WorkerSlotOps.PruneSlot`): older duplicate slots go cold
 first, then the newest is pruned in stages to the requested size.
@@ -383,7 +390,7 @@ falls through to the digest view on its next lookup. File contents are
 materialized on first read (never on open) by a machine-wide file cache
 (`<cache>/anyfs/files`) from **pages** (content addressed, small files
 packed) of the repository's tier stack: a local page tier
-(`<cache>/anyfs/repos/<repo>/local`, ARC, capacity half the disk budget)
+(`<cache>/anyfs/repos/<repo>/local`, ARC; all local tiers of the machine together hold at most half the disk budget)
 over the repository's store prefix (`repos/<repo>/` of the store grant).
 Files faulted in through the digest view reach the kernel with FUSE
 passthrough; files up to 64 KiB are prefetched at mount. Incremental
