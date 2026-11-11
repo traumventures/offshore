@@ -44,7 +44,17 @@ type Options struct {
 	// retried (up to Retries times, default 3).
 	Swap         bool
 	SwapSlowdown float64
-	Retries      int
+	// MemoryRamp is the share of its peak memory a build uses at its
+	// start; it grows linearly to the peak at its end (default 0.3;
+	// negative: the peak for the whole run). OOM kills are checked at
+	// every event against the current use.
+	MemoryRamp float64
+	// Writeback saves a snapshot of a build's slot to the provider's store
+	// when the build ends (the cache file system writes back
+	// continuously), so other machines can restore a warm slot while its
+	// machine is busy (default true; set NoWriteback to disable).
+	NoWriteback bool
+	Retries     int
 	// RecentTTL drops environments from the warm pool after this long
 	// without use (default 24h, like the orchestrator).
 	RecentTTL time.Duration
@@ -100,6 +110,9 @@ func (o *Options) defaults() {
 		o.ColdPenalty = 0.5
 	} else if o.ColdPenalty < 0 {
 		o.ColdPenalty = 0
+	}
+	if o.MemoryRamp == 0 {
+		o.MemoryRamp = 0.3
 	}
 	if o.SwapSlowdown <= 0 {
 		o.SwapSlowdown = 2
@@ -240,6 +253,7 @@ type run struct {
 	restored bool
 	before   int64   // slot bytes at the start
 	work     float64 // remaining seconds at full speed
+	total    float64 // work at the start
 	speed    float64
 	seq      int
 	start    time.Time
@@ -405,6 +419,9 @@ func Run(trace Trace, o Options) Report {
 					}
 					m.slots[r.j.Repo] = after
 					s.fitDisk(m, r.j.Repo)
+					if !s.o.NoWriteback {
+						s.snapshot(m, r.j.Repo, after)
+					}
 				}
 				u := scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), CPUSeconds: r.j.CPU * r.j.Duration,
 					Wall: r.j.runFor, Warm: r.warm, Provider: m.prov, SlotBytesBefore: r.before, SlotBytesAfter: after,
@@ -426,6 +443,7 @@ func Run(trace Trace, o Options) Report {
 				m.idle = s.now
 			}
 		}
+		s.ooms() // after the completions: a finished build frees its memory
 		// Machines becoming ready.
 		for _, m := range s.machines {
 			if m.state == scheduler.Starting && !m.readyAt.After(s.now) {
@@ -556,7 +574,7 @@ func (s *sim) speeds() {
 		var mem int64
 		for _, r := range m.runs {
 			cpu += r.j.CPU
-			mem += int64(r.j.PeakMemory)
+			mem += s.mem(r)
 		}
 		f := 1.0
 		if cpu > m.size.Capacity.CPU && cpu > 0 {
@@ -599,7 +617,7 @@ func (s *sim) advance(d time.Duration) {
 		for _, r := range m.runs {
 			r.work -= r.speed * sec
 			cpu += r.j.CPU
-			mem += int64(r.j.PeakMemory)
+			mem += s.mem(r)
 		}
 		s.cpuUsed += math.Min(cpu, c.CPU) * sec
 		s.memUsed += math.Min(float64(mem), float64(c.Memory)) * sec
@@ -673,7 +691,7 @@ func (s *sim) pool() scheduler.Pool {
 				sm.Reserved = sm.Reserved.Add(r.reserve)
 				sm.Releases = append(sm.Releases, scheduler.Release{At: r.start.Add(r.expected), Res: r.reserve, Start: r.start})
 				cpu += r.j.CPU
-				mem += int64(r.j.PeakMemory)
+				mem += s.mem(r)
 			}
 			sm.Used = scheduler.Resources{CPU: math.Min(cpu, m.size.Capacity.CPU), Memory: min(mem, m.size.Capacity.Memory)}
 			if cpu > m.size.Capacity.CPU {
@@ -973,11 +991,34 @@ func (s *sim) assign(m *machine, j *job, pl scheduler.Placement, exp time.Durati
 		s.r.PageInBytes += refault
 	}
 	s.seq++
-	m.runs = append(m.runs, &run{j: j, reserve: reserve, work: work, seq: s.seq, start: s.now, expected: exp, warm: warm,
+	m.runs = append(m.runs, &run{j: j, reserve: reserve, work: work, total: work, seq: s.seq, start: s.now, expected: exp, warm: warm,
 		restored: restored, before: m.slots[j.Repo], ws: m.ws, capacity: m.capacity(), refault: refault,
 		pred: pl.Run, predThrash: strings.Contains(pl.Reason, "thrashing")})
 	m.idle = time.Time{}
 	if !s.o.Swap {
+		s.oom(m)
+	}
+}
+
+// mem is the memory r uses now: builds grow towards their peak (linking,
+// the last crates), from MemoryRamp of the peak at the start to the peak
+// at the end (Options.MemoryRamp < 0: the peak for the whole run).
+func (s *sim) mem(r *run) int64 {
+	peak := int64(r.j.PeakMemory)
+	if s.o.MemoryRamp < 0 || r.total <= 0 {
+		return peak
+	}
+	done := math.Min(math.Max(1-r.work/r.total, 0), 1)
+	return int64(float64(peak) * (s.o.MemoryRamp + (1-s.o.MemoryRamp)*done))
+}
+
+// ooms checks every machine for memory beyond its physical capacity
+// (without swap: OOM kills).
+func (s *sim) ooms() {
+	if s.o.Swap {
+		return
+	}
+	for _, m := range s.machines {
 		s.oom(m)
 	}
 }
@@ -987,13 +1028,14 @@ func (s *sim) oom(m *machine) {
 	for {
 		var mem int64
 		for _, r := range m.runs {
-			mem += int64(r.j.PeakMemory)
+			mem += s.mem(r)
 		}
 		if mem <= m.size.Capacity.Memory || len(m.runs) == 0 {
 			return
 		}
 		k := len(m.runs) - 1
 		r := m.runs[k]
+
 		m.runs = m.runs[:k]
 		s.r.OOMs++
 		s.observe(r.j.Repo, scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), OOM: true, Wall: s.now.Sub(r.start)})
@@ -1110,12 +1152,17 @@ func (s *sim) saveSnapshots(m *machine) {
 		if b <= 0 || !m.warm[repo] {
 			continue
 		}
-		ss := append([]scheduler.Snapshot{{Repo: repo, Provider: m.prov, Store: m.prov, Bytes: b, At: s.now}}, s.snaps[repo]...)
-		if len(ss) > 2 {
-			ss = ss[:2]
-		}
-		s.snaps[repo] = ss
+		s.snapshot(m, repo, b)
 	}
+}
+
+// snapshot records the slot of repo on m (bytes) in m's provider's store.
+func (s *sim) snapshot(m *machine, repo string, b int64) {
+	ss := append([]scheduler.Snapshot{{Repo: repo, Provider: m.prov, Store: m.prov, Bytes: b, At: s.now}}, s.snaps[repo]...)
+	if len(ss) > 2 {
+		ss = ss[:2]
+	}
+	s.snaps[repo] = ss
 }
 
 // attachVolume gives a new machine of a volume size its cache volume: the

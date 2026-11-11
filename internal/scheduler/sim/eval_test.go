@@ -37,7 +37,11 @@ func evalCases(t testing.TB) []evalCase {
 			t.Fatal(err)
 		}
 		for _, p := range []string{"c7a", "prod"} {
-			cs = append(cs, evalCase{name: name + "/" + p, pool: pools[p], trace: tr})
+			tp := tr
+			if p == "prod" {
+				tp = withSlots(tr)
+			}
+			cs = append(cs, evalCase{name: name + "/" + p, pool: pools[p], trace: tp})
 		}
 	}
 	for _, sc := range Scenarios(1) {
@@ -46,10 +50,31 @@ func evalCases(t testing.TB) []evalCase {
 			continue
 		}
 		for _, p := range []string{"c7a", "prod"} {
-			cs = append(cs, evalCase{name: sc.Name + "/" + p, pool: pools[p], trace: sc.Trace, down: sc.Down})
+			tp := sc.Trace
+			if p == "prod" {
+				tp = withSlots(tp)
+			}
+			cs = append(cs, evalCase{name: sc.Name + "/" + p, pool: pools[p], trace: tp, down: sc.Down})
 		}
 	}
 	return cs
+}
+
+// withSlots gives jobs without cache data the slot of a production app
+// worktree (8G after a cold build, +200M per warm build, 3G working set,
+// like the snapshots and page-ins of November 2026), so restores from
+// the store (written back after every build) are options on the
+// production pool.
+func withSlots(tr Trace) Trace {
+	out := tr
+	out.Jobs = append([]Job(nil), tr.Jobs...)
+	for i := range out.Jobs {
+		j := &out.Jobs[i]
+		if j.SlotBytes == 0 {
+			j.SlotBytes, j.SlotGrowth, j.WorkingSet = Bytes(8*gib), Bytes(200<<20), Bytes(3*gib)
+		}
+	}
+	return out
 }
 
 type evalRun struct {

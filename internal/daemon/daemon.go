@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -529,7 +530,11 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	key := UsageKey(repoID, req.Tool, req.Args)
 	span.SetAttributes(attribute.String("offshore.repo_id", repoID), attribute.String("offshore.usage_key", key))
 	ectx, sp := tracing.Start(ctx, "daemon.estimate")
-	est, err := d.pool.Estimate(ectx, key, scheduler.Resources{CPU: repo.Resources.CPU, Memory: repo.MemoryBytes()})
+	fallback := scheduler.Resources{CPU: repo.Resources.CPU, Memory: repo.MemoryBytes()}
+	if req.Tool == "" {
+		fallback = FetchNeed // offshore fetch: no build runs in the session
+	}
+	est, err := d.pool.Estimate(ectx, key, fallback)
 	tracing.End(sp, err)
 	if err != nil {
 		return nil, err
@@ -615,21 +620,54 @@ func (d *Daemon) attachAll(ctx context.Context, lease orchestrator.Lease, repo *
 	return nil
 }
 
+// FetchNeed is the reservation of a session that only reads outputs
+// (offshore fetch: a prepare without a tool).
+var FetchNeed = scheduler.Resources{CPU: 0.25, Memory: 256 << 20}
+
 // UsageKey is the unit of resource learning: repository, tool and
-// subcommand (e.g. "cargo test" and "cargo check" differ a lot).
+// subcommand (e.g. "cargo test" and "cargo check" differ a lot), the
+// release profile and the package scope: "<repo>/<tool>/<sub>[/release]"
+// plus "?p=a,b" for packages selected with -p/--package or "?workspace"
+// for --workspace/--all (a check of one crate and of the workspace need
+// very different memory). A prepare without a tool (offshore fetch) is
+// "<repo>/offshore/fetch". The estimator falls back to the key without
+// scope and release (scheduler.ParentKeys) until the key has its own
+// history.
 func UsageKey(repoID, tool string, args []string) string {
+	if tool == "" {
+		return repoID + "/offshore/fetch"
+	}
 	sub := ""
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "+") {
-			sub = a
-			break
-		}
-	}
 	release := ""
-	for _, a := range args {
-		if a == "--release" || a == "-r" {
+	var pkgs []string
+	workspace := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			i = len(args)
+		case a == "--release" || a == "-r":
 			release = "/release"
+		case a == "--workspace" || a == "--all":
+			workspace = true
+		case (a == "-p" || a == "--package") && i+1 < len(args):
+			pkgs = append(pkgs, args[i+1])
+			i++
+		case strings.HasPrefix(a, "--package="):
+			pkgs = append(pkgs, strings.TrimPrefix(a, "--package="))
+		case strings.HasPrefix(a, "-p") && len(a) > 2:
+			pkgs = append(pkgs, a[2:])
+		case sub == "" && !strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "+"):
+			sub = a
 		}
 	}
-	return repoID + "/" + tool + "/" + sub + release
+	key := repoID + "/" + tool + "/" + sub + release
+	switch {
+	case workspace:
+		key += "?workspace"
+	case len(pkgs) > 0:
+		slices.Sort(pkgs)
+		key += "?p=" + strings.Join(slices.Compact(pkgs), ",")
+	}
+	return key
 }

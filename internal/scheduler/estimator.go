@@ -92,6 +92,62 @@ func (h *History) Estimate(key string, fallback Resources) Resources {
 
 // Explain implements Estimator.
 func (h *History) Explain(key string, fallback Resources) Estimate {
+	_, minSamples, _, _, _ := h.defaults()
+	h.mu.Lock()
+	n := len(h.runs[key])
+	parent := ""
+	if n < minSamples {
+		// Too few runs of the key: the closest parent key with enough
+		// runs (same tool and subcommand, other package scope or
+		// profile) knows more than the configured fallback.
+		for _, pk := range ParentKeys(key) {
+			if len(h.runs[pk]) >= minSamples && !h.runs[pk][len(h.runs[pk])-1].OOM {
+				parent = pk
+				break
+			}
+		}
+	}
+	own := append([]Usage{}, h.runs[key]...)
+	h.mu.Unlock()
+	if parent != "" && (n == 0 || !own[n-1].OOM) {
+		_, _, headroom, _, _ := h.defaults()
+		e := h.explain(parent, fallback)
+		e.Requested = key
+		for _, u := range own {
+			if m := int64(float64(u.PeakMemory) * (1 + headroom)); m > e.Need.Memory {
+				e.Need.Memory, e.PeakMemory = m, u.PeakMemory
+			}
+		}
+		if e.MemorySource == SourceLearned {
+			e.MemorySource = SourceLearnedParent
+		}
+		if e.CPUSource == SourceLearned {
+			e.CPUSource = SourceLearnedParent
+		}
+		return e
+	}
+	e := h.explain(key, fallback)
+	e.Requested = key
+	return e
+}
+
+// ParentKeys returns the more general usage keys of key, closest first:
+// without the package scope ("?p=..." or "?workspace"), then also
+// without the release profile ("/release").
+func ParentKeys(key string) []string {
+	var out []string
+	if i := strings.IndexByte(key, '?'); i >= 0 {
+		key = key[:i]
+		out = append(out, key)
+	}
+	if k, ok := strings.CutSuffix(key, "/release"); ok {
+		out = append(out, k)
+	}
+	return out
+}
+
+// explain estimates key from its own runs.
+func (h *History) explain(key string, fallback Resources) Estimate {
 	_, minSamples, headroom, minMem, oomFactor := h.defaults()
 	h.mu.Lock()
 	rs := append([]Usage{}, h.runs[key]...)
@@ -184,13 +240,20 @@ const (
 	SourceLearned = "learned"
 	// SourceOOMBackoff: the last run was OOM killed; memory grows.
 	SourceOOMBackoff = "oom_backoff"
+	// SourceLearnedParent: the key has too few runs; the statistic of a
+	// more general key (ParentKeys) is used, raised by the key's own
+	// peaks.
+	SourceLearnedParent = "learned_parent"
 )
 
 // Estimate is a need with where it came from (traceable reservations):
 // the estimator key, the runs known for it and the statistic used.
 type Estimate struct {
-	Key  string    `json:"key"`
-	Need Resources `json:"need"`
+	// Key is the usage key whose runs the statistic used; Requested the
+	// task's own key (they differ for SourceLearnedParent).
+	Key       string    `json:"key"`
+	Requested string    `json:"requested,omitempty"`
+	Need      Resources `json:"need"`
 	// Fallback is the configured value (repository resources).
 	Fallback     Resources `json:"fallback"`
 	CPUSource    string    `json:"cpu_source"`

@@ -124,7 +124,7 @@ func (p Default) hedgeBound(f Pool, t Task, active int, perProvider map[string]i
 	}
 	best := time.Duration(-1)
 	for _, m := range f.Machines {
-		if m.EnvHash != t.EnvHash || m.State != Stopped || !p.usable(m, f.Now) || f.Now.Before(m.StartBlocked) ||
+		if m.EnvHash != t.EnvHash || m.State != Stopped || !p.usable(m, f.Now) || f.Now.Before(m.StartBlocked) || c.Disabled(m.Provider) ||
 			!p.admissible(m).Fits(t.Request) || !p.physical(f, m.Capacity, t) {
 			continue
 		}
