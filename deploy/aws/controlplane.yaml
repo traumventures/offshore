@@ -217,6 +217,7 @@ Resources:
                   - ec2:DescribeSecurityGroups
                   - ec2:DescribeImages
                   - ec2:DescribeTags
+                  - ec2:DescribeVolumes
                   - ecr:GetAuthorizationToken
                   - logs:DescribeLogGroups
                 Resource: "*"
@@ -243,11 +244,29 @@ Resources:
                 Resource: "*"
                 Condition:
                   StringEquals:
-                    ec2:CreateAction: [RunInstances, CreateSecurityGroup]
+                    ec2:CreateAction: [RunInstances, CreateSecurityGroup, CreateVolume]
               - Sid: ManageMachines
                 Effect: Allow
                 Action: [ec2:StartInstances, ec2:StopInstances, ec2:TerminateInstances]
                 Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/project: offshore
+              - Sid: CreateCacheVolumes
+                Effect: Allow
+                Action: ec2:CreateVolume
+                Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*"
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/project: offshore
+              - Sid: ManageCacheVolumes
+                # cache volumes and root disks (ModifyVolume grows both);
+                # attach/detach authorize on the volume and the instance
+                Effect: Allow
+                Action: [ec2:AttachVolume, ec2:DetachVolume, ec2:ModifyVolume, ec2:DeleteVolume, ec2:CreateTags, ec2:DeleteTags]
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
                 Condition:
                   StringEquals:
                     aws:ResourceTag/project: offshore

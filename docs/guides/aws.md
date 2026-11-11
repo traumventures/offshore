@@ -182,6 +182,19 @@ when idle for `idle_stop` while no orchestrator has probed them for
 `max(idle_stop, 10m)`. The scheduler can grow a full gp3 volume
 (`ec2:ModifyVolume`, at most every six hours).
 
+Cache volumes (provider part `Volumes`, see
+[caches and storage](../caches-and-storage.md#volumes)) are encrypted gp3
+EBS volumes tagged `project=offshore`, `offshore.pool` and
+`offshore.volume`. The control plane needs `ec2:CreateVolume` (with
+`aws:RequestTag/project = offshore`), `ec2:AttachVolume`,
+`ec2:DetachVolume`, `ec2:ModifyVolume`, `ec2:DeleteVolume`,
+`ec2:CreateTags`/`ec2:DeleteTags` (with `aws:ResourceTag/project =
+offshore`, on volumes and instances) and `ec2:DescribeVolumes`;
+`deploy/aws/iam.yaml` and `deploy/aws/controlplane.yaml` grant them. A
+volume lives in one availability zone and attaches only to instances
+there; a machine created with a volume is placed in its zone (the zone's
+default subnet, or the configured `subnet` if it is in that zone).
+
 ## Costs
 
 * **Instances**: billed per second while running (at least 60 s per start).

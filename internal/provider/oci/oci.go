@@ -86,6 +86,8 @@ type OCI struct {
 	objects   objectAPI
 	identity  identityAPI
 	artifacts artifactsAPI
+	block     blockAPI
+	attach    attachAPI
 
 	infraMu sync.Mutex
 	infra   *infra
@@ -204,12 +206,18 @@ func (o *OCI) connect() error {
 	if err != nil {
 		return fmt.Errorf("oci: %w", err)
 	}
+	bc, err := core.NewBlockstorageClientWithConfigurationProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("oci: %w", err)
+	}
+	bc.SetRegion(o.region)
 	cc.SetRegion(o.region)
 	nc.SetRegion(o.region)
 	oc.SetRegion(o.region)
 	ic.SetRegion(o.region)
 	ac.SetRegion(o.region)
 	o.cfg, o.compute, o.network, o.objects, o.identity, o.artifacts = cfg, cc, nc, oc, ic, ac
+	o.block, o.attach = bc, cc
 	if o.registry == "" {
 		o.registry = registryHost(o.region)
 	}
@@ -583,8 +591,12 @@ func (o *OCI) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	if err != nil {
 		return provider.Machine{}, err
 	}
+	ad, err := o.placement(ctx, in, spec)
+	if err != nil {
+		return provider.Machine{}, err
+	}
 	base := core.LaunchInstanceDetails{
-		AvailabilityDomain: common.String(in.ad),
+		AvailabilityDomain: common.String(ad),
 		CompartmentId:      common.String(in.compartment),
 		DisplayName:        common.String("offshore-" + spec.ID),
 		CreateVnicDetails: &core.CreateVnicDetails{SubnetId: common.String(in.subnet), AssignPublicIp: common.Bool(true),
@@ -614,7 +626,37 @@ func (o *OCI) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 		o.deleteSecrets(context.Background(), in, spec.ID)
 		return provider.Machine{}, err
 	}
+	if spec.Volume != "" {
+		if _, err := o.AttachVolume(ctx, spec.Volume, spec.ID); err != nil {
+			o.terminate(context.Background(), *inst.Id)
+			o.deleteSecrets(context.Background(), in, spec.ID)
+			return provider.Machine{}, err
+		}
+	}
 	return o.byMachine(ctx, spec.ID)
+}
+
+// placement is the availability domain of a new machine: its cache
+// volume's, else spec.Zone, else the configured one.
+func (o *OCI) placement(ctx context.Context, in *infra, spec provider.MachineSpec) (string, error) {
+	ad := spec.Zone
+	if spec.Volume != "" {
+		v, err := o.volume(ctx, spec.Volume)
+		if err != nil {
+			return "", err
+		}
+		if v.State != provider.VolumeAvailable {
+			return "", fmt.Errorf("oci: volume %s: %w (%s)", spec.Volume, provider.ErrVolumeInUse, v.State)
+		}
+		if ad != "" && ad != v.Zone {
+			return "", fmt.Errorf("oci: machine in %s, volume %s in %s: %w", ad, spec.Volume, v.Zone, provider.ErrVolumeZone)
+		}
+		ad = v.Zone
+	}
+	if ad == "" {
+		ad = in.ad
+	}
+	return ad, nil
 }
 
 func (o *OCI) putSecrets(ctx context.Context, in *infra, spec provider.MachineSpec) error {
@@ -702,7 +744,8 @@ func selected(i core.Instance, owner, machine string) bool {
 // toMachine maps an instance (and its public address, "" if unknown).
 func toMachine(i core.Instance, publicIP string) provider.Machine {
 	l := labels(i.FreeformTags)
-	m := provider.Machine{ID: l[provider.LabelMachine], EnvHash: l[provider.LabelEnvHash], Labels: l, Fingerprint: l[provider.LabelFinger]}
+	m := provider.Machine{ID: l[provider.LabelMachine], EnvHash: l[provider.LabelEnvHash], Labels: l, Fingerprint: l[provider.LabelFinger],
+		Zone: deref(i.AvailabilityDomain)}
 	l["instance-id"] = deref(i.Id)
 	l["shape"] = deref(i.Shape)
 	m.CPU, _ = strconv.ParseFloat(l[provider.LabelCPU], 64)
@@ -870,11 +913,6 @@ func (o *OCI) List(ctx context.Context, owner string) ([]provider.Machine, error
 	}
 	return ms, nil
 }
-
-// Volumes: caches live on the boot volume and die with the instance.
-func (o *OCI) Volumes(context.Context, string) ([]provider.Volume, error) { return nil, nil }
-
-func (o *OCI) DeleteVolume(context.Context, string) error { return nil }
 
 var _ provider.SecretChannel = (*OCI)(nil)
 

@@ -15,7 +15,9 @@ import (
 //     snapshots and global caches, replaced for all providers by the pool's
 //     [storage] section;
 //   - Secrets (SecretChannel): how a new machine receives its secret
-//     environment.
+//     environment;
+//   - Volumes: attachable block volumes (aws-ec2 EBS, oci block volumes,
+//     local-docker volumes) that outlive machines.
 type (
 	Compute  = Provider
 	Registry = ImageHost
@@ -54,6 +56,7 @@ type Parts struct {
 	Registry Registry
 	Store    StoreSource
 	Secrets  SecretChannel
+	Volumes  Volumes
 }
 
 // Split returns the parts of a provider.
@@ -62,6 +65,7 @@ func Split(p Provider) Parts {
 	parts.Registry, _ = p.(ImageHost)
 	parts.Store, _ = p.(StoreSource)
 	parts.Secrets, _ = p.(SecretChannel)
+	parts.Volumes, _ = p.(Volumes)
 	return parts
 }
 

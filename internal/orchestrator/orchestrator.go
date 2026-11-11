@@ -1472,8 +1472,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	return o.reapVolumes(ctx)
 }
 
-// reapVolumes deletes expired dependency caches and orphaned cache volumes
-// on every provider.
+// reapVolumes deletes expired and orphaned volumes on every provider.
 func (o *Orchestrator) reapVolumes(ctx context.Context) error {
 	for name, p := range o.provs {
 		if err := o.reapProvider(ctx, p); err != nil {
@@ -1483,8 +1482,16 @@ func (o *Orchestrator) reapVolumes(ctx context.Context) error {
 	return nil
 }
 
+// reapProvider deletes a provider's detached volumes that are expired or
+// orphaned: labelled with a machine (a per-machine cache volume, or one
+// attached to a machine that has gone) that no longer exists, and without
+// an expiry that keeps them for reuse.
 func (o *Orchestrator) reapProvider(ctx context.Context, p provider.Provider) error {
-	vols, err := p.Volumes(ctx, o.cfg.Owner)
+	pv := provider.Split(p).Volumes
+	if pv == nil {
+		return nil
+	}
+	vols, err := pv.ListVolumes(ctx, o.cfg.Owner)
 	if err != nil {
 		return o.provErr(o.provName(p), "volumes", err)
 	}
@@ -1494,23 +1501,27 @@ func (o *Orchestrator) reapProvider(ctx context.Context, p provider.Provider) er
 	}
 	alive := map[string]bool{}
 	for _, m := range list {
-		alive["cs-cache-"+m.ID] = true
+		alive[m.ID] = true
 	}
 	// A machine being created has its cache volume before the provider
 	// lists the machine: that volume is not orphaned. (o.creating is read
 	// after the listing, so a creation that finished in between is listed.)
 	o.mu.Lock()
 	for id := range o.creating {
-		alive["cs-cache-"+id] = true
+		alive[id] = true
 	}
 	o.mu.Unlock()
 	now := o.now()
 	for _, v := range vols {
-		expired := !v.ExpiresAt.IsZero() && !now.Before(v.ExpiresAt)
-		orphan := v.Kind == "cache" && !alive[v.Name]
+		if v.State != provider.VolumeAvailable {
+			continue // attached, or changing state
+		}
+		owner := v.Labels[provider.LabelMachine]
+		expired := v.Expired(now)
+		orphan := v.Kind == provider.VolumeCache && owner != "" && !alive[owner] && v.ExpiresAt.IsZero()
 		if expired || orphan {
-			if err := o.provErr(o.provName(p), "delete_volume", p.DeleteVolume(ctx, v.Name)); err == nil {
-				o.log.Info("deleted volume", "provider", p.Name(), "name", v.Name, "expired", expired, "orphan", orphan)
+			if err := o.provErr(o.provName(p), "delete_volume", pv.DeleteVolume(ctx, v.ID)); err == nil {
+				o.log.Info("deleted volume", "provider", p.Name(), "volume", v.ID, "name", v.Name, "expired", expired, "orphan", orphan)
 			}
 		}
 	}
@@ -1529,12 +1540,19 @@ func (o *Orchestrator) DestroyAll(ctx context.Context) error {
 				return fmt.Errorf("provider %s: %w", name, err)
 			}
 		}
-		vols, err := p.Volumes(ctx, o.cfg.Owner)
+		pv := provider.Split(p).Volumes
+		if pv == nil {
+			continue
+		}
+		vols, err := pv.ListVolumes(ctx, o.cfg.Owner)
 		if err != nil {
 			return fmt.Errorf("provider %s: %w", name, err)
 		}
 		for _, v := range vols {
-			p.DeleteVolume(ctx, v.Name)
+			if v.Machine != "" && v.State == provider.VolumeAttached {
+				pv.DetachVolume(ctx, v.ID, time.Time{})
+			}
+			pv.DeleteVolume(ctx, v.ID)
 		}
 	}
 	o.mu.Lock()

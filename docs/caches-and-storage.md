@@ -256,6 +256,26 @@ shrinking) and the supervisor grows partition and file system
 (`growpart`, `xfs_growfs`/`resize2fs`) on its next check. Sizes may declare
 `disk = "200G"` so the scheduler plans slots against it.
 
+### Volumes
+
+Providers expose attachable block volumes as their `Volumes` part
+(`internal/provider/volumes.go`): create, attach, detach (with an expiry
+for reuse), grow, delete and list by tag. Volumes outlive machines and
+attach only within their zone.
+
+| provider | volume | zone | attach | resize |
+|---|---|---|---|---|
+| aws-ec2 | encrypted EBS (gp3, `iops`/`throughput`), 1 GiB..16 TiB | availability zone | running or stopped instances | grow, once per 6 h |
+| oci | block volume (performance units per GB), 50 GB..32 TB | availability domain | paravirtualized, `/dev/oracleoci/oraclevdb` | grow, online |
+| local-docker | Docker volume (unbounded directory) | `local` | at machine creation only | not needed |
+| static | none: the host's fixed disk | | | |
+
+A machine created with `MachineSpec.Volume` is placed in the volume's
+zone and gets it attached. The reaper deletes detached volumes past their
+expiry and cache volumes whose machine is gone and that carry no expiry.
+How the orchestrator and scheduler use volumes (medium per size, pool,
+TTL) is being designed.
+
 Machines use gp3 root volumes (`disk_gb`, default 100; 3000 IOPS and
 125 MB/s baseline). Instance types with local NVMe (`c6id`, `m6id`,
 `c7gd`) are faster for target directories but lose their content on stop,
