@@ -31,7 +31,20 @@ type ScanOptions struct {
 	Alone func(rel string, size int64) bool
 	// Skip excludes a path (and, for directories, everything below it).
 	Skip func(rel string, d fs.DirEntry) bool
+	// FileSink, if set, returns the sink of the pages of one large file
+	// (files of their own pages; e.g. streamed to the store by the
+	// file's access class); small files packed together go to Sink.
+	FileSink func(rel string) PageSink
+	// Workers bounds the files read concurrently (0: DefaultReadWorkers).
+	// Small files are still packed in path order, so pages do not depend
+	// on it; the sink must accept concurrent puts.
+	Workers int
 }
+
+// DefaultReadWorkers is the default number of files read concurrently:
+// enough to keep a network volume's queue busy and several cores
+// hashing, bounded so a scan does not starve the build's IO.
+const DefaultReadWorkers = 4
 
 // ScanStats describe a scan.
 type ScanStats struct {
@@ -40,6 +53,8 @@ type ScanStats struct {
 	Read      int64 // bytes read (changed files)
 	Hashed    int64 // files read (changed files)
 	Reused    int64 // files reused from Prev
+	Known     int64 // changed files whose digest was known (hashed in the background)
+	KnownRead int64 // their bytes (not read by the scan)
 	Examined  int64 // entries of the scanned directory stat'ed
 	Pages     int64 // pages emitted to the sink
 	PageBytes int64
@@ -275,30 +290,111 @@ func reuseNodes(nodes []*scanned, opt ScanOptions, lower *Tree, st *ScanStats) [
 }
 
 // readFiles reads the files below dir into their nodes (digest, pages to
-// opt.Sink); files gone meanwhile get Kind 0.
+// opt.Sink); files gone meanwhile get Kind 0. Up to opt.Workers files are
+// read at once: large files are hashed and paged by the reader, small
+// files are packed by one consumer in the order of nodes.
 func readFiles(dir string, nodes []*Node, opt ScanOptions, st *ScanStats) error {
+	workers := opt.Workers
+	if workers <= 0 {
+		workers = DefaultReadWorkers
+	}
 	var pk *Packer
 	if opt.Sink != nil {
 		pk = NewPacker(opt.Sink)
 	}
-	for _, n := range nodes {
-		path := filepath.Join(dir, filepath.FromSlash(n.Path))
-		alone := opt.Alone != nil && opt.Alone(n.Path, n.Size)
-		if err := readNode(n, path, pk, alone); err != nil {
+	type job struct {
+		n      *Node
+		small  []byte // content of a small file to pack
+		packed bool   // small: packed by the consumer
+		alone  bool
+		pages  int64 // pages emitted by the reader
+		pbytes int64
+		err    error
+		done   chan struct{}
+	}
+	// ordered bounds the jobs in flight (and the small contents held).
+	ordered := make(chan *job, workers*8)
+	sem := make(chan struct{}, workers)
+	stop := make(chan struct{})
+	go func() {
+		defer close(ordered)
+		for _, n := range nodes {
+			j := &job{n: n, done: make(chan struct{}), alone: opt.Alone != nil && opt.Alone(n.Path, n.Size)}
+			select {
+			case ordered <- j:
+			case <-stop:
+				return
+			}
+			select {
+			case sem <- struct{}{}:
+			case <-stop:
+				close(j.done)
+				return
+			}
+			go func() {
+				defer func() { <-sem; close(j.done) }()
+				path := filepath.Join(dir, filepath.FromSlash(j.n.Path))
+				if pk != nil && j.n.Size <= SmallFile {
+					b, err := os.ReadFile(path)
+					if err == nil {
+						j.n.Size, j.n.Digest = int64(len(b)), string(KeyOf(b))
+					}
+					j.small, j.packed, j.err = b, true, err
+					return
+				}
+				var lp *Packer
+				if pk != nil {
+					sink := opt.Sink
+					if opt.FileSink != nil {
+						sink = opt.FileSink(j.n.Path)
+					}
+					lp = NewPacker(sink)
+				}
+				j.err = readNode(j.n, path, lp, false)
+				if lp != nil {
+					j.pages, j.pbytes = lp.Pages()
+				}
+			}()
+		}
+	}()
+	var firstErr error
+	var pages, pbytes int64
+	for j := range ordered {
+		<-j.done
+		if firstErr != nil {
+			continue
+		}
+		err := j.err
+		if err == nil && j.packed {
+			if j.alone {
+				err = pk.addAlone(j.n, j.small)
+			} else {
+				err = pk.addSmall(j.n, j.small)
+			}
+		}
+		if err != nil {
 			if os.IsNotExist(err) {
-				n.Kind = 0 // removed while scanning
+				j.n.Kind = 0 // removed while scanning
 				continue
 			}
-			return err
+			firstErr = err
+			close(stop)
+			continue
 		}
-		st.Read += n.Size
+		pages += j.pages
+		pbytes += j.pbytes
+		st.Read += j.n.Size
 		st.Hashed++
+	}
+	if firstErr != nil {
+		return firstErr
 	}
 	if pk != nil {
 		if err := pk.Flush(); err != nil {
 			return err
 		}
-		st.Pages, st.PageBytes = pk.Pages()
+		p, b := pk.Pages()
+		st.Pages, st.PageBytes = st.Pages+p+pages, st.PageBytes+b+pbytes
 	}
 	return nil
 }

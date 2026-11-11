@@ -102,13 +102,18 @@ func (p *Packer) emit(b []byte) (Key, error) {
 func (p *Packer) AddSmall(n *Node, b []byte) error {
 	n.Size = int64(len(b))
 	n.Digest = string(KeyOf(b))
+	return p.addSmall(n, b)
+}
+
+// addSmall is AddSmall with n.Size and n.Digest already set.
+func (p *Packer) addSmall(n *Node, b []byte) error {
 	n.Pages = nil
 	if len(b) == 0 {
 		return nil
 	}
 	p.pack.Write(b)
 	p.pending = append(p.pending, n)
-	if p.pack.Len() >= PageSize || (p.pack.Len() >= SmallFile && blake3.Sum256(b)[0] < 16) {
+	if p.pack.Len() >= PageSize || (p.pack.Len() >= SmallFile && n.Digest[0] == '0') { // first digest byte < 16
 		return p.Flush()
 	}
 	return nil
@@ -120,6 +125,11 @@ func (p *Packer) AddSmall(n *Node, b []byte) error {
 func (p *Packer) AddAlone(n *Node, b []byte) error {
 	n.Size = int64(len(b))
 	n.Digest = string(KeyOf(b))
+	return p.addAlone(n, b)
+}
+
+// addAlone is AddAlone with n.Size and n.Digest already set.
+func (p *Packer) addAlone(n *Node, b []byte) error {
 	n.Pages = nil
 	if len(b) == 0 {
 		return nil

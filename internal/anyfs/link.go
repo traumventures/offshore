@@ -500,3 +500,101 @@ func (l *Link) Stats() Stats {
 	s.FaultRate = l.faults.get(l.now())
 	return s
 }
+
+// Stream writes pages back as they are put into the link, from the
+// caller's buffer (no read back from the upper tier): a commit streams its
+// new pages to the lower tier while it still reads files, so its upload
+// overlaps the hashing instead of following it. At most Policy.Parallel
+// pages are in flight; Put blocks beyond that (the reader is paced by the
+// lower tier's bandwidth). Failed pages stay dirty for the periodic
+// writeback or a flush.
+type Stream struct {
+	l     *Link
+	ctx   context.Context
+	sem   chan struct{}
+	wg    sync.WaitGroup
+	begin time.Time
+
+	mu     sync.Mutex
+	err    error
+	pages  int64
+	bytes  int64
+	failed int64
+}
+
+// Stream starts a stream of write-through pages.
+func (l *Link) Stream(ctx context.Context) *Stream {
+	return &Stream{l: l, ctx: ctx, sem: make(chan struct{}, l.pol.Parallel), begin: time.Now()}
+}
+
+// Put puts a page into the link (dirty) and writes it back in the
+// background.
+func (s *Stream) Put(k Key, b []byte) error {
+	if err := s.l.Put(s.ctx, k, b, Dirty); err != nil {
+		return err
+	}
+	select {
+	case s.sem <- struct{}{}:
+	case <-s.ctx.Done():
+		return nil // stays dirty
+	}
+	s.wg.Add(1)
+	go func() {
+		defer func() { <-s.sem; s.wg.Done() }()
+		s.l.mu.Lock()
+		_, dirty := s.l.dirty[k]
+		s.l.mu.Unlock()
+		if !dirty {
+			return // written back (or discarded) meanwhile
+		}
+		err := s.l.lower.Put(s.ctx, k, b, Dirty)
+		s.mu.Lock()
+		if err != nil {
+			s.failed++
+			if s.err == nil {
+				s.err = err
+			}
+			s.mu.Unlock()
+			return
+		}
+		s.pages++
+		s.bytes += int64(len(b))
+		s.mu.Unlock()
+		l := s.l
+		l.mu.Lock()
+		if d, ok := l.dirty[k]; ok {
+			delete(l.dirty, k)
+			l.dirtyB -= d.size
+		}
+		l.st.PageOuts++
+		l.st.PageOutBytes += int64(len(b))
+		l.st.Writebacks++
+		l.mu.Unlock()
+		if c, ok := l.upper.(Cleaner); ok {
+			c.MarkClean(k)
+		}
+	}()
+	return nil
+}
+
+// StreamStats describe a stream so far.
+type StreamStats struct {
+	Pages, Bytes, Failed int64
+	Err                  error
+}
+
+// Wait waits for the pages in flight and reports the stream (a writeback
+// event for the pages written back since the last Wait).
+func (s *Stream) Wait() StreamStats {
+	s.wg.Wait()
+	s.mu.Lock()
+	st := StreamStats{s.pages, s.bytes, s.failed, s.err}
+	s.pages, s.bytes, s.failed, s.err = 0, 0, 0, nil
+	begin := s.begin
+	s.begin = time.Now()
+	s.mu.Unlock()
+	if st.Pages > 0 {
+		s.l.obs.emit(Event{Type: EvWriteback, Tier: s.l.lower.Profile().Name, Pages: st.Pages, Bytes: st.Bytes, Seconds: time.Since(begin).Seconds()})
+	}
+	return st
+}

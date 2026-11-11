@@ -98,6 +98,7 @@ func (s *Worker) snapshotSlot(ctx context.Context, slot, repo string) error {
 			if t := s.cfs.tracker(slot); t != nil {
 				t.requeue(p.Reads)
 			}
+			s.cfs.release(slot, p, false)
 			return nil
 		}
 	}
@@ -112,10 +113,12 @@ func (s *Worker) snapshotSlot(ctx context.Context, slot, repo string) error {
 	}
 	if err := p.Changes.Capture(filepath.Join(dir, "files"), source); err != nil {
 		os.RemoveAll(dir)
+		s.cfs.release(slot, p, false)
 		return fmt.Errorf("capture session: %w", err)
 	}
 	b, err := json.Marshal(p)
 	if err != nil {
+		s.cfs.release(slot, p, false)
 		return err
 	}
 	// plan.json marks the capture complete: fsynced with its directory.
@@ -123,9 +126,11 @@ func (s *Worker) snapshotSlot(ctx context.Context, slot, repo string) error {
 	// recovery checks their sizes against the plan instead (capturedIntact).
 	if err := hostfs.WriteFileSync(filepath.Join(dir, "plan.json"), b, 0o644); err != nil {
 		os.RemoveAll(dir)
+		s.cfs.release(slot, p, false)
 		return err
 	}
-	s.log.Debug("build slot session captured", "slot", slot, "files", len(p.Changes.Read), "seconds", time.Since(begin).Seconds())
+	s.log.Debug("build slot session captured", "slot", slot, "files", len(p.Changes.Read), "known", len(p.Resolved),
+		"known_bytes", p.Changes.Stats.KnownRead, "seconds", time.Since(begin).Seconds())
 	return nil
 }
 
@@ -200,6 +205,7 @@ func (s *Worker) commitPendingLocked(ctx context.Context, slot, repo string) (co
 		if err != nil || p.Changes == nil || p.Head != head || !intact {
 			s.log.Warn("dropping build slot snapshot", "slot", slot, "snapshot", filepath.Base(dir), "complete", err == nil, "intact", intact)
 			os.RemoveAll(dir)
+			s.cfs.release(slot, p, false)
 			continue
 		}
 		r, err := s.cfs.repo(repo)
@@ -210,8 +216,9 @@ func (s *Worker) commitPendingLocked(ctx context.Context, slot, repo string) (co
 		res, err := s.cfs.finish(ctx, slot, r, m, p, filepath.Join(dir, "files"), true, s.liveLayers(repo, slot))
 		r.cmu.Unlock()
 		if err != nil {
-			return last, err
+			return last, err // retried later: the hasher keeps holding the plan's pages
 		}
+		s.cfs.release(slot, p, true)
 		now := s.cfg.now().Unix()
 		s.slots.update(slot, func(x *slotMeta) {
 			if top := res.chain.Top(); top != nil {

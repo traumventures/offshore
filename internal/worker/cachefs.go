@@ -98,6 +98,12 @@ type cacheFSOptions struct {
 	// FlushDeadline bounds how long a committed head waits before it is
 	// flushed to the store (default headFlushDeadline).
 	FlushDeadline time.Duration
+	// HashBytesPerSec bounds the background hashing of written files
+	// (0: unbounded; two files at a time).
+	HashBytesPerSec float64
+	// ReadWorkers bounds the files a commit reads at once (0:
+	// anyfs.DefaultReadWorkers).
+	ReadWorkers int
 }
 
 // cacheFS mounts and commits the build slots of a machine.
@@ -117,6 +123,7 @@ type cacheFS struct {
 	mounts map[string]*slotMount
 	heads  map[string]proto.LayerHead // repo -> last flushed head
 	snapMu map[string]*sync.Mutex     // slot -> snapshot/commit lock
+	hashed map[string]*anyfs.Hasher   // slot -> background hasher of its upper
 }
 
 // repoFS is a repository's tier stack and layer store.
@@ -400,6 +407,8 @@ func (c *cacheFS) mount(ctx context.Context, slot, repo, base string) error {
 	src := anyfs.NewTreeSource(ch.Tree(), c.files, r.tier)
 	sm = &slotMount{repo: r, base: base, src: src, reads: newReadTracker(data)}
 	upper, work := filepath.Join(slot, "upper"), filepath.Join(slot, "work")
+	h := c.hasher(slot, r)
+	sm.reads.onWrite = func(rel string) { h.Queue(rel, filepath.Join(upper, filepath.FromSlash(rel))) }
 	mounted := false
 	if c.mode == fsKernel {
 		// Metadata layer + materialized files + lazy FUSE (digest
@@ -480,16 +489,66 @@ func (c *cacheFS) unmountAll() {
 	for s := range c.mounts {
 		ss = append(ss, s)
 	}
+	hs := c.hashed
+	c.hashed = nil
 	c.mu.Unlock()
 	for _, s := range ss {
 		c.unmount(s)
 	}
+	for _, h := range hs {
+		h.Close()
+	}
+}
+
+// hasher returns (starting) a slot's background hasher: files written in
+// the slot's upper directory are hashed once they settled, their pages
+// put into the repository's tier (written back by their access class
+// during the session), so a commit looks their digests up instead of
+// reading them (plan). Ephemeral classes are not hashed.
+func (c *cacheFS) hasher(slot string, r *repoFS) *anyfs.Hasher {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if h := c.hashed[slot]; h != nil {
+		return h
+	}
+	ctx := context.Background()
+	h := anyfs.NewHasher(anyfs.HasherOptions{
+		Sink: func(k anyfs.Key, b []byte) error { return r.tier.Put(ctx, k, b, anyfs.Dirty) },
+		Skip: func(rel string) bool { return r.access.Policy(rel).Class == access.Ephemeral },
+		OnHashed: func(n *anyfs.Node) {
+			hint := pageHint(r.access.Policy(n.Path))
+			for _, p := range n.Pages {
+				r.local.Hint(p.Key, hint)
+			}
+		},
+		BytesPerSec: c.opt.HashBytesPerSec,
+		Now:         c.opt.Now,
+	})
+	if c.hashed == nil {
+		c.hashed = map[string]*anyfs.Hasher{}
+	}
+	c.hashed[slot] = h
+	return h
+}
+
+// slotHasher returns a slot's background hasher (nil: none).
+func (c *cacheFS) slotHasher(slot string) *anyfs.Hasher {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hashed[slot]
 }
 
 // removeSlot deletes a slot directory, unmounting it first.
 func (c *cacheFS) removeSlot(slot string) {
 	if c != nil {
 		c.unmount(slot)
+		c.mu.Lock()
+		h := c.hashed[slot]
+		delete(c.hashed, slot)
+		c.mu.Unlock()
+		if h != nil {
+			h.Close()
+		}
 	} else {
 		for _, d := range []string{"data", "lower"} {
 			if p := filepath.Join(slot, d); anyfs.IsMountpoint(p) {
@@ -526,7 +585,9 @@ func (c *cacheFS) commit(ctx context.Context, slot, repo string, m slotMeta, liv
 	if err != nil {
 		return commitResult{repo: r}, err
 	}
-	return c.finish(ctx, slot, r, m, p, filepath.Join(slot, "data"), false, live)
+	res, err := c.finish(ctx, slot, r, m, p, filepath.Join(slot, "data"), false, live)
+	c.release(slot, p, err == nil)
+	return res, err
 }
 
 // slotPlan is a planned commit of a slot: what changed since its head
@@ -539,8 +600,11 @@ type slotPlan struct {
 	ReadsKnown bool             `json:"reads_known,omitempty"`
 	Scanned    int64            `json:"scanned_ns"`
 	Upper      int64            `json:"upper_bytes,omitempty"`
-	Runs       int64            `json:"runs"`   // the slot's runs at the plan
-	Leases     int64            `json:"leases"` // the slot's leases at the plan
+	// Resolved are the changed files whose digests the background hasher
+	// knew (their pages are in the tier; the hasher holds them).
+	Resolved []string `json:"resolved,omitempty"`
+	Runs     int64    `json:"runs"`   // the slot's runs at the plan
+	Leases   int64    `json:"leases"` // the slot's leases at the plan
 }
 
 // plan stats a slot's changes since its head (the caller holds the slot
@@ -587,13 +651,30 @@ func (c *cacheFS) plan(ctx context.Context, slot string, r *repoFS, m slotMeta) 
 	}
 	if c.mode != fsPlain {
 		p.Upper = treeSize(filepath.Join(slot, "upper"))
+		if h := c.slotHasher(slot); h != nil {
+			// Files hashed in the background while the session wrote
+			// them (unchanged since: same inode, size, mtime and ctime)
+			// are neither captured nor read again.
+			upper := filepath.Join(slot, "upper")
+			p.Resolved = p.Changes.Resolve(func(n *anyfs.Node) bool {
+				return h.Lookup(n, filepath.Join(upper, filepath.FromSlash(n.Path)))
+			})
+		}
 	}
 	return p, nil
 }
 
+// release ends the hasher holds of a plan's resolved files (committed:
+// the commit referencing their pages is done).
+func (c *cacheFS) release(slot string, p slotPlan, committed bool) {
+	if h := c.slotHasher(slot); h != nil && len(p.Resolved) > 0 {
+		h.Release(p.Resolved, committed)
+	}
+}
+
 // scanOptions are the scan options of a repository's commits over prev.
 func (c *cacheFS) scanOptions(ctx context.Context, r *repoFS, prev *anyfs.Tree, since int64) anyfs.ScanOptions {
-	return anyfs.ScanOptions{Prev: prev, Since: since,
+	return anyfs.ScanOptions{Prev: prev, Since: since, Workers: c.opt.ReadWorkers,
 		Sink:  func(k anyfs.Key, b []byte) error { return r.tier.Put(ctx, k, b, anyfs.Dirty) },
 		Alone: func(rel string, size int64) bool { return size >= dedupeMin && r.access.Policy(rel).Dedupe }}
 }
@@ -608,7 +689,29 @@ func (c *cacheFS) finish(ctx context.Context, slot string, r *repoFS, m slotMeta
 		return res, err
 	}
 	base := ch.Tree()
-	tree, st, err := p.Changes.Tree(content, c.scanOptions(ctx, r, base, 0))
+	opt := c.scanOptions(ctx, r, base, 0)
+	var stream *anyfs.Stream
+	if _, link, _, _ := r.stack(); link != nil {
+		// New pages stream to the store while the files are read: the
+		// commit's upload overlaps its hashing (the flush then finds them
+		// clean).
+		// Only files whose class is written back early (not churn,
+		// ephemeral: they wait for their writeback delay or the flush).
+		stream = link.Stream(ctx)
+		put := func(k anyfs.Key, b []byte) error { return stream.Put(k, b) }
+		opt.FileSink = func(rel string) anyfs.PageSink {
+			if h := pageHint(r.access.Policy(rel)); h.Expire < 0 && !h.NoWriteback {
+				return put
+			}
+			return opt.Sink
+		}
+	}
+	tree, st, err := p.Changes.Tree(content, opt)
+	if stream != nil {
+		if ss := stream.Wait(); ss.Err != nil {
+			c.log.Warn("stream commit pages to the store (left for the flush)", "repo", r.id, "failed", ss.Failed, "err", ss.Err)
+		}
+	}
 	if err != nil {
 		return res, fmt.Errorf("read build slot changes: %w", err)
 	}
@@ -695,14 +798,24 @@ func (c *cacheFS) discard(ctx context.Context, r *repoFS, live []string) {
 		}
 	}
 	c.mu.Lock()
-	for _, sm := range c.mounts {
+	var hs []*anyfs.Hasher
+	for slot, sm := range c.mounts {
 		if sm.repo == r {
 			for _, k := range sm.src.Tree().Keys() {
 				keep[k] = true
 			}
+			if h := c.hashed[slot]; h != nil {
+				hs = append(hs, h)
+			}
 		}
 	}
 	c.mu.Unlock()
+	for _, h := range hs {
+		// Pages hashed in the background, not committed yet.
+		for _, k := range h.Keys() {
+			keep[k] = true
+		}
+	}
 	for _, d := range dirty {
 		if !keep[d.Key] {
 			r.tier.Discard(d.Key)
