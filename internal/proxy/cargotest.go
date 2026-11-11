@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/traumventures/cloudsourced/internal/platform"
 	"io"
 	"net/url"
 	"os"
@@ -248,7 +249,7 @@ func splitCargoTestRun(ctx context.Context, repo *config.Repo, profile config.To
 	if outside != "" {
 		return runTestsRemotely(ctx, repo, profile, "cargo", args, cwd, rec, fmt.Sprintf("test binary %s is outside the [cache.build] paths", outside))
 	}
-	if why := checkLocalExec(build.exes); why != "" {
+	if why := platform.CheckRun(build.exes); why != "" {
 		return runTestsRemotely(ctx, repo, profile, "cargo", args, cwd, rec, why)
 	}
 	// Package metadata for the test environment (CARGO_PKG_*).

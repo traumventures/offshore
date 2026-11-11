@@ -20,6 +20,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/image"
 	"github.com/traumventures/cloudsourced/internal/manifest"
+	"github.com/traumventures/cloudsourced/internal/platform"
 	"github.com/traumventures/cloudsourced/internal/provider"
 )
 
@@ -47,7 +48,7 @@ func Resolve(r *config.Repo) (*Plan, error) {
 	add := func(s string) { hashParts = append(hashParts, s) }
 	add("generator=" + generatorVersion)
 	add(fmt.Sprintf("schema=%d", config.SchemaVersion))
-	add("arch=" + r.Resources.Arch)
+	add("platform=" + platform.Target(r.Resources.Arch).String())
 	envJSON, _ := json.Marshal(env)
 	add("env=" + string(envJSON))
 
