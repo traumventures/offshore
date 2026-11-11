@@ -31,6 +31,11 @@ type ChangeOptions struct {
 	// directory, which is walked whole with the ctime watermark).
 	Upper       string
 	UpperFormat UpperFormat
+	// Lower is the tree of the overlay's lower layers (nil: Prev). Kernel
+	// metacopy entries of the upper (metadata-only copy-ups, renames of
+	// lower files) take digest and pages from the lower file they
+	// redirect to, unread.
+	Lower *Tree
 }
 
 // ScanChanges builds the tree of dir (an overlay's merged view) from the
@@ -74,7 +79,7 @@ func PlanChanges(dir string, opt ChangeOptions) (*ChangeSet, error) {
 		}
 	} else {
 		c := &changeScan{dir: dir, opt: opt, nodes: map[string]*scanned{}, added: map[string]bool{}, kids: map[string]map[string]bool{},
-			rescanned: map[string]bool{}, metaOnly: map[string]bool{}}
+			rescanned: map[string]bool{}, metaOnly: map[string]metaRef{}}
 		for _, n := range opt.Prev.Nodes() {
 			c.nodes[n.Path] = &scanned{Node: n}
 		}
@@ -96,7 +101,7 @@ func PlanChanges(dir string, opt ChangeOptions) (*ChangeSet, error) {
 			changed = append(changed, &ns[i])
 		}
 	}
-	read := reuseNodes(changed, opt.ScanOptions, &st)
+	read := reuseNodes(changed, opt.ScanOptions, opt.Lower, &st)
 	cs := &ChangeSet{Nodes: make([]Node, len(ns)), Stats: st}
 	for i := range ns {
 		cs.Nodes[i] = ns[i].Node
@@ -188,9 +193,9 @@ func (c *changeScan) run() error {
 			return err
 		}
 	}
-	for p := range c.metaOnly {
-		if n := c.nodes[p]; n != nil && c.added[p] {
-			n.meta = true
+	for p, ref := range c.metaOnly {
+		if n := c.nodes[p]; n != nil && c.added[p] && n.Kind == File {
+			n.meta, n.from, n.fromDigest = true, ref.path, ref.digest
 		}
 	}
 	return nil
@@ -217,7 +222,56 @@ type changeScan struct {
 	added     map[string]bool            // nodes set by this scan (files are hashed unless reusable)
 	kids      map[string]map[string]bool // dir -> added children Prev lacks
 	rescanned map[string]bool
-	metaOnly  map[string]bool // metadata-only copy-ups
+	metaOnly  map[string]metaRef // metacopy entries: where their data is
+}
+
+// metaRef is the data of a kernel overlay metacopy entry: the lower file
+// at path ("": its own path) or the data-only file of a content digest
+// (the absolute redirects of the slot's metadata layer).
+type metaRef struct{ path, digest string }
+
+// overlayRedirect returns an entry's overlay redirect xattr ("" if none).
+func overlayRedirect(p string) string {
+	buf := make([]byte, 4096)
+	for _, ns := range []string{"trusted.overlay.", "user.overlay."} {
+		if n, err := unix.Lgetxattr(p, ns+"redirect", buf); err == nil {
+			return string(buf[:n])
+		}
+	}
+	return ""
+}
+
+// metaRefOf resolves the redirect of the metacopy entry rel.
+func metaRefOf(rel, redirect string) (metaRef, bool) {
+	switch {
+	case redirect == "":
+		return metaRef{}, true
+	case strings.HasPrefix(redirect, "/"):
+		r := strings.TrimPrefix(redirect, "/")
+		if pre, d, ok := strings.Cut(r, "/"); ok && len(pre) == 2 && validDigest(d) && d[:2] == pre {
+			return metaRef{digest: d}, true
+		}
+		if r == "" || strings.Contains(r, "/../") || strings.HasPrefix(r, "../") {
+			return metaRef{}, false
+		}
+		return metaRef{path: path.Clean(r)}, true
+	case strings.Contains(redirect, "/"):
+		return metaRef{}, false
+	}
+	return metaRef{path: path.Join(parent(rel), redirect)}, true
+}
+
+// validDigest reports whether d is a content digest (64 hex digits).
+func validDigest(d string) bool {
+	if len(d) != 64 {
+		return false
+	}
+	for _, c := range d {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // set records a node found by this scan.
@@ -305,8 +359,10 @@ func (c *changeScan) upperOps() ([]changeOp, error) {
 			ops = append(ops, changeOp{rel, opDir})
 			return nil
 		}
-		if c.opt.UpperFormat == UpperKernel && d.Type().IsRegular() && overlayXattr(p, "metacopy") && !overlayXattr(p, "redirect") {
-			c.metaOnly[rel] = true
+		if c.opt.UpperFormat == UpperKernel && d.Type().IsRegular() && overlayXattr(p, "metacopy") {
+			if ref, ok := metaRefOf(rel, overlayRedirect(p)); ok {
+				c.metaOnly[rel] = ref
+			}
 		}
 		ops = append(ops, changeOp{rel, opEntry})
 		return nil
