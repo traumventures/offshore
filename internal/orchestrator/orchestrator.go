@@ -305,6 +305,10 @@ type Orchestrator struct {
 	// is assumed present under the environment's tag).
 	PrepareImage func(ctx context.Context, provName string, prov provider.Provider, envHash, size string) (string, error)
 
+	// Slots performs build slot operations on workers (prune, snapshot
+	// save and restore); nil disables slot moves and prunes.
+	Slots SlotOps
+
 	metrics *orchMetrics
 	obs     *observer
 }
@@ -592,6 +596,9 @@ func (o *Orchestrator) sampleLocked(id string, m *Machine) {
 	ev.Reserved = &scheduler.Resources{CPU: st.UsedCPU, Memory: st.UsedMemory}
 	used, pr := st.Measured, st.Pressure
 	ev.Used, ev.Pressure, ev.Sessions = &used, &pr, len(st.Sessions)
+	if d := st.Disk; d != nil {
+		ev.Disk = &events.Disk{Total: d.Total, Used: d.Used, Slots: d.Slots, MachineCaches: d.MachineCaches}
+	}
 	o.obs.log.Append(ev)
 }
 
@@ -748,6 +755,9 @@ func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
 			sm.Pressure = st.Pressure
 			sm.Sessions = len(st.Sessions)
 			sm.WarmRepos = st.WarmRepos
+			if d := st.Disk; d != nil {
+				sm.DiskTotal, sm.DiskUsed, sm.SlotBytes = d.Total, d.Used, d.SlotBytes
+			}
 			sm.Draining = sm.Draining || st.Draining
 			if st.IdleSince > 0 {
 				sm.IdleSince = time.Unix(st.IdleSince, 0)

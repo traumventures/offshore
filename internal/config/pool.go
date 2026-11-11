@@ -149,6 +149,9 @@ type Size struct {
 	CPU          float64 `toml:"cpu"`
 	Memory       string  `toml:"memory"`
 	PricePerHour float64 `toml:"price_per_hour"` // hourly price
+	// Disk is the machine disk ("200G"; empty = unknown). The scheduler
+	// plans build slots against it (resize, prune, move).
+	Disk string `toml:"disk,omitempty"`
 	// Arch is the machine architecture, "amd64" (default) or "arm64".
 	// Environments are built per architecture; a repository pins its
 	// architecture with resources.arch, and only sizes of that
@@ -409,6 +412,11 @@ func (u *PoolConfig) Validate() error {
 		}
 		if _, err := ParseBytes(sz.Memory); err != nil {
 			errs = append(errs, fmt.Sprintf("pool.size[%d].memory: %v", i, err))
+		}
+		if sz.Disk != "" {
+			if _, err := ParseBytes(sz.Disk); err != nil {
+				errs = append(errs, fmt.Sprintf("pool.size[%d].disk: %v", i, err))
+			}
 		}
 		if _, ok := u.Providers[sz.Provider]; !ok {
 			errs = append(errs, fmt.Sprintf("pool.size[%d].provider: %q is not a configured provider (%s)", i, sz.Provider, strings.Join(u.ProviderNames(), ", ")))
