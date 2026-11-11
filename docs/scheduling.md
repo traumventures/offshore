@@ -1,15 +1,106 @@
-# Scheduler
+# Scheduling
 
 The scheduler (`internal/scheduler`) decides where a session runs (`Place`)
-and how the pool changes (`Plan`) as pure functions of a pool snapshot.
-The orchestrator only gathers state and executes the decisions, so policies
-can be tested and simulated without machines.
+and how the pool changes (`Plan`) as pure functions of a pool snapshot
+(interfaces `Policy` and `Estimator`). The orchestrator only gathers state
+and executes the decisions, so policies can be tested and simulated without
+machines. One orchestrator can span several providers; sizes of all
+providers compete.
+
+## Configuration
+
+```toml
+[scheduler]
+policy              = "default"   # default (cost model) | binpack | classic
+cost_optimization   = 0.5         # 1 = cheapest, 0 = fastest result
+disk_price_per_gb_month = 0.08    # prices disk resizes
+estimator           = "history"   # history | static
+cpu_overcommit      = 2.0         # only slows builds down
+memory_overcommit   = 1.25        # requires soft_limit or swap, otherwise OOM
+soft_limit          = 1.2         # memory.high = request * 1.2
+swap                = true
+max_cpu_pressure    = 0.0         # PSI some avg10; no new sessions above (0 = off)
+max_memory_pressure = 0.4
+limit_jobs          = true        # CARGO_BUILD_JOBS = granted cores
+consolidate_below   = 0.5         # 0 = off
+consolidate_target  = 0.75
+
+[[scheduler.egress]]              # transfer prices for snapshot restores
+from         = "aws"              # store: provider name, or "storage" for [storage]
+to           = "oci"              # provider whose machines restore
+price_per_gb = 0.09
+bandwidth    = "50M"              # bytes/s
+
+[[scheduler.warm_pool]]
+days     = ["mon", "tue", "wed", "thu", "fri"]   # empty = every day
+from     = "08:00"
+to       = "19:00"                               # earlier than from spans midnight
+machines = 1                                     # per recently used environment
+timezone = "Europe/Berlin"                       # default: local time
+
+[providers.aws]
+type         = "aws-ec2"
+max_machines = 4                                 # per provider, below pool.max_machines
+```
+
+| key | default | |
+|---|---|---|
+| `policy` | `"default"` | `default` (cost model); `binpack` and `classic` are earlier policies kept for comparison |
+| `cost_optimization` | 0.5 | 0..1 trade-off of the cost model: 1 = cheapest, 0 = fastest result |
+| `[[egress]]` | free within a provider, 0.09/GB at 50 MB/s across | `from` (provider or `storage`), `to` (provider), `price_per_gb`, `bandwidth` |
+| `disk_price_per_gb_month` | 0.08 | price of extra disk, for resize decisions |
+| `estimator` | `"history"` | `history` learns CPU and peak memory per repository/tool/subcommand from cgroup usage; `static` uses `[resources]` |
+| `cpu_overcommit` | 2 | reserved CPU may exceed physical cores by this factor (>= 1) |
+| `memory_overcommit` | 1 | > 1 needs `swap = true` or `soft_limit` |
+| `soft_limit` | 0 (off) | sets `memory.high` to request x factor |
+| `swap` | false | allow sessions to swap |
+| `max_cpu_pressure`, `max_memory_pressure` | 0 (off) | PSI threshold 0..1 above which a machine takes no new sessions |
+| `limit_jobs` | false | pass the reserved cores as build parallelism (`CARGO_BUILD_JOBS`, `OFFSHORE_JOBS`) |
+| `consolidate_below` | 0.5 | drain the least loaded machine of an environment below this reserved share (0 = off) |
+| `consolidate_target` | 0.75 | share the remaining machines may reach by taking its load |
+| `[[warm_pool]]` | none | scheduled warm machines in addition to `pool.min_machines` |
+
+Memory is never overcommitted beyond `memory_overcommit`; CPU is. Lifetimes
+(`idle_stop`, `max_lifetime`), `min_machines`, `max_machines` and
+`queue_timeout` are in `[pool]` ([configuration.md](configuration.md#pool-configuration)).
 
 ## Default policy: cost model
 
 `[scheduler] policy = "default"` decides with a cost model
-(`model.go`, `modelpolicy.go`); see the README section "Cost model and
-`cost_optimization`" for the objective. Per decision:
+(`internal/scheduler/model.go`, `modelpolicy.go`). It scores every candidate
+of a decision (run now on a machine, wait for a busy or starting machine,
+start or create a machine, prune or grow a full disk, restore a slot
+snapshot) by money and time to result and minimises
+
+    r * cost / min_cost + (1 - r) * time / min_time      (r = cost_optimization)
+
+normalised against the cheapest and the fastest candidate of the same
+decision. `cost` is what the pool pays: the machine time a placement
+occupies (full price where it extends a machine's uptime, its share where
+the machine is paid anyway), started and created machines, the egress of a
+snapshot restore and extra disk. `time` is queue wait + start or boot
+latency + slot preparation (prune, resize, restore) + the run, using what
+the estimator learned per key: warm and cold durations (cold per provider,
+because global result caches live in a provider's store), restore times and
+slot growth (`task_end.usage.slot_bytes_before/after`).
+`cost_optimization = 1` optimises purely for cost (e.g. waits for a warm
+slot instead of building cold on an idle machine), `0` purely for time,
+`0.5` (default) accepts 10 % more cost for more than 10 % less time.
+Rendezvous hashing breaks ties. Waits are bounded by `queue_timeout`.
+
+Other inputs of the model: provider boot/start latencies (learned), snapshot
+locations (reported by workers when they save slots), per-repository slot
+sizes and the machine disk, and transfer prices between stores and
+providers (`[[scheduler.egress]]`). Unlisted pairs are free within a
+provider's own store and cost 0.09/GB at 50 MB/s across. A full slot is
+handled by the cheaper/faster of: prune other slots (their next builds
+become cold, which the model charges), grow the disk
+(`provider.DiskResizer`, aws-ec2), or run elsewhere (cold, or restore a
+snapshot). Capacity and quota errors take a provider out of scale-out for a
+cooldown (2 min, doubling up to 30 min, reset on the next ready machine); a
+failed start backs off for 2 minutes instead of retrying in a loop.
+
+Per decision:
 
 - **Place**: candidates are every way to run now (each accepting machine
   with free capacity: warm slot, restore of the best snapshot, cold; each
@@ -36,11 +127,18 @@ placement (prune via the worker slot RPC, `provider.DiskResizer`, restore)
 run before the lease is returned and are logged as `slot_action` events;
 capacity cooldowns as `provider_down`.
 
+Consolidation is coordinated with creation: a machine is only drained when
+the peak demand of the last 5 minutes (running plus queued) fits on the
+others, never within 2 minutes of a scale-up, a drained machine is undrained
+before anything is started or created, and an emptied consolidated machine
+whose demand the others cannot take is undrained instead of stopped (regression trace `internal/scheduler/sim/testdata/prod-flap.json`, test
+`TestRegressionDrainThenCreate`).
+
 ## Binpack policy (before the cost model)
 
 `policy = "binpack"`, kept for comparison in the simulator:
 
-- **Placement**: machines with a warm build cache for the repository come
+- **Placement**: machines with a warm build slot for the repository come
   first; then machines that still have *physical* room (CPU overcommit slows
   tasks down, so it is the last resort); then best fit: the machine with the
   least normalised capacity left after placing the task. Rendezvous hashing
@@ -55,50 +153,45 @@ capacity cooldowns as `provider_down`.
 - **Sizing**: for the next machine the policy packs the remaining queue into
   every size and picks the lowest price per fraction of the queued demand
   the size absorbs (measured in the dominant resource). A single small task
-  gets the cheapest fitting size; several queued tasks may justify one larger
-  machine when it is cheaper per unit, and at equal cost per unit fewer
-  machines win. Sizes that would need more machines than `max_machines`
-  still allows lose against sizes that absorb more; a small stopped machine
-  is not started when its slot is needed for a larger new machine, and an
-  empty running machine is stopped to make room for a larger one when the
-  pool is at its limit. Unknown prices (0) prefer the size absorbing the
-  most demand, then the smaller one.
+  gets the cheapest fitting size; several queued tasks may justify one
+  larger machine when it is cheaper per unit, and at equal cost per unit
+  fewer machines win. Sizes that would need more machines than
+  `max_machines` still allows lose against sizes that absorb more; a small
+  stopped machine is not started when its slot is needed for a larger new
+  machine, and an empty running machine is stopped to make room for a larger
+  one when the pool is at its limit. Unknown prices (0) prefer the size
+  absorbing the most demand, then the smaller one.
 - **Architecture**: machines are only created from sizes of the
   environment's architecture (the repository's `resources.arch`; unknown
   environments are amd64), and a task no size of its architecture can hold
   is rejected.
 - **Consolidation**: when the machines of an environment are reserved below
-  `consolidate_below` (default 0.5) and the others stay below
-  `consolidate_target` (default 0.75) after taking its share, the least
-  loaded busy machine is drained (one at a time, never below the warm pool,
-  never while tasks of the environment wait). New work lands elsewhere and
-  the drained machine stops as soon as its sessions end. When demand returns
-  it is undrained before anything is started or created.
+  `consolidate_below` and the others stay below `consolidate_target` after
+  taking its share, the least loaded busy machine is drained (one at a time,
+  never below the warm pool, never while tasks of the environment wait). New
+  work lands elsewhere and the drained machine stops as soon as its sessions
+  end. When demand returns it is undrained before anything is started or
+  created.
 - **Idle stop and warm pool**: idle machines stop after `idle_stop` unless
   the warm pool keeps them: `min_machines` per environment used in the last
-  24 hours, raised by scheduled windows:
+  24 hours, raised by the scheduled `[[scheduler.warm_pool]]` windows.
+- **Limits**: `max_machines` (pool and per provider) also bounds starting
+  stopped machines.
+- **Lifetime**: machines past `max_lifetime` drain and are destroyed with
+  their volumes; idle machines stop and keep their disk.
 
-  ```toml
+`policy = "classic"` keeps the previous behaviour (rendezvous placement,
+cheapest size for the aggregate demand, no consolidation) for comparison.
 
-[scheduler]
+## Inputs: disk, slots and snapshots
 
-[[scheduler.warm_pool]]
-  days = ["mon", "tue", "wed", "thu", "fri"]   # empty = every day
-  from = "08:00"
-  to = "19:00"                                # earlier than from spans midnight
-  machines = 1                                # per recently used environment
-  timezone = "Europe/Berlin"                  # default: local time
-  ```
-
-- **Limits**: `max_machines` now also bounds starting stopped machines (the
-  previous policy could exceed it).
-
-`pool.policy = "classic"` keeps the previous behaviour (rendezvous
-placement, cheapest size for the aggregate demand, no consolidation) for
-comparison.
-
-New keys: `policy = "default" | "binpack" | "classic"`, `consolidate_below`
-(0 = off), `consolidate_target`, `[[scheduler.warm_pool]]`.
+The pool snapshot the policy sees contains, per machine, the disk
+(`DiskTotal`, `DiskUsed`) and the size of each repository's build slot
+(`Status.Disk`), and the snapshots held in object stores
+(`Status.Snapshots`). Sizes may declare `disk`. Sessions report their slot
+size before and after the run (`task_end.usage.slot_bytes_before/after`).
+The mechanisms for a full disk (prune, move by snapshot and restore, grow
+the disk) are in [caches-and-storage.md](caches-and-storage.md).
 
 ## Simulator
 
@@ -109,6 +202,12 @@ offshore sim -config internal/scheduler/sim/testdata/pool.toml \
   internal/scheduler/sim/testdata/team-week.json internal/scheduler/sim/testdata/small-week.json
 offshore sim -generate trace.json -profile team -seed 1 -days 5 -tz Europe/Berlin
 ```
+
+`offshore sim -sweep trace.json` sweeps `cost_optimization` from 0 to 1
+(steps of 0.1) and prints the cost/time frontier (Pareto points marked);
+`-cost-optimization 0,0.5,1` compares chosen values, `-resize` lets machines
+grow disks. Traces exported with `sim export` carry slot sizes, so disk,
+slot growth, restores and multiple providers are simulated.
 
 The simulation (`internal/scheduler/sim`) is discrete-event and drives the
 policy like the orchestrator: every waiting task is placed in arrival

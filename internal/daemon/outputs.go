@@ -59,7 +59,7 @@ type outputsState struct {
 // The overlay is up to date with the latest remote build as soon as that
 // build's run returned: the proxy's release call starts the new generation
 // before it exits. Local cargo then finds unchanged units fresh (see
-// README "Output overlay"), e.g. to run tests locally from remote-built
+// docs/tools.md "Output overlay"), e.g. to run tests locally from remote-built
 // binaries without fetching them.
 func EnsureOutputs(ctx context.Context, root string) (OutputsStatus, error) {
 	var st OutputsStatus

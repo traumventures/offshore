@@ -201,7 +201,7 @@ Resources:
                   StringEquals:
                     aws:ResourceAccount: !Ref AWS::AccountId
         - PolicyName: pool-operator
-          # The aws-ec2 provider's permissions (see docs/CONTROLPLANE.md). The
+          # The aws-ec2 provider's permissions (see docs/control-plane.md). The
           # first block runs machines; the second lets it create and update
           # its own CloudFormation stack (CloudFormation acts with the
           # caller's permissions), limited to resources named after the stack.

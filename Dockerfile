@@ -8,7 +8,7 @@
 # providers build environment images with it; local-docker also runs
 # machines with it) and CA certificates. It runs as the unprivileged user
 # offshore (uid 10001); the Docker socket of the host is passed in with
-# --group-add <gid of the socket>. See docs/CONTROLPLANE.md.
+# --group-add <gid of the socket>. See docs/control-plane.md.
 #
 # The control plane runs linux/amd64; the server binary it hands to amd64
 # machines is its own executable, arm64 machines get

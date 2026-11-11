@@ -1,13 +1,25 @@
-# Running the control plane
+# Control plane
 
-`offshore controlplane` serves the pool API (leases, environments,
-status) over HTTPS with one global API key. Clients set `[control_plane]
+The orchestrator can run as a shared service instead of inside every
+daemon. `offshore controlplane` serves the pool API (leases,
+environments, status, events) over HTTPS with one global API key. Clients
+only fetch leases from it; build traffic goes directly from the laptop to
+the machines over QUIC. Without a `[control_plane]` section in the client
+configuration the daemon embeds the orchestrator instead (single user).
 
 The control plane works **without a domain**: it serves a persistent
-self-signed certificate that clients pin by fingerprint. A domain is **only a
-question of the hostname**: `--hostname cs.example.com` (a DNS name pointing at
-the control plane) makes it obtain a Let's Encrypt certificate, and clients
-drop the fingerprint.
+self-signed certificate that clients pin by fingerprint. A domain is **only
+a question of the hostname**: `--hostname cs.example.com` (a DNS name
+pointing at the control plane) makes it obtain a Let's Encrypt certificate,
+and clients drop the fingerprint.
+
+```sh
+# pool and providers in the control plane's pool file (--config FILE)
+offshore controlplane                             # self-signed, :7443, fingerprint pinned
+offshore controlplane --hostname cs.example.com   # Let's Encrypt, :443 (+ :80 for ACME)
+offshore controlplane client-config               # prints the client block
+offshore controlplane info [--show-key]           # URLs, fingerprint, API key location
+```
 
 ## Flags and commands
 
@@ -31,6 +43,8 @@ offshore controlplane health                   liveness check (container HEALTHC
 | `--api-key-file` | `$OFFSHORE_API_KEY`, else generated `<state>/api-key` | the key is never logged; `info --show-key` prints it |
 | `--state-dir` | `$OFFSHORE_STATE_DIR` or `~/.local/state/offshore/controlplane` | |
 | `--machine-binary` | see below | worker binary for local-docker machines, as a path on the Docker host |
+| `--metrics-listen` | `$OFFSHORE_METRICS_LISTEN` | also serve `/metrics` without authentication on a plain HTTP listener, e.g. `127.0.0.1:9090` |
+| `--client-ca` | | require client certificates signed by this CA (mutual TLS) |
 | `--config` | `$OFFSHORE_POOL_CONFIG`, else `$OFFSHORE_CONFIG`/`~/.config/offshore/config.toml` | pool configuration (`[pool]`, `[providers.*]`); `[control_plane]` and `user` in it are ignored with a warning |
 
 The pool configuration is reloaded when the file changes (checked before
@@ -48,7 +62,7 @@ usage history and `controlplane.json` (what `info`, `client-config` and
 `health` read; no secrets). SIGTERM/SIGINT shut down gracefully (running
 requests get 20 s). `/healthz` needs no API key.
 
-Clients:
+## Clients
 
 ```sh
 offshore controlplane client-config                       # on the control plane host
@@ -57,13 +71,33 @@ offshore controlplane client-config --url https://1.2.3.4:7443   # anywhere: fet
 
 ```toml
 [control_plane]
-url = "https://10.0.0.5:7443"
-fingerprint = "0b91…"                # only with the self-signed certificate
-api_key = "env:OFFSHORE_API_KEY" # or file:…, cmd:…
+url         = "https://10.0.0.5:7443"   # or https://cs.example.com
+fingerprint = "0b91…"                    # only with the self-signed certificate
+api_key     = "env:OFFSHORE_API_KEY" # or file:…, cmd:…
+client_cert = "client.pem"               # only with controlplane --client-ca
+client_key  = "client-key.pem"
 ```
 
+`offshore doctor` checks the control plane from the client: reachable,
+certificate fingerprint, API key accepted, clock skew.
+
+## Keys and mutual TLS
+
+The API key is generated once (`<state>/api-key`) and never logged. Instead
+of the built-in TLS modes pass `--tls-cert/--tls-key`, or terminate TLS in a
+reverse proxy and use `--insecure-http`. `--client-ca ca.pem` additionally
+requires a client certificate signed by that CA (mutual TLS); the API key
+is still checked.
+
+The control plane keeps the pool master key in `<state>/master.key` (0600,
+created on first start). It is the only secret that matters: every machine
+identity and token is derived from it ([security.md](security.md)).
+Replicas or a rebuilt control plane share a pool by importing the same key
+with `OFFSHORE_MASTER_KEY` (hex or base64) or
+`OFFSHORE_MASTER_KEY_FILE`.
+
 When `client-config` fetches the fingerprint from a remote URL (trust on first
-use) compare it with `offshore controlplane info` on the server.
+use) compare it with `offshore controlplane info` on the control plane host.
 
 ## From no domain to a domain
 
@@ -96,15 +130,16 @@ CLI's registry logins persist), config `/var/lib/offshore/config.toml`.
 
 The control plane builds environment images (`internal/image`): once per
 environment hash and platform, with the Docker CLI of the provider that
-needs it (local-docker `command`, aws-ec2 `docker_command`), reusing an
-existing image and Docker's layer cache. Registries receive images lazily:
-
-- local-docker machines run the image from the local daemon; it is built
-  eagerly when a client registers the environment, so the first build is
-  reported to the user right away;
-- aws-ec2 pushes to the stack's ECR repository (`<repo>:<hash>-<arch>`) right
-  before the first instance of that environment is launched; the build and
-  push are reported to the clients waiting for that machine.
+needs it (local-docker `command`, aws-ec2/oci `docker_command`, static
+`docker`), reusing an existing image and Docker's layer cache. When a
+client's environment changes, its daemon uploads the build context and the
+control plane builds and pushes the image for every provider and platform
+of the pool in the background ([tools.md](tools.md#environment-image-prebuild)):
+local-docker machines run it from the local daemon, aws-ec2 pushes to the
+stack's ECR repository (`<repo>:<hash>-<arch>`), oci to OCIR, static to its
+`registry`. A lease that needs an image that is not there yet waits for (or
+starts) the build, and the build and push are reported to the waiting
+clients.
 
 The registry is asked first (ECR `DescribeImages`): when it already holds
 the image, nothing is built and Docker is not called, so a control plane
@@ -172,15 +207,16 @@ networking, host Docker for environment image builds). Resources:
   image, and the **aws-ec2 operator permissions**: run/start/stop/terminate
   instances tagged `project=offshore`, ingress on the pool security
   group, the binary bucket and environment repository, the AMI parameter,
-  machine secrets under `/offshore/<PoolStackName>/` (P1), and creating
-  and updating the pool stack `PoolStackName` (CloudFormation acts with the
-  caller's permissions), limited to resources named after that stack. The
-  policy is written here; the dedicated IAM template of workpack P4 may
-  replace it.
+  machine secrets under `/offshore/<PoolStackName>/`, growing machine
+  volumes, assuming the pool stack's `StoreRole` for worker grants, and
+  creating and updating the pool stack `PoolStackName` (CloudFormation acts
+  with the caller's permissions), limited to resources named after that
+  stack. It matches the policies of `deploy/aws/iam.yaml` (see the
+  [AWS guide](guides/aws.md)).
 - `config.toml` is written to the state volume on first boot (aws-ec2
   provider with `region`, `stack`, `subnet`, `allow_cidrs = [ClientCidr]`,
   one size from `MachineInstanceType/Cpu/Memory`); edit it there afterwards
-  (it is re-read on every scheduling call).
+  (it is reloaded when it changes).
 
 Deploy:
 

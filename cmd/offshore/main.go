@@ -47,6 +47,7 @@ Usage:
   offshore shim install [tools...]     install proxies into ~/.offshore/bin
   offshore shim status                 are the proxies first in PATH (exit 1 if not)
   offshore shim uninstall              remove proxies
+  offshore shim path                   print the shim directory
   offshore status [--json]             show machines, sessions and cost today
   offshore why [N|last|list] [--json]  explain a recent run (placement, timings, labels)
   offshore top [--once] [--window 10m] live view: machines, sessions, queue, cost
@@ -92,7 +93,7 @@ Environment:
   OFFSHORE_DISABLE=1          always run locally
   OFFSHORE_REQUIRE_REMOTE=1   fail instead of falling back to local execution
   OFFSHORE_STDIN=always|never stdin forwarding policy
-  OFFSHORE_AGENT=NAME         agent label of sessions (default: detected, see README)
+  OFFSHORE_AGENT=NAME         agent label of sessions (default: detected, see docs/operations.md)
   OFFSHORE_LABELS=k=v,k=v     extra session labels (status, top, why, report --by)
   OFFSHORE_VERBOSE=1          print the machine used for each run
   OFFSHORE_NO_RETRY=1         no second attempt when the machine is lost mid-run
@@ -672,7 +673,7 @@ func supervisorCmd(args []string) error {
 	}
 	fs := flag.NewFlagSet("supervisor", flag.ContinueOnError)
 	specPath := fs.String("spec", supervisor.SpecPath, "public machine spec")
-	stateDir := fs.String("state", supervisor.StateDir, "root-only agent state")
+	stateDir := fs.String("state", supervisor.StateDir, "root-only supervisor state")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Smoke test of the control plane container with the local-docker provider:
-# start the image like docs/CONTROLPLANE.md describes, point a client at it
+# start the image like docs/control-plane.md describes, point a client at it
 # (remote mode, pinned fingerprint) and run "cargo build" of the e2e fixture
 # on a machine the containerised control plane created. Cleans up after
 # itself (containers, volumes, state); the image is kept.
