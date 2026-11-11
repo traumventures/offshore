@@ -21,6 +21,10 @@ const (
 	// same candidates scored relative to the cheapest and fastest of each
 	// decision. Kept for comparison in the simulator.
 	VariantCostModel = "costmodel"
+	// VariantOption is the option policy of c5191aa: per-request greedy
+	// placement, waits scored at their pessimistic ETA, no copy cost for
+	// restoring a slot that is warm elsewhere. Kept for comparison.
+	VariantOption = "option"
 	// VariantBinpack is the policy before the cost model: warm cache
 	// first, best-fit packing, sizes by cost per unit of queued demand and
 	// consolidation by the present reservation. Kept for comparison in the
@@ -118,7 +122,12 @@ func (p Default) model() bool {
 }
 
 // next reports whether the option policy decides (see options.go).
-func (p Default) next() bool { return p.Cfg.Variant == VariantDefault || p.Cfg.Variant == "" }
+func (p Default) next() bool { return p.global() || p.Cfg.Variant == VariantOption }
+
+// global reports whether the default policy's batch decisions apply
+// (see batch.go): queue-wide assignment, wait ETAs as distributions,
+// the copy cost of restoring a slot warm elsewhere.
+func (p Default) global() bool { return p.Cfg.Variant == VariantDefault || p.Cfg.Variant == "" }
 
 // Admissible capacity of a machine under overcommit.
 func (p Default) admissible(m Machine) Resources {
@@ -433,7 +442,11 @@ func (p Default) Plan(f Pool) []Action {
 		case p.classic():
 			p.scaleOutClassic(st, env)
 		case p.model():
-			p.scaleOutModel(st, env)
+			if p.global() && abl("fullproj") {
+				p.scaleOutProjected(st, env)
+			} else {
+				p.scaleOutModel(st, env)
+			}
 		default:
 			p.scaleOut(st, env)
 		}
@@ -669,6 +682,7 @@ func (p Default) warmTarget(f Pool, env string) int {
 // running machines per environment afterwards.
 func (p Default) idleStop(st *planState) map[string]int {
 	c, f := p.cfg(), st.f
+	stoppedNow := map[string]bool{}
 	running := map[string]int{}
 	for _, m := range f.Machines {
 		if (m.State == Running || m.State == Starting) && p.usable(m, f.Now) {
@@ -701,6 +715,16 @@ func (p Default) idleStop(st *planState) map[string]int {
 				st.acts = append(st.acts, Action{Kind: Undrain, Machine: m.ID, Reason: why})
 			}
 			continue
+		}
+		// Default policy: an environment's idle machines stop one at a
+		// time, at most one a minute (decay): after a burst the pool
+		// shrinks gradually and the next burst finds a warm tail.
+		if !consolidated && p.global() && !abl("nodecay") && p.usable(m, f.Now) {
+			last := f.Demand[m.EnvHash].LastStop
+			if stoppedNow[m.EnvHash] || !last.IsZero() && f.Now.Sub(last) < StopDecay {
+				continue
+			}
+			stoppedNow[m.EnvHash] = true
 		}
 		running[m.EnvHash]--
 		reason := "idle"

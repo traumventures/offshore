@@ -143,13 +143,13 @@ func TestEvalTable(t *testing.T) {
 	}
 	wg.Wait()
 	var b strings.Builder
-	fmt.Fprintln(&b, "| case | policy | cost $ | idle h | turn p50 | turn p95 | wait p95 | cold | flaps | late | regret p95 | failed |")
-	fmt.Fprintln(&b, "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+	fmt.Fprintln(&b, "| case | policy | cost $ | idle h | turn p50 | turn p95 | wait p95 | cold | flaps | late | regret p95 | failed | OOMs | machines | mem util |")
+	fmt.Fprintln(&b, "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
 	for i, c := range cases {
 		for _, r := range reports[i] {
-			fmt.Fprintf(&b, "| %s | %s | %.2f | %.1f | %s | %s | %s | %.0f%% | %d | %d | %s | %d |\n", c.name, r.Name, r.Cost, r.IdleHours,
+			fmt.Fprintf(&b, "| %s | %s | %.2f | %.1f | %s | %s | %s | %.0f%% | %d | %d | %s | %d | %d | %d | %.0f%% |\n", c.name, r.Name, r.Cost, r.IdleHours,
 				r.TurnP50.Round(time.Second), r.TurnP95.Round(time.Second), r.WaitP95.Round(time.Second), 100*r.ColdRate, r.Flaps, r.Late,
-				r.RegretP95.Round(time.Second), r.Failed)
+				r.RegretP95.Round(time.Second), r.Failed, r.OOMs, r.Machines, 100*r.MemUtil)
 		}
 	}
 	if out := os.Getenv("OFFSHORE_EVAL_OUT"); out != "" {

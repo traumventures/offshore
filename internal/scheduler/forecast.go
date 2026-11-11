@@ -22,6 +22,7 @@ type Forecast struct {
 	mu      sync.Mutex
 	samples map[string][]demandSample
 	up      map[string]time.Time
+	down    map[string]time.Time // env -> last idle or consolidation stop
 }
 
 type demandSample struct {
@@ -74,6 +75,9 @@ func (fc *Forecast) Note(f Pool, acts []Action) {
 	if fc.up == nil {
 		fc.up = map[string]time.Time{}
 	}
+	if fc.down == nil {
+		fc.down = map[string]time.Time{}
+	}
 	env := map[string]string{}
 	for _, m := range f.Machines {
 		env[m.ID] = m.EnvHash
@@ -85,6 +89,10 @@ func (fc *Forecast) Note(f Pool, acts []Action) {
 		case Start, Undrain:
 			if e, ok := env[a.Machine]; ok {
 				fc.up[e] = f.Now
+			}
+		case Stop:
+			if e, ok := env[a.Machine]; ok && (a.Reason == "idle" || a.Reason == "consolidated") {
+				fc.down[e] = f.Now
 			}
 		}
 	}
@@ -129,6 +137,11 @@ func (fc *Forecast) Apply(f *Pool) {
 	for env, t := range fc.up {
 		d := f.Demand[env]
 		d.LastScaleUp = t
+		f.Demand[env] = d
+	}
+	for env, t := range fc.down {
+		d := f.Demand[env]
+		d.LastStop = t
 		f.Demand[env] = d
 	}
 }

@@ -88,7 +88,7 @@ type Pool struct {
 // overcommitting memory needs soft limits and swap, otherwise tasks may be
 // OOM killed.
 type Scheduler struct {
-	Policy string `toml:"policy"` // "default" (option policy) | "costmodel" | "binpack" | "classic"
+	Policy string `toml:"policy"` // "default" (batch option policy) | "option" | "costmodel" | "binpack" | "classic"
 	// CostOptimization is the cost model's knob, 0..1 (default 0.5): 1
 	// optimises purely for cost, 0 purely for time to result.
 	CostOptimization *float64 `toml:"cost_optimization"`
@@ -520,8 +520,8 @@ func (u *PoolConfig) Validate() error {
 			errs = append(errs, "pool."+name+": "+err.Error())
 		}
 	}
-	if f.Policy != "default" && f.Policy != "costmodel" && f.Policy != "binpack" && f.Policy != "classic" {
-		errs = append(errs, fmt.Sprintf("pool.policy: unsupported %q (default, costmodel, binpack, classic)", f.Policy))
+	if f.Policy != "default" && f.Policy != "option" && f.Policy != "costmodel" && f.Policy != "binpack" && f.Policy != "classic" {
+		errs = append(errs, fmt.Sprintf("pool.policy: unsupported %q (default, option, costmodel, binpack, classic)", f.Policy))
 	}
 	if f.ConsolidateBelow != nil && (*f.ConsolidateBelow < 0 || *f.ConsolidateBelow > 1) {
 		errs = append(errs, "pool.consolidate_below: must be between 0 (off) and 1")

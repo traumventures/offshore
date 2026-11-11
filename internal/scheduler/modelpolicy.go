@@ -14,10 +14,22 @@ import (
 // resizing a full disk), or wait for a machine (a warm slot freeing soon, a
 // machine starting) when that scores better.
 func (p Default) placeModel(f Pool, t Task) Placement {
+	if p.global() && !abl("nobatch") {
+		if pl, ok := p.placeBatch(f, t); ok {
+			return pl
+		}
+	}
+	pl, _, _ := p.placeScored(f, t)
+	return pl
+}
+
+// placeScored is placeModel for t alone; it also returns the scored
+// options and the chosen index (-1 without options).
+func (p Default) placeScored(f Pool, t Task) (Placement, []option, int) {
 	if !p.fitsAnySize(f, t) {
 		reason := "task larger than every machine size"
 		d := p.decision(f, t.EnvHash, nil, -1, []Option{{Kind: OptReject, Rejected: reason}})
-		return Placement{Kind: Reject, Reason: reason, Decision: d}
+		return Placement{Kind: Reject, Reason: reason, Decision: d}, nil, -1
 	}
 	var opts []option
 	var pls []Placement
@@ -47,7 +59,7 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 			rejected = append(rejected, rejectOption(OptAssign, m, 0, RejSmaller))
 			continue
 		}
-		if !p.Free(m).Fits(t.Request) {
+		if !p.admits(f, m, t) {
 			continue // a wait option below
 		}
 		for _, rc := range p.runChoices(f, m, t) {
@@ -60,7 +72,7 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 	if !assignable {
 		reason := "no machine with free capacity"
 		wait := option{info: &Option{Kind: OptWaitCapacity, Reason: reason + " (scale-out decides)"}}
-		return Placement{Kind: Wait, Reason: reason, Decision: p.decision(f, t.EnvHash, []option{wait}, 0, rejected)}
+		return Placement{Kind: Wait, Reason: reason, Decision: p.decision(f, t.EnvHash, []option{wait}, 0, rejected)}, nil, -1
 	}
 	// Waiting for a busy or starting machine of the environment, not
 	// longer than getting a machine would take (option policy).
@@ -85,6 +97,15 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 			continue
 		}
 		wait := at.Sub(f.Now)
+		// The bounds below use the pessimistic ETA; the score uses the
+		// expected wait over the distribution of the sessions' remaining
+		// times (default policy).
+		expWait := wait
+		if p.global() && !abl("nodist") {
+			if mean, ok := p.waitDist(f, m, t.Request); ok {
+				expWait = mean
+			}
+		}
 		if p.Cfg.QueueTimeout > 0 && f.Now.Sub(t.Since)+wait > p.Cfg.QueueTimeout*8/10 {
 			rejected = append(rejected, rejectOption(OptWaitMachine, m, wait, RejQueueTimeout))
 			continue
@@ -96,8 +117,8 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 		mm := m
 		mm.Reserved = Resources{} // runs after the sessions it waits for
 		for _, rc := range p.runChoices(f, mm, t) {
-			o := option{cost: p.machineCost(f, m, t, at, rc.run) + rc.cost, time: wait + rc.run, tie: Score(t.RepoID, m.ID), fit: math.Inf(1),
-				info: runOption(OptWaitMachine, m, t, rc, wait)}
+			o := option{cost: p.machineCost(f, m, t, f.Now.Add(expWait), rc.run) + rc.cost, time: expWait + rc.run, tie: Score(t.RepoID, m.ID), fit: math.Inf(1),
+				info: runOption(OptWaitMachine, m, t, rc, expWait)}
 			consider(o, Placement{Kind: Wait, Machine: m.ID, Reason: fmt.Sprintf("waiting %s for %s on %s", wait.Round(time.Second), rc.reason, m.ID)})
 		}
 	}
@@ -107,7 +128,7 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 		pl.Machine = ""
 	}
 	pl.Decision = p.decision(f, t.EnvHash, opts, i, rejected)
-	return pl
+	return pl, opts, i
 }
 
 // rawFits reports whether t fits the physical capacity of some size or
@@ -143,6 +164,7 @@ type tlMachine struct {
 	latency time.Duration // its start or boot latency
 	lastEnd time.Time     // end of its last planned session
 	planned int           // sessions the last timeline planned on it
+	guess   *Release      // release guessed (DefaultRun) for reservations without a lease estimate
 }
 
 // earliest returns the first time >= tm.ready at which need fits for run.
@@ -322,7 +344,8 @@ func (p Default) tlOf(f Pool, m Machine) *tlMachine {
 		covered = covered.Add(r.Res)
 	}
 	if rest := m.Reserved.Sub(covered); rest.CPU > 1e-9 || rest.Memory > 0 {
-		tm.deltas = append(tm.deltas, Release{At: f.Now.Add(DefaultRun), Res: Resources{CPU: math.Max(rest.CPU, 0), Memory: max(rest.Memory, 0)}})
+		g := Release{At: f.Now.Add(DefaultRun), Res: Resources{CPU: math.Max(rest.CPU, 0), Memory: max(rest.Memory, 0)}}
+		tm.deltas, tm.guess = append(tm.deltas, g), &g
 	}
 	return tm
 }
@@ -468,8 +491,42 @@ func (p Default) scaleOutModel(st *planState, env string) {
 				break
 			}
 		}
+		// Default policy: a machine is only added for a request whose
+		// projected start (the queue list-scheduled in priority order on
+		// the machines there and on their way) is later than the machine
+		// takes plus the hedge margin; a request that starts sooner anyway
+		// cannot be helped by it.
+		var projected map[string]time.Time
+		if p.global() && !abl("nogate") {
+			projected = p.project(f, ms, prioritize(f.Now, tasks))
+		}
+		helps := func(lat time.Duration) bool {
+			if projected == nil {
+				return true
+			}
+			margin, ok := p.hedgeMargin()
+			if !ok {
+				margin = 8 * time.Hour
+				if c.QueueTimeout > 0 {
+					margin = c.QueueTimeout * 8 / 10
+				}
+			}
+			for _, t := range tasks {
+				at, ok := projected[t.ID]
+				if !ok || at.Sub(f.Now)+f.Now.Sub(t.Since) > lat+margin {
+					return true
+				}
+			}
+			return false
+		}
 		for i := range cands {
 			cd := &cands[i]
+			if !helps(cd.tm.latency) {
+				info := candOption(cd.act, cd.tm)
+				info.Rejected = RejNoViolation
+				rejected = append(rejected, *info)
+				continue
+			}
 			cost, total, _ := p.timeline(f, append(append([]*tlMachine(nil), base...), cd.tm), tasks, tail, bounds)
 			info := candOption(cd.act, cd.tm)
 			if cd.tm.planned == 0 {

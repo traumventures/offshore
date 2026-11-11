@@ -1021,6 +1021,12 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 	}()
 	now := o.now()
 	task := scheduler.Task{ID: newID(8), EnvHash: req.EnvHash, RepoID: req.RepoID, Key: req.Key, Request: req.Need, Limit: req.Limit, Since: now}
+	// Fair queueing serves owners round robin: the agent's conversation,
+	// else the user (empty: the repository).
+	task.Owner = req.Labels[labels.AgentSession]
+	if task.Owner == "" {
+		task.Owner = req.Labels[labels.User]
+	}
 	if o.Profile != nil && req.Key != "" {
 		task.Profile = o.Profile(req.Key)
 	}
@@ -1073,7 +1079,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			if exp <= 0 {
 				exp = task.Profile.High(task.Profile.WarmRun())
 			}
-			o.leases[task.ID] = leaseInfo{start: o.now(), expected: exp}
+			o.leases[task.ID] = leaseInfo{start: o.now(), expected: exp, run: pl.Run, memMean: task.Profile.PeakMean, memSD: task.Profile.PeakSD}
 			env := m.EnvHash
 			o.mu.Unlock()
 			if pl.Slot.Kind != scheduler.SlotNone {

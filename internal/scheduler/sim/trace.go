@@ -64,6 +64,16 @@ type Job struct {
 	// (0: Options.Refetch): repositories differ in how often a build
 	// touches its working set again.
 	Refetch float64 `json:"refetch,omitempty"`
+	// Key is the usage key the estimator learns under (empty: Repo), e.g.
+	// a workspace build and a one-crate check of the same repository.
+	Key string `json:"key,omitempty"`
+}
+
+func (j Job) key() string {
+	if j.Key != "" {
+		return j.Key
+	}
+	return j.Repo
 }
 
 // Trace is a sequence of jobs.

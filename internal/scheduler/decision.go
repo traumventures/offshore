@@ -171,6 +171,7 @@ const (
 	RejNotAccepting = "not accepting sessions (draining or expiring)"
 	RejNoTasks      = "takes none of the queued tasks"
 	RejOverdue      = "queued longer than a start or create takes"
+	RejNoViolation  = "no queued request would wait longer than the machine takes"
 	RejProviderDown = "provider down (capacity/quota cooldown or disabled)"
 	RejCreateBlock  = "create backoff after a failed create"
 	RejMachineLimit = "provider or pool machine limit"

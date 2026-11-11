@@ -61,7 +61,11 @@ type createBackoff struct {
 // leaseInfo is the expected end of a lease's session.
 type leaseInfo struct {
 	start    time.Time
-	expected time.Duration
+	expected time.Duration // pessimistic run (release forecast)
+	run      time.Duration // median run (0: unknown)
+	// memMean, memSD: the peak memory belief at placement (statistical
+	// admission).
+	memMean, memSD int64
 }
 
 func ewma(old, v time.Duration) time.Duration {
@@ -255,7 +259,8 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 			for _, se := range m.Status.Sessions {
 				r := scheduler.Release{Res: scheduler.Resources{CPU: se.CPU, Memory: se.Memory}, Start: time.Unix(se.Started, 0)}
 				if li, ok := o.leases[se.Lease]; ok && se.Lease != "" {
-					r.At, seen[se.Lease] = li.start.Add(li.expected), true
+					r.At, r.Run, seen[se.Lease] = li.start.Add(li.expected), li.run, true
+					r.MemMean, r.MemSD = li.memMean, li.memSD
 				} else {
 					r.At = r.Start.Add(scheduler.DefaultRun)
 				}
@@ -267,7 +272,7 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 				continue
 			}
 			if li, ok := o.leases[lid]; ok {
-				sm.Releases = append(sm.Releases, scheduler.Release{At: li.start.Add(li.expected), Res: pl.res, Start: li.start})
+				sm.Releases = append(sm.Releases, scheduler.Release{At: li.start.Add(li.expected), Res: pl.res, Start: li.start, Run: li.run, MemMean: li.memMean, MemSD: li.memSD})
 			}
 		}
 	}

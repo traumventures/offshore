@@ -264,6 +264,8 @@ type run struct {
 	// is set when it expected the build to thrash.
 	pred       time.Duration
 	predThrash bool
+	// memMean, memSD: the belief about its peak memory at placement.
+	memMean, memSD int64
 }
 
 type machine struct {
@@ -436,7 +438,7 @@ func Run(trace Trace, o Options) Report {
 				if r.restored {
 					u.Warm, u.Restored = false, true
 				}
-				s.observe(r.j.Repo, u)
+				s.observe(r.j.key(), u)
 			}
 			m.runs = kept
 			if len(m.runs) == 0 && m.idle.IsZero() && m.state == scheduler.Running {
@@ -655,15 +657,15 @@ func (s *sim) observe(repo string, u scheduler.Usage) {
 
 func (s *sim) task(j *job) scheduler.Task {
 	fallback := scheduler.Resources{CPU: j.CPU, Memory: int64(j.Memory)}
-	e, ok := s.est[j.Repo]
+	e, ok := s.est[j.key()]
 	if !ok || e.fallback != fallback {
-		e = estimate{fallback, s.o.Estimator.Estimate(j.Repo, fallback), s.o.Estimator.Profile(j.Repo)}
+		e = estimate{fallback, s.o.Estimator.Estimate(j.key(), fallback), s.o.Estimator.Profile(j.key())}
 		if s.est == nil {
 			s.est = map[string]estimate{}
 		}
-		s.est[j.Repo] = e
+		s.est[j.key()] = e
 	}
-	return scheduler.Task{ID: fmt.Sprintf("j%d", j.n), EnvHash: j.Env, RepoID: j.Repo, Key: j.Repo,
+	return scheduler.Task{ID: fmt.Sprintf("j%d", j.n), EnvHash: j.Env, RepoID: j.Repo, Key: j.key(),
 		Request: e.need, Since: j.since, Profile: e.profile}
 }
 
@@ -689,7 +691,7 @@ func (s *sim) pool() scheduler.Pool {
 			var mem int64
 			for _, r := range m.runs {
 				sm.Reserved = sm.Reserved.Add(r.reserve)
-				sm.Releases = append(sm.Releases, scheduler.Release{At: r.start.Add(r.expected), Res: r.reserve, Start: r.start})
+				sm.Releases = append(sm.Releases, scheduler.Release{At: r.start.Add(r.expected), Res: r.reserve, Start: r.start, Run: r.pred, MemMean: r.memMean, MemSD: r.memSD})
 				cpu += r.j.CPU
 				mem += s.mem(r)
 			}
@@ -826,6 +828,9 @@ func (s *sim) placeQueued() {
 			if m := s.find(pl.Machine); m != nil && m.state == scheduler.Running {
 				s.dequeue(j)
 				s.assign(m, j, pl, expected(pl, t, m))
+				if n := len(m.runs); n > 0 && m.runs[n-1].j == j {
+					m.runs[n-1].memMean, m.runs[n-1].memSD = t.Profile.PeakMean, t.Profile.PeakSD
+				}
 			}
 		case scheduler.Reject:
 			s.dequeue(j)
@@ -1038,7 +1043,7 @@ func (s *sim) oom(m *machine) {
 
 		m.runs = m.runs[:k]
 		s.r.OOMs++
-		s.observe(r.j.Repo, scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), OOM: true, Wall: s.now.Sub(r.start)})
+		s.observe(r.j.key(), scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), OOM: true, Wall: s.now.Sub(r.start)})
 		if r.j.attempts <= s.o.Retries {
 			r.j.since = s.now
 			s.enqueue(r.j)
