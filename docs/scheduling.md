@@ -104,13 +104,33 @@ the composite profile (`scheduler.Size.Stack`, a `medium.Stack`; anyfs.Profile i
   unknown: the whole slot, as before).
 - *thrashing*: when the working set exceeds the local capacity (the top
   tier: `VM.Capacity`, else the size's, else the disk budget), the build
-  is charged `2 x FaultTime(excess)` from the tier below the top. A machine
-  that reports `VM.Thrashing` (or a working set above its capacity) gets
-  this penalty for every placement. Against it the model weighs growing
-  the disk to 1.25 x the working set (a resize slot action, priced until
-  the machine expires) and, when scaling out, sizes whose local capacity
-  fits the working set. With `cost_optimization = 1` a cheaper thrashing
-  size can still win; at 0.5 and below the bigger disk or size does.
+  is charged `refetch x FaultTime(excess)` from the tier below the top.
+  The refetch factor (refaulted bytes per byte of excess) is calibrated
+  from the event log (`events.Refetch`, fed live by the orchestrator and
+  replayed from the last 24 h at start): while a machine thrashes
+  (`thrash` event, or a `machine_sample` whose VM thrashes), its refaults
+  are `min(page_in, reclaim)` bytes; each episode (closed by the build's
+  `task_end`, a sample below capacity, stop or destroy) divided by the
+  excess of the working set over the capacity is one sample of a decaying
+  average (weight 0.3) per provider and over all providers
+  (`Pool.Refetch`; no data: 2). A machine that reports `VM.Thrashing` (or
+  a working set above its capacity) gets this penalty for every placement.
+  Against it the model weighs growing the disk (to 1.25 x the working set
+  and twice that growth, priced until the machine expires; only when the
+  disk is the local tier, not a volume below a fixed local disk) and, when
+  scaling out, sizes whose local capacity fits the working set. With
+  `cost_optimization = 1` a cheaper thrashing size can still win; at 0.5
+  and below the bigger disk or size does.
+- *restore and resize jointly*: every way to run (warm, restore, move,
+  cold) is scored with each disk preparation (none, prune, grow to room
+  for the slot / the working set / twice that), each with the thrash
+  penalty of the local capacity it leaves, in one choice. A restore or
+  move that needs room or whose working set does not fit grows the disk
+  in the same step (`SlotAction.Grow`, slot action `resize+restore`)
+  instead of restoring and thrashing or growing and running cold (before,
+  a resize for a full disk replaced the restore and the build ran cold).
+  A restore never prunes another repository's warm slot: in the sim that
+  ping-pongs (team week with tiers: 3x thrashing, 5x restores).
 - the medium slots persist on (the volume, else the top tier) prices
   storage, attach and resize cooldown.
 
@@ -297,11 +317,17 @@ machines drain or are destroyed. It models what the policy cannot see:
   `working_set` (bytes the build touches) restore lazily (the working set
   faults in at the stack's fault time, the rest in the background) and
   thrash when the working set exceeds the machine's local capacity (its
-  disk; growing with resizes): `2 x FaultTime(excess)` more build time.
-  The policy sees this as `Machine.VM` (capacity, working set, thrashing)
-  like the worker reports it. Reports add `thrashed` builds, thrash time
-  and page-in bytes; the sweep adds resizes, thrashed and machines created
-  per size.
+  disk; growing with resizes): `refetch x FaultTime(excess)` more build
+  time, with the true factor `-refetch` (default 2). The policy sees this
+  as `Machine.VM` (capacity, working set, thrashing) like the worker
+  reports it and calibrates the factor from the simulated `thrash`,
+  `reclaim`, `page_in` and `task_end` events like the orchestrator.
+  Reports add `thrashed` builds, thrash time, page-in bytes and the
+  calibrated factor; the sweep adds resizes, thrashed, refetch and
+  machines created per size. `-working-set` and `-slot-bytes` give jobs
+  without cache data a working set and slot (tier stress on real arrival
+  patterns), `sim/testdata/pool-tiers.toml` the c7a sizes with local disks
+  (30G/30G/100G/200G) over the store.
 
 Traces are JSON (`{"start": RFC3339, "end": seconds, "jobs": [{"at",
 "repo", "env", "duration", "cpu", "memory", "peak_memory", optional
@@ -354,6 +380,29 @@ turnaround is equal. The warm pool costs about $12 a week for three
 environments and here only lowers the maximum wait, because start latency
 (20 s) is already short. `TestSampleTraces` in `internal/scheduler/sim`
 asserts the cost/p95 claim on the sample traces.
+
+### Refetch calibration and joint resize+restore (Nov 2026)
+
+`offshore sim -sweep` on `sim/testdata` (`prod-flap.json` is from the
+production event log, small/team week synthetic), before and after:
+
+- `pool.toml`: identical frontiers on all three traces (the traces carry
+  no working sets or slot sizes, so neither the refetch factor nor the
+  joint restore+resize applies; the new `refetch` column is `-`).
+- `pool-tiers.toml -resize -estimator history`, every job with a 40G
+  working set and 25G slots (`-working-set 40G -slot-bytes 25G`): the
+  frontier is roughly unchanged at r <= 0.6 and better at high r with
+  fewer thrashing builds (team week r=0.8: $79.50 / turnaround p95
+  13m21s / 288 thrashed before, $78.52 / 12m46s / 333 after; r=0.9:
+  $78.66 / 14m32s / 753 → $76.54 / 13m43s / 311; r=1: $94.69 / 20m39s /
+  1600 → $89.55 / 20m4s / 1194; small week r=1: 783 → 457 thrashed,
+  p95 17m5s → 15m53s, +$1.27). Letting restores prune other warm slots
+  instead made team week r=0.7 $89.70 / 17m43s (3x thrashed), hence no
+  prune for restores.
+- true refetch 6 (`-refetch 6`): calibrated (6.0) versus the old fixed
+  factor 2: team week r=1 $83.66 / 18m3s / 133 thrashed versus $115.68 /
+  33m20s / 966; r=0.5 $84.32 / 10m39s versus $86.00 / 13m55s; small week
+  r=1 $34.06 / 14m43s versus $41.36 / 31m28s.
 
 ## Calibrating the simulator from real runs
 

@@ -103,3 +103,35 @@ func TestLazyRestore(t *testing.T) {
 		t.Fatalf("the lazy restore is faster than a cold build: slowdown %.2f vs %.2f", lazy.Slowdown, full.Slowdown)
 	}
 }
+
+// The simulated cache file systems refault 12 times the excess; the
+// policy learns that factor from the thrash/page_in/reclaim events
+// (Report.Refetch) and the thrashing costs 6 times the default's.
+func TestRefetchCalibratedFromEvents(t *testing.T) {
+	tr := spaced(6, Job{Repo: "r", Env: "e", Duration: 600, CPU: 2, Memory: Bytes(2 * gib), PeakMemory: Bytes(gib), WorkingSet: Bytes(40 * gib)})
+	run := func(refetch float64) Report {
+		o := opts(scheduler.Config{CostOptimization: 1})
+		o.Sizes, o.MaxLifetime, o.Estimator, o.Refetch = localSizes(), time.Hour, scheduler.NewHistory(""), refetch
+		return Run(tr, o)
+	}
+	def, high := run(0), run(12)
+	if def.Refetch != scheduler.DefaultRefetch || def.Thrashed != 6 {
+		t.Fatalf("default: calibrated %v, thrashed %d", def.Refetch, def.Thrashed)
+	}
+	if high.Refetch != 12 || high.PageInBytes != 6*def.PageInBytes || high.ThrashTime < 5*def.ThrashTime {
+		t.Fatalf("factor 12: calibrated %v, page-in %d vs %d, thrash time %v vs %v", high.Refetch, high.PageInBytes, def.PageInBytes, high.ThrashTime, def.ThrashTime)
+	}
+}
+
+// A restore onto a machine whose disk is smaller than the working set
+// grows the disk in the same step: no thrashing after the restore.
+func TestRestoreWithResize(t *testing.T) {
+	j := Job{Repo: "r", Env: "e", Duration: 900, CPU: 2, Memory: Bytes(2 * gib), PeakMemory: Bytes(gib),
+		SlotBytes: Bytes(15 * gib), SlotGrowth: Bytes(gib), WorkingSet: Bytes(30 * gib)}
+	o := opts(scheduler.Config{CostOptimization: 0.5})
+	o.Sizes, o.MaxLifetime, o.Estimator, o.Resize, o.ColdPenalty = localSizes()[:1], time.Hour, scheduler.NewHistory(""), true, 0.5
+	rep := Run(spaced(4, j), o)
+	if rep.Completed != 4 || rep.Restores != 3 || rep.Resizes < rep.Restores || rep.Thrashed > 1 {
+		t.Fatalf("want joint resize+restore: restores %d, resizes %d, thrashed %d, actions %v", rep.Restores, rep.Resizes, rep.Thrashed, rep.Actions)
+	}
+}
