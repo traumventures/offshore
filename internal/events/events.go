@@ -77,7 +77,6 @@ type Event struct {
 	Provider string               `json:"provider,omitempty"`
 	Size     string               `json:"size,omitempty"`
 	Price    float64              `json:"price_per_hour,omitempty"`
-	Spot     bool                 `json:"spot,omitempty"`
 	Capacity *scheduler.Resources `json:"capacity,omitempty"`
 	State    string               `json:"state,omitempty"` // MachineState: new provider state
 	// LatencyMs is the provider call duration of a machine action.
@@ -89,6 +88,10 @@ type Event struct {
 	Used     *scheduler.Resources `json:"used,omitempty"`     // busy cores, memory of sessions
 	Pressure *scheduler.Pressure  `json:"pressure,omitempty"` // PSI some avg10, 0..1
 	Sessions int                  `json:"sessions,omitempty"`
+
+	// Labels describe who ran a task (worktree, repo, branch, user, agent
+	// and free labels; see internal/labels). Set on task events.
+	Labels map[string]string `json:"labels,omitempty"`
 
 	// TraceID correlates the event with a distributed trace.
 	TraceID string `json:"trace_id,omitempty"`

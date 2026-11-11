@@ -39,7 +39,6 @@ func init() {
 
 // hostCompute is the part of the compute client the supervisor uses.
 type hostCompute interface {
-	GetInstance(ctx context.Context, req core.GetInstanceRequest) (core.GetInstanceResponse, error)
 	InstanceAction(ctx context.Context, req core.InstanceActionRequest) (core.InstanceActionResponse, error)
 	TerminateInstance(ctx context.Context, req core.TerminateInstanceRequest) (core.TerminateInstanceResponse, error)
 }
@@ -137,19 +136,11 @@ func (h *host) CompilerCacheStore(ctx context.Context) (blobcache.Store, error) 
 	return newObjectStore(h.objects, h.spec.Params[paramNamespace], h.spec.Params[paramBucket], prefix, blobcache.MaxTTL), nil
 }
 
-// StopSelf stops this instance, keeping its boot volume. A preemptible
-// instance cannot be stopped on OCI: it terminates instead.
+// StopSelf stops this instance, keeping its boot volume.
 func (h *host) StopSelf(ctx context.Context) error {
 	id, err := h.instanceID(ctx)
 	if err != nil {
 		return err
-	}
-	r, err := h.compute.GetInstance(ctx, core.GetInstanceRequest{InstanceId: common.String(id)})
-	if err != nil {
-		return fmt.Errorf("oci host: instance: %w", err)
-	}
-	if r.PreemptibleInstanceConfig != nil {
-		return h.terminate(ctx, id)
 	}
 	_, err = h.compute.InstanceAction(ctx, core.InstanceActionRequest{InstanceId: common.String(id), Action: core.InstanceActionActionSoftstop})
 	return err

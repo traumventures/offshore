@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"github.com/traumventures/cloudsourced/internal/labels"
 	"sync"
 	"time"
 
@@ -38,11 +39,6 @@ func (o *Orchestrator) Events() *events.Log { return o.obs.log }
 // SetEventRetention changes how long event files are kept.
 func (o *Orchestrator) SetEventRetention(d time.Duration) { o.obs.log.SetRetention(d) }
 
-// spot reports whether provider labels mark a spot (interruptible) machine.
-func spot(labels map[string]string) bool {
-	return labels["cloudsourced.spot"] == "true" || labels["cloudsourced.lifecycle"] == "spot" || labels["cloudsourced.market"] == "spot"
-}
-
 // machineEvent describes machine id from the orchestrator's state.
 func (o *Orchestrator) machineEvent(typ, id string) events.Event {
 	o.mu.Lock()
@@ -55,8 +51,7 @@ func (o *Orchestrator) machineEventLocked(typ, id string) events.Event {
 	if m, ok := o.machines[id]; ok {
 		size := m.Labels[provider.LabelSize]
 		ev.Provider, ev.Size, ev.Env = m.Provider, size, m.EnvHash
-		ev.Price = o.priceLocked(m.Provider, size, m.Labels[provider.LabelMarket])
-		ev.Spot = spot(m.Labels)
+		ev.Price = o.priceLocked(m.Provider, size)
 		if m.CPU > 0 || m.Memory > 0 {
 			ev.Capacity = &scheduler.Resources{CPU: m.CPU, Memory: m.Memory}
 		}
@@ -179,7 +174,7 @@ func (o *Orchestrator) endAcquire(ctx context.Context, span trace.Span, req Requ
 		Type: events.TaskPlaced, Task: lease.ID, Repo: req.RepoID, Env: req.EnvHash, Key: req.Key,
 		Arrival: arrival.UTC(), WaitMs: wait.Milliseconds(), Placement: kind, Reason: lease.Reason,
 		Machine: lease.MachineID, Provider: lease.Provider, Size: lease.Size, Price: lease.PricePerHour,
-		TraceID: tracing.TraceID(ctx),
+		TraceID: tracing.TraceID(ctx), Labels: labels.Clean(req.Labels),
 	}
 	need, limit := req.Need, req.Limit
 	ev.Need = &need
@@ -193,7 +188,6 @@ func (o *Orchestrator) endAcquire(ctx context.Context, span trace.Span, req Requ
 		ev.Reserve = &res
 		o.mu.Lock()
 		if m, ok := o.machines[lease.MachineID]; ok {
-			ev.Spot = spot(m.Labels)
 			ev.Capacity = &scheduler.Resources{CPU: m.CPU, Memory: m.Memory}
 		}
 		o.mu.Unlock()
@@ -221,7 +215,6 @@ func (o *Orchestrator) endAcquire(ctx context.Context, span trace.Span, req Requ
 		attribute.Float64("cloudsourced.price_per_hour", lease.PricePerHour),
 		attribute.Float64("cloudsourced.reserve.cpu", lease.Grant.Reserve.CPU),
 		attribute.Int64("cloudsourced.reserve.memory", lease.Grant.Reserve.Memory),
-		attribute.Bool("cloudsourced.spot", ev.Spot),
 	)
 	tracing.End(span, err)
 }

@@ -167,6 +167,9 @@ func TestControlPlaneRoundTrip(t *testing.T) {
 	if ms, err := r.Status(ctx); err != nil || len(ms) != 0 {
 		t.Fatalf("status: %v %v", ms, err)
 	}
+	if q, err := r.Queue(ctx); err != nil || len(q) != 0 {
+		t.Fatalf("queue: %v %v", q, err)
+	}
 }
 
 func TestUnpackRejectsTraversal(t *testing.T) {

@@ -36,6 +36,7 @@ type Repo struct {
 	Services    map[string]Service `toml:"services"`
 	Outputs     Outputs            `toml:"outputs"`
 	Editor      Editor             `toml:"editor"`
+	Prewarm     Prewarm            `toml:"prewarm"`
 
 	// Root is the absolute directory containing the configuration file.
 	Root string `toml:"-"`
@@ -154,6 +155,28 @@ type Tool struct {
 	// Ports are forwarded from 127.0.0.1 locally into the session while
 	// it runs: 8080 or "local:remote" (e.g. "3000:3001").
 	Ports []any `toml:"ports"`
+	// Split lists test subcommands that are split into a remote build and
+	// a local test run (only cargo: "test", "nextest"). Unset means both
+	// for cargo; an empty list runs tests remotely like any command.
+	Split *[]string `toml:"split"`
+}
+
+// Split test subcommands of cargo.
+const (
+	SplitCargoTest    = "test"    // cargo test
+	SplitCargoNextest = "nextest" // cargo nextest run
+)
+
+// SplitSubcommands returns the subcommands of tool split into a remote
+// build and a local test run.
+func (t Tool) SplitSubcommands(tool string) []string {
+	if t.Split != nil {
+		return *t.Split
+	}
+	if tool == "cargo" {
+		return []string{SplitCargoTest, SplitCargoNextest}
+	}
+	return nil
 }
 
 // Service is an auxiliary container started next to every machine of the
@@ -180,6 +203,15 @@ const (
 	OutputsEager = "eager"
 	OutputsFuse  = "fuse"
 )
+
+// Prewarm configures `cloudsourced prewarm` (also run by the git
+// post-checkout hook of `cloudsourced hooks install`).
+type Prewarm struct {
+	// Run is an optional warm-up command run remotely after the machine
+	// is leased and the sources are synced, e.g. ["cargo", "check",
+	// "--workspace", "--tests"]. Empty: only lease, start and sync.
+	Run []string `toml:"run"`
+}
 
 // Editor configures editor integration.
 type Editor struct {
@@ -421,6 +453,13 @@ func (r *Repo) Validate() error {
 	for name, t := range r.Tools {
 		if _, err := ParsePorts(t.Ports); err != nil {
 			errs = append(errs, fmt.Sprintf("tool.%s.ports: %v", name, err))
+		}
+		if t.Split != nil {
+			for _, s := range *t.Split {
+				if name != "cargo" || (s != SplitCargoTest && s != SplitCargoNextest) {
+					errs = append(errs, fmt.Sprintf("tool.%s.split: unsupported %q (only tool.cargo: %q, %q)", name, s, SplitCargoTest, SplitCargoNextest))
+				}
+			}
 		}
 	}
 	for name, svc := range r.Services {

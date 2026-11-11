@@ -14,6 +14,7 @@ import (
 
 	"github.com/traumventures/cloudsourced/internal/daemon"
 	"github.com/traumventures/cloudsourced/internal/events"
+	"github.com/traumventures/cloudsourced/internal/labels"
 )
 
 const whyUsage = "usage: cloudsourced why [N|last|list] [--json]  (N=1 is the most recent run)"
@@ -80,7 +81,7 @@ func printRunList(w io.Writer, runs []events.Run) {
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "N\tTIME\tMODE\tMACHINE\tEXIT\tTOTAL\tCOMMAND")
+	fmt.Fprintln(tw, "N\tTIME\tMODE\tAGENT\tMACHINE\tEXIT\tTOTAL\tCOMMAND")
 	for i, r := range runs {
 		exit := "-"
 		if r.Exit != nil {
@@ -90,7 +91,15 @@ func printRunList(w io.Writer, runs []events.Run) {
 		if machine == "" {
 			machine = "-"
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", i+1, r.Time.Local().Format("Jan 02 15:04:05"), r.Mode, machine, exit,
+		mode := r.Mode
+		if r.Labels[labels.Purpose] == labels.PurposePrewarm {
+			mode += " (prewarm)"
+		}
+		agent := r.Labels[labels.Agent]
+		if agent == "" {
+			agent = "-"
+		}
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", i+1, r.Time.Local().Format("Jan 02 15:04:05"), mode, agent, machine, exit,
 			ms(r.Timings.Total), commandLine(r))
 	}
 	tw.Flush()
@@ -105,6 +114,9 @@ func printRun(w io.Writer, r events.Run) {
 		fmt.Fprintf(w, "  directory  %s\n", r.Cwd)
 	}
 	fmt.Fprintf(w, "  ran        %s: %s\n", r.Mode, r.Why)
+	if len(r.Labels) > 0 {
+		fmt.Fprintf(w, "  labels     %s\n", labels.Format(r.Labels))
+	}
 	if r.Machine != "" {
 		m := r.Machine
 		if r.Provider != "" || r.Size != "" {
@@ -134,6 +146,9 @@ func printRun(w io.Writer, r events.Run) {
 	}
 	if r.Error != "" {
 		fmt.Fprintf(w, "  error      %s\n", r.Error)
+	}
+	if r.LostMachine != "" {
+		fmt.Fprintf(w, "  retried    machine %s was lost mid-run; ran again on %s\n", r.LostMachine, r.Machine)
 	}
 	t := r.Timings
 	if r.Mode == events.Remote {

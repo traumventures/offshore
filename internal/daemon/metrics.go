@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/traumventures/cloudsourced/internal/labels"
 	"strings"
 	"time"
 
@@ -59,8 +60,8 @@ func (m *daemonMetrics) request(op string, start time.Time, err error) {
 }
 
 func (m *daemonMetrics) run(r *events.Run) {
-	if r == nil || r.Tool == "" || len(r.Tool) > 64 {
-		return
+	if r == nil || r.Tool == "" || len(r.Tool) > 64 || r.Labels[labels.Purpose] == labels.PurposePrewarm {
+		return // prewarms are not user runs
 	}
 	m.runs.Inc(r.Tool, r.Mode)
 }

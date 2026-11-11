@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"io"
 	"net"
 	"os"
 	"testing"
@@ -83,7 +84,7 @@ func TestStreamClassifiesLostConnection(t *testing.T) {
 		raw.Close() // the machine disappears mid-run
 	})
 	st := &attemptState{}
-	_, err := stream(pc, false, st)
+	_, err := stream(pc, false, false, io.Discard, io.Discard, st)
 	var perr *proto.Error
 	if err == nil || errors.As(err, &perr) {
 		t.Fatalf("want a transport error, got %v", err)
@@ -96,7 +97,7 @@ func TestStreamClassifiesLostConnection(t *testing.T) {
 	pc = fakeSession(t, func(srv *proto.Conn, _ net.Conn) {
 		srv.SendError("exec", errors.New("out of memory"))
 	})
-	_, err = stream(pc, false, &attemptState{})
+	_, err = stream(pc, false, false, io.Discard, io.Discard, &attemptState{})
 	if !errors.As(err, &perr) {
 		t.Fatalf("want *proto.Error, got %v", err)
 	}
@@ -105,7 +106,7 @@ func TestStreamClassifiesLostConnection(t *testing.T) {
 	pc = fakeSession(t, func(srv *proto.Conn, _ net.Conn) {
 		srv.Send(proto.TExit, proto.Exit{Code: 3})
 	})
-	if ex, err := stream(pc, false, &attemptState{}); err != nil || ex.Code != 3 {
+	if ex, err := stream(pc, false, false, io.Discard, io.Discard, &attemptState{}); err != nil || ex.Code != 3 {
 		t.Fatalf("%+v %v", ex, err)
 	}
 }
@@ -127,7 +128,7 @@ func TestStreamRecordsStdinUse(t *testing.T) {
 		raw.Close()
 	})
 	st := &attemptState{}
-	stream(pc, false, st)
+	stream(pc, false, false, io.Discard, io.Discard, st)
 	if !st.stdinUsed.Load() {
 		t.Fatal("stdin use not recorded")
 	}

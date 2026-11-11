@@ -24,9 +24,9 @@ import (
 
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/daemon"
+	"github.com/traumventures/cloudsourced/internal/labels"
 	"github.com/traumventures/cloudsourced/internal/logs"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
-	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
 	"github.com/traumventures/cloudsourced/internal/proxy"
 	"github.com/traumventures/cloudsourced/internal/sandbox"
@@ -43,9 +43,15 @@ const usage = `cloudsourced - run builds on cloud machines as if they ran locall
 Usage:
   cloudsourced run [--] <tool> [args...]   run a command through the proxy
   cloudsourced shim install [tools...]     install proxies into ~/.cloudsourced/bin
+  cloudsourced shim status                 are the proxies first in PATH (exit 1 if not)
   cloudsourced shim uninstall              remove proxies
   cloudsourced status [--json]             show machines, sessions and cost today
-  cloudsourced why [N|last|list] [--json]  explain a recent run (placement, timings)
+  cloudsourced why [N|last|list] [--json]  explain a recent run (placement, timings, labels)
+  cloudsourced top [--once] [--window 10m] live view: machines, sessions, queue, cost
+  cloudsourced prewarm [--wait] [--force]  start the remote environment of this repo in the
+                                           background ([prewarm] run = [...] warms the build)
+  cloudsourced hooks install|uninstall|status
+                                           git post-checkout hook: prewarm on new worktrees
   cloudsourced metrics                     daemon, pool and machine metrics (Prometheus text)
   cloudsourced fetch <glob>...             copy outputs from the latest remote build
   cloudsourced outputs mount|unmount|status
@@ -67,8 +73,9 @@ Usage:
   cloudsourced sim [flags] <trace>...      simulate the pool policy on a build trace
   cloudsourced sim export [--since 7d] -o trace.json
                                            convert the event log into a simulator trace
-  cloudsourced report [--since 7d] [--json] cost, utilisation, queue wait, cache and
-                                           estimator accuracy from the event log
+  cloudsourced report [--since 7d] [--by agent|worktree|branch|repo|user] [--json]
+                                           cost, utilisation, queue wait, cache, estimator
+                                           accuracy and per-label groups from the event log
   cloudsourced controlplane info|client-config|health
   cloudsourced version
 
@@ -82,8 +89,11 @@ Environment:
   CLOUDSOURCED_DISABLE=1          always run locally
   CLOUDSOURCED_REQUIRE_REMOTE=1   fail instead of falling back to local execution
   CLOUDSOURCED_STDIN=always|never stdin forwarding policy
+  CLOUDSOURCED_AGENT=NAME         agent label of sessions (default: detected, see README)
+  CLOUDSOURCED_LABELS=k=v,k=v     extra session labels (status, top, why, report --by)
   CLOUDSOURCED_VERBOSE=1          print the machine used for each run
   CLOUDSOURCED_NO_RETRY=1         no second attempt when the machine is lost mid-run
+  CLOUDSOURCED_SPLIT=0            run cargo test / nextest entirely remotely (no local test run)
   CLOUDSOURCED_PORTS=8080,3000:3001  forward local ports into the session
   CLOUDSOURCED_CONFIG=FILE        client configuration (default ~/.config/cloudsourced/config.toml)
   CLOUDSOURCED_POOL_CONFIG=FILE  pool configuration (default: the client configuration file)
@@ -175,6 +185,12 @@ func run(cmd string, args []string) error {
 		return daemonCmd(args)
 	case "status":
 		return status(args)
+	case "top":
+		return topCmd(args)
+	case "prewarm":
+		return prewarmCmd(args)
+	case "hooks":
+		return hooksCmd(args)
 	case "why":
 		return why(args)
 	case "metrics":
@@ -357,11 +373,23 @@ func status(args []string) error {
 		}
 		sort.Slice(m.Status.Sessions, func(i, j int) bool { return m.Status.Sessions[i].Started < m.Status.Sessions[j].Started })
 		for _, s := range m.Status.Sessions {
-			fmt.Printf("  %s session %s: %s (%s, running %s)\n", m.ID, s.ID, strings.Join(s.Argv, " "), s.Repo,
+			where := s.Repo
+			if l := sessionLabels(s.Labels); l != "" {
+				where = l
+			}
+			fmt.Printf("  %s session %s: %s (%s, running %s)\n", m.ID, s.ID, strings.Join(s.Argv, " "), where,
 				time.Since(time.Unix(s.Started, 0)).Round(time.Second))
 		}
 	}
 	return nil
+}
+
+// sessionLabels renders the labels of a running session for `status`
+// (without the user, which is the same for all of one's sessions).
+func sessionLabels(l map[string]string) string {
+	c := labels.Clean(l)
+	delete(c, labels.User)
+	return labels.Format(c)
 }
 
 // printCost prints the estimated cost per machine size since the start of
@@ -407,13 +435,15 @@ func ShimDir() string {
 
 func shimCmd(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: cloudsourced shim install [tools...] | uninstall | path")
+		return errors.New("usage: cloudsourced shim install [tools...] | status | uninstall | path")
 	}
 	dir := ShimDir()
 	switch args[0] {
 	case "path":
 		fmt.Println(dir)
 		return nil
+	case "status":
+		return shimStatus()
 	case "install":
 		tools := args[1:]
 		if len(tools) == 0 {
@@ -444,9 +474,9 @@ func shimCmd(args []string) error {
 			}
 			fmt.Println("installed", link)
 		}
-		if !strings.Contains(":"+os.Getenv("PATH")+":", ":"+dir+":") {
-			fmt.Printf("\nAdd the shims to the front of your PATH:\n  export PATH=%q:$PATH\n", dir)
-		}
+		fmt.Println()
+		r := inspectShims(dir, os.Getenv("PATH"), self)
+		r.print(os.Stdout)
 		return nil
 	case "uninstall":
 		des, _ := os.ReadDir(dir)
@@ -461,7 +491,7 @@ func shimCmd(args []string) error {
 		}
 		return nil
 	}
-	return errors.New("usage: cloudsourced shim install [tools...] | uninstall | path")
+	return errors.New("usage: cloudsourced shim install [tools...] | status | uninstall | path")
 }
 
 func envCmd(args []string) error {
@@ -608,27 +638,14 @@ func fetch(globs []string) error {
 		return err
 	}
 	defer conn.CloseWithError(0, "")
-	_, pc, err := transport.OpenStream(ctx, conn, prep.Token, proto.KindFetch)
+	files, err := proxy.FetchOutputs(ctx, conn, prep.Token, prep.RepoID, root, globs)
 	if err != nil {
 		return err
 	}
-	if err := pc.Send(proto.TFetch, proto.Fetch{RepoID: prep.RepoID, Repo: root, Paths: globs}); err != nil {
-		return err
-	}
-	var outs proto.Outputs
-	if err := pc.Expect(proto.TOutputs, &outs); err != nil {
-		return err
-	}
-	if err := proxy.ReceiveFiles(pc, root, outs.Files); err != nil {
-		return err
-	}
-	if err := pc.Write(proto.TDone, nil); err != nil {
-		return err
-	}
-	for _, f := range outs.Files {
+	for _, f := range files {
 		fmt.Println(filepath.Join(root, f.Path))
 	}
-	if len(outs.Files) == 0 {
+	if len(files) == 0 {
 		return errors.New("no matching outputs on the machine")
 	}
 	return nil

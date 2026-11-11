@@ -31,32 +31,21 @@ func (e svcErr) GetMessage() string      { return e.msg }
 func (e svcErr) GetCode() string         { return e.code }
 func (e svcErr) GetOpcRequestID() string { return "req" }
 
-func spotSpec() provider.MachineSpec {
+func shapedSpec() provider.MachineSpec {
 	return provider.MachineSpec{ID: "m1", Size: "x4", CPU: 4, Memory: 16 << 30,
-		InstanceTypes: []string{"VM.Standard.E5.Flex", "VM.Standard.E4.Flex"}, Spot: true, SpotFallback: true}
+		InstanceTypes: []string{"VM.Standard.E5.Flex", "VM.Standard.E4.Flex"}}
 }
 
-func plan(s provider.MachineSpec) string {
-	var out []string
-	for _, a := range launchPlan(s) {
-		out = append(out, a.String())
-	}
-	return strings.Join(out, ", ")
-}
+func plan(s provider.MachineSpec) string { return strings.Join(launchPlan(s), ", ") }
 
 func TestLaunchPlan(t *testing.T) {
-	s := spotSpec()
-	if g, w := plan(s), "VM.Standard.E5.Flex (spot), VM.Standard.E4.Flex (spot), VM.Standard.E5.Flex (on-demand), VM.Standard.E4.Flex (on-demand)"; g != w {
+	if g, w := plan(shapedSpec()), "VM.Standard.E5.Flex, VM.Standard.E4.Flex"; g != w {
 		t.Errorf("got %s\nwant %s", g, w)
 	}
-	s.SpotFallback = false
-	if g := plan(s); g != "VM.Standard.E5.Flex (spot), VM.Standard.E4.Flex (spot)" {
-		t.Errorf("no fallback: %s", g)
-	}
-	if g := plan(provider.MachineSpec{Arch: "arm64"}); g != "VM.Standard.A1.Flex (on-demand)" {
+	if g := plan(provider.MachineSpec{Arch: "arm64"}); g != "VM.Standard.A1.Flex" {
 		t.Errorf("arm64 default: %s", g)
 	}
-	if g := plan(provider.MachineSpec{}); g != "VM.Standard.E5.Flex (on-demand)" {
+	if g := plan(provider.MachineSpec{}); g != "VM.Standard.E5.Flex" {
 		t.Errorf("amd64 default: %s", g)
 	}
 }
@@ -82,19 +71,21 @@ func TestLaunchFallsBackOnCapacity(t *testing.T) {
 	var tried []string
 	run := func(_ context.Context, req core.LaunchInstanceRequest) (core.LaunchInstanceResponse, error) {
 		d := req.LaunchInstanceDetails
-		a := *d.Shape + "/" + labels(d.FreeformTags)[provider.LabelMarket]
-		tried = append(tried, a)
+		tried = append(tried, *d.Shape)
 		if d.PreemptibleInstanceConfig != nil {
+			t.Error("no preemptible instances")
+		}
+		if *d.Shape == "VM.Standard.E5.Flex" {
 			return core.LaunchInstanceResponse{}, svcErr{500, "InternalError", "Out of host capacity."}
 		}
 		return core.LaunchInstanceResponse{Instance: core.Instance{Id: common.String("i1")}}, nil
 	}
 	base := core.LaunchInstanceDetails{FreeformTags: map[string]string{"project": "cloudsourced"}}
-	inst, a, failed, err := launch(context.Background(), run, base, spotSpec())
-	if err != nil || *inst.Id != "i1" || a.spot || a.shape != "VM.Standard.E5.Flex" || len(failed) != 2 {
-		t.Fatalf("inst %v attempt %v failed %v err %v", inst.Id, a, failed, err)
+	inst, shape, failed, err := launch(context.Background(), run, base, shapedSpec())
+	if err != nil || *inst.Id != "i1" || shape != "VM.Standard.E4.Flex" || len(failed) != 1 {
+		t.Fatalf("inst %v shape %v failed %v err %v", inst.Id, shape, failed, err)
 	}
-	if strings.Join(tried, ",") != "VM.Standard.E5.Flex/spot,VM.Standard.E4.Flex/spot,VM.Standard.E5.Flex/on-demand" {
+	if strings.Join(tried, ",") != "VM.Standard.E5.Flex,VM.Standard.E4.Flex" {
 		t.Errorf("tried %v", tried)
 	}
 	if len(base.FreeformTags) != 1 {
@@ -105,24 +96,8 @@ func TestLaunchFallsBackOnCapacity(t *testing.T) {
 	bad := func(context.Context, core.LaunchInstanceRequest) (core.LaunchInstanceResponse, error) {
 		return core.LaunchInstanceResponse{}, svcErr{400, "InvalidParameter", "image not found"}
 	}
-	if _, _, _, err := launch(context.Background(), bad, base, spotSpec()); err == nil || strings.Contains(err.Error(), "no capacity") {
+	if _, _, _, err := launch(context.Background(), bad, base, shapedSpec()); err == nil || strings.Contains(err.Error(), "no capacity") {
 		t.Errorf("want the configuration error, got %v", err)
-	}
-}
-
-func TestPreemptibleAttempt(t *testing.T) {
-	var d core.LaunchInstanceDetails
-	applyAttempt(&d, attempt{shape: "VM.Standard.A1.Flex", spot: true}, spotSpec())
-	pa, ok := d.PreemptibleInstanceConfig.PreemptionAction.(core.TerminatePreemptionAction)
-	if !ok || pa.PreserveBootVolume == nil || *pa.PreserveBootVolume {
-		t.Errorf("preemption action %+v", d.PreemptibleInstanceConfig)
-	}
-	if labels(d.FreeformTags)[provider.LabelSpot] != "true" {
-		t.Errorf("tags %v", d.FreeformTags)
-	}
-	applyAttempt(&d, attempt{shape: "VM.Standard.A1.Flex"}, spotSpec())
-	if d.PreemptibleInstanceConfig != nil || labels(d.FreeformTags)[provider.LabelSpot] != "false" {
-		t.Error("an on-demand attempt must clear the preemptible config")
 	}
 }
 
@@ -149,7 +124,7 @@ func TestToMachine(t *testing.T) {
 	}
 	var d core.LaunchInstanceDetails
 	d.FreeformTags = tags
-	applyAttempt(&d, attempt{shape: "VM.Standard.E5.Flex"}, spec)
+	applyShape(&d, "VM.Standard.E5.Flex", spec)
 	tags = d.FreeformTags
 	if len(tags) > 10 {
 		t.Errorf("%d tags, OCI allows 10", len(tags))
@@ -167,7 +142,7 @@ func TestToMachine(t *testing.T) {
 	m := toMachine(i, "203.0.113.7")
 	if m.ID != "m1" || m.State != provider.Running || m.Addr != "203.0.113.7:7443" || m.EnvHash != "eh" || m.CPU != 4 ||
 		m.Memory != 8<<30 || !m.ExpiresAt.Equal(spec.ExpiresAt) || m.Labels[provider.LabelPool] != "pool" || m.Labels["instance-id"] != "ocid1.instance" ||
-		m.Labels[provider.LabelSize] != "x4" || m.Labels[provider.LabelMarket] != "on-demand" {
+		m.Labels[provider.LabelSize] != "x4" {
 		t.Errorf("machine %+v", m)
 	}
 	i.LifecycleState = core.InstanceLifecycleStateStopped
@@ -175,9 +150,8 @@ func TestToMachine(t *testing.T) {
 		t.Errorf("stopped: %+v", m)
 	}
 	i.LifecycleState = core.InstanceLifecycleStateTerminating
-	i.PreemptibleInstanceConfig = &core.PreemptibleInstanceConfigDetails{PreemptionAction: core.TerminatePreemptionAction{}}
-	if m := toMachine(i, ""); m.State != provider.Failed || m.Labels["interrupted"] != "spot" || m.Labels[provider.LabelSpot] != "true" {
-		t.Errorf("preempted: %+v", m)
+	if m := toMachine(i, ""); m.State != provider.Failed {
+		t.Errorf("terminating: %+v", m)
 	}
 	i.LifecycleState = core.InstanceLifecycleStateTerminated
 	if selected(i, "", "") {
@@ -352,16 +326,7 @@ func TestObjectStore(t *testing.T) {
 }
 
 type fakeHostCompute struct {
-	preemptible bool
-	actions     []string
-}
-
-func (f *fakeHostCompute) GetInstance(context.Context, core.GetInstanceRequest) (core.GetInstanceResponse, error) {
-	i := core.Instance{}
-	if f.preemptible {
-		i.PreemptibleInstanceConfig = &core.PreemptibleInstanceConfigDetails{}
-	}
-	return core.GetInstanceResponse{Instance: i}, nil
+	actions []string
 }
 
 func (f *fakeHostCompute) InstanceAction(_ context.Context, r core.InstanceActionRequest) (core.InstanceActionResponse, error) {
@@ -407,11 +372,7 @@ func TestHost(t *testing.T) {
 	if err := h.StopSelf(ctx); err != nil || strings.Join(c.actions, ",") != "SOFTSTOP" {
 		t.Errorf("stop: %v %v", c.actions, err)
 	}
-	c.preemptible, c.actions = true, nil
-	if err := h.StopSelf(ctx); err != nil || strings.Join(c.actions, ",") != "TERMINATE" {
-		t.Errorf("preemptible stop: %v %v", c.actions, err)
-	}
-	c.preemptible, c.actions = false, nil
+	c.actions = nil
 	if err := h.TerminateSelf(ctx); err != nil || strings.Join(c.actions, ",") != "TERMINATE" {
 		t.Errorf("terminate: %v %v", c.actions, err)
 	}

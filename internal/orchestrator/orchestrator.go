@@ -23,6 +23,7 @@ import (
 
 	"github.com/traumventures/cloudsourced/internal/auth"
 	"github.com/traumventures/cloudsourced/internal/events"
+	"github.com/traumventures/cloudsourced/internal/labels"
 	"github.com/traumventures/cloudsourced/internal/logs"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/provider"
@@ -77,6 +78,20 @@ type Request struct {
 	// amd64). Machines for the environment are only created from sizes of
 	// this architecture.
 	Arch string `json:",omitempty"`
+	// Labels describe who runs the session (worktree, branch, user, agent
+	// and free labels, see internal/labels). They are recorded in the
+	// event log and shown in the queue; they never affect placement.
+	Labels map[string]string `json:",omitempty"`
+}
+
+// QueuedTask is a request waiting for capacity (`cloudsourced top`).
+type QueuedTask struct {
+	ID     string              `json:"id"`
+	Since  time.Time           `json:"since"`
+	RepoID string              `json:"repo_id,omitempty"`
+	Key    string              `json:"key,omitempty"`
+	Need   scheduler.Resources `json:"need"`
+	Labels map[string]string   `json:"labels,omitempty"`
 }
 
 // buildTTL returns the effective build TTL of a request.
@@ -263,6 +278,7 @@ type Orchestrator struct {
 	creating   map[string]creation       // machine id -> creation
 	queue      map[string]scheduler.Task // waiting tasks
 	queued     map[string]repoParams     // task id -> repository parameters
+	waiting    map[string]QueuedTask     // task id -> request shown in Queue
 	envParams  map[string]repoParams     // env hash -> parameters of its last request
 	recentEnvs map[string]time.Time      // env hash -> last use (warm pool)
 	images     map[string]string         // env hash -> image
@@ -317,7 +333,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		cfg: cfg, provs: provs, stateDir: stateDir, log: log, master: master, signer: master.Signer(),
 		policy:   scheduler.Default{Cfg: cfg.Policy},
 		machines: map[string]*Machine{}, creating: map[string]creation{}, queue: map[string]scheduler.Task{},
-		queued: map[string]repoParams{}, envParams: map[string]repoParams{},
+		queued: map[string]repoParams{}, waiting: map[string]QueuedTask{}, envParams: map[string]repoParams{},
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
 		ProbeFunc: Probe, Clock: clk,
 	}
@@ -546,10 +562,6 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		if st := r.status; st != nil && st.InterruptAt > 0 && (m.Status == nil || m.Status.InterruptAt == 0) {
-			o.log.Warn("machine interruption notice", "id", r.id, "reason", st.DrainReason,
-				"deadline", time.Unix(st.InterruptAt, 0).UTC().Format(time.RFC3339), "sessions", len(st.Sessions))
-		}
 		if r.status == nil && m.Status != nil && m.State == provider.Running && time.Since(m.StatusAt) < statusGrace {
 			// A single failed probe (e.g. a timeout on a loaded host) does
 			// not make a running machine unschedulable: keep the last
@@ -740,12 +752,6 @@ func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
 			if st.IdleSince > 0 {
 				sm.IdleSince = time.Unix(st.IdleSince, 0)
 			}
-			// A machine with an interruption notice (spot) drains and is
-			// not undrained for new work: capacity is planned elsewhere.
-			if st.InterruptAt > 0 {
-				sm.Interrupted, sm.Draining = true, true
-			}
-			sm.AtRisk = st.AtRisk
 		}
 		for lid, p := range m.pending {
 			if now.After(p.expires) {
@@ -826,6 +832,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 	o.services[req.EnvHash] = req.Services
 	o.envParams[req.EnvHash] = req.params()
 	o.queued[task.ID] = req.params()
+	o.waiting[task.ID] = QueuedTask{ID: task.ID, Since: time.Now(), RepoID: req.RepoID, Key: req.Key, Need: req.Need, Labels: labels.Clean(req.Labels)}
 	o.saveRecentLocked()
 	stale := time.Since(o.refreshed) > 30*time.Second
 	o.mu.Unlock()
@@ -838,6 +845,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 		o.mu.Lock()
 		delete(o.queue, task.ID)
 		delete(o.queued, task.ID)
+		delete(o.waiting, task.ID)
 		o.mu.Unlock()
 	}()
 	deadline := now.Add(o.cfg.QueueTimeout)
@@ -854,7 +862,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			lease := Lease{
 				ID: task.ID, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: o.sessionToken(m.Machine, task.ID),
 				Grant: pl.Grant, MemoryOvercommit: o.cfg.Policy.MemoryOvercommit,
-				Provider: m.Provider, Size: size, PricePerHour: o.priceLocked(m.Provider, size, m.Labels[provider.LabelMarket]), Reason: pl.Reason,
+				Provider: m.Provider, Size: size, PricePerHour: o.priceLocked(m.Provider, size), Reason: pl.Reason,
 				BuildTTL: req.buildTTL(o.cfg.MaxLifetime),
 			}
 			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: o.now().Add(2 * time.Minute)}
@@ -1109,7 +1117,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	provision, _ := json.Marshal(cfg.Provision)
 	spec := provider.MachineSpec{
 		ID: id, Owner: cfg.Owner, Image: image, EnvHash: envHash, Size: size.Name,
-		Arch: size.ArchOf(), InstanceTypes: size.InstanceTypes, Spot: size.Spot, SpotFallback: size.SpotFallback,
+		Arch: size.ArchOf(), InstanceTypes: size.InstanceTypes,
 		CPU: size.Capacity.CPU, Memory: size.Capacity.Memory, Swap: cfg.Swap,
 		ExpiresAt: expires, Finger: ident.Fingerprint, DepsTTL: params.DepsTTL,
 		IdleStop: cfg.Policy.IdleStop, Services: services,
@@ -1291,7 +1299,7 @@ func (o *Orchestrator) Snapshot() []Machine {
 		c := *m
 		c.pending = nil
 		c.Uptime = append([]Span(nil), m.Uptime...)
-		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize], m.Labels[provider.LabelMarket])
+		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize])
 		out = append(out, c)
 	}
 	kept := o.removed[:0]
@@ -1302,7 +1310,7 @@ func (o *Orchestrator) Snapshot() []Machine {
 		kept = append(kept, m)
 		c := *m
 		c.Uptime = append([]Span(nil), m.Uptime...)
-		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize], m.Labels[provider.LabelMarket])
+		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize])
 		out = append(out, c)
 	}
 	o.removed = kept
@@ -1310,15 +1318,10 @@ func (o *Orchestrator) Snapshot() []Machine {
 	return out
 }
 
-// priceLocked returns the hourly price of a pool size (0: unknown). A
-// machine of a spot size that fell back to on-demand capacity (market)
-// costs the on-demand price.
-func (o *Orchestrator) priceLocked(prov, size, market string) float64 {
+// priceLocked returns the hourly price of a pool size (0: unknown).
+func (o *Orchestrator) priceLocked(prov, size string) float64 {
 	for _, sz := range o.cfg.Sizes {
 		if sz.Name == size && (sz.Provider == prov || sz.Provider == "") {
-			if sz.Spot && market == provider.MarketOnDemand && sz.OnDemandPrice > 0 {
-				return sz.OnDemandPrice
-			}
 			return sz.PricePerHour
 		}
 	}
@@ -1469,4 +1472,19 @@ func (o *Orchestrator) DestroyAll(ctx context.Context) error {
 	o.saveRecentLocked()
 	o.mu.Unlock()
 	return nil
+}
+
+// Queue returns the requests currently waiting for capacity, oldest first.
+// A request counts from its arrival, including placement on cached state.
+func (o *Orchestrator) Queue() []QueuedTask {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := make([]QueuedTask, 0, len(o.waiting))
+	for id, t := range o.waiting {
+		if _, queued := o.queue[id]; queued {
+			out = append(out, t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Since.Before(out[j].Since) })
+	return out
 }

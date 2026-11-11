@@ -51,7 +51,7 @@ import (
 var stackTemplate string
 
 // templateVersion must match the TemplateVersion output of stack.yaml.
-const templateVersion = "6"
+const templateVersion = "7"
 
 const (
 	serverPort = 7443
@@ -73,7 +73,6 @@ type EC2 struct {
 	docker     []string
 	binaries   map[string]string // server binary per architecture
 	subnet     string
-	spotMax    string // optional spot max price (USD per hour)
 	cfg        aws.Config
 	ec2        *ec2.Client
 	ecr        *ecr.Client
@@ -106,7 +105,6 @@ func open(opts map[string]any) (provider.Provider, error) {
 	e.amis[archAMD64] = provider.String(opts, "ami", "")
 	e.amis[archARM64] = provider.String(opts, "ami_arm64", "")
 	e.subnet = provider.String(opts, "subnet", "")
-	e.spotMax = provider.String(opts, "spot_max_price", "")
 	if v := provider.StringList(opts["docker_command"]); len(v) > 0 {
 		e.docker = v
 	}
@@ -453,8 +451,7 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 		MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
 		UserData:           aws.String(base64.StdEncoding.EncodeToString([]byte(ud))),
 		IamInstanceProfile: &ec2types.IamInstanceProfileSpecification{Arn: aws.String(in.profile)},
-		// Shutting down at expiry terminates an on-demand instance (spot:
-		// see applyAttempt).
+		// Shutting down at expiry terminates the instance.
 		InstanceInitiatedShutdownBehavior: ec2types.ShutdownBehaviorTerminate,
 		MetadataOptions: &ec2types.InstanceMetadataOptionsRequest{
 			HttpTokens: ec2types.HttpTokensStateRequired,
@@ -485,16 +482,13 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	if err := e.putSecrets(ctx, spec); err != nil {
 		return provider.Machine{}, err
 	}
-	out, how, failed, err := launch(ctx, e.ec2.RunInstances, input, spec, e.spotMax, time.Now())
+	out, instanceType, failed, err := launch(ctx, e.ec2.RunInstances, input, spec)
 	if err != nil {
 		e.deleteSecrets(context.Background(), spec.ID)
 		return provider.Machine{}, err
 	}
-	if len(failed) > 0 && how.spot {
-		slog.Info("aws-ec2: launched on a later spot instance type", "machine", spec.ID, "size", spec.Size, "instance_type", how.instanceType, "failed", strings.Join(failed, "; "))
-	}
-	if spec.Spot && !how.spot {
-		slog.Warn("aws-ec2: no spot capacity, launched on-demand", "machine", spec.ID, "size", spec.Size, "instance_type", how.instanceType, "spot_attempts", strings.Join(failed, "; "))
+	if len(failed) > 0 {
+		slog.Info("aws-ec2: launched on a later instance type", "machine", spec.ID, "size", spec.Size, "instance_type", instanceType, "failed", strings.Join(failed, "; "))
 	}
 	id := aws.ToString(out.Instances[0].InstanceId)
 	if err := e.waitRunning(ctx, id); err != nil {
@@ -573,9 +567,6 @@ func toMachine(i ec2types.Instance) provider.Machine {
 	m := provider.Machine{ID: l[provider.LabelMachine], EnvHash: l[provider.LabelEnvHash], Labels: l, Fingerprint: l[provider.LabelFinger]}
 	l["instance-id"] = aws.ToString(i.InstanceId)
 	l["instance-type"] = string(i.InstanceType)
-	if i.InstanceLifecycle == ec2types.InstanceLifecycleTypeSpot {
-		l[provider.LabelMarket], l[provider.LabelSpot] = provider.MarketSpot, "true"
-	}
 	m.CPU, _ = strconv.ParseFloat(l[provider.LabelCPU], 64)
 	m.Memory, _ = strconv.ParseInt(l[provider.LabelMemory], 10, 64)
 	if n, err := strconv.ParseInt(l[provider.LabelCreatedAt], 10, 64); err == nil {
@@ -591,12 +582,6 @@ func toMachine(i ec2types.Instance) provider.Machine {
 		m.State = provider.Starting
 	case ec2types.InstanceStateNameStopping, ec2types.InstanceStateNameStopped:
 		m.State = provider.Stopped
-		if spotInterrupted(i) {
-			// Only EC2 can restart it: the orchestrator destroys it and
-			// places the work elsewhere.
-			m.State = provider.Failed
-			l["interrupted"] = "spot"
-		}
 	default:
 		m.State = provider.Failed
 	}
@@ -670,33 +655,17 @@ func (e *EC2) Destroy(ctx context.Context, id string) error {
 	return e.deleteSecrets(ctx, id)
 }
 
-// terminate cancels the spot requests of instances, so that persistent
-// requests do not launch replacements, and terminates the instances.
+// terminate terminates instances.
 func (e *EC2) terminate(ctx context.Context, is []ec2types.Instance) error {
-	ids, reqs := instanceIDs(is)
-	if len(reqs) > 0 {
-		_, err := e.ec2.CancelSpotInstanceRequests(ctx, &ec2.CancelSpotInstanceRequestsInput{SpotInstanceRequestIds: reqs})
-		if err != nil && !strings.Contains(err.Error(), "InvalidSpotInstanceRequestID.NotFound") {
-			return fmt.Errorf("aws-ec2: cancel spot request: %w", err)
-		}
-	}
-	if len(ids) > 0 {
-		if _, err := e.ec2.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: ids}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// instanceIDs returns the instance and spot request IDs of instances.
-func instanceIDs(is []ec2types.Instance) (ids, spotRequests []string) {
+	var ids []string
 	for _, i := range is {
 		ids = append(ids, aws.ToString(i.InstanceId))
-		if r := aws.ToString(i.SpotInstanceRequestId); r != "" {
-			spotRequests = append(spotRequests, r)
-		}
 	}
-	return ids, spotRequests
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := e.ec2.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: ids})
+	return err
 }
 
 // List returns the machines of owner.

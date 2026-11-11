@@ -37,7 +37,7 @@ type PoolConfig struct {
 var Backends = []string{"local-docker", "aws-ec2", "oci"}
 
 // cloudBackend reports whether a provider type launches cloud instances
-// with instance types (shapes) and spot (preemptible) capacity.
+// with instance types (shapes).
 func cloudBackend(t string) bool { return t == "aws-ec2" || t == "oci" }
 
 // Pool configures machine provisioning and scaling.
@@ -148,27 +148,17 @@ type Size struct {
 	Name         string  `toml:"name"`
 	CPU          float64 `toml:"cpu"`
 	Memory       string  `toml:"memory"`
-	PricePerHour float64 `toml:"price_per_hour"` // on-demand price
+	PricePerHour float64 `toml:"price_per_hour"` // hourly price
 	// Arch is the machine architecture, "amd64" (default) or "arm64".
 	// Environments are built per architecture; a repository pins its
 	// architecture with resources.arch, and only sizes of that
 	// architecture are created for it.
 	Arch string `toml:"arch"`
 	// InstanceTypes are the provider machine types that provide this size,
-	// tried in order (aws-ec2 instance types, oci shapes; default: the
-	// size name on aws-ec2, a flexible shape of the architecture on oci).
+	// tried in order: a capacity error on one type moves on to the next
+	// (aws-ec2 instance types, oci shapes; default: the size name on
+	// aws-ec2, a flexible shape of the architecture on oci).
 	InstanceTypes []string `toml:"instance_types"`
-	// Spot launches machines of this size as spot instances (aws-ec2) or
-	// preemptible instances (oci).
-	// Spot machines can be interrupted with two minutes' notice: they
-	// drain and running sessions get until the deadline.
-	Spot bool `toml:"spot"`
-	// SpotDiscount is the expected spot discount on price_per_hour used for
-	// sizing and cost estimates (0..1, default 0.5 for spot sizes).
-	SpotDiscount *float64 `toml:"spot_discount"`
-	// SpotFallback launches on-demand when no spot capacity is available
-	// for any instance type (default true).
-	SpotFallback *bool `toml:"spot_fallback"`
 }
 
 // Machine architectures of sizes.
@@ -176,9 +166,6 @@ const (
 	ArchAMD64 = "amd64"
 	ArchARM64 = "arm64"
 )
-
-// DefaultSpotDiscount is the assumed spot discount when none is configured.
-const DefaultSpotDiscount = 0.5
 
 // MachineArch maps a repository architecture (resources.arch: "x86_64",
 // "aarch64") or a size architecture to the size naming ("amd64",
@@ -192,29 +179,6 @@ func MachineArch(a string) string {
 	}
 	return a
 }
-
-// EffectivePrice is the expected hourly price: the on-demand price, less
-// the spot discount for spot sizes.
-func (s Size) EffectivePrice() float64 {
-	if !s.Spot {
-		return s.PricePerHour
-	}
-	return s.PricePerHour * (1 - s.Discount())
-}
-
-// Discount returns the spot discount (0 for on-demand sizes).
-func (s Size) Discount() float64 {
-	if !s.Spot {
-		return 0
-	}
-	if s.SpotDiscount != nil {
-		return *s.SpotDiscount
-	}
-	return DefaultSpotDiscount
-}
-
-// Fallback reports whether a spot size falls back to on-demand.
-func (s Size) Fallback() bool { return s.SpotFallback == nil || *s.SpotFallback }
 
 // ProvisionStep is a machine level provisioning command, executed once per
 // machine before it accepts sessions.
@@ -452,12 +416,9 @@ func (u *PoolConfig) Validate() error {
 		if sz.Arch != "" && sz.Arch != ArchAMD64 && sz.Arch != ArchARM64 {
 			errs = append(errs, fmt.Sprintf("pool.size[%d].arch: unsupported %q (amd64, arm64)", i, sz.Arch))
 		}
-		if d := sz.SpotDiscount; d != nil && (*d < 0 || *d >= 1) {
-			errs = append(errs, fmt.Sprintf("pool.size[%d].spot_discount: must be in [0, 1)", i))
-		}
 		if b := u.ProviderType(sz.Provider); b != "" && !cloudBackend(b) {
-			if sz.Spot || len(sz.InstanceTypes) > 0 || sz.SpotDiscount != nil || sz.SpotFallback != nil {
-				errs = append(errs, fmt.Sprintf("pool.size[%d]: spot, spot_discount, spot_fallback and instance_types need an aws-ec2 or oci provider (%s is %s)", i, sz.Provider, b))
+			if len(sz.InstanceTypes) > 0 {
+				errs = append(errs, fmt.Sprintf("pool.size[%d]: instance_types needs an aws-ec2 or oci provider (%s is %s)", i, sz.Provider, b))
 			}
 			if a := MachineArch(sz.Arch); b == "local-docker" && a != MachineArch(runtime.GOARCH) {
 				errs = append(errs, fmt.Sprintf("pool.size[%d].arch: local-docker machines run on this host (%s), not %s", i, runtime.GOARCH, a))

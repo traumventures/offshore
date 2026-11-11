@@ -46,6 +46,8 @@ type Run struct {
 	// LostMachine is the machine of a first attempt that was lost while
 	// the command ran; the run was repeated once on Machine.
 	LostMachine string `json:"lost_machine,omitempty"`
+	// Labels describe who ran the command (worktree, branch, user, agent).
+	Labels map[string]string `json:"labels,omitempty"`
 
 	Machine   string  `json:"machine,omitempty"`
 	Provider  string  `json:"provider,omitempty"`
