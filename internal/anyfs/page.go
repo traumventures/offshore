@@ -114,6 +114,24 @@ func (p *Packer) AddSmall(n *Node, b []byte) error {
 	return nil
 }
 
+// AddAlone gives a small file's content a page of its own (key = content
+// digest: the same file content is the same page wherever it is
+// scanned) and sets n.Pages, n.Size and n.Digest.
+func (p *Packer) AddAlone(n *Node, b []byte) error {
+	n.Size = int64(len(b))
+	n.Digest = string(KeyOf(b))
+	n.Pages = nil
+	if len(b) == 0 {
+		return nil
+	}
+	k, err := p.emit(append([]byte(nil), b...))
+	if err != nil {
+		return err
+	}
+	n.Pages = []PageRef{{Key: k, Len: n.Size}}
+	return nil
+}
+
 // AddLarge splits the content read from r into pages and sets n.Pages,
 // n.Size and n.Digest.
 func (p *Packer) AddLarge(n *Node, r io.Reader) error {
