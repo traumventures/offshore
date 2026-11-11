@@ -12,10 +12,6 @@
 // the image pipeline before an instance is launched.
 //
 // Differences to aws-ec2, by OCI's design:
-//   - spot sizes launch preemptible instances. OCI terminates them on
-//     preemption (there is no stop behaviour), so they cannot idle-stop
-//     either: stopping one terminates it. There is no advance notice the
-//     supervisor could drain on.
 //   - an OS shutdown only stops an OCI instance: at expiry the supervisor
 //     terminates its instance through the API (supervisor.SelfTerminator).
 //   - there is no reaper function: expired machines terminate themselves,
@@ -542,7 +538,7 @@ func machineTags(spec provider.MachineSpec, arch string, now time.Time) (map[str
 		setLabel(t, kv[0], kv[1])
 	}
 	for k, v := range t {
-		if len(v) > maxTagSize-32 { // room for market and spot
+		if len(v) > maxTagSize {
 			return nil, fmt.Errorf("oci: tag %s too long (%d characters)", k, len(v))
 		}
 	}
@@ -601,16 +597,13 @@ func (o *OCI) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	if err := o.putSecrets(ctx, in, spec); err != nil {
 		return provider.Machine{}, err
 	}
-	inst, how, failed, err := launch(ctx, o.compute.LaunchInstance, base, spec)
+	inst, shape, failed, err := launch(ctx, o.compute.LaunchInstance, base, spec)
 	if err != nil {
 		o.deleteSecrets(context.Background(), in, spec.ID)
 		return provider.Machine{}, err
 	}
-	if len(failed) > 0 && how.spot {
-		o.log.Info("oci: launched on a later preemptible shape", "machine", spec.ID, "size", spec.Size, "shape", how.shape, "failed", strings.Join(failed, "; "))
-	}
-	if spec.Spot && !how.spot {
-		o.log.Warn("oci: no preemptible capacity, launched on regular capacity", "machine", spec.ID, "size", spec.Size, "shape", how.shape, "spot_attempts", strings.Join(failed, "; "))
+	if len(failed) > 0 {
+		o.log.Info("oci: launched on a later shape", "machine", spec.ID, "size", spec.Size, "shape", shape, "failed", strings.Join(failed, "; "))
 	}
 	if err := o.waitState(ctx, *inst.Id, 10*time.Minute, core.InstanceLifecycleStateRunning); err != nil {
 		o.terminate(context.Background(), *inst.Id)
@@ -708,9 +701,6 @@ func toMachine(i core.Instance, publicIP string) provider.Machine {
 	m := provider.Machine{ID: l[provider.LabelMachine], EnvHash: l[provider.LabelEnvHash], Labels: l, Fingerprint: l[provider.LabelFinger]}
 	l["instance-id"] = deref(i.Id)
 	l["shape"] = deref(i.Shape)
-	if i.PreemptibleInstanceConfig != nil {
-		l[provider.LabelMarket], l[provider.LabelSpot] = provider.MarketSpot, "true"
-	}
 	m.CPU, _ = strconv.ParseFloat(l[provider.LabelCPU], 64)
 	m.Memory, _ = strconv.ParseInt(l[provider.LabelMemory], 10, 64)
 	if n, err := strconv.ParseInt(l[provider.LabelCreatedAt], 10, 64); err == nil {
@@ -728,9 +718,6 @@ func toMachine(i core.Instance, publicIP string) provider.Machine {
 		m.State = provider.Stopped
 	default:
 		m.State = provider.Failed
-		if i.PreemptibleInstanceConfig != nil && i.LifecycleState == core.InstanceLifecycleStateTerminating {
-			l["interrupted"] = "spot"
-		}
 	}
 	if m.State == provider.Running && publicIP != "" {
 		m.Addr = publicIP + ":" + strconv.Itoa(serverPort)
@@ -814,8 +801,7 @@ func (o *OCI) Start(ctx context.Context, id string) (provider.Machine, error) {
 }
 
 // Stop stops the instance (ACPI shutdown, then power off); its boot
-// volume, and with it the caches, is kept. Preemptible instances cannot
-// be stopped on OCI: stopping one terminates it.
+// volume, and with it the caches, is kept.
 func (o *OCI) Stop(ctx context.Context, id string) error {
 	if err := o.init(); err != nil {
 		return err
@@ -823,10 +809,6 @@ func (o *OCI) Stop(ctx context.Context, id string) error {
 	i, err := o.byInstance(ctx, id)
 	if err != nil {
 		return err
-	}
-	if i.PreemptibleInstanceConfig != nil {
-		o.log.Info("oci: preemptible machines cannot stop, terminating it", "machine", id)
-		return o.Destroy(ctx, id)
 	}
 	_, err = o.compute.InstanceAction(ctx, core.InstanceActionRequest{InstanceId: i.Id, Action: core.InstanceActionActionSoftstop})
 	if err != nil {

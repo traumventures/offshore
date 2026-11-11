@@ -58,7 +58,7 @@ func TestOCILimits(t *testing.T) {
 		for _, v := range r.Items {
 			n := *v.Name
 			if !(strings.Contains(n, "standard-e5") || strings.Contains(n, "standard-e4") || strings.Contains(n, "standard-a1") ||
-				strings.Contains(n, "standard-e3") || strings.Contains(n, "preemptible") || strings.Contains(n, "vm-standard2")) {
+				strings.Contains(n, "standard-e3") || strings.Contains(n, "vm-standard2")) {
 				continue
 			}
 			ad := ""
@@ -160,7 +160,7 @@ func TestOCISmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
-	t.Logf("status probe of %s at %s: ready=%v labels shape=%s market=%s", id, m.Addr, st.Ready, m.Labels["shape"], m.Labels["cloudsourced.market"])
+	t.Logf("status probe of %s at %s: ready=%v labels shape=%s", id, m.Addr, st.Ready, m.Labels["shape"])
 }
 
 func TestOCICleanup(t *testing.T) {

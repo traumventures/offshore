@@ -22,6 +22,7 @@ import (
 
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/events"
+	"github.com/traumventures/cloudsourced/internal/labels"
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 	"github.com/traumventures/cloudsourced/internal/pool"
@@ -208,7 +209,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 
 // Request is a daemon RPC request.
 type Request struct {
-	Op    string   `json:"op"` // prepare | release | sync | status | metrics | down | reconcile | shutdown | ping | outputs-mount | outputs-ensure | outputs-unmount | outputs-status | outputs-hint
+	Op    string   `json:"op"` // prepare | release | sync | status | queue | metrics | down | reconcile | shutdown | ping | outputs-mount | outputs-ensure | outputs-unmount | outputs-status | outputs-hint
 	Root  string   `json:"root,omitempty"`
 	Cwd   string   `json:"cwd,omitempty"`
 	Tool  string   `json:"tool,omitempty"`
@@ -224,6 +225,9 @@ type Request struct {
 	Run *events.Run `json:"run,omitempty"`
 	// TraceParent continues the caller's trace (W3C traceparent).
 	TraceParent string `json:"traceparent,omitempty"`
+	// Labels describe who runs the session (op "prepare"); the daemon adds
+	// the user label from the client configuration.
+	Labels map[string]string `json:"labels,omitempty"`
 	// Since and Until bound the events of op "events" (zero: open).
 	Since time.Time `json:"since,omitzero"`
 	Until time.Time `json:"until,omitzero"`
@@ -250,6 +254,9 @@ type Prepared struct {
 	PricePerHour float64        `json:"price_per_hour,omitempty"`
 	Reason       string         `json:"reason,omitempty"`
 	Timings      events.Timings `json:"timings"`
+	// Labels are the session's effective labels (request labels plus
+	// user); the proxy sends them to the machine and the run log.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // Response is one line of a daemon RPC response.
@@ -359,6 +366,12 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 		return map[string]uint64{"version": v}, err
 	case "status":
 		return d.pool.Status(ctx)
+	case "queue":
+		src, ok := d.pool.(pool.QueueSource)
+		if !ok {
+			return nil, errors.New("the pool cannot list its queue")
+		}
+		return src.Queue(ctx)
 	case "reconcile":
 		if d.reload != nil {
 			// Explicit reload of the pool configuration (embedded mode).
@@ -486,6 +499,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	sp.End()
 	tm.Sync = lap()
 	repoID := RepoID(c.User, repo.Root)
+	lbl := labels.Clean(labels.Merge(req.Labels, map[string]string{labels.User: c.User}))
 	key := UsageKey(repoID, req.Tool, req.Args)
 	span.SetAttributes(attribute.String("cloudsourced.repo_id", repoID), attribute.String("cloudsourced.usage_key", key))
 	ectx, sp := tracing.Start(ctx, "daemon.estimate")
@@ -504,7 +518,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		lease, err = d.pool.Acquire(ctx, orchestrator.Request{
 			EnvHash: plan.Hash, Image: plan.Tag, Services: plan.Services, RepoID: repoID,
 			Key: key, Need: need, Limit: scheduler.Resources{Memory: repo.MaxMemoryBytes()}, Arch: repo.Resources.Arch,
-			BuildTTL: buildTTL, DepsTTL: depsTTL,
+			BuildTTL: buildTTL, DepsTTL: depsTTL, Labels: lbl,
 		}, progress)
 		if err != nil {
 			return nil, err
@@ -543,6 +557,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		Lease: lease.ID, RepoID: repoID, EnvHash: plan.Hash, Roots: versions, BuildTTL: ttl.String(),
 		Grant: lease.Grant, UsageKey: key, MemoryOvercommit: lease.MemoryOvercommit,
 		Provider: lease.Provider, Size: lease.Size, PricePerHour: lease.PricePerHour, Reason: lease.Reason, Timings: tm,
+		Labels: lbl,
 	}, nil
 }
 

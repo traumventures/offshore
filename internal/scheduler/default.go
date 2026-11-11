@@ -169,9 +169,6 @@ func (p Default) rank(ms []Machine, t Task) {
 		if pi, pj := physical[ms[i].ID], physical[ms[j].ID]; pi != pj {
 			return pi // overcommit only when no machine has physical room
 		}
-		if ri, rj := ms[i].AtRisk, ms[j].AtRisk; ri != rj {
-			return rj // a machine at risk of interruption comes last
-		}
 		if fi, fj := fit[ms[i].ID], fit[ms[j].ID]; math.Abs(fi-fj) > 1e-9 {
 			return fi < fj
 		}
@@ -259,10 +256,7 @@ func (p Default) smallestSize(sizes []Size, need Resources, perProvider map[stri
 		if ss[i].PricePerHour != ss[j].PricePerHour {
 			return ss[i].PricePerHour < ss[j].PricePerHour
 		}
-		if ss[i].Capacity.Memory != ss[j].Capacity.Memory {
-			return ss[i].Capacity.Memory < ss[j].Capacity.Memory
-		}
-		return ss[i].Spot && !ss[j].Spot
+		return ss[i].Capacity.Memory < ss[j].Capacity.Memory
 	})
 	for _, s := range ss {
 		if p.sizeAdmissible(s).Fits(need) {
@@ -347,10 +341,7 @@ func (p Default) bestSize(sizes []Size, tasks []Task, perProvider map[string]int
 		if a.s.PricePerHour != b.s.PricePerHour {
 			return a.s.PricePerHour < b.s.PricePerHour
 		}
-		if a.s.Capacity.Memory != b.s.Capacity.Memory {
-			return a.s.Capacity.Memory < b.s.Capacity.Memory
-		}
-		return a.s.Spot && !b.s.Spot
+		return a.s.Capacity.Memory < b.s.Capacity.Memory
 	})
 	return cs[0].s, cs[0].rest, true
 }
@@ -367,9 +358,6 @@ type planState struct {
 }
 
 func (p Default) usable(m Machine, now time.Time) bool {
-	if m.Interrupted {
-		return false
-	}
 	return m.ExpiresAt.IsZero() || m.ExpiresAt.Sub(now) > p.cfg().ExpiryMargin
 }
 
@@ -636,12 +624,6 @@ func (p Default) idleStop(st *planState) map[string]int {
 	}
 	for _, m := range f.Machines {
 		if m.State != Running || m.Sessions > 0 || m.Reserved.Memory > 0 || len(st.queued[m.EnvHash]) > 0 {
-			continue
-		}
-		// An interrupted machine stops as soon as it is empty, before it is
-		// taken away: stopped by us, it stays a warm machine.
-		if m.Interrupted {
-			st.acts = append(st.acts, Action{Kind: Stop, Machine: m.ID, Reason: "interrupted"})
 			continue
 		}
 		// A machine drained by consolidation stops as soon as it is empty.

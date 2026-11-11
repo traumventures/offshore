@@ -32,6 +32,18 @@ check "failing build returns cargo's exit code" eq "$code" 101
 check "compiler errors are streamed" contains "$out" "expected \`u32\`, found \`&str\`"
 cp "$WORK/main.rs.bak" "$PROJ/src/main.rs"; rm "$PROJ/src/broken.rs"
 
+step "cargo test: remote build, local test run"
+out="$(run cargo test -- --nocapture 2>&1)"; code=$?
+check "cargo test exits 0" eq "$code" 0
+check "test binary built remotely, run locally" contains "$out" "test ran=local manifest_dir=$PROJ"
+check "cargo's status line for the local run" contains "$out" "Running unittests src/main.rs (target/debug/deps/hello-"
+check "no build-phase artifacts in the output" sh -c "! echo \"\$1\" | grep -q -e Executable -e '\"reason\"'" _ "$out"
+out="$(E2E_TEST_FAIL=1 run cargo test 2>&1)"; code=$?
+check "failing local test gives cargo's exit code" eq "$code" 101
+check "cargo's rerun hint" contains "$out" "error: test failed, to rerun pass \`--bin hello\`"
+out="$(CLOUDSOURCED_SPLIT=0 run cargo test -- --nocapture 2>&1)"
+check "CLOUDSOURCED_SPLIT=0 runs the tests remotely" contains "$out" "test ran=remote"
+
 step "shims (transparent proxy through PATH)"
 cs shim install cargo >/dev/null
 out="$(cd "$PROJ" && PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" cargo run -q 2>&1)"

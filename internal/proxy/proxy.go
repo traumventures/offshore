@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,9 +17,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/daemon"
 	"github.com/traumventures/cloudsourced/internal/events"
+	"github.com/traumventures/cloudsourced/internal/labels"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/tracing"
 	"github.com/traumventures/cloudsourced/internal/transport"
@@ -26,6 +29,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/term"
 )
+
+// progressOut receives the daemon's progress messages (machine start,
+// image build) during preparation.
+var progressOut io.Writer = os.Stderr
 
 // defaultEnv is always forwarded in addition to the tool's allowlist.
 var defaultEnv = []string{"TERM", "COLORTERM", "NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "LANG", "LC_*"}
@@ -50,7 +57,8 @@ func mainRun(tr *runTrace, tool string, args []string) int {
 	if err != nil {
 		return execLocal(tool, args)
 	}
-	rec := &events.Run{Time: time.Now(), Repo: rootDir, Cwd: cwd, Tool: tool, Args: args, Mode: events.Local}
+	rec := &events.Run{Time: time.Now(), Repo: rootDir, Cwd: cwd, Tool: tool, Args: args, Mode: events.Local,
+		Labels: labels.Detect(rootDir, "", os.Getenv)}
 	tr.rec = rec
 	local := func(why string) int {
 		rec.Why = why
@@ -74,7 +82,13 @@ func mainRun(tr *runTrace, tool string, args []string) int {
 		return local(why)
 	}
 	rec.Mode, rec.Why = events.Remote, "[tool."+tool+"] allows remote execution"
-	code, err := runRemote(tr.ctx, repo, profile, tool, args, cwd, rec)
+	var code int
+	if plan := planSplit(profile, tool, args); plan != nil {
+		rec.Why = "[tool." + tool + "] split: remote build, local test run"
+		code, err = runSplit(tr.ctx, repo, profile, tool, args, cwd, rec, plan)
+	} else {
+		code, err = runRemote(tr.ctx, repo, profile, tool, args, cwd, rec, remoteRun{})
+	}
 	if err != nil {
 		var fb *fallback
 		if errors.As(err, &fb) {
@@ -194,7 +208,30 @@ func allowedEnv(patterns []string) map[string]string {
 	return out
 }
 
-func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, tool string, args []string, cwd string, rec *events.Run) (code int, err error) {
+// remoteRun adjusts one remote execution. The zero value runs the
+// command as typed, attached to the local terminal.
+type remoteRun struct {
+	argv   []string          // command line instead of tool and args
+	stdout io.Writer         // instead of os.Stdout
+	stderr io.Writer         // instead of os.Stderr
+	noTTY  bool              // never allocate a remote terminal
+	stdin  bool              // with noTTY: still forward stdin by the usual policy
+	env    map[string]string // additional environment
+	// after runs once the remote command exited and its outputs arrived,
+	// while the lease is still held; code is the remote exit code.
+	after func(ctx context.Context, s *session, code int) error
+}
+
+// session is a finished remote session whose connection and lease are
+// still open.
+type session struct {
+	conn   *quic.Conn
+	token  string
+	repoID string
+	root   string
+}
+
+func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, tool string, args []string, cwd string, rec *events.Run, opt remoteRun) (code int, err error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	// Ctrl+C during preparation aborts cleanly.
@@ -211,7 +248,8 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 		tracing.End(pspan, err)
 		return 0, &fallback{err}
 	}
-	raw, err := daemon.Call(pctx, daemon.Request{Op: "prepare", Root: repo.Root, Cwd: cwd, Tool: tool, Args: args, TraceParent: tracing.Inject(pctx)}, os.Stderr)
+	raw, err := daemon.Call(pctx, daemon.Request{Op: "prepare", Root: repo.Root, Cwd: cwd, Tool: tool, Args: args,
+		Labels: rec.Labels, TraceParent: tracing.Inject(pctx)}, progressOut)
 	tracing.End(pspan, err)
 	signal.Stop(prepSig)
 	close(prepSig)
@@ -227,6 +265,9 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 	}
 	rec.Machine, rec.Provider, rec.Size, rec.Price, rec.Placement = prep.Machine, prep.Provider, prep.Size, prep.PricePerHour, prep.Reason
 	rec.Lease, rec.Timings = prep.Lease, prep.Timings
+	if prep.Labels != nil {
+		rec.Labels = prep.Labels
+	}
 	release := daemon.Request{Op: "release", Lease: prep.Lease, UsageKey: prep.UsageKey, TraceParent: tracing.Inject(ctx)}
 	started := false
 	defer func() {
@@ -251,6 +292,9 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 	rec.Ports = fwd.forwarded()
 
 	env := allowedEnv(profile.Env)
+	for k, v := range opt.env {
+		env[k] = v
+	}
 	for name, ref := range repo.Secrets {
 		v, err := resolveSecret(ref, repo.Root)
 		if err != nil {
@@ -258,14 +302,18 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 		}
 		env[name] = v
 	}
-	useTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	useTTY := !opt.noTTY && term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	argv := opt.argv
+	if argv == nil {
+		argv = append([]string{tool}, args...)
+	}
 	req := proto.Exec{
 		Repo: repo.Root, RepoID: prep.RepoID, Roots: prep.Roots,
-		Argv: append([]string{tool}, args...), Cwd: cwd, Env: env,
+		Argv: argv, Cwd: cwd, Env: env,
 		Grant: prep.Grant, MemoryOvercommit: prep.MemoryOvercommit,
 		Build: repo.Cache.Build.Paths, BuildTTL: prep.BuildTTL, Deps: repo.Cache.Deps.Paths,
 		Eager: profile.Eager, Lease: prep.Lease,
-		Linker: repo.Environment.Linker, TraceParent: tracing.Inject(ctx),
+		Linker: repo.Environment.Linker, TraceParent: tracing.Inject(ctx), Labels: rec.Labels,
 	}
 	if repo.Outputs.Mode == config.OutputsFuse {
 		// The remote build directory appears locally (output overlay):
@@ -328,7 +376,14 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 		}
 	}
 	_, xspan := tracing.Start(ctx, "proxy.exec")
-	exit, err := stream(pc, useTTY)
+	stdout, stderr := opt.stdout, opt.stderr
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	exit, err := stream(pc, useTTY, opt.noTTY && !opt.stdin, stdout, stderr)
 	code = exit.Code
 	execAttrs(xspan, exit)
 	tracing.End(xspan, err)
@@ -368,6 +423,11 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 	if err := pc.Expect(proto.TDone, nil); err != nil {
 		return code, err
 	}
+	if opt.after != nil {
+		if err := opt.after(ctx, &session{conn: conn, token: prep.Token, repoID: prep.RepoID, root: repo.Root}, code); err != nil {
+			return code, err
+		}
+	}
 	if verbose {
 		warn("exit %d (run %s, write back and outputs %s)", code, t2.Sub(t1).Round(time.Millisecond), time.Since(t2).Round(time.Millisecond))
 		if line := FormatCompilerCache(exit.Cache); line != "" {
@@ -395,7 +455,8 @@ func FormatCompilerCache(c map[string]int64) string {
 }
 
 // stream forwards stdio, terminal and signals until the remote exits.
-func stream(pc *proto.Conn, useTTY bool) (proto.Exit, error) {
+// noStdin closes the remote stdin right away.
+func stream(pc *proto.Conn, useTTY, noStdin bool, stdout, stderr io.Writer) (proto.Exit, error) {
 	if useTTY {
 		if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
 			defer term.Restore(int(os.Stdin.Fd()), old)
@@ -416,7 +477,7 @@ func stream(pc *proto.Conn, useTTY bool) (proto.Exit, error) {
 			pc.Send(proto.TSignal, proto.Signal{Sig: int(sig)})
 		}
 	}()
-	if !forwardStdin(useTTY) {
+	if noStdin || !forwardStdin(useTTY) {
 		pc.Write(proto.TStdinEOF, nil)
 	} else {
 		go copyStdin(pc)
@@ -428,9 +489,9 @@ func stream(pc *proto.Conn, useTTY bool) (proto.Exit, error) {
 		}
 		switch t {
 		case proto.TStdout:
-			os.Stdout.Write(p)
+			stdout.Write(p)
 		case proto.TStderr:
-			os.Stderr.Write(p)
+			stderr.Write(p)
 		case proto.TExit:
 			var ex proto.Exit
 			if err := json.Unmarshal(p, &ex); err != nil {
@@ -486,3 +547,24 @@ func copyStdin(pc *proto.Conn) {
 // resolveSecret reads a secret reference locally. Secret values only travel
 // inside the session request and are never written to the machine's disk.
 func resolveSecret(ref, root string) (string, error) { return config.ResolveRef(ref, root) }
+
+// Prewarm runs argv remotely in repo's root like a proxied command (image,
+// machine lease and start, source sync, build slot), labelled
+// purpose=prewarm, but never falls back to local execution: an error
+// before the remote start is returned as is. progress receives the
+// daemon's preparation messages.
+func Prewarm(ctx context.Context, repo *config.Repo, argv []string, progress io.Writer) (int, error) {
+	if len(argv) == 0 {
+		return 0, errors.New("prewarm: empty command")
+	}
+	progressOut = progress
+	l := labels.Merge(labels.Detect(repo.Root, "", os.Getenv), map[string]string{labels.Purpose: labels.PurposePrewarm})
+	rec := &events.Run{Time: time.Now(), Repo: repo.Root, Cwd: repo.Root, Tool: argv[0], Args: argv[1:],
+		Mode: events.Remote, Why: "cloudsourced prewarm", Labels: labels.Clean(l)}
+	code, err := runRemote(ctx, repo, config.Tool{}, argv[0], argv[1:], repo.Root, rec, remoteRun{})
+	var fb *fallback
+	if errors.As(err, &fb) {
+		return 0, fb.err
+	}
+	return code, err
+}

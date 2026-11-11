@@ -58,11 +58,8 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 	for _, sz := range u.Pool.Sizes {
 		mem, _ := config.ParseBytes(sz.Memory)
 		s := scheduler.Size{Provider: sz.Provider, Name: sz.Name,
-			Capacity: scheduler.Resources{CPU: sz.CPU, Memory: mem}, PricePerHour: sz.EffectivePrice(),
-			Arch: config.MachineArch(sz.Arch), Spot: sz.Spot, InstanceTypes: sz.InstanceTypes}
-		if sz.Spot {
-			s.OnDemandPrice, s.SpotFallback = sz.PricePerHour, sz.Fallback()
-		}
+			Capacity: scheduler.Resources{CPU: sz.CPU, Memory: mem}, PricePerHour: sz.PricePerHour,
+			Arch: config.MachineArch(sz.Arch), InstanceTypes: sz.InstanceTypes}
 		sizes = append(sizes, s)
 	}
 	f := u.Pool

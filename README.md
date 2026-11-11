@@ -71,8 +71,17 @@ Requirements: Linux, Docker, `/dev/fuse`, Go ≥ 1.24.
 ```sh
 make build                       # static binary in bin/cloudsourced
 bin/cloudsourced shim install cargo
-export PATH="$HOME/.cloudsourced/bin:$PATH"
+export PATH="$HOME/.cloudsourced/bin:$PATH"   # in ~/.profile or ~/.zshrc
+bin/cloudsourced shim status     # checks that the shims are first in PATH
 ```
+
+Shims are the standard setup: with `~/.cloudsourced/bin` first in PATH,
+plain `cargo build`, `cargo test` and `cargo nextest run` in a repository
+with a `.cloudsourced.toml` go through cloudsourced, for people, scripts and
+coding agents alike. `cloudsourced shim install` without tools installs the
+tools of the current repository's `[tool.*]` sections; `cloudsourced shim
+status` exits 1 when a shim is missing from PATH or shadowed by an earlier
+entry. `cloudsourced run <tool> ...` is the explicit form without shims.
 
 ### Configuration files
 
@@ -224,18 +233,15 @@ them for `max(idle_stop, 10m)` (an offline control plane does not leave them
 running). The metadata service is not reachable from sessions (IMDSv2, hop
 limit 1). The caller's credentials need `ssm:PutParameter`/`DeleteParameter`.
 
-#### Spot and arm64
+#### Instance types and arm64
 
 ```toml
 [[providers.aws.size]]
-name           = "x4-spot"            # a name of your choice
+name           = "x4"                 # a name of your choice
 cpu            = 4
 memory         = "7G"
-price_per_hour = 0.21                 # on-demand price
-spot           = true
+price_per_hour = 0.21
 instance_types = ["c7a.xlarge", "c6a.xlarge", "m7a.xlarge"]   # tried in order
-spot_discount  = 0.5                  # expected discount (default 0.5) for sizing and costs
-spot_fallback  = true                 # on-demand when no type has spot capacity (default)
 
 [[providers.aws.size]]
 name           = "c7g.xlarge"
@@ -245,28 +251,10 @@ memory         = "7G"
 price_per_hour = 0.17
 ```
 
-Spot machines are launched as persistent spot requests with interruption
-behaviour `stop` (only persistent requests can stop instead of terminate, and
-stopping keeps the disk with the warm caches; one-time spot instances cannot
-be stopped at all). The request ends at the machine's expiry. The types are
-tried in order on spot, then, with `spot_fallback`, in order on-demand; any
-capacity error (`InsufficientInstanceCapacity`, `SpotMaxPriceTooLow`, spot
-quota, type not offered) moves on. The optional provider option
-`spot_max_price` caps the spot price (AWS recommends against it: it causes
-more interruptions). The policy sizes with `price_per_hour × (1 −
-spot_discount)` and prefers spot at equal cost; a machine that fell back is
-accounted at the on-demand price.
-
-The risk: AWS can take a spot machine back with two minutes' notice. The supervisor polls the metadata service (`spot/instance-action` and the rebalance
-recommendation). A rebalance recommendation only marks the machine at risk
-(new work prefers other machines). On an interruption notice the worker
-drains: no new sessions, running
-sessions continue until the deadline and fail if they are still running
-then. The orchestrator places new
-work elsewhere and stops the machine as soon as it is empty (then it stays a
-warm machine); a machine stopped by AWS can only be restarted by AWS, so it
-is destroyed and replaced. Do not use spot sizes for builds that take longer
-than you can afford to lose.
+All machines are on-demand instances (spot capacity is not supported). The
+instance types of a size are tried in order (default: the size name); any
+capacity error (`InsufficientInstanceCapacity`, vCPU quota, type not offered
+in the zone) moves on to the next type.
 
 `arch = "arm64"` sizes (Graviton: c7g, m7g, t4g, ...) boot the arm64 Amazon
 Linux 2023 AMI and run `bin/cloudsourced-linux-arm64`, which `make build`
@@ -362,6 +350,7 @@ NPM_TOKEN = "cmd:agentpass get npm/token"   # or env:VAR, file:PATH
 local = ["publish", "login", "install", "new", "init", "add", "remove"]
 eager = ["target/debug/myapp"]              # copied back after every run
 env   = ["RUSTFLAGS", "CARGO_TERM_*", "RUST_LOG", "RUST_BACKTRACE"]
+# split = ["test", "nextest"]               # default: remote build, local test run
 
 [tool.npm]
 ports = [8080, "3000:3001"]  # forward 127.0.0.1:local -> session port while it runs
@@ -372,9 +361,12 @@ Then just use the tool:
 ```sh
 cargo build
 cargo test
-cloudsourced status                 # machines, sessions, cost today (--json)
+cloudsourced status                 # machines, sessions (with labels), cost today (--json)
+cloudsourced top                    # live view: graphs, machines, sessions, queue, cost
 cloudsourced why                    # last run: local/remote and why, machine,
-                                    # placement, timings, usage (N, list, --json)
+                                    # placement, timings, usage, labels (N, list, --json)
+cloudsourced prewarm                # start the remote environment of this repo now
+cloudsourced hooks install          # prewarm automatically on new worktrees
 cloudsourced fetch 'target/debug/deps/*.so'   # lazy outputs
 cloudsourced outputs mount          # remote target/ at its local path (writable overlay)
 cloudsourced down                   # destroy machines and caches
@@ -422,12 +414,11 @@ price_per_hour = 0.11
 instance_types = ["VM.Standard.E5.Flex"]   # shapes, tried in order (default: E5.Flex, A1.Flex for arm64)
 
 [[providers.oci.size]]
-name           = "a1-4-preemptible"
+name           = "a1-4"
 arch           = "arm64"
 cpu            = 4
 memory         = "24G"
 price_per_hour = 0.07
-spot           = true              # preemptible capacity
 ```
 
 On first use the provider creates, idempotently: the compartment, a VCN
@@ -457,11 +448,9 @@ and machines pull with a token of their instance principal.
 
 Differences to AWS: an OS shutdown only stops an OCI instance, so at
 `max_lifetime` the supervisor terminates its instance through the API; there
-is no reaper function. `spot = true` launches preemptible instances, which
-OCI terminates on preemption without notice to drain on and which cannot be
-stopped: idle stop terminates them. Shapes are tried preemptible first, then
-(with `spot_fallback`) on regular capacity; "Out of host capacity", service
-limit and unavailable-shape errors move on to the next attempt. A live smoke
+is no reaper function. Preemptible capacity is not supported. Shapes are
+tried in order; "Out of host capacity", service limit and unavailable-shape
+errors move on to the next shape. A live smoke
 test is in `internal/orchestrator/ocismoke_test.go` (build tag `ocismoke`).
 
 ### Output overlay (output FUSE)
@@ -622,6 +611,47 @@ libraries and build script outputs must be available locally:
   (`rust-toolchain.toml`), otherwise rust-analyzer's proc-macro server
   rejects the libraries.
 
+### Tests: remote build, local run
+
+`cargo test` and `cargo nextest run` are split: the test binaries are built
+remotely and run on this machine, with the local environment and local
+services (e.g. the developer's Postgres via `APP_TEST_DATABASE_URL`). Type
+the command as usual (`cargo nextest run -p app-store foo`, `cargo test foo
+-- --nocapture`); output and exit code are those of a local run.
+
+* **cargo test**: the remote phase runs `cargo test --no-run
+  --message-format=json-render-diagnostics` with the build options; the
+  executables it reports are transferred and run in cargo's order with
+  cargo's working directory (package root), environment (`CARGO_MANIFEST_DIR`,
+  `CARGO_PKG_*`, `CARGO_BIN_EXE_*`), arguments (test name, `--quiet` with
+  `-q`, everything after `--`), status lines and `error: test failed, to
+  rerun pass ...` messages, `--no-fail-fast` summary and exit code 101.
+  Doc tests are compiled while they run, so they run remotely afterwards
+  (`cargo test --doc` with the same options), as cargo runs them last.
+* **nextest**: the remote phase runs `cargo nextest archive` with the cargo
+  build options (`-p`, `--workspace`, features, `--cargo-profile`, ...); the
+  zstd archive is transferred and `cargo nextest run --archive-file ...`
+  runs locally with the filters, runner and reporter options, `-P`/
+  `--profile`, `-- args` and `NEXTEST_*` variables. Configuration options
+  (`--config-file`, `-P`) go to both.
+
+Commands that do not run tests (`--no-run`, `--doc`, `--message-format`,
+`nextest list`, `nextest archive`, reuse options such as `--archive-file`)
+and unknown options run remotely as typed. The tests run remotely instead,
+with one line saying why, when this machine cannot execute the binaries:
+another OS or architecture, an older glibc than the environment image, a
+missing shared library or dynamic loader (checked on the ELF files), no
+local `cargo-nextest`, nextest failing to list the tests locally (exit 104),
+or test binaries outside the `[cache.build]` paths.
+
+`[tool.cargo] split = ["test", "nextest"]` is the default; `split = []`
+turns it off for a repository, `CLOUDSOURCED_SPLIT=0` for one run.
+Binaries are transferred over the session that built them (only files whose
+content changed); the transport sits behind one interface so the target
+overlay can replace it. Not reproduced locally: cargo `[env]` configuration
+and build-script `rustc-env` values at test run time, and files a test reads
+from `OUT_DIR` at run time.
+
 ## Compatibility
 
 Machines are Linux x86_64 (arm64 machines may follow). Everything that
@@ -751,7 +781,7 @@ cloudsourced.run (proxy: tool, subcommand, flag names, repo id, decision, reason
 │  └─ daemon.prepare (repo id, env hash, usage key, estimate, lease, machine)
 │     ├─ daemon.env_resolve, daemon.image_ensure, daemon.manifest_refresh, daemon.estimate
 │     ├─ [remote] controlplane /v1/acquire (client) > controlplane /v1/acquire (server)
-│     │  └─ pool.acquire (queue wait, placement, reason, machine, provider, size, price, reservation, spot)
+│     │  └─ pool.acquire (queue wait, placement, reason, machine, provider, size, price, reservation)
 │     │       ~ pool.create / pool.start (linked root spans: provider, size, price, duration, ready event)
 │     └─ daemon.attach (machine, attempt)
 ├─ proxy.connect (session, worker wait)
@@ -765,11 +795,78 @@ orchestrator.reconcile > pool.stop / pool.destroy (background, provider latency)
 Only the subcommand and the names of flags of a tool's arguments are
 recorded, never their values, positional arguments, environment or tokens.
 
+### Agents, worktrees and labels
+
+Every session carries labels: `worktree` (the repository root, i.e. the
+worktree), `repo` (name of the main repository, shared by its worktrees),
+`branch`, `user` (client config `user`) and `agent`. They are computed by the
+proxy (git metadata is read from `.git` files, git is not run), travel with
+the session to the daemon, the orchestrator and the worker, and are recorded
+in the event log (`labels` of `task_placed`/`task_end`) and the run log.
+`cloudsourced why`, `status`, `top` and `report` show them.
+
+`agent` is `CLOUDSOURCED_AGENT` if set, otherwise detected from the first
+present variable: `CODEX_THREAD_ID` (codex, the thread id also becomes
+`agent_session`), `CODEX_SANDBOX`, `CODEX_MANAGED_BY_NPM` (codex),
+`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT` (claude-code), `CURSOR_AGENT`
+(cursor), `GEMINI_CLI` (gemini-cli), `OPENCODE` (opencode), `AIDER_MODEL`
+(aider), `AMP_THREAD_ID` (amp, also `agent_session`). Only these names and
+ids are read, never other environment values. `CLOUDSOURCED_LABELS="task=WP-7,team=infra"`
+adds free labels. Keys are `[a-z0-9_.-]{1,32}`, values at most 200
+characters, at most 16 labels; servers clean labels again on receipt.
+Labels never influence placement.
+
+`cloudsourced report` groups cost (attributed by reserved share, as per
+repository), session-hours, CPU-hours, requests and failures, queue wait
+p50/p95/max and contention (share of wall time stalled on CPU/memory) by
+agent and by worktree; `--by agent|worktree|branch|repo|user` (comma
+separated) chooses the dimensions. Events from before labels fall back to
+the repository id; sessions without an agent count as `(human)`.
+
+**Prewarm.** `cloudsourced prewarm` starts the remote environment of the
+current repository in the background (log `<state>/prewarm.log`): image
+ensure, machine lease and start, source sync and the build slot, then an
+optional warm-up command from the repository configuration:
+
+```toml
+[prewarm]
+run = ["cargo", "check", "--workspace", "--tests"]
+```
+
+`--wait` runs in the foreground, `--force` skips the warm check. A prewarm
+is skipped when a running machine of the environment already has a warm
+build slot of the repository and (with `run`) the warm-up succeeded for the
+same commit, environment and command within 12 hours. Only one prewarm per
+repository runs at a time. Prewarm sessions are labelled `purpose=prewarm`
+(shown in `why` and `report`), never fall back to local execution and are
+not counted as user runs in the daemon metrics. `cloudsourced hooks install`
+installs a git `post-checkout` hook into the repository's hooks directory
+(shared by all worktrees, honours `core.hooksPath`) that calls
+`cloudsourced prewarm --quiet` after branch checkouts, which includes `git
+worktree add`. An existing hook is chained (renamed to
+`post-checkout.cloudsourced-chain`, runs first, its exit status is kept);
+install is idempotent and `cloudsourced hooks uninstall` restores the
+previous hook.
+
+**Top.** `cloudsourced top` is a full-screen view in the style of zenith:
+history graphs of the pool (busy cores, session memory, sessions plus queue,
+cost per hour; seeded from the `machine_sample` events and extended by the
+2 s status polls, kept in memory for 3 h), one line per machine (busy-core
+bar and history, memory bar, PSI, sessions, price), a sortable session table
+(machine, agent, worktree, branch, elapsed, busy/reserved cores,
+used/reserved memory, command) and the queue. Keys: ↑/↓ PgUp/PgDn select,
+`e c m a w n` sort by elapsed, CPU, memory, agent, worktree, machine (again:
+reverse), `r` reverse, `+`/`-` zoom the graph window (1m..3h), `q` quit.
+`cloudsourced top --once [--width N] [--window 10m]` prints one plain text
+frame without colors, for agents and scripts. Busy cores per session come
+from the session's cgroup CPU time between polls (`Status.Sessions[]
+cpu_seconds`, `used_memory`).
+
 **Event log and reports.** Independent of tracing, the orchestrator writes
 an analysis event log (`events-YYYY-MM-DD.jsonl` in its state directory,
 `[telemetry] events_retention_days`, default 30) of task and machine events.
-`cloudsourced report [--since 7d] [--json]` shows cost per day, repository
-and size, utilisation and overprovisioning, queue wait p50/p95, warm vs.
+`cloudsourced report [--since 7d] [--by agent,worktree] [--json]` shows cost per day, repository
+and size, per agent/worktree/branch/repo/user, utilisation and overprovisioning, queue wait p50/p95, warm vs.
 cold caches and estimator accuracy; `cloudsourced sim export --since 7d -o
 trace.json` converts the real runs into a simulator trace (both work
 embedded and remote, via the control plane's `POST /v1/events`, API key
