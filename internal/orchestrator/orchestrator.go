@@ -51,6 +51,9 @@ type Config struct {
 	// thresholds ([writeback]; zero: the workers' defaults).
 	DirtyRatio  float64
 	DirtyExpire time.Duration
+	// SourceCache is [scheduler] source_cache, passed to the workers
+	// ("": their default).
+	SourceCache string
 	// Profile resolves a provider's medium profile (instance-store sizes
 	// get medium.LocalNVMe once their disk is known; nil: defaults).
 	Profile func(provider, med string) medium.Profile `json:"-"`
@@ -1335,6 +1338,9 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	}
 	if cfg.DirtyExpire > 0 {
 		spec.Env["OFFSHORE_WRITEBACK_DIRTY_EXPIRE"] = cfg.DirtyExpire.String()
+	}
+	if cfg.SourceCache != "" {
+		spec.Env["OFFSHORE_SOURCE_CACHE"] = cfg.SourceCache
 	}
 	for k, v := range logs.Forward() { // machines log like the pool
 		spec.Env[k] = v

@@ -72,7 +72,7 @@ func TestOutputsFallBackToTheStore(t *testing.T) {
 	}
 	p := &storePool{out: orchestrator.OutputsStore{Head: proto.LayerHead{Repo: "r1", Layer: layer.ID},
 		Grant: store.Grant{Store: "storage", Dir: base, Prefix: "cache", Scopes: []string{store.RepoScope("r1")}}}}
-	m, err := newOutputsMgr(testDaemon(p))
+	m, err := newOutputsMgr(testDaemon(p), 1<<30)
 	if err != nil {
 		t.Fatal(err)
 	}

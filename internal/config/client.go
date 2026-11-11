@@ -36,6 +36,8 @@ type rawFile struct {
 	Providers map[string]map[string]any `toml:"providers"`
 	Storage   Storage                   `toml:"storage"`
 	Telemetry Telemetry                 `toml:"telemetry"`
+	Writeback Writeback                 `toml:"writeback"`
+	Outputs   ClientOutputs             `toml:"outputs"`
 }
 
 // Client is the client configuration.
@@ -50,11 +52,36 @@ type Client struct {
 	ControlPlane ControlPlane `toml:"control_plane"`
 	// Telemetry configures tracing of the proxy and the daemon.
 	Telemetry Telemetry `toml:"telemetry"`
+	// Outputs configures the daemon's cache of remote build outputs.
+	Outputs ClientOutputs `toml:"outputs"`
 	// PoolSections lists pool sections present in the client file. They
 	// configure the embedded orchestrator and have no effect in remote mode.
 	PoolSections []string `toml:"-"`
 	// Warnings are ineffective settings found while loading.
 	Warnings []string `toml:"-"`
+}
+
+// DefaultOutputsCacheSize bounds the daemon's output cache.
+const DefaultOutputsCacheSize = "8G"
+
+// ClientOutputs configures the daemon's cache of remote build outputs
+// ([outputs] of the client file; the repository's [outputs] selects the
+// mode).
+type ClientOutputs struct {
+	// CacheSize bounds the output cache (anyfs pages and materialized
+	// files, each reclaimed least recently used beyond it; default "8G").
+	// Outputs not yet committed by the machine are kept regardless.
+	CacheSize string `toml:"cache_size"`
+}
+
+// CacheBytes returns the parsed cache size (default 8 GiB).
+func (o ClientOutputs) CacheBytes() int64 {
+	s := o.CacheSize
+	if s == "" {
+		s = DefaultOutputsCacheSize
+	}
+	n, _ := ParseBytes(s)
+	return n
 }
 
 // ControlPlane configures the connection to a shared control plane.
@@ -109,7 +136,7 @@ func LoadClientFrom(path string) (*Client, error) {
 		if err := decodeStrict(data, &raw); err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
-		c.User, c.Telemetry = raw.User, raw.Telemetry
+		c.User, c.Telemetry, c.Outputs = raw.User, raw.Telemetry, raw.Outputs
 		if raw.ControlPlane != nil {
 			c.ControlPlane = *raw.ControlPlane
 			c.ControlPlane.Mode = "remote"
@@ -168,6 +195,11 @@ func (c *Client) Validate() error {
 		errs = append(errs, fmt.Sprintf("orchestrator.mode: unsupported %q (embedded, remote)", o.Mode))
 	}
 	errs = append(errs, c.Telemetry.validate()...)
+	if s := c.Outputs.CacheSize; s != "" {
+		if n, err := ParseBytes(s); err != nil || n <= 0 {
+			errs = append(errs, fmt.Sprintf("outputs.cache_size: invalid size %q (want e.g. 8G)", s))
+		}
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid %s:\n  %s", c.Path, strings.Join(errs, "\n  "))
 	}
@@ -230,7 +262,7 @@ func sections(top map[string]bool, names ...string) []string {
 }
 
 func clientSections(top map[string]bool) []string {
-	return sections(top, "control_plane", "user")
+	return sections(top, "control_plane", "user", "outputs")
 }
 func poolSections(top map[string]bool) []string {
 	return sections(top, "pool", "scheduler", "machine", "providers", "storage", "writeback")

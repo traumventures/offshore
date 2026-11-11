@@ -201,7 +201,7 @@ func TestRemoteTreeHintServesEagerOutputsWithoutMachine(t *testing.T) {
 	src.put("target/debug/app", "eager-binary", 5)
 	tr := newTestTree(t)
 	tr.Update(src)
-	if _, err := tr.Ingest(context.Background(), "target/debug/app", 12, 5, strings.NewReader("eager-binary")); err != nil {
+	if _, err := tr.Ingest(context.Background(), "target/debug/app", proto.OutEntry{Size: 12, MtimeNs: 5}, strings.NewReader("eager-binary")); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := readContent(t, tr, "target/debug/app"); err != nil || got != "eager-binary" {

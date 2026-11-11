@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/traumventures/offshore/internal/config"
 )
 
 func TestSlotSizesAndDiskStatus(t *testing.T) {
@@ -37,5 +39,16 @@ func TestSlotSizesAndDiskStatus(t *testing.T) {
 	d := w.diskStatus()
 	if d == nil || d.Total <= 0 || d.Used <= 0 || d.Slots != n || d.SlotBytes["repo"] != n || d.MachineCaches < 8<<10 {
 		t.Fatalf("disk status %+v", d)
+	}
+}
+
+func TestSourceCacheBytes(t *testing.T) {
+	budget, _ := config.ParseDiskBudget("50%")
+	if got := sourceCacheBytes(Config{DiskBudget: budget}, 1600); got != 100 {
+		t.Fatalf("default: %d, want an eighth of the budget", got)
+	}
+	sc, _ := config.ParseSourceCache("300")
+	if got := sourceCacheBytes(Config{DiskBudget: budget, SourceCache: sc}, 1600); got != 300 {
+		t.Fatalf("size: %d", got)
 	}
 }

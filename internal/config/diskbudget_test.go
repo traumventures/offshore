@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseDiskBudget(t *testing.T) {
 	b, err := ParseDiskBudget("80%")
@@ -15,5 +18,18 @@ func TestParseDiskBudget(t *testing.T) {
 		if _, err := ParseDiskBudget(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+func TestParseSourceCache(t *testing.T) {
+	b, err := ParseSourceCache(DefaultSourceCache)
+	if err != nil || b.Of(800) != 100 {
+		t.Fatalf("default: %+v %v", b, err)
+	}
+	if b, err := ParseSourceCache("20G"); err != nil || b.Of(100<<30) != 20<<30 {
+		t.Fatalf("20G: %+v %v", b, err)
+	}
+	if _, err := ParseSourceCache("0%"); err == nil || !strings.Contains(err.Error(), "source cache") {
+		t.Fatalf("0%%: %v", err)
 	}
 }

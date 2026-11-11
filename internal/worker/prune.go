@@ -504,3 +504,13 @@ func coldSlot(slot string, rm func(string)) pruneResult {
 	rm(slot) // the next session starts a new slot
 	return pruneResult{Freed: n, Cold: true}
 }
+
+// sourceCacheBytes is the limit of the fetched source contents on a cache
+// file system of total bytes: cfg.SourceCache of the disk budget.
+func sourceCacheBytes(cfg Config, total int64) int64 {
+	sc := cfg.SourceCache
+	if sc == (config.DiskBudget{}) {
+		sc, _ = config.ParseSourceCache(config.DefaultSourceCache)
+	}
+	return sc.Of(budgetBytes(cfg.DiskBudget, total))
+}

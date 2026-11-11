@@ -15,6 +15,7 @@ policy              = "default"   # default (cost model) | binpack | classic
 cost_optimization   = 0.5         # 1 = cheapest, 0 = fastest result
 disk_price_per_gb_month = 0.08    # prices disk resizes
 disk_budget    = "90%"            # cache disk machines fill before pruning ("150G": bytes)
+source_cache   = "12.5%"          # fetched source contents kept, share of the disk budget ("20G": bytes)
 estimator           = "history"   # history | static
 cpu_overcommit      = 2.0         # only slows builds down
 memory_overcommit   = 1.25        # requires soft_limit or swap, otherwise OOM
@@ -50,6 +51,7 @@ max_machines = 4                                 # per provider, below pool.max_
 | `cost_optimization` | 0.5 | 0..1 trade-off of the cost model: 1 = cheapest, 0 = fastest result |
 | `[[egress]]` | free within a provider, 0.09/GB at 50 MB/s across | `from` (provider or `storage`), `to` (provider), `price_per_gb`, `bandwidth` |
 | `disk_price_per_gb_month` | 0.08 | price of extra disk, for resize decisions |
+| `source_cache` | `"12.5%"` | source contents a worker fetched from the laptop are kept as a cache, reclaimed least recently used beyond this share of the disk budget or size (`"20G"`); open files never |
 | `disk_budget` | `"90%"` | how much of a machine's cache file system build slots and machine caches may fill before the worker prunes: a percentage or a size (`"150G"`); sizes override it with their own `disk_budget`. The worker reports the budget in bytes and the scheduler plans prune/resize against it |
 | `estimator` | `"history"` | `history` learns CPU and peak memory per repository/tool/subcommand from cgroup usage; `static` uses `[resources]` |
 | `cpu_overcommit` | 2 | reserved CPU may exceed physical cores by this factor (>= 1) |

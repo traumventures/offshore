@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -267,6 +268,26 @@ func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry, compress 
 	mounts := daemon.OutputMounts()
 	var store *cas.Store
 	var cached []manifest.Entry
+	// Contents the output cache already holds (same digest) are not
+	// downloaded again: eager outputs unchanged since an earlier run.
+	have := map[string]bool{}
+	if len(mounts) > 0 {
+		var covered []manifest.Entry
+		for _, e := range files {
+			if dst, err := safeJoin(root, e.Path); err == nil && anyfs.Covering(mounts, dst) != "" {
+				covered = append(covered, e)
+			}
+		}
+		if len(covered) > 0 {
+			if raw, err := daemon.Call(context.Background(), daemon.Request{Op: "outputs-have", Root: root, Files: covered}, nil); err == nil {
+				var hs []string
+				json.Unmarshal(raw, &hs)
+				for _, h := range hs {
+					have[h] = true
+				}
+			}
+		}
+	}
 	for _, e := range files {
 		dst, err := safeJoin(root, e.Path)
 		if err != nil {
@@ -279,7 +300,7 @@ func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry, compress 
 				}
 			}
 			cached = append(cached, e)
-			if !store.Has(e.Hash) && !needSet[e.Hash] {
+			if !have[e.Hash] && !store.Has(e.Hash) && !needSet[e.Hash] {
 				needSet[e.Hash] = true
 				need = append(need, e.Hash)
 			}

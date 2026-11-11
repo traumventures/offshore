@@ -5,7 +5,7 @@ strictly: unknown keys are errors, there are no aliases or legacy keys.
 
 | File | Role | Read by |
 |---|---|---|
-| client: `~/.config/offshore/config.toml` (`$OFFSHORE_CONFIG`) | where the orchestrator runs (`[control_plane]`, absent = embedded), `user`, `[telemetry]` of proxy and daemon | CLI, daemon |
+| client: `~/.config/offshore/config.toml` (`$OFFSHORE_CONFIG`) | where the orchestrator runs (`[control_plane]`, absent = embedded), `user`, `[telemetry]` of proxy and daemon, `[outputs]` output cache | CLI, daemon |
 | pool: `$OFFSHORE_POOL_CONFIG`, `controlplane --config FILE`; default: the client file | `[pool]`, `[scheduler]`, `[[machine.setup]]`, `[providers.*]`, `[storage]`, `[telemetry]` | the orchestrator: daemon in embedded mode, control plane |
 | repository: `.offshore.toml` at the repository root (plus an optional, not checked in `.offshore.local.toml` that overrides it) | environment, resources, caches, tools, services, secrets | proxy and daemon; sent with every request |
 
@@ -45,7 +45,18 @@ client_key  = "client-key.pem"           # relative to this file
 
 [telemetry]                              # tracing of proxy and daemon, see operations.md
 endpoint = "https://otel.example.com:4318"
+
+[outputs]
+cache_size = "8G"                        # the daemon's cache of remote outputs
 ```
+
+| client key | default | |
+|---|---|---|
+| `outputs.cache_size` | `"8G"` | bound of the daemon's output cache (anyfs pages and materialized files of remote outputs, each reclaimed least recently used beyond it, [tools.md](tools.md#output-overlay)). Outputs the laptop fetched that the machine has not committed yet are kept regardless, until the store holds them or a newer build replaced them |
+
+The repository's `[outputs] mode` selects how outputs appear; the client's
+`[outputs]` only sizes the cache. The pool loader ignores the client
+`[outputs]` (with a warning) when one file holds both.
 
 `offshore controlplane client-config` prints the `[control_plane]`
 block, see [control-plane.md](control-plane.md).

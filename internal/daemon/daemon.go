@@ -85,7 +85,7 @@ func NewDaemon(log *slog.Logger) (*Daemon, error) {
 	d := &Daemon{log: log, roots: map[string]*root{}, conns: map[string]*machineConn{}}
 	d.metrics = newDaemonMetrics(d)
 	d.env = newEnvWatch(d)
-	if d.outputs, err = newOutputsMgr(d); err != nil {
+	if d.outputs, err = newOutputsMgr(d, c.Outputs.CacheBytes()); err != nil {
 		return nil, err
 	}
 	if o := c.ControlPlane; o.Mode == "remote" {
@@ -191,6 +191,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	// Before serving requests, so no proxy writes eager outputs below a
 	// mount point that is about to be mounted.
 	d.outputs.remountSaved()
+	go d.outputs.checkCommitted(ctx)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -216,7 +217,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 
 // Request is a daemon RPC request.
 type Request struct {
-	Op    string   `json:"op"` // prepare | release | sync | status | queue | metrics | down | reconcile | shutdown | ping | outputs-mount | outputs-ensure | outputs-unmount | outputs-status | outputs-hint | env-build | env-status | unreachable
+	Op    string   `json:"op"` // prepare | release | sync | status | queue | metrics | down | reconcile | shutdown | ping | outputs-mount | outputs-ensure | outputs-unmount | outputs-status | outputs-hint | outputs-have | env-build | env-status | unreachable
 	Root  string   `json:"root,omitempty"`
 	Cwd   string   `json:"cwd,omitempty"`
 	Tool  string   `json:"tool,omitempty"`
@@ -230,7 +231,7 @@ type Request struct {
 	UsageKey string           `json:"usage_key,omitempty"`
 	Usage    *scheduler.Usage `json:"usage,omitempty"`
 	// Files are output entries already stored in the outputs content
-	// cache (op "outputs-hint").
+	// cache (op "outputs-hint") or to look up there (op "outputs-have").
 	Files []manifest.Entry `json:"files,omitempty"`
 	// Run is recorded in the run log (op "release" and "record").
 	Run *events.Run `json:"run,omitempty"`
@@ -378,6 +379,8 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 	case "outputs-hint":
 		d.outputs.hint(req.Root, req.Files)
 		return nil, nil
+	case "outputs-have":
+		return d.outputs.have(req.Files), nil
 	case "sync":
 		r := d.rootByPath(req.Root)
 		if r == nil {

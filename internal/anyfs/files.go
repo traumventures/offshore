@@ -36,6 +36,9 @@ type Files struct {
 	faults   int64
 	faultB   int64
 	rate     rate
+	// pins counts holders per digest: pinned contents are never
+	// reclaimed (e.g. outputs not yet committed anywhere else).
+	pins map[string]int
 
 	pmu    sync.Mutex
 	pages  map[Key][]byte // last pages assembled (packed small files share them)
@@ -59,7 +62,7 @@ func OpenFiles(dir string, obs Observer) (*Files, error) {
 		return nil, err
 	}
 	f := &Files{dir: dir, obs: obs, files: map[string]*mfile{}, lru: list.New(),
-		inflight: map[string]*fetch{}, pages: map[Key][]byte{}}
+		inflight: map[string]*fetch{}, pages: map[Key][]byte{}, pins: map[string]int{}}
 	type found struct {
 		d   string
 		sz  int64
@@ -122,6 +125,52 @@ func (f *Files) SetLimit(max int64) {
 	f.limit = max
 	f.mu.Unlock()
 	f.reclaimToLimit("")
+}
+
+// Limit returns the resident byte cap (0: unbounded).
+func (f *Files) Limit() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.limit
+}
+
+// Pin keeps a node's content resident (never reclaimed) until a matching
+// Unpin; pins are counted per digest and may precede the content.
+func (f *Files) Pin(n *Node) {
+	d := digestOf(n)
+	if d == "" {
+		return
+	}
+	f.mu.Lock()
+	f.pins[d]++
+	f.mu.Unlock()
+}
+
+// Unpin ends a Pin.
+func (f *Files) Unpin(n *Node) {
+	d := digestOf(n)
+	f.mu.Lock()
+	if f.pins[d] <= 1 {
+		delete(f.pins, d)
+	} else {
+		f.pins[d]--
+	}
+	f.mu.Unlock()
+	f.reclaimToLimit("")
+}
+
+// Pinned returns the number of pinned digests and the resident bytes of
+// their contents.
+func (f *Files) Pinned() (n int, bytes int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for d := range f.pins {
+		n++
+		if m := f.files[d]; m != nil {
+			bytes += m.size
+		}
+	}
+	return n, bytes
 }
 
 // reclaimToLimit reclaims down to 90% of the limit, keeping the content
@@ -488,7 +537,7 @@ func (f *Files) reclaim(target int64, keep string) int64 {
 	for e := f.lru.Front(); e != nil && f.resident > target; {
 		next := e.Next()
 		m := e.Value.(*mfile)
-		if m.open == 0 && m.backed && m.digest != keep {
+		if m.open == 0 && m.backed && m.digest != keep && f.pins[m.digest] == 0 {
 			os.Remove(f.path(m.digest))
 			f.lru.Remove(e)
 			delete(f.files, m.digest)
