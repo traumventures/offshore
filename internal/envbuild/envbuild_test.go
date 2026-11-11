@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -119,6 +120,26 @@ func TestCompilerCacheAndLinkerTools(t *testing.T) {
 	if !strings.Contains(p3.Dockerfile, "--no-install-recommends lld") || !strings.Contains(p3.Dockerfile, "-fuse-ld=lld") || len(p3.tools) != 0 {
 		t.Fatalf("lld not installed:\n%s", p3.Dockerfile)
 	}
+	pw, err := Resolve(repo(t, base+"linker = \"wild\"\n", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"COPY tools/wild /usr/local/bin/wild",
+		"ln -sf /usr/local/bin/wild /usr/local/lib/offshore-wild/ld.bfd",
+		`exec cc "$@" -fuse-ld=bfd -B/usr/local/lib/offshore-wild`,
+		"/usr/local/bin/offshore-cc-wild",
+	} {
+		if !strings.Contains(pw.Dockerfile, want) {
+			t.Errorf("Dockerfile lacks %q:\n%s", want, pw.Dockerfile)
+		}
+	}
+	if pw.tools["tools/wild"].SHA256 != toolReleases["wild"]["x86_64"].SHA256 || strings.Contains(pw.Dockerfile, "mold") {
+		t.Fatalf("pinned wild release not used:\n%s", pw.Dockerfile)
+	}
+	if pw.Hash == p0.Hash || pw.Hash == p3.Hash {
+		t.Fatal("linker = \"wild\" did not change the environment hash")
+	}
 	pc, _ := Resolve(repo(t, base+"[cache.cc]\ntool = \"ccache\"\n", nil))
 	if !strings.Contains(pc.Dockerfile, "--no-install-recommends ccache") {
 		t.Fatalf("ccache not installed:\n%s", pc.Dockerfile)
@@ -166,4 +187,75 @@ func TestToolDownloadVerifiesChecksum(t *testing.T) {
 	if err := bad.extract(dst); err == nil {
 		t.Fatal("unverified archive accepted")
 	}
+}
+
+func TestExtraToolchains(t *testing.T) {
+	base := "version = 1\n[environment]\nimage = \"rust:1-slim-trixie\"\n"
+	p0, err := Resolve(repo(t, base, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, err := Resolve(repo(t, base+"[environment.toolchains]\nextra = [\"headstart\"]\n", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p1.Hash == p0.Hash {
+		t.Fatal("extra toolchain did not change the environment hash")
+	}
+	for _, want := range []string{
+		"COPY toolchains/headstart /opt/offshore/toolchains/headstart",
+		"rustup toolchain link headstart /opt/offshore/toolchains/headstart",
+	} {
+		if !strings.Contains(p1.Dockerfile, want) {
+			t.Errorf("Dockerfile lacks %q:\n%s", want, p1.Dockerfile)
+		}
+	}
+	if tl := p1.tools["toolchains/headstart"]; tl.Dir == "" || tl.SHA256 != toolReleases["headstart"]["x86_64"].SHA256 {
+		t.Fatalf("headstart release: %+v", tl)
+	}
+	if _, err := Resolve(repo(t, base+"[resources]\narch = \"aarch64\"\n[environment.toolchains]\nextra = [\"headstart\"]\n", nil)); err == nil {
+		t.Fatal("headstart accepted for aarch64 without a release")
+	}
+}
+
+func TestExtractTree(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	add := func(name string, mode int64, body string, typ byte) {
+		tw.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: int64(len(body)), Typeflag: typ})
+		tw.Write([]byte(body))
+	}
+	add("tc-1/", 0o755, "", tar.TypeDir)
+	add("tc-1/bin/rustc", 0o755, "rustc", tar.TypeReg)
+	add("tc-1/lib/librustc.so", 0o644, "so", tar.TypeReg)
+	tw.WriteHeader(&tar.Header{Name: "tc-1/lib/rustlib/rustc", Linkname: "tc-1/bin/rustc", Typeflag: tar.TypeLink})
+	add("other/x", 0o644, "x", tar.TypeReg)
+	tw.Close()
+	gz.Close()
+	dst := t.TempDir()
+	if err := extractTree(tar.NewReader(mustGzip(t, buf.Bytes())), "tc-1", dst); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(filepath.Join(dst, "bin", "rustc"))
+	if err != nil || fi.Mode().Perm()&0o100 == 0 {
+		t.Fatalf("rustc: %v %v", fi, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dst, "lib", "rustlib", "rustc")); err != nil || string(b) != "rustc" {
+		t.Fatalf("hard link: %q %v", b, err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "x")); err == nil {
+		t.Fatal("entry outside the prefix extracted")
+	}
+	if err := extractTree(tar.NewReader(mustGzip(t, buf.Bytes())), "missing", t.TempDir()); err == nil {
+		t.Fatal("missing prefix accepted")
+	}
+}
+
+func mustGzip(t *testing.T, b []byte) io.Reader {
+	r, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }

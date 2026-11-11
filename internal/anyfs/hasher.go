@@ -39,6 +39,10 @@ func FileIDOf(fi fs.FileInfo) (FileID, bool) {
 type HasherOptions struct {
 	// Sink receives the pages of hashed files (nil: digests only).
 	Sink PageSink
+	// RangeSink, if set, receives the pages instead of Sink, with their
+	// range in the hashed file (a tier can clone it instead of writing
+	// the bytes again).
+	RangeSink RangeSink
 	// Skip excludes files from background hashing (e.g. ephemeral access
 	// classes: deleted before any commit, hashing them is wasted IO).
 	Skip func(rel string) bool
@@ -233,9 +237,12 @@ func (h *Hasher) hash(it hitem) {
 	if h.opt.BytesPerSec > 0 {
 		r = &limitedReader{r: f, h: h}
 	}
-	if h.opt.Sink != nil {
+	switch {
+	case h.opt.RangeSink != nil:
+		err = NewPacker(h.opt.Sink).WithRanges(h.opt.RangeSink).AddLargeFile(n, f, id.Ctime, r)
+	case h.opt.Sink != nil:
 		err = NewPacker(h.opt.Sink).AddLarge(n, r)
-	} else {
+	default:
 		err = hashReader(n, r)
 	}
 	f.Close()

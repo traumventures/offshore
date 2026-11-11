@@ -153,7 +153,7 @@ func buildEnv(prefixes ...string) map[string]string {
 	env := map[string]string{}
 	for _, kv := range os.Environ() {
 		k, v, _ := strings.Cut(kv, "=")
-		for _, p := range append([]string{"CARGO_TERM_"}, prefixes...) {
+		for _, p := range append([]string{"CARGO_TERM_", "CARGO_LOG"}, prefixes...) {
 			if strings.HasPrefix(k, p) {
 				env[k] = v
 			}

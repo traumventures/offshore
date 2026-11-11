@@ -172,3 +172,78 @@ func testSlotCommitDuringNextSession(t *testing.T, mode fsMode) {
 		t.Fatalf("slot uncommitted after committing session 2: %+v", m)
 	}
 }
+
+// The end of a session never waits for the commit of an earlier one: the
+// next session waits for the slot while it is captured (production: the
+// commit inside the capture held the slot for minutes, sessions waited
+// maintWait). A session ending while a commit runs or a snapshot is
+// pending is committed with the next capture or commit.
+func TestSlotCaptureDoesNotWaitForCommit(t *testing.T) {
+	for _, mode := range []fsMode{fsUser, fsKernel} {
+		t.Run(mode.String(), func(t *testing.T) { testSlotCaptureDoesNotWaitForCommit(t, mode) })
+	}
+}
+
+func testSlotCaptureDoesNotWaitForCommit(t *testing.T, mode fsMode) {
+	ctx := context.Background()
+	w, _ := fsWorkerAt(t, mode, t.TempDir(), t.TempDir(), cacheFSOptions{})
+	mt := time.Now().Add(-time.Hour)
+
+	slot := startSession(t, w)
+	put(t, filepath.Join(slot, "data", "s1"), []byte("session 1"), mt)
+	endSession(t, w, slot, false) // captured, commit pending
+	if n := len(pendingSnapshots(slot)); n != 1 {
+		t.Fatalf("%d snapshots after session 1", n)
+	}
+
+	// Session 2 ends while session 1 waits for its commit.
+	if startSession(t, w) != slot {
+		t.Fatal("next session got another slot")
+	}
+	put(t, filepath.Join(slot, "data", "s2"), []byte("session 2"), mt)
+	endSession(t, w, slot, false)
+	if n := len(pendingSnapshots(slot)); n != 1 {
+		t.Fatalf("%d snapshots after session 2 (want session 2 not captured)", n)
+	}
+
+	// Session 3 ends while a commit holds the slot's snapshot lock.
+	if startSession(t, w) != slot {
+		t.Fatal("next session got another slot")
+	}
+	put(t, filepath.Join(slot, "data", "s3"), []byte("session 3"), mt)
+	lk := w.cfs.snapLock(slot)
+	lk.Lock()
+	done := make(chan error, 1)
+	go func() { done <- w.snapshotSlot(ctx, slot, "repo") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("capture waited for the running commit")
+	}
+	lk.Unlock()
+	w.slots.release(slot)
+
+	if _, err := w.commitPending(ctx, slot, "repo"); err != nil {
+		t.Fatal(err)
+	}
+	if got := headTree(t, w, slot); !got["s1"] || got["s2"] || got["s3"] {
+		t.Fatalf("head after the pending commit %v", got)
+	}
+	m, _ := readMeta(slot)
+	if !m.uncommitted() {
+		t.Fatalf("slot committed with sessions 2 and 3 uncommitted: %+v", m)
+	}
+	// The idle commit takes sessions 2 and 3.
+	if _, err := w.commitSlot(ctx, ref(t, w, slot)); err != nil {
+		t.Fatal(err)
+	}
+	if got := headTree(t, w, slot); !got["s1"] || !got["s2"] || !got["s3"] {
+		t.Fatalf("head after the idle commit %v", got)
+	}
+	if m, _ := readMeta(slot); m.uncommitted() {
+		t.Fatalf("slot uncommitted after the idle commit: %+v", m)
+	}
+}

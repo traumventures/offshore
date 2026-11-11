@@ -73,22 +73,28 @@ type EC2 struct {
 	stack       string
 	ingress     provider.Ingress // allow_cidrs
 	diskGB      int32
-	amis        map[string]string // optional fixed AMI per architecture
-	docker      []string
-	binaries    map[string]string // server binary per architecture
-	subnet      string
-	cfg         aws.Config
-	ec2         *ec2.Client
-	api         ec2API // e.ec2 (fakes in tests)
-	ecr         *ecr.Client
-	s3          *s3.Client
-	cf          *cloudformation.Client
-	ssm         *ssm.Client
-	quotas      quotaAPI // Service Quotas (created on first use)
-	infraMu     sync.Mutex
-	infra       *infra
-	binMu       sync.Mutex
-	binKeys     map[string]string // architecture -> uploaded binary key
+	// diskIOPS and diskThroughput (MiB/s) provision the gp3 root volume:
+	// gp3's baseline (3000 IOPS, 125 MiB/s) is the bottleneck of
+	// concurrent builds (cargo writes, the slot hasher, page-ins and
+	// writeback share it; production sessions ran at 0.15-0.4 cores).
+	diskIOPS       int32
+	diskThroughput int32
+	amis           map[string]string // optional fixed AMI per architecture
+	docker         []string
+	binaries       map[string]string // server binary per architecture
+	subnet         string
+	cfg            aws.Config
+	ec2            *ec2.Client
+	api            ec2API // e.ec2 (fakes in tests)
+	ecr            *ecr.Client
+	s3             *s3.Client
+	cf             *cloudformation.Client
+	ssm            *ssm.Client
+	quotas         quotaAPI // Service Quotas (created on first use)
+	infraMu        sync.Mutex
+	infra          *infra
+	binMu          sync.Mutex
+	binKeys        map[string]string // architecture -> uploaded binary key
 
 	builderOnce sync.Once
 	builder     *image.DockerBuilder
@@ -121,11 +127,11 @@ func open(opts map[string]any) (provider.Provider, error) {
 	if v := provider.StringList(opts["docker_command"]); len(v) > 0 {
 		e.docker = v
 	}
-	switch v := opts["disk_gb"].(type) {
-	case int64:
-		e.diskGB = int32(v)
-	case float64:
-		e.diskGB = int32(v)
+	e.diskGB = int32(provider.Int(opts, "disk_gb", int64(e.diskGB)))
+	e.diskIOPS = int32(provider.Int(opts, "disk_iops", DefaultDiskIOPS))
+	e.diskThroughput = int32(provider.Int(opts, "disk_throughput", DefaultDiskThroughput))
+	if err := checkGP3(e.diskGB, e.diskIOPS, e.diskThroughput); err != nil {
+		return nil, err
 	}
 	self, err := os.Executable()
 	if err != nil {
@@ -507,6 +513,7 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 		BlockDeviceMappings: []ec2types.BlockDeviceMapping{{
 			DeviceName: aws.String("/dev/xvda"),
 			Ebs: &ec2types.EbsBlockDevice{VolumeSize: aws.Int32(e.diskGB), VolumeType: ec2types.VolumeTypeGp3,
+				Iops: aws.Int32(e.diskIOPS), Throughput: aws.Int32(e.diskThroughput),
 				DeleteOnTermination: aws.Bool(true), Encrypted: aws.Bool(true)},
 		}},
 		NetworkInterfaces: []ec2types.InstanceNetworkInterfaceSpecification{{
@@ -786,4 +793,27 @@ func rootVolume(i ec2types.Instance) string {
 		}
 	}
 	return ""
+}
+
+// Default gp3 root volume performance (gp3 baseline: 3000 IOPS, 125 MiB/s).
+const (
+	DefaultDiskIOPS       = 6000
+	DefaultDiskThroughput = 500
+)
+
+// checkGP3 validates the provisioned performance of a gp3 volume of gb
+// GiB: 3000..80000 IOPS (at most 500 per GiB), 125..2000 MiB/s (at most
+// a quarter of the IOPS).
+func checkGP3(gb, iops, throughput int32) error {
+	switch {
+	case iops < 3000 || iops > 80000:
+		return fmt.Errorf("aws-ec2: disk_iops must be 3000..80000 (got %d)", iops)
+	case int64(iops) > 500*int64(gb):
+		return fmt.Errorf("aws-ec2: disk_iops %d exceeds 500 per GiB of disk_gb %d", iops, gb)
+	case throughput < 125 || throughput > 2000:
+		return fmt.Errorf("aws-ec2: disk_throughput must be 125..2000 MiB/s (got %d)", throughput)
+	case throughput*4 > iops:
+		return fmt.Errorf("aws-ec2: disk_throughput %d MiB/s needs at least %d disk_iops", throughput, throughput*4)
+	}
+	return nil
 }

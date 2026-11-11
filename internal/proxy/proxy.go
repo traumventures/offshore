@@ -407,7 +407,9 @@ func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, 
 	verbose := os.Getenv("OFFSHORE_VERBOSE") != ""
 	t1 := time.Now()
 	rec.Slot = sstarted.Slot
-	rec.Timings.Barrier = sstarted.WaitMs
+	rec.Timings.Barrier = sstarted.BarrierMs
+	rec.Timings.Slot = sstarted.SlotMs
+	rec.Timings.Prepare = max(0, sstarted.WaitMs-sstarted.BarrierMs-sstarted.SlotMs)
 	rec.Timings.Connect = max(0, events.Ms(t1.Sub(tc))-sstarted.WaitMs)
 	fwd.serve(conn, prep.Token, sstarted.Session)
 	if verbose {

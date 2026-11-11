@@ -68,14 +68,18 @@ type OCI struct {
 	ingress     provider.Ingress
 	images      map[string]string // optional fixed image OCID per architecture
 	diskGB      int64
-	docker      []string
-	binaries    map[string]string // server binary per architecture
-	bucket      string
-	repository  string
-	registry    string // OCIR host
-	iam         bool   // create the dynamic group and policy
-	pollEvery   time.Duration
-	log         *slog.Logger
+	// diskVPUs are the boot volume's performance units per GB (10
+	// balanced, 20 higher performance, 30-120 ultra high): throughput
+	// and IOPS grow with VPUs and size, builds are disk bound below.
+	diskVPUs   int64
+	docker     []string
+	binaries   map[string]string // server binary per architecture
+	bucket     string
+	repository string
+	registry   string // OCIR host
+	iam        bool   // create the dynamic group and policy
+	pollEvery  time.Duration
+	log        *slog.Logger
 
 	initMu    sync.Mutex
 	initErr   error
@@ -147,11 +151,10 @@ func open(opts map[string]any) (provider.Provider, error) {
 	if v := provider.StringList(opts["docker_command"]); len(v) > 0 {
 		o.docker = v
 	}
-	switch v := opts["disk_gb"].(type) {
-	case int64:
-		o.diskGB = v
-	case float64:
-		o.diskGB = int64(v)
+	o.diskGB = provider.Int(opts, "disk_gb", o.diskGB)
+	o.diskVPUs = provider.Int(opts, "disk_vpus", DefaultDiskVPUs)
+	if err := checkVPUs(o.diskVPUs); err != nil {
+		return nil, err
 	}
 	if o.diskGB < 50 {
 		return nil, fmt.Errorf("oci: disk_gb must be at least 50 (the minimum boot volume)")
@@ -605,8 +608,9 @@ func (o *OCI) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 		DisplayName:        common.String("offshore-" + spec.ID),
 		CreateVnicDetails: &core.CreateVnicDetails{SubnetId: common.String(in.subnet), AssignPublicIp: common.Bool(true),
 			FreeformTags: freeform()},
-		SourceDetails: core.InstanceSourceViaImageDetails{ImageId: common.String(img), BootVolumeSizeInGBs: common.Int64(o.diskGB)},
-		Metadata:      map[string]string{"user_data": base64.StdEncoding.EncodeToString([]byte(ud))},
+		SourceDetails: core.InstanceSourceViaImageDetails{ImageId: common.String(img), BootVolumeSizeInGBs: common.Int64(o.diskGB),
+			BootVolumeVpusPerGB: common.Int64(o.diskVPUs)},
+		Metadata: map[string]string{"user_data": base64.StdEncoding.EncodeToString([]byte(ud))},
 		// Metadata service v2 only (requests need the Authorization
 		// header; containers are cut off from it, see userData).
 		InstanceOptions: &core.InstanceOptions{AreLegacyImdsEndpointsDisabled: common.Bool(true)},
@@ -937,4 +941,17 @@ func (o *OCI) DeleteSecrets(ctx context.Context, machineID string) error {
 		return err
 	}
 	return o.deleteSecrets(ctx, in, machineID)
+}
+
+// DefaultDiskVPUs is the boot volume's default performance (higher
+// performance: 75 IOPS and 600 KB/s per GB, 120 MB/s for 200 GB; the
+// balanced default of OCI, 10, gives 96 MB/s).
+const DefaultDiskVPUs = 20
+
+// checkVPUs validates a boot volume's performance units per GB.
+func checkVPUs(v int64) error {
+	if v < 10 || v > 120 || v%10 != 0 {
+		return fmt.Errorf("oci: disk_vpus must be 10, 20, ... 120 (got %d)", v)
+	}
+	return nil
 }

@@ -88,6 +88,9 @@ type Stats struct {
 	// SharedBytes are resident pages another tier holds too (linked from
 	// a shared pool: counted by both).
 	SharedBytes int64 `json:"shared_bytes,omitempty"`
+	// ClonedBytes are page bytes stored as clones (reflinks) of file
+	// ranges instead of being written again (PutRange).
+	ClonedBytes int64 `json:"cloned_bytes,omitempty"`
 	// FaultRate is page faults per second (exponentially weighted).
 	FaultRate float64 `json:"fault_rate"`
 	// Thrashing is set while refaults show a working set larger than the

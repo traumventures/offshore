@@ -64,7 +64,7 @@ cd ~/src/my-crate
 offshore init --write                      # writes .offshore.toml
 offshore doctor                            # checks installation and configuration
 cargo build                                    # runs on a local-docker machine
-offshore why                               # where and why it ran
+offshore why                               # where and why it ran: timings (manifest barrier, build slot wait, run), units rebuilt
 ```
 
 Without any client configuration the daemon embeds the orchestrator and
@@ -92,6 +92,7 @@ Reference:
 Guides:
 
 * Providers: [AWS EC2](docs/guides/aws.md), [Oracle Cloud](docs/guides/oci.md)
+* [Rust compile speed](docs/rust.md): measured compiler options, the parallel front end, wild, the opt-in headstart toolchain
 * Ecosystems: [Rust](docs/guides/rust.md), [TypeScript / Node](docs/guides/typescript.md), [Go](docs/guides/go.md)
 
 Project: [roadmap](docs/ROADMAP.md), [design plan](docs/PLAN.md) (German).

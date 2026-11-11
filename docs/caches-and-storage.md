@@ -282,8 +282,11 @@ exit message (`proto.Exit.Cache`) and shown by `offshore why`.
 ### Linker
 
 `[environment] linker = "mold"` installs the pinned static mold release
-(`lld` installs the distribution's `lld` package, Debian based images) and a
-driver `/usr/local/bin/offshore-cc-<linker>` (`cc ... -fuse-ld=<linker>`,
+(`wild` the pinned static [wild](https://github.com/wild-linker/wild)
+release, `lld` the distribution's `lld` package, Debian based images) and a
+driver `/usr/local/bin/offshore-cc-<linker>` (`cc ... -fuse-ld=<linker>`;
+gcc has no `-fuse-ld=wild`, so wild is `-fuse-ld=bfd
+-B/usr/local/lib/offshore-wild` with `ld.bfd` there linking to wild;
 last so it beats rustc's own `-fuse-ld=lld` for its bundled rust-lld), which
 sessions use as `CARGO_TARGET_<host triple>_LINKER` unless set (with
 `[outputs] mode = "fuse"` through a `cc` on `PATH` instead, see
@@ -615,8 +618,15 @@ volumes whose machine disappeared are released like destroyed ones, and
 unmanaged cache volumes whose machine is gone and that carry no expiry are
 deleted.
 
-Machines use gp3 root volumes (`disk_gb`, default 100; 3000 IOPS and
-125 MB/s baseline). Instance types with local NVMe (`c6id`, `m6id`,
+Machines use gp3 root volumes (`disk_gb`, default 100) provisioned with
+6000 IOPS and 500 MiB/s (`disk_iops`, `disk_throughput`; the gp3 baseline
+of 3000 IOPS and 125 MB/s made concurrent app sessions I/O bound at
+0.15-0.4 cores, Nov 2026); OCI boot volumes use `disk_vpus` (default 20).
+Pages of files hashed during a session (and large files read by a commit)
+are reflinks of the slot's files on xfs with reflink (`FICLONERANGE`,
+`anyfs.Local.PutRange`, counted as `cloned_bytes`): build outputs are not
+written a second time; a source changed after it was read (ctime) or a
+file system without reflinks gets a written copy. Instance types with local NVMe (`c6id`, `m6id`,
 `c7gd`) are faster for target directories but lose their content on stop,
 so their warm state only survives through committed layers in the store. To compare on a real
 machine:

@@ -95,7 +95,9 @@ func slotCommit(args []string) {
 		opt.Workers = *workers
 		stream = link.Stream(ctx)
 		put := func(k anyfs.Key, b []byte) error { return stream.Put(k, b) }
-		opt.FileSink = func(string) anyfs.PageSink { return put }
+		opt.FileSink = func(string) anyfs.RangeSink {
+			return func(k anyfs.Key, b []byte, _ anyfs.Range) error { return put(k, b) }
+		}
 	}
 	tree, st, err := cs.Tree(*upper, opt)
 	must(err)
