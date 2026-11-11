@@ -99,11 +99,26 @@ type cacheFSOptions struct {
 	// flushed to the store (default headFlushDeadline).
 	FlushDeadline time.Duration
 	// HashBytesPerSec bounds the background hashing of written files
-	// (0: unbounded; two files at a time).
+	// (0: defaultHashBytesPerSec; negative: unbounded). The default keeps
+	// hashing from competing with the build on slow disks such as gp3.
 	HashBytesPerSec float64
 	// ReadWorkers bounds the files a commit reads at once (0:
 	// anyfs.DefaultReadWorkers).
 	ReadWorkers int
+}
+
+// defaultHashBytesPerSec bounds background hashing during sessions: on a
+// gp3-like disk unbounded hashing doubled the session time in the bench.
+const defaultHashBytesPerSec = 32 << 20
+
+func hashRate(v float64) float64 {
+	switch {
+	case v < 0:
+		return 0
+	case v == 0:
+		return defaultHashBytesPerSec
+	}
+	return v
 }
 
 // cacheFS mounts and commits the build slots of a machine.
@@ -521,7 +536,7 @@ func (c *cacheFS) hasher(slot string, r *repoFS) *anyfs.Hasher {
 				r.local.Hint(p.Key, hint)
 			}
 		},
-		BytesPerSec: c.opt.HashBytesPerSec,
+		BytesPerSec: hashRate(c.opt.HashBytesPerSec),
 		Now:         c.opt.Now,
 	})
 	if c.hashed == nil {
