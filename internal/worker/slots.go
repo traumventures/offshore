@@ -26,7 +26,13 @@ type slots struct {
 	clock  clock.Clock // slot ages (nil: real time)
 	mu     sync.Mutex
 	leased map[string]bool
+	// pinned slots may be leased but never removed or pruned (a restore
+	// is filling them through a FUSE mount).
+	pinned map[string]bool
 }
+
+// busyLocked reports whether a slot must not be removed.
+func (s *slots) busyLocked(p string) bool { return s.leased[p] || s.pinned[p] }
 
 func (s *slots) now() time.Time {
 	if s.clock == nil {
@@ -51,6 +57,10 @@ type slotMeta struct {
 	// Digests are the digests of machine caches linked into the slot
 	// (cache name -> digest).
 	Digests map[string]string `json:"digests,omitempty"`
+	// Restored is the unix time the slot was restored from a snapshot
+	// (0: built here); RestoreSeconds the time spent restoring so far.
+	Restored       int64   `json:"restored,omitempty"`
+	RestoreSeconds float64 `json:"restore_seconds,omitempty"`
 }
 
 // slotCache is a slot-scope cache path with its pruning settings.
@@ -74,7 +84,7 @@ func newSlots(dir string) (*slots, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	return &slots{dir: dir, leased: map[string]bool{}}, nil
+	return &slots{dir: dir, leased: map[string]bool{}, pinned: map[string]bool{}}, nil
 }
 
 func readMeta(slot string) (slotMeta, error) {
@@ -121,10 +131,9 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 		p := filepath.Join(repoDir, de.Name())
 		m, err := readMeta(p)
 		if err != nil || now.Sub(time.Unix(m.Created, 0)) >= ttl {
-			if !s.leased[p] {
+			if !s.busyLocked(p) {
 				os.RemoveAll(p) // expired: never reuse old build data
-			}
-			if s.leased[p] {
+			} else {
 				used[n] = true
 			}
 			continue
@@ -224,7 +233,7 @@ func (s *slots) update(slot string, f func(*slotMeta)) error {
 func (s *slots) acquire(slot string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.leased[slot] {
+	if s.busyLocked(slot) {
 		return false
 	}
 	s.leased[slot] = true
@@ -270,7 +279,7 @@ func (s *slots) list() []slotRef {
 		for _, de := range des {
 			p := filepath.Join(s.dir, r.Name(), de.Name())
 			if m, err := readMeta(p); err == nil {
-				out = append(out, slotRef{Repo: r.Name(), Path: p, Meta: m, Leased: s.leased[p]})
+				out = append(out, slotRef{Repo: r.Name(), Path: p, Meta: m, Leased: s.busyLocked(p)})
 			}
 		}
 	}
@@ -312,7 +321,7 @@ func (s *slots) gc(ttl time.Duration) (removed int) {
 		des, _ := os.ReadDir(repoDir)
 		for _, de := range des {
 			p := filepath.Join(repoDir, de.Name())
-			if s.leased[p] {
+			if s.busyLocked(p) {
 				continue
 			}
 			m, err := readMeta(p)
@@ -335,4 +344,55 @@ func (s *slots) warmRepos(ttl time.Duration) []string {
 		}
 	}
 	return out
+}
+
+// adopt creates a new pinned slot for repo with the given metadata (a
+// restore fills its data) and returns its path.
+func (s *slots) adopt(repoID string, meta slotMeta) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	repoDir := filepath.Join(s.dir, repoID)
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		return "", err
+	}
+	for n := 0; ; n++ {
+		p := filepath.Join(repoDir, strconv.Itoa(n))
+		if err := os.Mkdir(p, 0o755); err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return "", err
+		}
+		if err := writeMeta(p, meta); err != nil {
+			return "", err
+		}
+		s.pinned[p] = true
+		return p, nil
+	}
+}
+
+// unpin ends a restore's protection of a slot.
+func (s *slots) unpin(slot string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pinned, slot)
+}
+
+// isLeased reports whether a session holds the slot.
+func (s *slots) isLeased(slot string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.leased[slot]
+}
+
+// acquirePinned marks a pinned slot leased if no session holds it (the
+// end of a restore).
+func (s *slots) acquirePinned(slot string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.leased[slot] {
+		return false
+	}
+	s.leased[slot] = true
+	return true
 }

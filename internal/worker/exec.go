@@ -190,11 +190,17 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		return prepErr(fmt.Errorf("build slot: %w", err))
 	}
 	data := filepath.Join(slot, "data")
+	var restored bool
+	var restoreSecs float64
+	if m, err := readMeta(slot); err == nil {
+		restored, restoreSecs = restoreUsage(m)
+	}
 	slotBefore := s.slots.size(slot)
 	slotAfter := int64(-1)
 	s.slots.update(slot, func(m *slotMeta) { m.Caches = slotCaches(req) })
 	defer func() {
 		s.slots.releaseSized(slot, slotAfter)
+		go s.finishFill(slot)
 		go s.enforceBudgets(slot)
 	}()
 
@@ -355,6 +361,7 @@ loop:
 	exit.Usage.Warm = warm
 	slotAfter = s.recordSlotRun(slot, se.started)
 	exit.Usage.SlotBytesBefore, exit.Usage.SlotBytesAfter = slotBefore, slotAfter
+	exit.Usage.Restored, exit.Usage.RestoreSeconds = restored, restoreSecs
 	exit.Usage.ExitCode = exit.Code
 	if s.cg.oomKilled(cgDir) {
 		exit.Usage.OOM = true

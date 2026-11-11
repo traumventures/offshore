@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -116,4 +117,66 @@ func (h *host) StopSelf(ctx context.Context) error {
 	}
 	_, err = h.ec2.StopInstances(ctx, &ec2.StopInstancesInput{InstanceIds: []string{strings.TrimSpace(string(b))}})
 	return err
+}
+
+// growCmd runs a command on the host (variable for tests).
+var growCmd = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+// GrowDisk implements supervisor.DiskGrower: after ResizeDisk enlarged
+// the root volume, grow its partition and file system (no-ops otherwise).
+func (h *host) GrowDisk(ctx context.Context) error {
+	src, err := growCmd(ctx, "findmnt", "-n", "-o", "SOURCE,FSTYPE", "/")
+	if err != nil {
+		return fmt.Errorf("findmnt: %v: %s", err, src)
+	}
+	f := strings.Fields(string(src))
+	if len(f) != 2 {
+		return fmt.Errorf("findmnt: unexpected %q", src)
+	}
+	dev, fstype := f[0], f[1]
+	disk, part := splitPartition(dev)
+	if part == "" {
+		return nil
+	}
+	// growpart exits 1 with NOCHANGE when the partition fills the disk.
+	if out, err := growCmd(ctx, "growpart", disk, part); err != nil && !strings.Contains(string(out), "NOCHANGE") {
+		return fmt.Errorf("growpart: %v: %s", err, out)
+	} else if err != nil {
+		return nil
+	}
+	var out []byte
+	switch fstype {
+	case "xfs":
+		out, err = growCmd(ctx, "xfs_growfs", "-d", "/")
+	case "ext4":
+		out, err = growCmd(ctx, "resize2fs", dev)
+	default:
+		return fmt.Errorf("cannot grow %s file systems", fstype)
+	}
+	if err != nil {
+		return fmt.Errorf("grow %s: %v: %s", fstype, err, out)
+	}
+	return nil
+}
+
+// splitPartition splits /dev/nvme0n1p1 into /dev/nvme0n1 and 1 (also
+// /dev/xvda1).
+func splitPartition(dev string) (disk, part string) {
+	i := len(dev)
+	for i > 0 && dev[i-1] >= '0' && dev[i-1] <= '9' {
+		i--
+	}
+	if i == len(dev) || i == 0 {
+		return dev, ""
+	}
+	disk, part = dev[:i], dev[i:]
+	if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
+		if !strings.HasSuffix(disk, "p") {
+			return dev, "" // a whole disk such as /dev/nvme0n1
+		}
+		disk = strings.TrimSuffix(disk, "p")
+	}
+	return disk, part
 }
