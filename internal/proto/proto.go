@@ -56,6 +56,8 @@ const (
 	TOutDir
 	TOutRead
 	TForward
+	TSlotOp
+	TSlotResult
 )
 
 // Stream kinds sent in Hello.
@@ -72,7 +74,38 @@ const (
 	// network namespace: TForward, then TAck (or TError), then raw bytes
 	// in both directions until either side closes.
 	KindForward = "forward"
+	// KindSlot carries one build slot operation of the orchestrator
+	// (TSlotOp, answered by TSlotResult); it needs an admin token.
+	KindSlot = "slot"
 )
+
+// Build slot operations (SlotOp.Op).
+const (
+	SlotPrune   = "prune"
+	SlotSave    = "save"
+	SlotRestore = "restore"
+)
+
+// SlotOp asks a worker to prune, save or restore a repository's build slot.
+type SlotOp struct {
+	Op   string `json:"op"`
+	Repo string `json:"repo"` // repository id
+	// TargetBytes is the prune target (0: the caches' prune policy).
+	TargetBytes int64 `json:"target_bytes,omitempty"`
+	// Snapshot is the snapshot to restore.
+	Snapshot *SnapshotInfo `json:"snapshot,omitempty"`
+}
+
+// SlotResult answers a SlotOp.
+type SlotResult struct {
+	Freed    int64         `json:"freed,omitempty"`    // prune
+	Snapshot *SnapshotInfo `json:"snapshot,omitempty"` // save
+	// Chunks, NewChunks and Seconds describe a save or restore.
+	Chunks    int64   `json:"chunks,omitempty"`
+	NewChunks int64   `json:"new_chunks,omitempty"`
+	Seconds   float64 `json:"seconds,omitempty"`
+	Err       string  `json:"err,omitempty"`
+}
 
 // Hello opens every stream.
 type Hello struct {

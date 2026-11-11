@@ -42,6 +42,22 @@ type slotMeta struct {
 	// Bytes is the slot size measured when the last session ended (or
 	// when it was cloned).
 	Bytes int64 `json:"bytes,omitempty"`
+	// Runs counts the sessions that used the slot; the read index
+	// (reads.json) records per file the last run that read or wrote it.
+	Runs int64 `json:"runs,omitempty"`
+	// Caches are the slot-scope caches of the last session (paths and
+	// prune policies), so the slot can be pruned without a request.
+	Caches []slotCache `json:"caches,omitempty"`
+	// Digests are the digests of machine caches linked into the slot
+	// (cache name -> digest).
+	Digests map[string]string `json:"digests,omitempty"`
+}
+
+// slotCache is a slot-scope cache path with its pruning settings.
+type slotCache struct {
+	Path     string `json:"path"`
+	Prune    string `json:"prune,omitempty"`
+	MaxBytes int64  `json:"max_bytes,omitempty"`
 }
 
 // expired reports whether the slot data is too old under the slot's TTL,
@@ -151,6 +167,10 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 			cmd := exec.Command("cp", "-a", "--reflink=always", src, filepath.Join(p, "data"))
 			if err := cmd.Run(); err == nil {
 				meta.Created = all[0].meta.Created
+				meta.Runs, meta.Caches = all[0].meta.Runs, all[0].meta.Caches
+				if b, err := os.ReadFile(filepath.Join(all[0].path, readsFile)); err == nil {
+					os.WriteFile(filepath.Join(p, readsFile), b, 0o644)
+				}
 				cloned = true
 			} else {
 				os.RemoveAll(filepath.Join(p, "data"))
@@ -183,6 +203,42 @@ func (s *slots) releaseSized(slot string, bytes int64) {
 		if bytes >= 0 {
 			m.Bytes = bytes
 		}
+		writeMeta(slot, m)
+	}
+}
+
+// update changes the metadata of a slot.
+func (s *slots) update(slot string, f func(*slotMeta)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := readMeta(slot)
+	if err != nil {
+		return err
+	}
+	f(&m)
+	return writeMeta(slot, m)
+}
+
+// acquire marks an unleased slot as leased (for maintenance such as
+// pruning or snapshots); it reports false if a session holds it.
+func (s *slots) acquire(slot string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.leased[slot] {
+		return false
+	}
+	s.leased[slot] = true
+	return true
+}
+
+// releaseMaint ends maintenance of a slot acquired with acquire, recording
+// its size; the slot's last use stays.
+func (s *slots) releaseMaint(slot string, bytes int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.leased, slot)
+	if m, err := readMeta(slot); err == nil {
+		m.Bytes = bytes
 		writeMeta(slot, m)
 	}
 }
