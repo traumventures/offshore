@@ -98,7 +98,6 @@ Resources:
               - ec2:DescribeTags
               - ec2:DescribeAvailabilityZones
               - ec2:DescribeAccountAttributes
-              - ec2:DescribeSpotInstanceRequests
             Resource: "*"
           - Sid: RunTaggedMachines
             Effect: Allow
@@ -106,7 +105,6 @@ Resources:
             Resource:
               - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:volume/*"
               - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:network-interface/*"
-              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:spot-instances-request/*"
             Condition:
               StringEquals:
                 aws:RequestTag/project: cloudsourced
@@ -141,7 +139,6 @@ Resources:
               - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:volume/*"
               - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:network-interface/*"
               - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*"
-              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:spot-instances-request/*"
             Condition:
               StringEquals:
                 ec2:CreateAction: [RunInstances, CreateSecurityGroup]
@@ -165,24 +162,6 @@ Resources:
             Condition:
               StringEquals:
                 aws:ResourceTag/project: cloudsourced
-          # Spot machines: persistent requests are canceled before their
-          # instance terminates (or they relaunch it).
-          - Sid: SpotRequests
-            Effect: Allow
-            Action: ec2:CancelSpotInstanceRequests
-            Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:spot-instances-request/*"
-            Condition:
-              StringEquals:
-                aws:ResourceTag/project: cloudsourced
-          # The first spot launch of an account creates the EC2 Spot
-          # service-linked role.
-          - Sid: SpotServiceLinkedRole
-            Effect: Allow
-            Action: iam:CreateServiceLinkedRole
-            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/spot.amazonaws.com/AWSServiceRoleForEC2Spot"
-            Condition:
-              StringEquals:
-                iam:AWSServiceName: spot.amazonaws.com
           - Sid: MachineSecurityGroupIngress
             Effect: Allow
             Action:

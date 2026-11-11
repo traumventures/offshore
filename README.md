@@ -224,18 +224,15 @@ them for `max(idle_stop, 10m)` (an offline control plane does not leave them
 running). The metadata service is not reachable from sessions (IMDSv2, hop
 limit 1). The caller's credentials need `ssm:PutParameter`/`DeleteParameter`.
 
-#### Spot and arm64
+#### Instance types and arm64
 
 ```toml
 [[providers.aws.size]]
-name           = "x4-spot"            # a name of your choice
+name           = "x4"                 # a name of your choice
 cpu            = 4
 memory         = "7G"
-price_per_hour = 0.21                 # on-demand price
-spot           = true
+price_per_hour = 0.21
 instance_types = ["c7a.xlarge", "c6a.xlarge", "m7a.xlarge"]   # tried in order
-spot_discount  = 0.5                  # expected discount (default 0.5) for sizing and costs
-spot_fallback  = true                 # on-demand when no type has spot capacity (default)
 
 [[providers.aws.size]]
 name           = "c7g.xlarge"
@@ -245,28 +242,10 @@ memory         = "7G"
 price_per_hour = 0.17
 ```
 
-Spot machines are launched as persistent spot requests with interruption
-behaviour `stop` (only persistent requests can stop instead of terminate, and
-stopping keeps the disk with the warm caches; one-time spot instances cannot
-be stopped at all). The request ends at the machine's expiry. The types are
-tried in order on spot, then, with `spot_fallback`, in order on-demand; any
-capacity error (`InsufficientInstanceCapacity`, `SpotMaxPriceTooLow`, spot
-quota, type not offered) moves on. The optional provider option
-`spot_max_price` caps the spot price (AWS recommends against it: it causes
-more interruptions). The policy sizes with `price_per_hour × (1 −
-spot_discount)` and prefers spot at equal cost; a machine that fell back is
-accounted at the on-demand price.
-
-The risk: AWS can take a spot machine back with two minutes' notice. The supervisor polls the metadata service (`spot/instance-action` and the rebalance
-recommendation). A rebalance recommendation only marks the machine at risk
-(new work prefers other machines). On an interruption notice the worker
-drains: no new sessions, running
-sessions continue until the deadline and fail if they are still running
-then. The orchestrator places new
-work elsewhere and stops the machine as soon as it is empty (then it stays a
-warm machine); a machine stopped by AWS can only be restarted by AWS, so it
-is destroyed and replaced. Do not use spot sizes for builds that take longer
-than you can afford to lose.
+All machines are on-demand instances (spot capacity is not supported). The
+instance types of a size are tried in order (default: the size name); any
+capacity error (`InsufficientInstanceCapacity`, vCPU quota, type not offered
+in the zone) moves on to the next type.
 
 `arch = "arm64"` sizes (Graviton: c7g, m7g, t4g, ...) boot the arm64 Amazon
 Linux 2023 AMI and run `bin/cloudsourced-linux-arm64`, which `make build`
@@ -422,12 +401,11 @@ price_per_hour = 0.11
 instance_types = ["VM.Standard.E5.Flex"]   # shapes, tried in order (default: E5.Flex, A1.Flex for arm64)
 
 [[providers.oci.size]]
-name           = "a1-4-preemptible"
+name           = "a1-4"
 arch           = "arm64"
 cpu            = 4
 memory         = "24G"
 price_per_hour = 0.07
-spot           = true              # preemptible capacity
 ```
 
 On first use the provider creates, idempotently: the compartment, a VCN
@@ -457,11 +435,9 @@ and machines pull with a token of their instance principal.
 
 Differences to AWS: an OS shutdown only stops an OCI instance, so at
 `max_lifetime` the supervisor terminates its instance through the API; there
-is no reaper function. `spot = true` launches preemptible instances, which
-OCI terminates on preemption without notice to drain on and which cannot be
-stopped: idle stop terminates them. Shapes are tried preemptible first, then
-(with `spot_fallback`) on regular capacity; "Out of host capacity", service
-limit and unavailable-shape errors move on to the next attempt. A live smoke
+is no reaper function. Preemptible capacity is not supported. Shapes are
+tried in order; "Out of host capacity", service limit and unavailable-shape
+errors move on to the next shape. A live smoke
 test is in `internal/orchestrator/ocismoke_test.go` (build tag `ocismoke`).
 
 ### Output FUSE
@@ -681,7 +657,7 @@ cloudsourced.run (proxy: tool, subcommand, flag names, repo id, decision, reason
 │  └─ daemon.prepare (repo id, env hash, usage key, estimate, lease, machine)
 │     ├─ daemon.env_resolve, daemon.image_ensure, daemon.manifest_refresh, daemon.estimate
 │     ├─ [remote] controlplane /v1/acquire (client) > controlplane /v1/acquire (server)
-│     │  └─ pool.acquire (queue wait, placement, reason, machine, provider, size, price, reservation, spot)
+│     │  └─ pool.acquire (queue wait, placement, reason, machine, provider, size, price, reservation)
 │     │       ~ pool.create / pool.start (linked root spans: provider, size, price, duration, ready event)
 │     └─ daemon.attach (machine, attempt)
 ├─ proxy.connect (session, worker wait)

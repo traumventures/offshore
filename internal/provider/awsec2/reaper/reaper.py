@@ -8,7 +8,7 @@ LIVE = ["pending", "running", "stopping", "stopped"]
 
 
 def machines(ec2):
-    """Return (instance id, tags, spot request id) of every live machine."""
+    """Return (instance id, tags) of every live machine."""
     out = []
     pages = ec2.get_paginator("describe_instances").paginate(Filters=[
         {"Name": "tag:cloudsourced.kind", "Values": ["machine"]},
@@ -18,7 +18,7 @@ def machines(ec2):
         for r in page["Reservations"]:
             for i in r["Instances"]:
                 tags = {t["Key"]: t["Value"] for t in i.get("Tags", [])}
-                out.append((i["InstanceId"], tags, i.get("SpotInstanceRequestId")))
+                out.append((i["InstanceId"], tags))
     return out
 
 
@@ -47,17 +47,12 @@ def orphaned_parameters(ssm, prefix, alive, now):
 def handler(event, context, ec2=None, ssm=None, now=None):
     ec2 = ec2 or boto3.client("ec2")
     now = time.time() if now is None else now
-    doomed, alive, requests = [], set(), []
-    for instance_id, tags, request in machines(ec2):
+    doomed, alive = [], set()
+    for instance_id, tags in machines(ec2):
         if expired(tags, now):
             doomed.append(instance_id)
-            if request:
-                requests.append(request)
         elif tags.get("cloudsourced.machine"):
             alive.add(tags["cloudsourced.machine"])
-    # A persistent spot request would relaunch its terminated instance.
-    for k in range(0, len(requests), 50):
-        ec2.cancel_spot_instance_requests(SpotInstanceRequestIds=requests[k:k + 50])
     for k in range(0, len(doomed), 50):
         ec2.terminate_instances(InstanceIds=doomed[k:k + 50])
     deleted = []
