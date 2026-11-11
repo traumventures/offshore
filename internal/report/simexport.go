@@ -38,10 +38,33 @@ func SimTrace(evs []events.Event, from, to time.Time, o ExportOptions) sim.Trace
 		j  sim.Job
 	}
 	var jobs []job
+	// task_end events reported by a remote daemon carry only the task id
+	// and usage: take repository, environment, arrival and need from the
+	// task's task_placed event.
+	placed := map[string]events.Event{}
+	for _, ev := range evs {
+		if ev.Type == events.TaskPlaced && ev.Task != "" {
+			placed[ev.Task] = ev
+		}
+	}
 	for _, ev := range evs {
 		u := ev.Usage
 		if ev.Type != events.TaskEnd || u == nil || u.Wall <= 0 {
 			continue
+		}
+		if p, ok := placed[ev.Task]; ok {
+			if ev.Repo == "" {
+				ev.Repo = p.Repo
+			}
+			if ev.Env == "" {
+				ev.Env = p.Env
+			}
+			if ev.Arrival.IsZero() {
+				ev.Arrival, ev.WaitMs = p.Arrival, p.WaitMs
+			}
+			if ev.Need == nil {
+				ev.Need = p.Need
+			}
 		}
 		if (!from.IsZero() && ev.Time.Before(from)) || (!to.IsZero() && !ev.Time.Before(to)) {
 			continue

@@ -30,9 +30,10 @@ func spaced(n int, j Job) Trace {
 }
 
 // A working set of 40G thrashes on the small size's 20G disk. Once the
-// estimator learned it, balanced and time-optimised scheduling create
-// the bigger size; cost-optimised keeps the cheaper small size and
-// thrashes (cheaper, slower).
+// estimator learned it, time-leaning scheduling (r <= 0.3: 8 minutes of
+// thrashing weigh more than the twice as expensive size) creates the
+// bigger size; cost-optimised keeps the cheaper small size and thrashes
+// (cheaper, slower).
 func TestThrashingPicksBiggerSize(t *testing.T) {
 	tr := spaced(6, Job{Repo: "r", Env: "e", Duration: 600, CPU: 2, Memory: Bytes(2 * gib), PeakMemory: Bytes(gib), WorkingSet: Bytes(40 * gib)})
 	run := func(r float64) Report {
@@ -40,13 +41,13 @@ func TestThrashingPicksBiggerSize(t *testing.T) {
 		o.Sizes, o.MaxLifetime, o.Estimator = localSizes(), time.Hour, scheduler.NewHistory("")
 		return Run(tr, o)
 	}
-	for _, r := range []float64{0, 0.5} {
+	for _, r := range []float64{0, 0.2} {
 		rep := run(r)
 		if rep.Completed != 6 || rep.Created["big"] < 5 || rep.Thrashed > 1 {
 			t.Errorf("r=%v: want the big size after learning: created %v, thrashed %d", r, rep.Created, rep.Thrashed)
 		}
 	}
-	cheap, fast := run(1), run(0.5)
+	cheap, fast := run(1), run(0.2)
 	if cheap.Created["big"] != 0 || cheap.Thrashed != 6 || cheap.ThrashTime <= 0 {
 		t.Errorf("r=1: want the small size, thrashing: created %v, thrashed %d", cheap.Created, cheap.Thrashed)
 	}

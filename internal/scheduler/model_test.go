@@ -306,10 +306,18 @@ func TestQueueNoLongerThanAStart(t *testing.T) {
 		}
 		return false
 	}
-	if starts(time.Second) {
-		t.Fatal("fresh request: waiting for the warm slot (about 2 min) is cheaper")
+	// The overrunning session is expected to need as long again (113s):
+	// longer than a start (16s) plus the margin of r=0.5 (60s).
+	if !starts(time.Second) {
+		t.Fatal("fresh request, warm slot expected in 113s, a start takes 16s: want the stopped machine started")
 	}
 	if !starts(30 * time.Second) {
 		t.Fatal("waited 30s, a start takes 16s: want the stopped machine started")
+	}
+	// A warm slot expected within the margin is worth waiting for.
+	b.Releases = []Release{{At: now.Add(30 * time.Second), Start: now.Add(-time.Minute), Res: res(8, 8)}}
+	f.Machines[0] = b
+	if starts(time.Second) {
+		t.Fatal("fresh request, warm slot in 30s: waiting is cheaper than a start and a cold build")
 	}
 }
