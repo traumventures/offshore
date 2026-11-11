@@ -243,27 +243,114 @@ func TestSessionRowsRunningQueuedFinished(t *testing.T) {
 	}
 }
 
-func TestStoragePanel(t *testing.T) {
+func storageSnapshot() Snapshot {
 	s := fakeSnapshot(100, now)
 	st0 := s.Machines[0].Status
-	st0.Disk = &proto.DiskStatus{Total: 200 * gib, Used: 120 * gib, Slots: 80 * gib, MachineCaches: 10 * gib, SlotBytes: map[string]int64{"repo-app": 30 * gib}}
-	st0.Heads = []proto.LayerHead{{Repo: "repo-app", Store: "aws", Bytes: 28 * gib, At: now.Add(-3 * time.Minute).Unix()}}
+	at := now.Add(-3 * time.Minute).Unix()
+	st0.Disk = &proto.DiskStatus{Total: 200 * gib, Used: 120 * gib, Budget: 180 * gib, Items: []proto.StorageItem{
+		{Kind: proto.StorageSlot, Name: "/cache/build/repo-app/0", Repo: "repo-app", Worktree: "/home/u/wt/feature", Branch: "wp/feature",
+			Bytes: 30 * gib, LastUsed: now.Add(-time.Minute).Unix(), Committed: now.Add(-2 * time.Minute).Unix(), StoreAt: at, Stored: 28 * gib, Leased: true},
+		{Kind: proto.StoragePages, Name: "repo-app", Repo: "repo-app", Bytes: 20 * gib, Resident: 20 * gib, Dirty: gib, Stored: 28 * gib, StoreAt: at,
+			WorkingSet: 9 * gib, Classes: map[string]int64{"immutable": 10 * gib, "churn": 5 * gib}, TopDirs: []proto.DirSize{{Path: "target/debug/deps", Bytes: 12 * gib}}},
+		{Kind: proto.StorageFiles, Name: "materialized files", Bytes: 8 * gib, Resident: 8 * gib},
+		{Kind: proto.StorageMachineCache, Name: "usr__local__cargo__registry", Bytes: 2 * gib},
+		{Kind: proto.StorageGlobal, Name: "sccache", Bytes: 3 * gib},
+		{Kind: proto.StorageOther, Name: "images, system and unaccounted", Bytes: 5 * gib},
+	}}
 	st0.VM = &proto.VMStats{PageInBytes: 1 << 30, WritebackBytes: 1 << 29}
+	return s
+}
+
+func TestStoragePanel(t *testing.T) {
+	homeDir = "/home/u"
+	s := storageSnapshot()
 	h := NewHistory(0)
 	h.Add(s)
-	s2 := fakeSnapshot(100, now.Add(10*time.Second))
-	*s2.Machines[0].Status = *st0
-	vm2 := *st0.VM
+	s2 := storageSnapshot()
+	s2.Time = now.Add(10 * time.Second)
+	vm2 := *s.Machines[0].Status.VM
 	vm2.PageInBytes += 100 << 20
 	s2.Machines[0].Status.VM = &vm2
 	h.Add(s2)
 	v := DefaultView()
-	v.Width, v.Height = 160, 50
+	v.Width, v.Height = 170, 60
 	out := Frame(s2, h, v, nil, PlainStyles())
-	for _, want := range []string{"Storage  store 28.0G in 1 repos", "page-in 10M/s", "REPO", "repo-app", "30.0G", "28.0G", "3m10s ago", "aws", "120.0G/200.0G"} {
+	for _, want := range []string{"Storage  store 28.0G in 1 repos", "page-in 10M/s", "KIND", "NAME", "RESIDENT", "STORED", "LAST USED", "COMMITTED", "LAG",
+		"budget 180.0G", "120.0G/200.0G", "~/wt/feature (wp/feature) *", "pages of repo-app", "materialized files", "usr__local__cargo__registry",
+		"sccache", "machine-cache", "global", "images, system", "1m10s ago", "28.0G"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("frame lacks %q\n%s", want, out)
 		}
+	}
+	// Slot first, its page tier next, then the machine-wide items.
+	if strings.Index(out, "(wp/feature)") > strings.Index(out, "pages of repo-app") || strings.Index(out, "pages of repo-app") > strings.Index(out, "materialized files") {
+		t.Errorf("storage rows not grouped:\n%s", out)
+	}
+}
+
+// Enter on a storage row opens its detail: access classes, largest
+// directories, working set and storage events of the repository.
+func TestStorageDetail(t *testing.T) {
+	s := storageSnapshot()
+	m := &model{snap: s, have: true, hist: NewHistory(0), view: DefaultView(), styles: PlainStyles()}
+	m.Update(tea.WindowSizeMsg{Width: 150, Height: 50})
+	m.hist.Events([]events.Event{
+		{Type: events.SnapshotSave, Time: now.Add(-2 * time.Minute), Machine: "m-aws-1", Repo: "repo-app", Bytes: 2 * gib, Seconds: 1.5},
+		{Type: events.SlotAction, Time: now.Add(-time.Minute), Machine: "m-aws-1", Repo: "repo-app", Reason: "prune", Bytes: gib},
+		{Type: events.SlotAction, Time: now.Add(-time.Minute), Machine: "m-aws-1", Repo: "other", Reason: "prune", Bytes: gib},
+	})
+	m.key("tab")
+	m.key("tab")
+	if m.view.Focus != FocusStorage {
+		t.Fatalf("focus %v", m.view.Focus)
+	}
+	m.key("down") // the slot row (after the machine header)
+	m.key("enter")
+	if !strings.HasPrefix(m.view.Detail, "storage:m-aws-1/slot/") {
+		t.Fatalf("detail %q", m.view.Detail)
+	}
+	out := m.View()
+	for _, want := range []string{"last session", "wp/feature", "store lag", "working set", "9.0G", "immutable", "churn", "Largest directories", "target/debug/deps",
+		"snapshot_save", "slot_action", "prune"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("storage detail lacks %q\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "slot_action") != 1 {
+		t.Errorf("events of other repositories shown:\n%s", out)
+	}
+	m.key("esc")
+	m.key("tab")
+	if m.view.Focus != FocusSessions {
+		t.Fatalf("tab cycles back to sessions: %v", m.view.Focus)
+	}
+}
+
+// A machine up at the provider whose worker is not ready shows as
+// booting with the time since its start, without capacity bars.
+func TestBootingMachine(t *testing.T) {
+	s := fakeSnapshot(100, now)
+	s.Machines[1].State = provider.Running // up at the provider, no status yet
+	s.Machines[1].Uptime = []orchestrator.Span{{Start: now.Add(-95 * time.Second)}}
+	v := DefaultView()
+	v.Width = 160
+	out := Frame(s, NewHistory(0), v, nil, PlainStyles())
+	var line string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "m-aws-2") {
+			line = l
+		}
+	}
+	if !strings.Contains(line, "booting 1m35s") || strings.Contains(line, "idle") || strings.Contains(line, "/16") {
+		t.Fatalf("booting row %q", line)
+	}
+	s.Machines[1].Status = &proto.Status{Ready: false}
+	if !strings.Contains(Frame(s, NewHistory(0), v, nil, PlainStyles()), "booting") {
+		t.Fatal("not ready worker must show booting")
+	}
+	s.Machines[1].Status = &proto.Status{Ready: true, Draining: true, DrainReason: "disk full"}
+	if !strings.Contains(Frame(s, NewHistory(0), v, nil, PlainStyles()), "draining (disk full)") {
+		t.Fatal("drain reason")
 	}
 }
 

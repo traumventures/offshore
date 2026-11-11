@@ -26,6 +26,7 @@ import (
 	"github.com/traumventures/offshore/internal/auth"
 	"github.com/traumventures/offshore/internal/config"
 	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/labels"
 	"github.com/traumventures/offshore/internal/manifest"
 	"github.com/traumventures/offshore/internal/proto"
 	"github.com/traumventures/offshore/internal/sandbox"
@@ -267,7 +268,10 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	slotBefore := s.slots.size(slot)
 	faultsBefore, refaultsBefore := s.cfs.faultBytes(), s.cfs.refaultBytes()
 	slotAfter := int64(-1)
-	s.slots.update(slot, func(m *slotMeta) { m.Caches = slotCaches(req) })
+	s.slots.update(slot, func(m *slotMeta) {
+		m.Caches = slotCaches(req)
+		m.Worktree, m.Branch = req.Labels[labels.Worktree], req.Labels[labels.Branch]
+	})
 	defer func() {
 		// Capture the session before the next one can change the slot
 		// (committed in the background by slotReleased).

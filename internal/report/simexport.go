@@ -1,7 +1,12 @@
 package report
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"math"
+	"os"
 	"sort"
 	"time"
 
@@ -121,4 +126,47 @@ func slotGrowth(u *scheduler.Usage) int64 {
 func round(x float64, digits int) float64 {
 	p := math.Pow(10, float64(digits))
 	return math.Round(x*p) / p
+}
+
+// ReadTaskEvents reads the task_placed and task_end events (the ones
+// SimTrace uses) of an event log file (events-DAY.jsonl), in file order.
+// Other lines are skipped before decoding: machine and sample events
+// dominate the log.
+func ReadTaskEvents(path string) ([]events.Event, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	placed := []byte(`"type":"` + events.TaskPlaced + `"`)
+	ended := []byte(`"type":"` + events.TaskEnd + `"`)
+	var out []events.Event
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64<<10), 4<<20)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if !bytes.Contains(line, ended) && !bytes.Contains(line, placed) {
+			continue
+		}
+		var ev events.Event
+		if json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+		out = append(out, ev)
+	}
+	if err := sc.Err(); err != nil {
+		return out, fmt.Errorf("%s: %w", path, err)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	return out, nil
+}
+
+// SimTraceFile converts the finished tasks of an event log file into a
+// simulator trace (SimTrace over the whole file).
+func SimTraceFile(path string, o ExportOptions) (sim.Trace, error) {
+	evs, err := ReadTaskEvents(path)
+	if err != nil {
+		return sim.Trace{}, err
+	}
+	return SimTrace(evs, time.Time{}, time.Time{}, o), nil
 }

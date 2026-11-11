@@ -237,9 +237,11 @@ type Worker struct {
 	// machineCacheBytes is the size of the machine caches, measured by
 	// the periodic gc.
 	machineCacheBytes atomic.Int64
-	pruneMu           sync.Mutex // one prune at a time
-	budgetMu          sync.Mutex // one budget check at a time
-	machineBudgets    machineCacheBudgets
+	// storage is the last storage measurement (storage.go).
+	storage        storageMeasure
+	pruneMu        sync.Mutex // one prune at a time
+	budgetMu       sync.Mutex // one budget check at a time
+	machineBudgets machineCacheBudgets
 }
 
 // New prepares a server.
@@ -383,6 +385,7 @@ func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	lastGC := time.Now()
+	go s.measureMachineCaches() // the storage breakdown before the first GC round
 	for {
 		select {
 		case <-ctx.Done():
