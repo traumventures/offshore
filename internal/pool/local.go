@@ -400,13 +400,14 @@ func (l *Local) Unreachable(_ context.Context, leaseID, machineID string) error 
 // configured size admits: a run whose measured peak plus headroom exceeds
 // every machine still gets the largest one (it ran before, so its real
 // peak fitted) instead of being rejected as unschedulable forever.
-func (l *Local) Estimate(_ context.Context, key string, fallback scheduler.Resources) (scheduler.Resources, error) {
-	need := l.est.Estimate(key, fallback)
+func (l *Local) Estimate(_ context.Context, key string, fallback scheduler.Resources) (scheduler.Estimate, error) {
+	e := l.est.Explain(key, fallback)
+	need := &e.Need
 	l.cfgMu.Lock()
 	u := l.cfg
 	l.cfgMu.Unlock()
 	if u == nil {
-		return need, nil
+		return e, nil
 	}
 	var maxCPU float64
 	var maxMem int64
@@ -417,11 +418,13 @@ func (l *Local) Estimate(_ context.Context, key string, fallback scheduler.Resou
 	}
 	if maxMem > 0 && need.Memory > maxMem && fallback.Memory <= maxMem {
 		need.Memory = maxMem
+		e.Statistic += "; memory capped at the largest size"
 	}
 	if maxCPU > 0 && need.CPU > maxCPU && fallback.CPU <= maxCPU {
 		need.CPU = maxCPU
+		e.Statistic += "; capped at the largest size"
 	}
-	return need, nil
+	return e, nil
 }
 
 func (l *Local) Status(ctx context.Context) ([]orchestrator.Machine, error) {

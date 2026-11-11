@@ -45,12 +45,7 @@ func (p Default) choose(f Pool, env string, opts []option) int {
 	if len(opts) == 0 {
 		return -1
 	}
-	score := func(o option) float64 {
-		if math.IsInf(lam, 1) {
-			return o.time.Seconds()
-		}
-		return o.cost + lam*hours(o.time)
-	}
+	score := absScore(lam)
 	best := 0
 	for i := 1; i < len(opts); i++ {
 		a, b := opts[i], opts[best]

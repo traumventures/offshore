@@ -429,7 +429,7 @@ func (s *Worker) shutdown() {
 	mounts := s.mounts
 	s.mu.Unlock()
 	for _, se := range sessions {
-		se.kill()
+		se.killFor(killerWorkerShutdown)
 	}
 	for _, p := range mounts {
 		p.Unmount()

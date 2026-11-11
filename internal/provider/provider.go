@@ -169,10 +169,9 @@ type ImageHost interface {
 	ImageBuilder() image.Builder
 }
 
-// ErrCapacity marks errors meaning the provider has no capacity or quota
-// for a machine right now (every instance type of a size failed with a
-// capacity, limit or quota error). The orchestrator downgrades such a
-// provider for a cooldown.
+// ErrCapacity marks errors meaning the provider has no capacity for a
+// machine right now (see ErrorClass and LaunchError for quota and account
+// limits). The orchestrator downgrades such a provider for a cooldown.
 var ErrCapacity = errors.New("no capacity")
 
 // Factory creates a provider.

@@ -178,3 +178,49 @@ func TestFinishDerivesThrashSeconds(t *testing.T) {
 		t.Fatalf("reported values must be kept: %+v", reported)
 	}
 }
+
+// The event log explains a placement: task_waiting while the machine is
+// created (what for, ETA), the scale-out decision on machine_create, the
+// placement decision and the estimate on task_placed, predicted vs actual
+// on task_end.
+func TestDecisionEvents(t *testing.T) {
+	old := waitingInterval
+	waitingInterval = 0
+	defer func() { waitingInterval = old }()
+	o := newTestOrch(t, newFake(), func(c *Config) { c.Sizes[0].PricePerHour = 0.5 })
+	r := req("r1")
+	r.Key = "r1/cargo/build"
+	est := scheduler.Estimate{Key: r.Key, Need: r.Need, CPUSource: scheduler.SourceLearned, MemorySource: scheduler.SourceLearned,
+		Samples: 5, Statistic: "memory p90 of 5 peaks x 1.25", PeakMemory: gib, Cores: 1.5}
+	r.Estimate = &est
+	l, err := o.Acquire(context.Background(), r, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Finish(context.Background(), l.ID, r.Key, &scheduler.Usage{PeakMemory: 2 * gib, CPUSeconds: 30, Wall: 10 * time.Second})
+	evs := readEvents(t, o)
+	placed := byType(evs, events.TaskPlaced)
+	if len(placed) != 1 || placed[0].Decision == nil || len(placed[0].Decision.Options) == 0 || placed[0].Estimate == nil ||
+		placed[0].Estimate.Samples != 5 {
+		t.Fatalf("task_placed %+v", placed)
+	}
+	if c, ok := placed[0].Decision.ChosenOption(); !ok || c.Kind != scheduler.OptAssign || c.Machine != l.MachineID {
+		t.Fatalf("chosen %+v", c)
+	}
+	creates := byType(evs, events.MachineCreate)
+	if len(creates) == 0 || creates[0].Decision == nil {
+		t.Fatalf("machine_create without decision: %+v", creates)
+	}
+	waits := byType(evs, events.TaskWaiting)
+	if len(waits) == 0 || waits[0].Waiting == nil || waits[0].Task != l.ID {
+		t.Fatalf("task_waiting %+v", waits)
+	}
+	end := byType(evs, events.TaskEnd)
+	if len(end) != 1 || end[0].Predicted == nil || end[0].Decision != nil {
+		t.Fatalf("task_end %+v", end)
+	}
+	p := end[0].Predicted
+	if p.Cores != 1.5 || p.ActualCores != 3 || p.CoresRatio != 2 || p.MemoryRatio != 2 || p.ActualRunSeconds != 10 {
+		t.Fatalf("predicted %+v", p)
+	}
+}

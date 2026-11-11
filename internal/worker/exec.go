@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -42,6 +43,21 @@ type session struct {
 	pgid    int
 	done    chan struct{} // closed when the process has exited
 	endOnce sync.Once
+	// killedBy is why offshore killed the session (killer*; "" = it did
+	// not); clientSignal the last signal the client forwarded.
+	killedBy     atomic.Value
+	clientSignal atomic.Int32
+}
+
+// killFor kills the session and records why (unless already recorded).
+func (se *session) killFor(why string) {
+	se.killedBy.CompareAndSwap(nil, why)
+	se.kill()
+}
+
+func (se *session) killReason() string {
+	s, _ := se.killedBy.Load().(string)
+	return s
 }
 
 // end marks the session's process as exited (idempotent).
@@ -238,6 +254,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	}
 	se.cgroup = cgDir
 	defer s.cg.remove(cgDir)
+	oomBefore := machineOOMKills()
 
 	cmd, err := sandbox.Command(s.self, sandbox.Spec{Argv: req.Argv, Env: env, Cwd: req.Cwd, Binds: binds, Cgroup: cgDir})
 	if err != nil {
@@ -314,7 +331,7 @@ loop:
 				if !clientGone {
 					clientGone = true
 					s.log.Info("client disconnected, killing session", "session", se.id)
-					se.kill()
+					se.killFor(killerClient)
 				}
 				frames = nil
 				continue
@@ -329,6 +346,7 @@ loop:
 			case proto.TSignal:
 				var sig proto.Signal
 				if json.Unmarshal(f.p, &sig) == nil && sig.Sig > 0 {
+					se.clientSignal.Store(int32(sig.Sig))
 					syscall.Kill(-se.pgid, syscall.Signal(sig.Sig))
 				}
 			case proto.TResize:
@@ -392,11 +410,22 @@ loop:
 	exit.Usage.LocalCapacity = s.cfs.capacity()
 	exit.Usage.Restored, exit.Usage.RestoreSeconds = restored, restoreSecs
 	exit.Usage.ExitCode = exit.Code
-	if s.cg.oomKilled(cgDir) {
-		exit.Usage.OOM = true
-		pc.Write(proto.TStderr, []byte(fmt.Sprintf("offshore: session exceeded its memory limit (%d bytes); the next run reserves more\n", req.Grant.MemoryMax)))
+	mev := s.cg.memoryEvents(cgDir)
+	oomDelta := int64(-1)
+	if after := machineOOMKills(); oomBefore >= 0 && after >= 0 {
+		oomDelta = after - oomBefore
 	}
-	s.log.Info("session finished", "session", se.id, "code", exit.Code, "duration", time.Since(se.started).Round(time.Millisecond))
+	exit.Usage.Signal, exit.Usage.OOM, exit.Usage.Killer = exitCause(exit.Code, exit.Signal, mev, oomDelta, se.killReason(), int(se.clientSignal.Load()))
+	exit.Usage.OOMKills = mev.OOMKill + mev.OOMGroupKill
+	exit.Usage.MemoryMaxEvents, exit.Usage.MemoryHighEvents = mev.Max, mev.High
+	if exit.Usage.OOM {
+		msg := fmt.Sprintf("offshore: session exceeded its memory limit (%d bytes); the next run reserves more\n", req.Grant.MemoryMax)
+		if exit.Usage.Killer == killerMachineOOM {
+			msg = "offshore: the machine ran out of memory and the kernel killed the session; the next run reserves more\n"
+		}
+		pc.Write(proto.TStderr, []byte(msg))
+	}
+	s.log.Info("session finished", "session", se.id, "code", exit.Code, "oom", exit.Usage.OOM, "killer", exit.Usage.Killer, "duration", time.Since(se.started).Round(time.Millisecond))
 	s.metrics.sessionEnded(exit.Code, exit.Usage.Wall.Seconds(), exit.Usage.OOM, exit.Cache)
 	unregister() // the session's processes are gone
 	// The client starts its next session as soon as it has the exit (and
