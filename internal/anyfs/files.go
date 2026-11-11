@@ -196,17 +196,6 @@ func (f *Files) EnsureWith(ctx context.Context, n *Node, fetch FileFetcher) (str
 	})
 }
 
-type countWriter struct {
-	w io.Writer
-	n int64
-}
-
-func (c *countWriter) Write(p []byte) (int, error) {
-	k, err := c.w.Write(p)
-	c.n += int64(k)
-	return k, err
-}
-
 // fault runs fill (which must leave the content at f.path(d)) unless the
 // node is resident, sharing concurrent faults of the same digest.
 func (f *Files) fault(ctx context.Context, n *Node, fill func(d string) error) (string, error) {

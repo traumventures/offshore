@@ -147,8 +147,6 @@ func (n *wnode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	return 0
 }
 
-const writeFlags = syscall.O_WRONLY | syscall.O_RDWR | syscall.O_TRUNC | syscall.O_APPEND
-
 func (n *wnode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	rel := n.rel()
 	w := n.w

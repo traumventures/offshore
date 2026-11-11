@@ -28,6 +28,7 @@ import (
 	"github.com/traumventures/offshore/internal/labels"
 	"github.com/traumventures/offshore/internal/machine"
 	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/proto"
 	"github.com/traumventures/offshore/internal/tracing"
 	"github.com/traumventures/offshore/internal/transport"
@@ -158,7 +159,10 @@ type Worker struct {
 	rcStore    *tieredStore // its store
 	grants     grantCache   // latest store grants per repository
 	fills      fills        // lazy restores in progress
-	snapshots  []proto.SnapshotInfo
+	// tiers counts the cache file system's transfers per medium
+	// (anyfs.RecordTransfers), reported in the status.
+	tiers     medium.Recorder
+	snapshots []proto.SnapshotInfo
 
 	mu       sync.Mutex
 	mounts   map[string]*anyfs.WritableFS // source projections by root
@@ -537,6 +541,7 @@ func (s *Worker) statusOnly() proto.Status {
 	st.WarmRepos = s.slots.warmRepos(s.cfg.BuildTTL)
 	st.Disk = s.diskStatus()
 	st.Snapshots = append([]proto.SnapshotInfo(nil), s.snapshots...)
+	st.Tiers = s.tiers.Snapshot()
 	return st
 }
 

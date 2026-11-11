@@ -3,7 +3,6 @@ package anyfs
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -373,33 +372,13 @@ func (w *WritableFS) copyUp(ctx context.Context, rel string, truncate bool) (str
 	}
 	upper := w.newUpper()
 	if truncate || content == os.DevNull {
-		f, err := os.OpenFile(upper, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-		if err != nil {
-			return "", err
-		}
-		f.Close()
-	} else if err := copyFile(content, upper); err != nil {
+		content = ""
+	}
+	if err := copyFile(content, upper, 0o644); err != nil {
 		return "", err
 	}
 	w.dirty[rel] = &dirtyNode{Node: cur.Node, Upper: upper, BaseDigest: cur.Digest, BaseExists: true}
 	return upper, nil
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 // setDirtyLocked records a new state of rel, keeping the base of an

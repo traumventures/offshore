@@ -1,13 +1,4 @@
-// Package outputfs makes the worker-local build directories (target/) of
-// the latest remote build appear on the laptop as if built locally: a
-// writable FUSE union (FS) of the remote build (Tree: listed per directory,
-// fetched per file on first open into a content addressed cache) and a
-// local upper directory that receives every write.
-//
-// The daemon owns the mounts ([outputs] mode = "fuse", "offshore
-// outputs mount"); other processes use daemon.EnsureOutputs to have them
-// mounted and IsMounted/Mounts/Covering to inspect them.
-package outputfs
+package anyfs
 
 import (
 	"context"
@@ -25,10 +16,11 @@ import (
 	"github.com/traumventures/offshore/internal/proto"
 )
 
-// Source reads the latest build slot of one repository on one machine.
-// Paths are relative to the repository root and use "/".
-type Source interface {
-	// Name identifies the source in logs (the machine).
+// Remote reads the latest build slot of one repository on one machine
+// (the peer tier of the laptop's output overlay) over the OutList and
+// OutRead RPCs. Paths are relative to the repository root and use "/".
+type Remote interface {
+	// Name identifies the remote in logs (the machine).
 	Name() string
 	List(ctx context.Context, dir string) ([]proto.OutEntry, error)
 	// Read writes the whole file to w. size and mtimeNs are those of the
@@ -44,21 +36,23 @@ var ErrUnavailable = errors.New("remote build outputs unavailable and not cached
 // ErrStale means a file changed on the machine after it was listed.
 var ErrStale = errors.New("remote output changed while reading")
 
-// downFor is how long an unreachable source is not asked again.
+// downFor is how long an unreachable remote is not asked again.
 const downFor = 20 * time.Second
 
-// Tree caches the remote view of one repository's build directories.
-// Directory listings belong to a generation that ends with every new
-// remote run (Update); file contents are kept across generations in the
-// content store, indexed by path, size and mtime, so unchanged outputs are
-// never downloaded twice.
-type Tree struct {
+// RemoteTree caches the remote view of one repository's build
+// directories. Directory listings are fetched lazily, one directory at a
+// time, and belong to a generation that ends with every new remote run
+// (Update); file contents are kept across generations in the content
+// store (the laptop CAS), indexed by path, size and mtime, so unchanged
+// outputs are never downloaded twice. Source(prefix) serves one build
+// directory as the lower layer of a UserOverlay.
+type RemoteTree struct {
 	store *cas.Store
 	log   *slog.Logger
 
 	mu        sync.Mutex
 	gen       uint64
-	src       Source
+	src       Remote
 	dirs      map[string]map[string]proto.OutEntry // current generation
 	missing   map[string]bool                      // dirs absent remotely in this generation
 	index     map[string]indexed
@@ -82,23 +76,23 @@ type flight struct {
 	err  error
 }
 
-// NewTree creates an empty tree backed by store.
-func NewTree(store *cas.Store, log *slog.Logger) *Tree {
-	return &Tree{store: store, log: log, dirs: map[string]map[string]proto.OutEntry{}, missing: map[string]bool{},
+// NewRemoteTree creates an empty tree backed by store.
+func NewRemoteTree(store *cas.Store, log *slog.Logger) *RemoteTree {
+	return &RemoteTree{store: store, log: log, dirs: map[string]map[string]proto.OutEntry{}, missing: map[string]bool{},
 		index: map[string]indexed{}, flights: map[string]*flight{}, now: time.Now}
 }
 
 // OnInvalidate registers a function called (outside the tree lock) after
 // every Update, e.g. to drop kernel caches.
-func (t *Tree) OnInvalidate(f func()) {
+func (t *RemoteTree) OnInvalidate(f func()) {
 	t.mu.Lock()
 	t.hooks = append(t.hooks, f)
 	t.mu.Unlock()
 }
 
 // Update starts a new generation after a remote run. src replaces the
-// current source unless it is nil.
-func (t *Tree) Update(src Source) {
+// current remote unless it is nil.
+func (t *RemoteTree) Update(src Remote) {
 	t.mu.Lock()
 	t.gen++
 	if src != nil {
@@ -118,7 +112,7 @@ func (t *Tree) Update(src Source) {
 }
 
 // Close releases the source.
-func (t *Tree) Close() {
+func (t *RemoteTree) Close() {
 	t.mu.Lock()
 	src := t.src
 	t.src = nil
@@ -129,14 +123,14 @@ func (t *Tree) Close() {
 }
 
 // Generation returns the current generation.
-func (t *Tree) Generation() uint64 {
+func (t *RemoteTree) Generation() uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.gen
 }
 
 // SourceName returns the current source's name ("" without source).
-func (t *Tree) SourceName() string {
+func (t *RemoteTree) SourceName() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.src == nil {
@@ -146,7 +140,7 @@ func (t *Tree) SourceName() string {
 }
 
 // Stats reports cached directories and indexed files.
-func (t *Tree) Stats() (dirs, files int) {
+func (t *RemoteTree) Stats() (dirs, files int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return len(t.dirs), len(t.index)
@@ -154,7 +148,7 @@ func (t *Tree) Stats() (dirs, files int) {
 
 // Hint records known contents (eager outputs that were already
 // transferred into the store), so they are served without the machine.
-func (t *Tree) Hint(files []manifest.Entry) {
+func (t *RemoteTree) Hint(files []manifest.Entry) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, e := range files {
@@ -167,7 +161,7 @@ func (t *Tree) Hint(files []manifest.Entry) {
 // classify turns a source error into ErrNotExist, ErrStale or a remote
 // error; anything that is not an answer of the server marks the source as
 // unreachable.
-func (t *Tree) classify(gen uint64, what string, err error) error {
+func (t *RemoteTree) classify(gen uint64, what string, err error) error {
 	var pe *proto.Error
 	if errors.As(err, &pe) {
 		switch pe.Stage {
@@ -198,7 +192,7 @@ func (t *Tree) classify(gen uint64, what string, err error) error {
 }
 
 // available returns the source unless it is missing or recently down.
-func (t *Tree) availableLocked() (Source, error) {
+func (t *RemoteTree) availableLocked() (Remote, error) {
 	if t.src == nil {
 		return nil, ErrUnavailable
 	}
@@ -209,7 +203,7 @@ func (t *Tree) availableLocked() (Source, error) {
 }
 
 // do runs fn once per key at a time.
-func (t *Tree) do(key string, fn func() (string, error)) (string, error) {
+func (t *RemoteTree) do(key string, fn func() (string, error)) (string, error) {
 	t.mu.Lock()
 	if f, ok := t.flights[key]; ok {
 		t.mu.Unlock()
@@ -228,8 +222,8 @@ func (t *Tree) do(key string, fn func() (string, error)) (string, error) {
 }
 
 // List returns the remote entries of dir (relative to the repository).
-func (t *Tree) List(ctx context.Context, dir string) (map[string]proto.OutEntry, error) {
-	dir = cleanDir(dir)
+func (t *RemoteTree) List(ctx context.Context, dir string) (map[string]proto.OutEntry, error) {
+	dir = cleanRel(dir)
 	for {
 		t.mu.Lock()
 		if m, ok := t.dirs[dir]; ok {
@@ -284,8 +278,8 @@ func (t *Tree) List(ctx context.Context, dir string) (map[string]proto.OutEntry,
 }
 
 // Stat returns the remote entry of rel.
-func (t *Tree) Stat(ctx context.Context, rel string) (proto.OutEntry, error) {
-	rel = cleanDir(rel)
+func (t *RemoteTree) Stat(ctx context.Context, rel string) (proto.OutEntry, error) {
+	rel = cleanRel(rel)
 	if rel == "" {
 		return proto.OutEntry{Kind: manifest.Dir, Mode: 0o755}, nil
 	}
@@ -302,8 +296,8 @@ func (t *Tree) Stat(ctx context.Context, rel string) (proto.OutEntry, error) {
 
 // Content returns the local path of the content of the remote file rel
 // described by e, downloading it into the store if needed.
-func (t *Tree) Content(ctx context.Context, rel string, e proto.OutEntry) (string, error) {
-	rel = cleanDir(rel)
+func (t *RemoteTree) Content(ctx context.Context, rel string, e proto.OutEntry) (string, error) {
+	rel = cleanRel(rel)
 	t.mu.Lock()
 	ix, ok := t.index[rel]
 	t.mu.Unlock()
@@ -366,10 +360,94 @@ func (c *countWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func cleanDir(p string) string {
+func cleanRel(p string) string {
 	p = path.Clean("/" + p)
 	if p == "/" {
 		return ""
 	}
 	return p[1:]
+}
+
+// Source returns the build directory prefix (relative to the repository,
+// e.g. "target") of the tree as a Source: the lower layer of the output
+// overlay mounted there. Its node paths are relative to prefix.
+func (t *RemoteTree) Source(prefix string) *RemoteSource {
+	return &RemoteSource{t: t, prefix: cleanRel(prefix)}
+}
+
+// RemoteSource is one build directory of a RemoteTree as a Source. It
+// implements StatSource: lookups distinguish absent (fs.ErrNotExist),
+// unreachable and not cached (ErrUnavailable) and remote errors, and
+// Fetch fails with ErrStale when the file changed since it was listed.
+type RemoteSource struct {
+	t      *RemoteTree
+	prefix string
+}
+
+var _ StatSource = (*RemoteSource)(nil)
+
+func (s *RemoteSource) full(rel string) string {
+	rel = cleanRel(rel)
+	switch {
+	case rel == "":
+		return s.prefix
+	case s.prefix == "":
+		return rel
+	}
+	return s.prefix + "/" + rel
+}
+
+func nodeOfEntry(rel string, e proto.OutEntry) *Node {
+	return &Node{Path: rel, Kind: e.Kind, Mode: e.Mode, Size: e.Size, MtimeNs: e.MtimeNs, Target: e.Target}
+}
+
+// Stat implements StatSource.
+func (s *RemoteSource) Stat(ctx context.Context, rel string) (*Node, error) {
+	rel = cleanRel(rel)
+	e, err := s.t.Stat(ctx, s.full(rel))
+	if err != nil {
+		return nil, err
+	}
+	return nodeOfEntry(rel, e), nil
+}
+
+// Node implements Source.
+func (s *RemoteSource) Node(rel string) (*Node, bool) {
+	n, err := s.Stat(context.Background(), rel)
+	return n, err == nil
+}
+
+// Children implements Source.
+func (s *RemoteSource) Children(dir string) ([]*Node, error) {
+	dir = cleanRel(dir)
+	m, err := s.t.List(context.Background(), s.full(dir))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*Node, 0, len(m))
+	for name, e := range m {
+		out = append(out, nodeOfEntry(join(dir, name), e))
+	}
+	return out, nil
+}
+
+func entryOfNode(n *Node) proto.OutEntry {
+	return proto.OutEntry{Name: path.Base(n.Path), Kind: n.Kind, Mode: n.Mode, Size: n.Size, MtimeNs: n.MtimeNs, Target: n.Target}
+}
+
+// Local implements Source.
+func (s *RemoteSource) Local(n *Node) (string, bool) {
+	rel := s.full(n.Path)
+	s.t.mu.Lock()
+	ix, ok := s.t.index[rel]
+	s.t.mu.Unlock()
+	if ok && ix.Size == n.Size && ix.MtimeNs == n.MtimeNs && s.t.store.Has(ix.Hash) {
+		return s.t.store.Path(ix.Hash), true
+	}
+	return "", false
+}
+
+// Fetch implements Source.
+func (s *RemoteSource) Fetch(ctx context.Context, n *Node) (string, error) {
+	return s.t.Content(ctx, s.full(n.Path), entryOfNode(n))
 }

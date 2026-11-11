@@ -1,6 +1,7 @@
 // Package anyfs is the one storage core behind offshore's file systems:
 // build slot caches on workers, the source projection on workers and the
-// laptop's output overlay (outputfs) are configurations of it.
+// laptop's output overlay (UserOverlay over a RemoteTree source) are
+// configurations of it.
 //
 // Data model. A Tree is a manifest: every path with kind, mode, size,
 // mtime, the BLAKE3 digest of its content and the pages holding it. A

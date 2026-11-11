@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,10 +16,10 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/cas"
 	"github.com/traumventures/offshore/internal/config"
 	"github.com/traumventures/offshore/internal/manifest"
-	"github.com/traumventures/offshore/internal/outputfs"
 	"github.com/traumventures/offshore/internal/proto"
 	"github.com/traumventures/offshore/internal/transport"
 )
@@ -53,7 +54,7 @@ type outputsState struct {
 
 // EnsureOutputs makes the build directories (slot-scope cache paths) of the
 // repository at root appear at their local paths as the output overlay
-// (internal/outputfs): it starts the daemon if needed, mounts the overlay
+// (anyfs.UserOverlay over the remote slot): it starts the daemon if needed, mounts the overlay
 // unless mounted (whatever [outputs] mode says) and returns its status.
 //
 // The overlay is up to date with the latest remote build as soon as that
@@ -74,12 +75,28 @@ func EnsureOutputs(ctx context.Context, root string) (OutputsStatus, error) {
 	return st, err
 }
 
-// outputsRepo is the output view of one repository.
+// OutputsFSName is the FUSE subtype of output mounts; their file system
+// type in /proc/self/mountinfo is OutputsFSType.
+const (
+	OutputsFSName = "offshore-outputs"
+	OutputsFSType = "fuse." + OutputsFSName
+)
+
+// OutputMounts returns the mount points of all output mounts visible to
+// this process.
+func OutputMounts() []string { return anyfs.Mounts(OutputsFSType) }
+
+// OutputsMounted reports whether an output mount exists at mp.
+func OutputsMounted(mp string) bool { return anyfs.IsMounted(OutputsFSType, mp) }
+
+// outputsRepo is the output view of one repository: a RemoteTree (the
+// latest build slot on the machine, listed lazily into the laptop CAS)
+// and one overlay per build directory over it.
 type outputsRepo struct {
 	root   string
 	state  outputsState
-	tree   *outputfs.Tree
-	mounts []*outputfs.FS
+	tree   *anyfs.RemoteTree
+	mounts []*anyfs.UserOverlay
 }
 
 // leaseRef remembers which repository a lease was prepared for.
@@ -131,7 +148,7 @@ func newOutputsMgr(d *Daemon) (*outputsMgr, error) {
 func (m *outputsMgr) repoLocked(root string) *outputsRepo {
 	r, ok := m.repos[root]
 	if !ok {
-		r = &outputsRepo{root: root, tree: outputfs.NewTree(m.store, m.d.log)}
+		r = &outputsRepo{root: root, tree: anyfs.NewRemoteTree(m.store, m.d.log)}
 		m.repos[root] = r
 	}
 	return r
@@ -150,7 +167,7 @@ func (m *outputsMgr) saveLocked() {
 	}
 }
 
-func (m *outputsMgr) source(st outputsState) outputfs.Source {
+func (m *outputsMgr) source(st outputsState) anyfs.Remote {
 	return &machineSource{st: st}
 }
 
@@ -178,8 +195,8 @@ func (m *outputsMgr) prepared(root, leaseID string, st outputsState) {
 	// Machines may restart with a new address: refresh the connection
 	// details of every repository whose latest build ran there.
 	type upd struct {
-		tree *outputfs.Tree
-		src  outputfs.Source
+		tree *anyfs.RemoteTree
+		src  anyfs.Remote
 	}
 	var updates []upd
 	for _, r := range m.repos {
@@ -239,7 +256,7 @@ func (m *outputsMgr) mount(root string, repo *config.Repo) ([]string, error) {
 	if len(r.mounts) == 0 {
 		for _, b := range build {
 			mp := filepath.Join(root, filepath.FromSlash(b))
-			fs, err := outputfs.Mount(r.tree, root, b, OutputsUpperDir(mp), m.d.log)
+			fs, err := mountOutputs(r.tree, mp, b, m.d.log)
 			if err != nil {
 				for _, f := range r.mounts {
 					f.Unmount()
@@ -283,7 +300,7 @@ func (m *outputsMgr) unmount(root string, keep bool) error {
 		// Also upper layers of mounts lost by a crashed daemon.
 		for _, b := range r.state.Build {
 			mp := filepath.Join(root, filepath.FromSlash(b))
-			if outputfs.IsMounted(mp) {
+			if OutputsMounted(mp) {
 				continue
 			}
 			if err := os.RemoveAll(OutputsUpperDir(mp)); err != nil {
@@ -338,6 +355,30 @@ func (m *outputsMgr) status() []OutputsStatus {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Root < out[j].Root })
 	return out
+}
+
+// mountOutputs mounts the build directory build (relative to the
+// repository) at its local path mp: the userspace overlay with the upper
+// layer in the client state over the remote slot. The local directory
+// the mount covers is hidden while mounted and left untouched. Newest
+// mtime wins (a local rebuild beats older remote outputs, a newer remote
+// build beats older local state), kernel caches are dropped with every
+// new remote generation.
+func mountOutputs(tree *anyfs.RemoteTree, mp, build string, log *slog.Logger) (*anyfs.UserOverlay, error) {
+	upper := OutputsUpperDir(mp)
+	if OutputsMounted(mp) {
+		// Left over by a daemon that did not shut down cleanly.
+		anyfs.ForceUnmount(mp)
+	}
+	o, err := anyfs.MountUserOverlay(mp, upper, tree.Source(build), anyfs.UserOverlayOptions{
+		FsName: "offshore", Name: OutputsFSName, Merge: anyfs.NewestMtime,
+		Timeout: 2 * time.Second, MaxReadAhead: 1 << 20, NoPassthrough: true, Log: log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("mount %s: %w", mp, err)
+	}
+	tree.OnInvalidate(o.Invalidate)
+	return o, nil
 }
 
 // machineSource reads outputs from one machine over its own QUIC

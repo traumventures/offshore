@@ -199,3 +199,12 @@ func nodeOf(rel string, fi os.FileInfo, p string) Node {
 	}
 	return n
 }
+
+// StatSource is a Source whose lookups can fail for other reasons than
+// absence (a remote listing). Stat returns an error wrapping
+// fs.ErrNotExist or ErrUnavailable (both shown as absent by a
+// UserOverlay) or another error (EIO).
+type StatSource interface {
+	Source
+	Stat(ctx context.Context, rel string) (*Node, error)
+}
