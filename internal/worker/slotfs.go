@@ -67,12 +67,15 @@ func (s *Worker) liveLayers(repo, slot string) []string {
 // commitSlot commits an idle slot's changes (it is held meanwhile) and
 // records the new head in its metadata.
 func (s *Worker) commitSlot(ctx context.Context, ref slotRef) (commitResult, error) {
-	if !s.slots.acquire(ref.Path) {
-		return commitResult{}, errSlotBusy
-	}
+	// The snapshot lock first: a background commit of the previous
+	// session may hold it for a while, and holding the slot meanwhile
+	// would make the next session wait.
 	lk := s.cfs.snapLock(ref.Path)
 	lk.Lock()
 	defer lk.Unlock()
+	if !s.slots.acquire(ref.Path) {
+		return commitResult{}, errSlotBusy
+	}
 	if _, err := s.commitPendingLocked(ctx, ref.Path, ref.Repo); err != nil {
 		s.slots.releaseMaint(ref.Path, ref.Meta.Bytes)
 		return commitResult{}, err

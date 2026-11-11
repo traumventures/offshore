@@ -27,6 +27,12 @@ type slots struct {
 	clock  clock.Clock // slot ages (nil: real time)
 	mu     sync.Mutex
 	leased map[string]bool
+	// maint marks leased slots held by maintenance (commit, prune,
+	// rebase) or by the end of a session (finishing) rather than a
+	// running session: a session waits for them instead of starting
+	// another slot without the latest session's state.
+	maint map[string]bool
+	freed *sync.Cond // broadcast when a slot is released (on mu)
 	// pinned slots may be leased but never removed or pruned (a restore
 	// is filling them through a FUSE mount).
 	pinned map[string]bool
@@ -40,6 +46,30 @@ func (s *slots) removeDir(p string) {
 		return
 	}
 	os.RemoveAll(p)
+}
+
+// maintWait bounds how long a session waits for maintenance to release
+// the most recently used slot before it takes another one.
+var maintWait = 2 * time.Minute
+
+// releasedLocked forgets a slot's lease and wakes waiting sessions.
+func (s *slots) releasedLocked(slot string) {
+	delete(s.leased, slot)
+	delete(s.maint, slot)
+	if s.freed != nil {
+		s.freed.Broadcast()
+	}
+}
+
+// finishing marks a session's slot as held for its end (snapshot,
+// release) only: the client already has the exit status and may start the
+// next session, which waits for this slot rather than taking another.
+func (s *slots) finishing(slot string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.leased[slot] {
+		s.maint[slot] = true
+	}
 }
 
 // busyLocked reports whether a slot must not be removed.
@@ -117,7 +147,7 @@ func newSlots(dir string) (*slots, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	return &slots{dir: dir, leased: map[string]bool{}, pinned: map[string]bool{}}, nil
+	return &slots{dir: dir, leased: map[string]bool{}, maint: map[string]bool{}, pinned: map[string]bool{}}, nil
 }
 
 func readMeta(slot string) (slotMeta, error) {
@@ -142,9 +172,28 @@ func writeMeta(slot string, m slotMeta) error {
 func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	deadline := s.now().Add(maintWait)
+	for {
+		p, warm, wait, err := s.leaseLocked(repoID, ttl, !s.now().Before(deadline))
+		if !wait {
+			return p, warm, err
+		}
+		if s.freed == nil {
+			s.freed = sync.NewCond(&s.mu)
+		}
+		t := time.AfterFunc(time.Second, func() { s.mu.Lock(); s.freed.Broadcast(); s.mu.Unlock() })
+		s.freed.Wait()
+		t.Stop()
+	}
+}
+
+// leaseLocked is one attempt of lease; wait reports that the most
+// recently used slot is held by maintenance (unless noWait), so the
+// caller waits for its release.
+func (s *slots) leaseLocked(repoID string, ttl time.Duration, noWait bool) (string, bool, bool, error) {
 	repoDir := filepath.Join(s.dir, repoID)
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	now := s.now()
 	des, _ := os.ReadDir(repoDir)
@@ -153,6 +202,7 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 		meta slotMeta
 	}
 	var free []cand
+	var newestMaint int64
 	used := map[int]bool{}
 	for _, de := range des {
 		n, err := strconv.Atoi(de.Name())
@@ -172,6 +222,8 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 		used[n] = true
 		if !s.leased[p] {
 			free = append(free, cand{p, m})
+		} else if s.maint[p] && !noWait && m.LastUsed > newestMaint {
+			newestMaint = m.LastUsed
 		}
 	}
 	byRecent := func(c []cand) {
@@ -179,15 +231,20 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 	}
 	if len(free) > 0 {
 		byRecent(free)
+	}
+	if newestMaint > 0 && (len(free) == 0 || free[0].meta.LastUsed <= newestMaint) {
+		return "", false, true, nil // the latest slot is busy with maintenance
+	}
+	if len(free) > 0 {
 		c := free[0]
 		c.meta.LastUsed = now.Unix()
 		c.meta.Leases++
 		c.meta.TTL = int64(ttl / time.Second)
 		if err := writeMeta(c.path, c.meta); err != nil {
-			return "", false, err
+			return "", false, false, err
 		}
 		s.leased[c.path] = true
-		return c.path, true, nil
+		return c.path, true, false, nil
 	}
 	n := 0
 	for used[n] {
@@ -195,17 +252,17 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 	}
 	p := filepath.Join(repoDir, strconv.Itoa(n))
 	if err := os.MkdirAll(p, 0o755); err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	meta := slotMeta{Created: now.Unix(), LastUsed: now.Unix(), TTL: int64(ttl / time.Second), Leases: 1}
 	if err := os.MkdirAll(filepath.Join(p, "data"), 0o755); err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	if err := writeMeta(p, meta); err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	s.leased[p] = true
-	return p, false, nil
+	return p, false, false, nil
 }
 
 func (s *slots) release(slot string) {
@@ -216,7 +273,7 @@ func (s *slots) release(slot string) {
 func (s *slots) releaseSized(slot string, bytes int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.leased, slot)
+	s.releasedLocked(slot)
 	if m, err := readMeta(slot); err == nil {
 		m.LastUsed = s.now().Unix()
 		if bytes >= 0 {
@@ -247,6 +304,7 @@ func (s *slots) acquire(slot string) bool {
 		return false
 	}
 	s.leased[slot] = true
+	s.maint[slot] = true
 	return true
 }
 
@@ -255,7 +313,7 @@ func (s *slots) acquire(slot string) bool {
 func (s *slots) releaseMaint(slot string, bytes int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.leased, slot)
+	s.releasedLocked(slot)
 	if m, err := readMeta(slot); err == nil {
 		m.Bytes = bytes
 		writeMeta(slot, m)
@@ -404,5 +462,6 @@ func (s *slots) acquirePinned(slot string) bool {
 		return false
 	}
 	s.leased[slot] = true
+	s.maint[slot] = true
 	return true
 }

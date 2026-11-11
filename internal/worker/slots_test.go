@@ -114,3 +114,90 @@ func TestExpandPath(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// A session waits for maintenance (a commit, prune or rebase) that holds
+// the most recently used slot instead of starting another slot without
+// the previous session's state (e2e: back-to-back cargo runs alternated
+// between two slots and found each other's builds stale).
+func TestSlotsLeaseWaitsForMaintenance(t *testing.T) {
+	s, err := newSlots(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot, _, err := s.lease("r", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.release(slot)
+	if !s.acquire(slot) {
+		t.Fatal("acquire")
+	}
+	got := make(chan string, 1)
+	go func() {
+		p, _, err := s.lease("r", time.Hour)
+		if err != nil {
+			t.Error(err)
+		}
+		got <- p
+	}()
+	select {
+	case p := <-got:
+		t.Fatalf("lease did not wait for maintenance: %s", p)
+	case <-time.After(200 * time.Millisecond):
+	}
+	s.releaseMaint(slot, 0)
+	select {
+	case p := <-got:
+		if p != slot {
+			t.Fatalf("lease got %s, want the released %s", p, slot)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("lease still waiting after the release")
+	}
+	s.release(slot)
+
+	// A session holding the slot is not waited for: a second slot.
+	if p, _, _ := s.lease("r", time.Hour); p != slot {
+		t.Fatalf("lease %s", p)
+	}
+	other, _, err := s.lease("r", time.Hour)
+	if err != nil || other == slot {
+		t.Fatalf("concurrent session got %s (%v)", other, err)
+	}
+
+	// Maintenance beyond maintWait: another slot.
+	s.release(slot)
+	s.release(other)
+	defer func(d time.Duration) { maintWait = d }(maintWait)
+	maintWait = 0
+	m, _ := readMeta(slot)
+	m.LastUsed = time.Now().Add(time.Minute).Unix() // the most recent
+	writeMeta(slot, m)
+	s.acquire(slot)
+	if p, _, _ := s.lease("r", time.Hour); p == slot {
+		t.Fatal("leased a slot held by maintenance")
+	}
+}
+
+// The next session waits for a slot whose session has ended but is still
+// being captured (the client already has the exit status).
+func TestSlotsLeaseWaitsForFinishingSession(t *testing.T) {
+	s, err := newSlots(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot, _, _ := s.lease("r", time.Hour)
+	s.finishing(slot)
+	got := make(chan string, 1)
+	go func() { p, _, _ := s.lease("r", time.Hour); got <- p }()
+	time.Sleep(100 * time.Millisecond)
+	s.release(slot)
+	select {
+	case p := <-got:
+		if p != slot {
+			t.Fatalf("next session got %s, want %s", p, slot)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("lease still waiting")
+	}
+}

@@ -20,8 +20,9 @@ sed -i 's/greeting=hello/greeting=changed/' "$PROJ/src/main.rs"
 out="$(run cargo run 2>&1)"
 check "edit picked up immediately" contains "$out" "greeting=changed ran=remote"
 check "new binary transferred" contains "$("$PROJ/target/debug/hello")" "greeting=changed"
-out="$(run cargo build 2>&1)"
+out="$(run cargo build -v 2>&1)"
 check "no-op build is fresh (warm build cache)" eq "$(echo "$out" | grep -c Compiling)" 0
+echo "$out" | grep -q Compiling && { echo "$out" | grep -E "Dirty|Compiling" | sed 's/^/       /'; cs why list 2>&1 | head -8 | sed 's/^/       /'; for n in 1 2 3; do cs why $n --json | python3 -c "import json,sys; d=json.load(sys.stdin); print('       run', d.get('args'), 'slot', d.get('slot'), d.get('start'))"; done; }
 check "worker-local build directory is mounted remotely" eq "$(run sh -c 'ls target | grep -c debug')" "1"
 
 step "compiler errors and exit codes"

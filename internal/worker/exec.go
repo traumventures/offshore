@@ -207,6 +207,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	defer func() {
 		// Capture the session before the next one can change the slot
 		// (committed in the background by slotReleased).
+		s.slots.finishing(slot)
 		if err := s.snapshotSlot(context.Background(), slot, req.RepoID); err != nil && !errors.Is(err, errNoSnapshots) {
 			s.log.Warn("build slot session snapshot", "slot", slot, "err", err)
 		}
