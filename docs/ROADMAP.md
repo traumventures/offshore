@@ -21,8 +21,12 @@ section 0 of [PLAN.md](PLAN.md).
   a virtual memory model (faults, writeback, ARC reclaim, thrashing);
   build slots are kernel overlays over committed layers (lazy restore and
   move by mounting), source projection and output overlay are anyfs
-  configurations; access classes per path pattern; measured tier profiles
-  and working sets in the scheduler and simulator.
+  configurations; access classes per path pattern drive placement,
+  writeback delay, reclaim order and cross-slot dedupe; per-session read
+  tracking and working-set readahead; every session is snapshotted and
+  committed, the store head follows within 30 s of the commit; measured
+  tier profiles and working sets in the scheduler and simulator (thrash
+  time counted once, refetch learned per build key).
 * Outputs: eager globs, `offshore fetch`, writable output overlay with
   cargo freshness; rust-analyzer `local` and `lsp-remote`.
 * Tool adapters (cargo, go, node, generic); tests built remotely and run
@@ -43,12 +47,39 @@ section 0 of [PLAN.md](PLAN.md).
   log, `report`, `top`, `why`, `status`, `doctor`, `init`, labels for
   agents and worktrees, prewarm and git hook.
 
-## Later
+## Verified (November 11, 2026)
 
-* **anyfs follow-ups**: apply the remaining access-class policies
-  (placement, per-class writeback delay, no writeback for ephemeral files,
-  cross-slot dedupe), track reads per session, commit busy slots.
+Final integration run: `go test ./...` and the three e2e suites green
+(embedded 163, remote core 97, remote full 169 checks); the app workspace
+built through an embedded control plane on AWS (cold, no-op, incremental,
+`cargo nextest run` split, output overlay with 0 local recompiles out of
+634 units); machine loss on AWS with a lazy restore (13.7 GB head mounted
+in 0.55 s, 4.6 GB paged in, warm build 7.5 s); an OCI machine smoke test.
+Numbers and the bugs found on the way are in [PLAN.md](PLAN.md) section 0
+("Verifikation").
 
+## Open
+
+* **Store head of large fresh slots**: after a cold build of a large
+  workspace the session commit (hashing 10 GB on a gp3 root) takes minutes;
+  the 30 s head deadline only starts after it. Commit during the session or
+  use faster media.
+* **Restore on slow root disks**: on gp3 roots (125 MB/s) the cost model
+  prefers cold builds for big slots; learned cold times underestimate cold
+  builds on fresh machines (empty compiler cache in the store).
+* **Output overlay**: freshness needs the same cargo configuration locally
+  and remotely (`[env]` of `$CARGO_HOME/config.toml` is not aligned, only
+  rustflags); the first local run over a cold overlay fetches metadata;
+  outputs the laptop never saw are lost if the machine dies before its
+  commit; `[outputs] cache_size` applies per level (pages and files).
+* **`offshore down`** leaves store objects until the bucket lifecycle
+  expires them (one day).
+* **Scheduler inputs**: per-session refault bytes are a machine-wide delta;
+  the event-based refetch calibration is still per provider; thrash seconds
+  are derived, not measured.
+* **Storage details**: the userspace overlay rehashes files on chmod; torn
+  non-empty clean pages are not detected; running machines get the cache
+  medium policy only when recreated.
 * **Users and quotas**: per-user API keys, quotas and cost limits on the
   control plane (today one global API key per pool).
 * **Production domain**: run the shared control plane on a DNS name via
@@ -56,7 +87,7 @@ section 0 of [PLAN.md](PLAN.md).
   current deployments pin a self-signed certificate).
 * **GPU machines**: sizes and environments with GPUs (drivers in the
   machine image, device access in sessions).
-* **Live arm64 on OCI**: Ampere A1 sizes are implemented, but only amd64
-  shapes were tested live; run the OCI smoke test on A1.
+* **OCI live coverage**: a build through the PAR store, Ampere A1 (arm64)
+  and the ext4 root of shapes without NVMe were not run live.
 * More providers (Scaleway, Kubernetes, ECS) and nextest across several
   machines remain open by choice.
