@@ -1,15 +1,63 @@
-# Scheduler
+# Scheduling
 
 The scheduler (`internal/scheduler`) decides where a session runs (`Place`)
-and how the pool changes (`Plan`) as pure functions of a pool snapshot.
-The orchestrator only gathers state and executes the decisions, so policies
-can be tested and simulated without machines.
+and how the pool changes (`Plan`) as pure functions of a pool snapshot
+(interfaces `Policy` and `Estimator`). The orchestrator only gathers state
+and executes the decisions, so policies can be tested and simulated without
+machines. One orchestrator can span several providers; sizes of all
+providers compete.
+
+## Configuration
+
+```toml
+[scheduler]
+policy              = "default"   # default (= binpack) | classic
+estimator           = "history"   # history | static
+cpu_overcommit      = 2.0         # only slows builds down
+memory_overcommit   = 1.25        # requires soft_limit or swap, otherwise OOM
+soft_limit          = 1.2         # memory.high = request * 1.2
+swap                = true
+max_cpu_pressure    = 0.0         # PSI some avg10; no new sessions above (0 = off)
+max_memory_pressure = 0.4
+limit_jobs          = true        # CARGO_BUILD_JOBS = granted cores
+consolidate_below   = 0.5         # 0 = off
+consolidate_target  = 0.75
+
+[[scheduler.warm_pool]]
+days     = ["mon", "tue", "wed", "thu", "fri"]   # empty = every day
+from     = "08:00"
+to       = "19:00"                               # earlier than from spans midnight
+machines = 1                                     # per recently used environment
+timezone = "Europe/Berlin"                       # default: local time
+
+[providers.aws]
+type         = "aws-ec2"
+max_machines = 4                                 # per provider, below pool.max_machines
+```
+
+| key | default | |
+|---|---|---|
+| `policy` | `"default"` | `default`/`binpack` or `classic` (the previous behaviour, for comparison) |
+| `estimator` | `"history"` | `history` learns CPU and peak memory per repository/tool/subcommand from cgroup usage; `static` uses `[resources]` |
+| `cpu_overcommit` | 2 | reserved CPU may exceed physical cores by this factor (>= 1) |
+| `memory_overcommit` | 1 | > 1 needs `swap = true` or `soft_limit` |
+| `soft_limit` | 0 (off) | sets `memory.high` to request x factor |
+| `swap` | false | allow sessions to swap |
+| `max_cpu_pressure`, `max_memory_pressure` | 0 (off) | PSI threshold 0..1 above which a machine takes no new sessions |
+| `limit_jobs` | false | pass the reserved cores as build parallelism (`CARGO_BUILD_JOBS`, `CLOUDSOURCED_JOBS`) |
+| `consolidate_below` | 0.5 | drain the least loaded machine of an environment below this reserved share (0 = off) |
+| `consolidate_target` | 0.75 | share the remaining machines may reach by taking its load |
+| `[[warm_pool]]` | none | scheduled warm machines in addition to `pool.min_machines` |
+
+Memory is never overcommitted beyond `memory_overcommit`; CPU is. Lifetimes
+(`idle_stop`, `max_lifetime`), `min_machines`, `max_machines` and
+`queue_timeout` are in `[pool]` ([configuration.md](configuration.md#pool-configuration)).
 
 ## Default policy
 
-`pool.policy = "default"` (alias `"binpack"`):
+`policy = "default"` (alias `"binpack"`):
 
-- **Placement**: machines with a warm build cache for the repository come
+- **Placement**: machines with a warm build slot for the repository come
   first; then machines that still have *physical* room (CPU overcommit slows
   tasks down, so it is the last resort); then best fit: the machine with the
   least normalised capacity left after placing the task. Rendezvous hashing
@@ -24,50 +72,45 @@ can be tested and simulated without machines.
 - **Sizing**: for the next machine the policy packs the remaining queue into
   every size and picks the lowest price per fraction of the queued demand
   the size absorbs (measured in the dominant resource). A single small task
-  gets the cheapest fitting size; several queued tasks may justify one larger
-  machine when it is cheaper per unit, and at equal cost per unit fewer
-  machines win. Sizes that would need more machines than `max_machines`
-  still allows lose against sizes that absorb more; a small stopped machine
-  is not started when its slot is needed for a larger new machine, and an
-  empty running machine is stopped to make room for a larger one when the
-  pool is at its limit. Unknown prices (0) prefer the size absorbing the
-  most demand, then the smaller one.
+  gets the cheapest fitting size; several queued tasks may justify one
+  larger machine when it is cheaper per unit, and at equal cost per unit
+  fewer machines win. Sizes that would need more machines than
+  `max_machines` still allows lose against sizes that absorb more; a small
+  stopped machine is not started when its slot is needed for a larger new
+  machine, and an empty running machine is stopped to make room for a larger
+  one when the pool is at its limit. Unknown prices (0) prefer the size
+  absorbing the most demand, then the smaller one.
 - **Architecture**: machines are only created from sizes of the
   environment's architecture (the repository's `resources.arch`; unknown
   environments are amd64), and a task no size of its architecture can hold
   is rejected.
 - **Consolidation**: when the machines of an environment are reserved below
-  `consolidate_below` (default 0.5) and the others stay below
-  `consolidate_target` (default 0.75) after taking its share, the least
-  loaded busy machine is drained (one at a time, never below the warm pool,
-  never while tasks of the environment wait). New work lands elsewhere and
-  the drained machine stops as soon as its sessions end. When demand returns
-  it is undrained before anything is started or created.
+  `consolidate_below` and the others stay below `consolidate_target` after
+  taking its share, the least loaded busy machine is drained (one at a time,
+  never below the warm pool, never while tasks of the environment wait). New
+  work lands elsewhere and the drained machine stops as soon as its sessions
+  end. When demand returns it is undrained before anything is started or
+  created.
 - **Idle stop and warm pool**: idle machines stop after `idle_stop` unless
   the warm pool keeps them: `min_machines` per environment used in the last
-  24 hours, raised by scheduled windows:
+  24 hours, raised by the scheduled `[[scheduler.warm_pool]]` windows.
+- **Limits**: `max_machines` (pool and per provider) also bounds starting
+  stopped machines.
+- **Lifetime**: machines past `max_lifetime` drain and are destroyed with
+  their volumes; idle machines stop and keep their disk.
 
-  ```toml
+`policy = "classic"` keeps the previous behaviour (rendezvous placement,
+cheapest size for the aggregate demand, no consolidation) for comparison.
 
-[scheduler]
+## Inputs: disk, slots and snapshots
 
-[[scheduler.warm_pool]]
-  days = ["mon", "tue", "wed", "thu", "fri"]   # empty = every day
-  from = "08:00"
-  to = "19:00"                                # earlier than from spans midnight
-  machines = 1                                # per recently used environment
-  timezone = "Europe/Berlin"                  # default: local time
-  ```
-
-- **Limits**: `max_machines` now also bounds starting stopped machines (the
-  previous policy could exceed it).
-
-`pool.policy = "classic"` keeps the previous behaviour (rendezvous
-placement, cheapest size for the aggregate demand, no consolidation) for
-comparison.
-
-New keys: `policy = "default" | "binpack" | "classic"`, `consolidate_below`
-(0 = off), `consolidate_target`, `[[scheduler.warm_pool]]`.
+The pool snapshot the policy sees contains, per machine, the disk
+(`DiskTotal`, `DiskUsed`) and the size of each repository's build slot
+(`Status.Disk`), and the snapshots held in object stores
+(`Status.Snapshots`). Sizes may declare `disk`. Sessions report their slot
+size before and after the run (`task_end.usage.slot_bytes_before/after`).
+The mechanisms for a full disk (prune, move by snapshot and restore, grow
+the disk) are in [caches-and-storage.md](caches-and-storage.md).
 
 ## Simulator
 
