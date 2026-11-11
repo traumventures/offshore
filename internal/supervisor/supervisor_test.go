@@ -166,7 +166,7 @@ func TestRebootStartsWithoutRecreating(t *testing.T) {
 }
 
 func TestCheckActs(t *testing.T) {
-	a, p, _ := testAgent(t)
+	a, p, dk := testAgent(t)
 	clk := clock.NewFake(time.Now())
 	a.Clock = clk
 	now := clk.Now()
@@ -183,6 +183,10 @@ func TestCheckActs(t *testing.T) {
 		IdleSince: now.Add(-time.Hour).Unix(), LastProbe: now.Add(-11 * time.Minute).Unix()})
 	if d := a.Check(ctx); d != machine.IdleStop || p.stops != 1 {
 		t.Fatalf("idle: %v stops=%d", d, p.stops)
+	}
+	// The worker container is stopped first (it saves its slots on SIGTERM).
+	if last := dk.cmds[len(dk.cmds)-1]; last != "stop -t 120 cs-m1" {
+		t.Fatalf("container not stopped before the instance: %q", last)
 	}
 	a.Spec.ExpiresAt = now.Unix()
 	if d := a.Check(ctx); d != machine.Terminate || shutdowns != 1 {

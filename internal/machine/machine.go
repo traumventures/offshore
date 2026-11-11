@@ -86,11 +86,16 @@ const (
 	SecretsInline
 )
 
+// StopTimeout is the seconds a stopping machine container gets after
+// SIGTERM before it is killed: the worker saves the build slots that
+// changed since their last snapshot.
+const StopTimeout = 120
+
 // Containers returns the machine's containers in creation and start order:
 // the machine first, then its services (which join its network namespace).
 func (l Layout) Containers(secret map[string]string, mode Secrets) []Container {
 	name := l.Name()
-	args := []string{"create", "--name", name, "--hostname", name}
+	args := []string{"create", "--name", name, "--hostname", name, "--stop-timeout", strconv.Itoa(StopTimeout)}
 	args = append(args, labelArgs(l.Labels)...)
 	args = append(args,
 		"--device", "/dev/fuse",

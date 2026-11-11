@@ -226,8 +226,8 @@ func New(cfg Config, log *slog.Logger) (*Worker, error) {
 }
 
 // Run provisions the machine and serves until ctx ends or the machine expires.
-func (s *Worker) Run(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
+func (s *Worker) Run(parent context.Context) error {
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	s.cg = setupCgroups(s.log)
 	s.startCompilerCache(ctx)
@@ -270,6 +270,13 @@ func (s *Worker) Run(ctx context.Context) error {
 	s.shutdown()
 	if ctx.Err() != nil && s.provisionFailed() {
 		return errors.New("provisioning failed")
+	}
+	if parent.Err() != nil {
+		// SIGTERM (machine stop): save what changed since the last
+		// snapshot. The container's stop timeout bounds this
+		// (machine.StopTimeout); the orchestrator normally saved before
+		// stopping, so this is incremental or nothing.
+		s.saveChanged(time.Duration(machine.StopTimeout-10)*time.Second, "stop")
 	}
 	return nil
 }

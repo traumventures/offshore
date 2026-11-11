@@ -30,7 +30,7 @@ func TestMachineContainerArgs(t *testing.T) {
 	if len(cs) != 2 || cs[0].Name != "cs-m1" || cs[1].Name != "cs-m1-svc-db" {
 		t.Fatalf("containers %+v", cs)
 	}
-	want := []string{"create", "--name", "cs-m1", "--hostname", "cs-m1",
+	want := []string{"create", "--name", "cs-m1", "--hostname", "cs-m1", "--stop-timeout", "120",
 		"--label", "a=1", "--label", "b=2",
 		"--device", "/dev/fuse", "--cap-add", "SYS_ADMIN", "--security-opt", "apparmor=unconfined",
 		"--cgroupns", "private", "-p", "127.0.0.1::7443/udp",

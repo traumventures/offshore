@@ -219,3 +219,30 @@ func TestProfileLearnsColdWarmGrowth(t *testing.T) {
 		t.Fatal("default cold run")
 	}
 }
+
+func TestPlaceMovesWarmSlotFromDrainingMachine(t *testing.T) {
+	m := machine("m", res(8, 16), Resources{})
+	m.Size = "m"
+	src := machine("src", res(8, 16), Resources{})
+	src.Size, src.Draining, src.WarmRepos = "m", true, []string{"r"}
+	src.SlotBytes = map[string]int64{"r": 2 * gib}
+	src.IdleSince = now.Add(-10 * time.Minute)
+	tk := profiled(time.Minute, 20*time.Minute)
+	pol := Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1}}
+	pl := pol.Place(Pool{Now: now, Sizes: priced, Machines: []Machine{m, src}}, tk)
+	if pl.Kind != Assign || pl.Machine != "m" || pl.Slot.Kind != SlotMove || pl.Slot.From != "src" || pl.Slot.Bytes != 2*gib {
+		t.Fatalf("want move from src, got %+v", pl)
+	}
+	// A snapshot taken after the source went idle holds the same slot:
+	// restore it instead of saving again.
+	f := Pool{Now: now, Sizes: priced, Machines: []Machine{m, src},
+		Snapshots: map[string][]Snapshot{"r": {{Repo: "r", Provider: "p", Store: "p", Bytes: 2 * gib, At: now.Add(-5 * time.Minute)}}}}
+	if pl := pol.Place(f, tk); pl.Slot.Kind != SlotRestore {
+		t.Fatalf("want restore of the current snapshot, got %+v", pl)
+	}
+	// A busy source is not a move source (its slot may be in use).
+	src.Sessions = 1
+	if pl := pol.Place(Pool{Now: now, Sizes: priced, Machines: []Machine{m, src}}, tk); pl.Slot.Kind == SlotMove {
+		t.Fatalf("moved from a busy machine: %+v", pl)
+	}
+}

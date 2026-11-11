@@ -142,6 +142,7 @@ type Report struct {
 	WarmHits     int           `json:"warm_hits"`
 	WarmRate     float64       `json:"warm_rate"`
 	Restores     int           `json:"restores"`
+	Moves        int           `json:"moves"` // slots saved on one machine and restored on another
 	Prunes       int           `json:"prunes"`
 	Resizes      int           `json:"resizes"`
 	Evictions    int           `json:"evictions"` // slots dropped because a disk was full
@@ -676,6 +677,20 @@ func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.D
 		}
 		prep = float64(slot.Snapshot.Bytes) / float64(bw)
 		m.slots[j.Repo] = slot.Snapshot.Bytes
+		restored = true
+	case scheduler.SlotMove:
+		// Save on the source (its provider's store), then restore here.
+		s.r.Moves++
+		src := s.find(slot.From)
+		bw := s.o.Bandwidth
+		if src != nil && src.prov != m.prov {
+			bw = s.o.CrossBandwidth
+			egress := float64(slot.Bytes) / 1e9 * s.o.CrossEgress
+			s.r.EgressCost += egress
+			s.r.Cost += egress
+		}
+		prep = float64(slot.Bytes)/float64(s.o.Bandwidth) + float64(slot.Bytes)/float64(bw)
+		m.slots[j.Repo] = slot.Bytes
 		restored = true
 	}
 	warm := m.warm[j.Repo]
