@@ -91,6 +91,9 @@ type cacheFSOptions struct {
 	Now         func() time.Time
 	// Observer receives the stacks' events (page-ins, writebacks).
 	Observer anyfs.Observer
+	// WritebackInterval is how often dirty pages are checked against
+	// their class's writeback delay (default 2s).
+	WritebackInterval time.Duration
 }
 
 // cacheFS mounts and commits the build slots of a machine.
@@ -226,7 +229,8 @@ func (c *cacheFS) repo(id string) (*repoFS, error) {
 		return r, nil
 	}
 	base := filepath.Join(c.dir, "repos", id)
-	local, err := anyfs.OpenLocal(anyfs.LocalOptions{Dir: filepath.Join(base, "local"), Capacity: c.opt.Capacity, Now: c.opt.Now, Observer: c.obs})
+	local, err := anyfs.OpenLocal(anyfs.LocalOptions{Dir: filepath.Join(base, "local"), Capacity: c.opt.Capacity, Now: c.opt.Now, Observer: c.obs,
+		Pool: filepath.Join(c.dir, "pool")})
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +261,15 @@ func (c *cacheFS) setGrant(repo string, g store.Grant) error {
 		return err
 	}
 	r.remote, r.storeNm, r.expires = st, g.Store, g.Expires
-	r.link = anyfs.NewLink(r.local, anyfs.NewStore(st, anyfs.StoreMedium()), anyfs.Policy{Write: anyfs.WriteBack, DirtyExpire: 24 * time.Hour}, r.c.obs)
+	if r.link != nil {
+		r.link.Close()
+	}
+	// Committed pages are written back in the background by their access
+	// class (PageHint): immutable early, churn late, ephemeral only by an
+	// explicit flush; the store head moves once a head's pages are clean.
+	r.link = anyfs.NewLink(r.local, anyfs.NewStore(st, anyfs.StoreMedium()), anyfs.Policy{Write: anyfs.WriteBack,
+		DirtyExpire: access.DefaultWritebackDelay, Interval: c.opt.WritebackInterval}, r.c.obs)
+	r.link.Start()
 	return nil
 }
 
@@ -522,7 +534,8 @@ func (c *cacheFS) commit(ctx context.Context, slot, repo string, m slotMeta, liv
 	}
 	base := ch.Tree()
 	opt := anyfs.ChangeOptions{ScanOptions: anyfs.ScanOptions{Prev: base, Since: m.Scanned,
-		Sink: func(k anyfs.Key, b []byte) error { return r.tier.Put(ctx, k, b, anyfs.Dirty) }}}
+		Sink:  func(k anyfs.Key, b []byte) error { return r.tier.Put(ctx, k, b, anyfs.Dirty) },
+		Alone: func(rel string, size int64) bool { return size >= dedupeMin && r.access.Policy(rel).Dedupe }}}
 	if c.mode != fsPlain {
 		opt.Upper = filepath.Join(slot, "upper")
 		if opt.Since == 0 && head == m.Base {
@@ -551,6 +564,7 @@ func (c *cacheFS) commit(ctx context.Context, slot, repo string, m slotMeta, liv
 	}
 	now := c.opt.Now()
 	c.observe(r, base, tree, now)
+	c.hintPages(r, diff)
 	l := anyfs.Commit(ch, base, tree, now, nil)
 	if len(ch) == 0 && m.Created > 0 {
 		l.Created = m.Created
@@ -638,6 +652,25 @@ func (c *cacheFS) discard(ctx context.Context, r *repoFS, live []string) {
 }
 
 var errNoStore = errors.New("no store grant for the repository")
+
+// dirtyIn counts the pages of a tree still awaiting writeback.
+func (c *cacheFS) dirtyIn(r *repoFS, t *anyfs.Tree) int {
+	dirty := r.local.DirtyKeys()
+	if len(dirty) == 0 {
+		return 0
+	}
+	set := make(map[anyfs.Key]bool, len(dirty))
+	for _, d := range dirty {
+		set[d.Key] = true
+	}
+	n := 0
+	for _, k := range t.Keys() {
+		if set[k] {
+			n++
+		}
+	}
+	return n
+}
 
 // flush writes a committed chain back to the store: the dirty pages of
 // its tree, its layer objects, then the head.
@@ -808,7 +841,7 @@ func (c *cacheFS) vm() *proto.VMStats {
 		s = s.Add(st)
 	}
 	f := c.files.Stats()
-	return &proto.VMStats{Capacity: c.opt.Capacity, ResidentBytes: s.ResidentBytes + f.ResidentBytes, DirtyBytes: s.DirtyBytes,
+	return &proto.VMStats{Capacity: c.opt.Capacity, ResidentBytes: s.ResidentBytes - s.SharedBytes + f.ResidentBytes, DirtyBytes: s.DirtyBytes,
 		PinnedBytes: s.PinnedBytes, WorkingSetBytes: s.WorkingSetBytes, Faults: s.Faults + f.Faults, PageInBytes: s.PageInBytes + f.PageInBytes,
 		WritebackBytes: s.PageOutBytes, ReclaimBytes: s.ReclaimBytes + c.reclaimed.Load(), FaultRate: s.FaultRate + f.FaultRate,
 		Thrashing: s.Thrashing, Stack: stack}
