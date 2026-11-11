@@ -225,6 +225,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		return prepErr(err)
 	}
 	binds = append(binds, cb...)
+	s.cfs.sessionStarted(slot, binds)
 	cgDir, err := s.cg.create(se.id, req.Grant)
 	if err != nil {
 		s.log.Warn("session cgroup", "err", err)
@@ -365,11 +366,20 @@ loop:
 	exit.Usage.PeakMemory, exit.Usage.CPUSeconds = s.cg.usage(cgDir)
 	exit.Usage.CPUStall, exit.Usage.MemoryStall = s.cg.stall(cgDir)
 	exit.Usage.Warm = warm
-	slotAfter = s.recordSlotRun(slot, se.started)
+	reads, readBytes, tracked := s.cfs.sessionEnded(slot, req.RepoID)
+	if !tracked {
+		reads = nil // the read index falls back to atime
+	}
+	slotAfter = s.recordSlotRun(slot, se.started, reads)
 	exit.Usage.SlotBytesBefore, exit.Usage.SlotBytesAfter = slotBefore, slotAfter
-	// Working set: slot content faulted in during the session (machine
-	// wide, an upper bound with concurrent sessions) plus what it grew.
-	exit.Usage.WorkingSetBytes = s.cfs.faultBytes() - faultsBefore + max(0, slotAfter-slotBefore)
+	// Working set: the files the session read (tracked) or the slot
+	// content faulted in during it (machine wide, an upper bound with
+	// concurrent sessions), plus what it grew.
+	if tracked {
+		exit.Usage.WorkingSetBytes = readBytes + max(0, slotAfter-slotBefore)
+	} else {
+		exit.Usage.WorkingSetBytes = s.cfs.faultBytes() - faultsBefore + max(0, slotAfter-slotBefore)
+	}
 	exit.Usage.Restored, exit.Usage.RestoreSeconds = restored, restoreSecs
 	exit.Usage.ExitCode = exit.Code
 	if s.cg.oomKilled(cgDir) {

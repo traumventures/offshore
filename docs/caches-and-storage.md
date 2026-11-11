@@ -127,8 +127,26 @@ pattern's own statistics override the prior once it was seen in 3
 sessions; unseen files fall back to their directory's statistics.
 
 On workers the slot file system feeds every commit into the repository's
-model (`<cache>/anyfs/repos/<repo>/access.json`; reads are not tracked
-yet, so read counts stay out of the classification). Two policies act
+model (`<cache>/anyfs/repos/<repo>/access.json`) together with the files
+sessions read since the last commit.
+
+**Reads and the working set.** Reads are tracked per session without
+atime: on the kernel overlay with fanotify on the slot's overlay super
+block (needs CAP_SYS_ADMIN, which the kernel overlay needs anyway; it also
+sees the session's bind mounts in its own mount namespace, whose paths are
+mapped back through the session's binds), on the userspace overlay through
+its open callback; the worker's own accesses are filtered out. Plain
+directory slots do not track reads (the read index of the prune policies
+falls back to atime there). Each session's reads also update the
+repository's **working set** (`workingset.json`: per path the last session
+that read it, how often, its size; entries unread for 16 sessions are
+dropped). It is carried in the meta of every committed layer (top 8000
+entries), so it travels with the head: a slot mounted fresh over a head
+(restore, move, a new slot) reads its working set ahead, most recently
+read first, then the class prefetch, within the prefetch budget.
+`working_set_bytes` (`Status.VM`, metric) is the size of the files read in
+the last 3 sessions; a session's `usage.working_set_bytes` the bytes it
+read plus what the slot grew (fault bytes without tracking). Two policies act
 today: reclaim drops materialized files of ephemeral, then churn files
 before the least recently used rest, and a slot mounted fresh over a
 committed head prefetches its immutable and write-once files (larger than

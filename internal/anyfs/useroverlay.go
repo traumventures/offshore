@@ -62,6 +62,9 @@ type UserOverlayOptions struct {
 	AllowOther    bool
 	MaxReadAhead  int
 	Log           *slog.Logger
+	// OnOpen is called for every file open with its path, whether it is
+	// opened for writing and the opening process (access tracking).
+	OnOpen func(rel string, write bool, pid uint32)
 }
 
 // UserOverlay is a writable union mounted with FUSE by an unprivileged
@@ -825,6 +828,13 @@ func (u *UserOverlay) handle(fd int, write bool) gofs.FileHandle {
 
 func (n *unode) Open(ctx context.Context, flags uint32) (gofs.FileHandle, uint32, syscall.Errno) {
 	rel := n.rel()
+	if on := n.u.opt.OnOpen; on != nil {
+		var pid uint32
+		if c, ok := ctx.(*fuse.Context); ok {
+			pid = c.Caller.Pid
+		}
+		on(rel, flags&writeFlags != 0, pid)
+	}
 	if flags&writeFlags != 0 {
 		n.u.mu.Lock()
 		errno := n.u.copyUp(ctx, rel, flags&syscall.O_TRUNC != 0)

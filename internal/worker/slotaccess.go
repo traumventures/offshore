@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"context"
 	"path/filepath"
 	"sort"
 	"time"
@@ -12,8 +11,8 @@ import (
 )
 
 // Access classes on the slot file system (internal/access): every commit
-// feeds the repository's model (trees before and after; reads are not
-// tracked yet), persisted next to its tier as access.json. The classes
+// feeds the repository's model (trees before and after, and the files
+// sessions read since the last commit: slotreads.go), persisted next to its tier as access.json. The classes
 // order reclaim (ephemeral, then churn materialized files go first) and
 // pick what is prefetched when a slot is mounted fresh over a head
 // (immutable and write-once files: the next build reads them).
@@ -29,8 +28,8 @@ func loadAccess(repoDir string) *access.Model {
 }
 
 // observe folds a commit into the repository's access model.
-func (c *cacheFS) observe(r *repoFS, before, after *anyfs.Tree, at time.Time) {
-	r.access.Observe(access.Observation{Before: before, After: after, At: at})
+func (c *cacheFS) observe(r *repoFS, before, after *anyfs.Tree, reads []string, readsKnown bool, at time.Time) {
+	r.access.Observe(access.Observation{Before: before, After: after, Reads: reads, ReadsKnown: readsKnown, At: at})
 	if err := r.access.Save(filepath.Join(c.dir, "repos", r.id, accessFile)); err != nil {
 		c.log.Warn("save access classes", "repo", r.id, "err", err)
 	}
@@ -52,26 +51,6 @@ func prefetchPlan(m *access.Model, t *anyfs.Tree, small, budget int64) []*anyfs.
 		sum += n.Size
 	}
 	return out
-}
-
-// prefetchClasses starts the class prefetch of a freshly mounted slot;
-// unmount cancels it.
-func (c *cacheFS) prefetchClasses(sm *slotMount) {
-	budget := int64(prefetchClassMax)
-	if c.opt.Capacity > 0 {
-		budget = min(budget, c.opt.Capacity/4)
-	}
-	nodes := prefetchPlan(sm.repo.access, sm.src.Tree(), prefetchSmall, budget)
-	if len(nodes) == 0 {
-		return
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	sm.cancel = cancel
-	go func() {
-		defer cancel()
-		n := c.files.Prefetch(ctx, sm.repo.tier, nodes, 8)
-		c.log.Debug("class prefetch", "repo", sm.repo.id, "files", n)
-	}()
 }
 
 // coldOrder returns the files of the trees whose class is reclaimed

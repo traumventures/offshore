@@ -63,7 +63,7 @@ func TestRecordRunTracksReadsAndRearmsAtime(t *testing.T) {
 	start := time.Now().Add(-time.Minute)
 	read(t, filepath.Join(data, "a"), time.Now())
 	write(t, filepath.Join(data, "c"), 4096, time.Now())
-	if n := recordRun(data, start, 2, idx); n < 3*4096 {
+	if n := recordRun(data, start, 2, idx, nil); n < 3*4096 {
 		t.Fatalf("size %d", n)
 	}
 	if idx["a"] != 2 || idx["b"] != 1 || idx["c"] != 2 {

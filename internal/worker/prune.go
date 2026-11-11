@@ -74,8 +74,9 @@ func fileTimes(fi os.FileInfo) (atime, mtime time.Time) {
 
 // recordRun scans the slot data after a session that started at start
 // and was the slot's run number run. It updates idx (files that no longer
-// exist are dropped) and returns the slot's size.
-func recordRun(data string, start time.Time, run int64, idx readIndex) int64 {
+// exist are dropped) and returns the slot's size. reads are the files the
+// session read when tracked (nil: from atimes, re-armed for relatime).
+func recordRun(data string, start time.Time, run int64, idx readIndex, reads map[string]bool) int64 {
 	var mu sync.Mutex
 	var seen sync.Map
 	var total int64
@@ -87,9 +88,14 @@ func recordRun(data string, start time.Time, run int64, idx readIndex) int64 {
 		}
 		n := allocated(fi, &seen)
 		at, mt := fileTimes(fi)
-		used := !at.Before(start) || !mt.Before(start)
-		if at.After(mt) && fi.Mode().IsRegular() {
-			os.Chtimes(p, mt, mt) // re-arm relatime for the next run
+		used := !mt.Before(start)
+		if reads != nil {
+			used = used || reads[filepath.ToSlash(rel)]
+		} else {
+			used = used || !at.Before(start)
+			if at.After(mt) && fi.Mode().IsRegular() {
+				os.Chtimes(p, mt, mt) // re-arm relatime for the next run
+			}
 		}
 		mu.Lock()
 		defer mu.Unlock()
@@ -338,11 +344,11 @@ func slotCaches(req proto.Exec) []slotCache {
 
 // recordSlotRun counts a finished session as the slot's next run, updates
 // its read index and returns its size.
-func (s *Worker) recordSlotRun(slot string, start time.Time) int64 {
+func (s *Worker) recordSlotRun(slot string, start time.Time, reads map[string]bool) int64 {
 	var run int64
 	s.slots.update(slot, func(m *slotMeta) { m.Runs++; run = m.Runs })
 	idx := loadReads(slot)
-	size := recordRun(filepath.Join(slot, "data"), start, run, idx)
+	size := recordRun(filepath.Join(slot, "data"), start, run, idx, reads)
 	if err := saveReads(slot, idx); err != nil {
 		s.log.Warn("slot read index", "slot", slot, "err", err)
 	}

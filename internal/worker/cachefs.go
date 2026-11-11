@@ -130,6 +130,7 @@ type repoFS struct {
 	link    *anyfs.Link
 
 	access *access.Model // access classes of the repository's files
+	ws     *workingSet   // files read in recent sessions
 }
 
 // slotMount is a mounted slot.
@@ -139,8 +140,10 @@ type slotMount struct {
 	src   *anyfs.TreeSource
 	lower *anyfs.LowerFS
 	user  *anyfs.UserOverlay
-	// cancel stops the class prefetch (nil: none).
+	// cancel stops the readahead (nil: none).
 	cancel context.CancelFunc
+	// reads tracks the files sessions read (nil: not tracked).
+	reads *readTracker
 }
 
 func newCacheFS(dir string, opt cacheFSOptions) (*cacheFS, error) {
@@ -238,7 +241,7 @@ func (c *cacheFS) repo(id string) (*repoFS, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &repoFS{id: id, c: c, local: local, layers: layers, access: loadAccess(base)}
+	r := &repoFS{id: id, c: c, local: local, layers: layers, access: loadAccess(base), ws: loadWorkingSet(filepath.Join(base, workingSetFile))}
 	r.tier = repoTier{r}
 	c.repos[id] = r
 	return r, nil
@@ -407,7 +410,7 @@ func (c *cacheFS) mount(ctx context.Context, slot, repo, base string) error {
 		return err
 	}
 	src := anyfs.NewTreeSource(ch.Tree(), c.files, r.tier)
-	sm = &slotMount{repo: r, base: base, src: src}
+	sm = &slotMount{repo: r, base: base, src: src, reads: newReadTracker(data)}
 	upper, work := filepath.Join(slot, "upper"), filepath.Join(slot, "work")
 	mounted := false
 	if c.mode == fsKernel {
@@ -429,14 +432,25 @@ func (c *cacheFS) mount(ctx context.Context, slot, repo, base string) error {
 		}
 	}
 	if !mounted {
-		sm.user, err = anyfs.MountUserOverlay(data, upper, src, anyfs.UserOverlayOptions{FsName: "offshore-slot", AllowOther: c.allowOther, Timeout: time.Minute})
+		sm.user, err = anyfs.MountUserOverlay(data, upper, src, anyfs.UserOverlayOptions{FsName: "offshore-slot", AllowOther: c.allowOther, Timeout: time.Minute,
+			OnOpen: sm.reads.onOpen})
 		if err != nil {
 			return fmt.Errorf("mount build slot: %w", err)
 		}
 		go src.PrefetchSmall(context.Background(), prefetchSmall, 16)
 	}
+	if mounted {
+		if err := sm.reads.watchKernel(); err != nil {
+			c.log.Warn("build slot reads not tracked", "slot", slot, "err", err)
+			sm.reads = nil
+		}
+	}
 	if dirEmpty(upper) {
-		c.prefetchClasses(sm) // fresh over a head: warm what the build reads
+		var meta []byte
+		if top := ch.Top(); top != nil {
+			meta = top.Meta
+		}
+		c.readahead(sm, meta) // fresh over a head: warm what the next build reads
 	}
 	c.mu.Lock()
 	c.mounts[slot] = sm
@@ -458,6 +472,9 @@ func (c *cacheFS) unmount(slot string) {
 	data := filepath.Join(slot, "data")
 	if sm != nil && sm.cancel != nil {
 		sm.cancel()
+	}
+	if sm != nil && sm.reads != nil {
+		sm.reads.close()
 	}
 	if sm != nil && sm.user != nil {
 		sm.user.Unmount()
@@ -563,9 +580,14 @@ func (c *cacheFS) commit(ctx context.Context, slot, repo string, m slotMeta, liv
 		return res, nil
 	}
 	now := c.opt.Now()
-	c.observe(r, base, tree, now)
+	var reads []string
+	t := c.tracker(slot)
+	if t != nil {
+		reads = t.takePending()
+	}
+	c.observe(r, base, tree, reads, t != nil, now)
 	c.hintPages(r, diff)
-	l := anyfs.Commit(ch, base, tree, now, nil)
+	l := anyfs.Commit(ch, base, tree, now, r.ws.marshal(wsMeta))
 	if len(ch) == 0 && m.Created > 0 {
 		l.Created = m.Created
 	}
@@ -841,6 +863,9 @@ func (c *cacheFS) vm() *proto.VMStats {
 		s = s.Add(st)
 	}
 	f := c.files.Stats()
+	if ws := c.workingSetBytes(); ws > 0 {
+		s.WorkingSetBytes = ws // files sessions read (tracked), not pages touched
+	}
 	return &proto.VMStats{Capacity: c.opt.Capacity, ResidentBytes: s.ResidentBytes - s.SharedBytes + f.ResidentBytes, DirtyBytes: s.DirtyBytes,
 		PinnedBytes: s.PinnedBytes, WorkingSetBytes: s.WorkingSetBytes, Faults: s.Faults + f.Faults, PageInBytes: s.PageInBytes + f.PageInBytes,
 		WritebackBytes: s.PageOutBytes, ReclaimBytes: s.ReclaimBytes + c.reclaimed.Load(), FaultRate: s.FaultRate + f.FaultRate,
