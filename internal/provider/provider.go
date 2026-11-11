@@ -236,3 +236,17 @@ func String(opts map[string]any, key, def string) string {
 	}
 	return def
 }
+
+// Int returns an integer option (TOML integers decode as int64, JSON
+// numbers as float64) or def.
+func Int(opts map[string]any, key string, def int64) int64 {
+	switch v := opts[key].(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case float64:
+		return int64(v)
+	}
+	return def
+}

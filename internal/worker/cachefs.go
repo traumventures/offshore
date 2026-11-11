@@ -307,6 +307,9 @@ func (t repoTier) Get(ctx context.Context, k anyfs.Key) ([]byte, error) {
 func (t repoTier) Put(ctx context.Context, k anyfs.Key, b []byte, s anyfs.State) error {
 	return t.top().Put(ctx, k, b, s)
 }
+func (t repoTier) PutRange(ctx context.Context, k anyfs.Key, b []byte, rg anyfs.Range, s anyfs.State) error {
+	return anyfs.PutPage(ctx, t.top(), k, b, rg, s)
+}
 func (t repoTier) Has(ctx context.Context, k anyfs.Key) bool { return t.top().Has(ctx, k) }
 func (t repoTier) Reclaim(ctx context.Context, n int64) (int64, error) {
 	return t.top().Reclaim(ctx, n)
@@ -530,6 +533,12 @@ func (c *cacheFS) hasher(slot string, r *repoFS) *anyfs.Hasher {
 	ctx := context.Background()
 	h := anyfs.NewHasher(anyfs.HasherOptions{
 		Sink: func(k anyfs.Key, b []byte) error { return r.tier.Put(ctx, k, b, anyfs.Dirty) },
+		// Pages are reflinks of the hashed upper files where the cache
+		// file system supports it: the build outputs are not written a
+		// second time (they were: twice the disk writes and space).
+		RangeSink: func(k anyfs.Key, b []byte, rg anyfs.Range) error {
+			return anyfs.PutPage(ctx, r.tier, k, b, rg, anyfs.Dirty)
+		},
 		Skip: func(rel string) bool { return r.access.Policy(rel).Class == access.Ephemeral },
 		OnHashed: func(n *anyfs.Node) {
 			hint := pageHint(r.access.Policy(n.Path))
@@ -691,7 +700,10 @@ func (c *cacheFS) release(slot string, p slotPlan, committed bool) {
 // scanOptions are the scan options of a repository's commits over prev.
 func (c *cacheFS) scanOptions(ctx context.Context, r *repoFS, prev *anyfs.Tree, since int64) anyfs.ScanOptions {
 	return anyfs.ScanOptions{Prev: prev, Since: since, Workers: c.opt.ReadWorkers,
-		Sink:  func(k anyfs.Key, b []byte) error { return r.tier.Put(ctx, k, b, anyfs.Dirty) },
+		Sink: func(k anyfs.Key, b []byte) error { return r.tier.Put(ctx, k, b, anyfs.Dirty) },
+		RangeSink: func(k anyfs.Key, b []byte, rg anyfs.Range) error {
+			return anyfs.PutPage(ctx, r.tier, k, b, rg, anyfs.Dirty)
+		},
 		Alone: func(rel string, size int64) bool { return size >= dedupeMin && r.access.Policy(rel).Dedupe }}
 }
 
@@ -714,12 +726,12 @@ func (c *cacheFS) finish(ctx context.Context, slot string, r *repoFS, m slotMeta
 		// Only files whose class is written back early (not churn,
 		// ephemeral: they wait for their writeback delay or the flush).
 		stream = link.Stream(ctx)
-		put := func(k anyfs.Key, b []byte) error { return stream.Put(k, b) }
-		opt.FileSink = func(rel string) anyfs.PageSink {
+		put := func(k anyfs.Key, b []byte, rg anyfs.Range) error { return stream.PutRange(k, b, rg) }
+		opt.FileSink = func(rel string) anyfs.RangeSink {
 			if h := pageHint(r.access.Policy(rel)); h.Expire < 0 && !h.NoWriteback {
 				return put
 			}
-			return opt.Sink
+			return nil
 		}
 	}
 	tree, st, err := p.Changes.Tree(content, opt)

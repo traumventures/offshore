@@ -57,15 +57,30 @@ func (c *cacheFS) snapLock(slot string) *sync.Mutex {
 
 // snapshotSlot captures the session that just ended in a slot (the
 // session still holds it).
+//
+// The capture runs while the slot is held for the end of the session
+// (finishing), and the next session of the repository waits for that
+// slot: it must take seconds. It therefore never commits: while an
+// earlier snapshot is still being committed (or waits for it), this
+// session is not captured on its own. Its changes stay in the upper
+// (newer than the head's watermark) and the next capture or the idle
+// commit takes them together with later sessions. Committing pending
+// snapshots here held the slot for the whole commit (hashing, pages,
+// layer: minutes for large sessions on a busy disk), and the next
+// session waited up to maintWait (production: 2 min "worker barrier").
 func (s *Worker) snapshotSlot(ctx context.Context, slot, repo string) error {
 	if s.cfs.mode == fsPlain {
 		return errNoSnapshots
 	}
 	lk := s.cfs.snapLock(slot)
-	lk.Lock()
+	if !lk.TryLock() {
+		s.log.Debug("build slot session not captured: a commit is running", "slot", slot)
+		return nil
+	}
 	defer lk.Unlock()
-	if _, err := s.commitPendingLocked(ctx, slot, repo); err != nil {
-		return err
+	if len(pendingSnapshots(slot)) > 0 {
+		s.log.Debug("build slot session not captured: snapshots wait for their commit", "slot", slot)
+		return nil
 	}
 	m, err := readMeta(slot)
 	if err != nil {

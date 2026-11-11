@@ -247,7 +247,13 @@ type Started struct {
 	Session string `json:"session"`
 	Machine string `json:"machine"`
 	Slot    string `json:"slot"`
-	WaitMs  int64  `json:"wait_ms"` // barrier and preparation time
+	// WaitMs is the worker's whole preparation until start; BarrierMs
+	// its manifest barrier (roots reach the client's version) and SlotMs
+	// leasing and preparing the build slot (waiting for the previous
+	// session's capture or maintenance of the repository's latest slot).
+	WaitMs    int64 `json:"wait_ms"`
+	BarrierMs int64 `json:"barrier_ms,omitempty"`
+	SlotMs    int64 `json:"slot_ms,omitempty"`
 }
 
 // Signal forwards a signal.

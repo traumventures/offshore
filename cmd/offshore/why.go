@@ -162,7 +162,8 @@ func printRun(w io.Writer, r events.Run) {
 			v    int64
 		}{
 			{"environment image", t.Env}, {"local sync", t.Sync}, {"queue / machine start", t.Queue},
-			{"attach roots", t.Attach}, {"connect", t.Connect}, {"worker barrier", t.Barrier},
+			{"attach roots", t.Attach}, {"connect", t.Connect}, {"manifest barrier", t.Barrier},
+			{"build slot", t.Slot}, {"worker prepare", t.Prepare},
 			{"run", t.Run}, {"write back", t.Writeback}, {"outputs", t.Outputs}, {"total", t.Total},
 		} {
 			fmt.Fprintf(tw, "    %s\t%s\n", p.name, ms(p.v))

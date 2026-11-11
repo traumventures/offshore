@@ -4,14 +4,18 @@ import (
 	"bufio"
 	"container/list"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/traumventures/offshore/internal/hostfs"
 	"github.com/traumventures/offshore/internal/medium"
@@ -57,6 +61,7 @@ type Local struct {
 	hintN   int      // lines appended since the last rewrite
 	demote  func(Key, []byte)
 	faults  rate
+	noClone atomic.Bool // PutRange found clones unsupported
 }
 
 type lpage struct {
@@ -440,6 +445,61 @@ func (l *Local) Peek(k Key) ([]byte, error) {
 
 // Put implements Tier. A page put again keeps the dirtier state.
 func (l *Local) Put(ctx context.Context, k Key, b []byte, s State) error {
+	return l.put(k, b, s, nil)
+}
+
+// PutRange implements RangePutter: a new page file is a clone of r
+// (FICLONERANGE: shares the file's blocks, nothing is written) where the
+// file system supports it, else b is written. Build outputs hashed during
+// a session are thereby not written to the disk a second time.
+func (l *Local) PutRange(ctx context.Context, k Key, b []byte, r Range, s State) error {
+	if r.File == nil || r.Ctime == 0 || l.noClone.Load() {
+		return l.put(k, b, s, nil)
+	}
+	return l.put(k, b, s, func(tmp string) (bool, error) {
+		out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o444)
+		if err != nil {
+			return false, err
+		}
+		cerr := unix.IoctlFileCloneRange(int(out.Fd()), &unix.FileCloneRange{
+			Src_fd: int64(r.File.Fd()), Src_offset: uint64(r.Off), Src_length: uint64(len(b))})
+		if cerr == nil {
+			// The page must hold b (its key): the clone does if the
+			// source was not written since b was read (every write
+			// changes the ctime, which user space cannot set back).
+			fi, err := out.Stat()
+			if err == nil && fi.Size() == int64(len(b)) && fileCtime(r.File) == r.Ctime {
+				return true, out.Close()
+			}
+			cerr = errCloneMismatch
+		}
+		out.Close()
+		os.Remove(tmp)
+		if errors.Is(cerr, unix.EOPNOTSUPP) || errors.Is(cerr, unix.EXDEV) || errors.Is(cerr, unix.ENOTTY) ||
+			errors.Is(cerr, unix.ENOSYS) {
+			l.noClone.Store(true) // not supported here: stop trying
+		}
+		return false, nil
+	})
+}
+
+var errCloneMismatch = errors.New("cloned range differs from the page")
+
+// fileCtime returns an open file's ctime in ns (0: unknown).
+func fileCtime(f *os.File) int64 {
+	fi, err := f.Stat()
+	if err != nil {
+		return 0
+	}
+	if id, ok := FileIDOf(fi); ok {
+		return id.Ctime
+	}
+	return 0
+}
+
+// put stores a page; clone, if set, creates the page file at tmp from a
+// file range and reports whether it did (false: b is written).
+func (l *Local) put(k Key, b []byte, s State, clone func(tmp string) (bool, error)) error {
 	l.mu.Lock()
 	if pg := l.pages[k]; pg != nil {
 		if s == Dirty && pg.state == Clean {
@@ -457,11 +517,22 @@ func (l *Local) Put(ctx context.Context, k Key, b []byte, s State) error {
 		return err
 	}
 	shared := l.opt.Pool != "" && os.Link(l.poolPath(k), p) == nil
+	cloned := false
 	if !shared {
 		tmp := fmt.Sprintf("%s.%d.tmp", p, time.Now().UnixNano())
-		if err := os.WriteFile(tmp, b, 0o444); err != nil {
-			os.Remove(tmp)
-			return err
+		if clone != nil {
+			ok, err := clone(tmp)
+			if err != nil {
+				os.Remove(tmp)
+				return err
+			}
+			cloned = ok
+		}
+		if !cloned {
+			if err := os.WriteFile(tmp, b, 0o444); err != nil {
+				os.Remove(tmp)
+				return err
+			}
 		}
 		if err := os.Rename(tmp, p); err != nil {
 			os.Remove(tmp)
@@ -481,6 +552,9 @@ func (l *Local) Put(ctx context.Context, k Key, b []byte, s State) error {
 	pg := &lpage{key: k, size: int64(len(b)), state: s, last: l.opt.Now(), shared: shared}
 	if shared {
 		l.st.SharedBytes += pg.size
+	}
+	if cloned {
+		l.st.ClonedBytes += pg.size
 	}
 	if g := l.ghosts[k]; g != nil {
 		// A refault: ARC adapts towards the list the ghost came from.
