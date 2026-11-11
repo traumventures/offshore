@@ -45,6 +45,13 @@ Allow group OffshoreOperators to read objectstorage-namespaces in tenancy
 Allow group OffshoreOperators to manage all-resources in compartment offshore
 ```
 
+Cache volumes (provider part `Volumes`) are block volumes in the
+compartment, attached paravirtualized at `/dev/oracleoci/oraclevdb`;
+`manage all-resources` covers them (narrower: `manage volume-family` and
+`use instance-family`). A volume lives in one availability domain and
+attaches only to instances there; a machine created with a volume is
+launched in its domain.
+
 When the user may not manage IAM, set `iam = false` and let an
 administrator create the dynamic group `offshore-<hash>` (matching rule
 `ALL {instance.compartment.id = '<compartment OCID>'}`) and a policy with

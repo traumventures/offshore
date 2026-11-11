@@ -76,6 +76,7 @@ type EC2 struct {
 	subnet   string
 	cfg      aws.Config
 	ec2      *ec2.Client
+	api      ec2API // e.ec2 (fakes in tests)
 	ecr      *ecr.Client
 	s3       *s3.Client
 	cf       *cloudformation.Client
@@ -144,6 +145,7 @@ func open(opts map[string]any) (provider.Provider, error) {
 	e.region = cfg.Region
 	e.cfg = cfg
 	e.ec2 = ec2.NewFromConfig(cfg)
+	e.api = e.ec2
 	e.ecr = ecr.NewFromConfig(cfg)
 	e.s3 = s3.NewFromConfig(cfg)
 	e.cf = cloudformation.NewFromConfig(cfg)
@@ -509,8 +511,12 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 			{ResourceType: ec2types.ResourceTypeNetworkInterface, Tags: tags},
 		},
 	}
-	if e.subnet != "" {
-		input.NetworkInterfaces[0].SubnetId = aws.String(e.subnet)
+	subnet, err := e.placement(ctx, spec)
+	if err != nil {
+		return provider.Machine{}, err
+	}
+	if subnet != "" {
+		input.NetworkInterfaces[0].SubnetId = aws.String(subnet)
 	}
 	// The secret environment goes through SSM: the supervisor reads it
 	// with the instance role and deletes it.
@@ -530,6 +536,13 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 		e.terminate(context.Background(), out.Instances)
 		e.DeleteSecrets(context.Background(), spec.ID)
 		return provider.Machine{}, err
+	}
+	if spec.Volume != "" {
+		if _, err := e.AttachVolume(ctx, spec.Volume, spec.ID); err != nil {
+			e.terminate(context.Background(), out.Instances)
+			e.DeleteSecrets(context.Background(), spec.ID)
+			return provider.Machine{}, err
+		}
 	}
 	return e.byMachine(ctx, spec.ID)
 }
@@ -584,7 +597,7 @@ func (e *EC2) instances(ctx context.Context, owner, machine string) ([]ec2types.
 		filters = append(filters, ec2types.Filter{Name: aws.String("tag:" + provider.LabelMachine), Values: []string{machine}})
 	}
 	var out []ec2types.Instance
-	p := ec2.NewDescribeInstancesPaginator(e.ec2, &ec2.DescribeInstancesInput{Filters: filters})
+	p := ec2.NewDescribeInstancesPaginator(e.api, &ec2.DescribeInstancesInput{Filters: filters})
 	for p.HasMorePages() {
 		page, err := p.NextPage(ctx)
 		if err != nil {
@@ -603,6 +616,9 @@ func toMachine(i ec2types.Instance) provider.Machine {
 		l[aws.ToString(t.Key)] = aws.ToString(t.Value)
 	}
 	m := provider.Machine{ID: l[provider.LabelMachine], EnvHash: l[provider.LabelEnvHash], Labels: l, Fingerprint: l[provider.LabelFinger]}
+	if i.Placement != nil {
+		m.Zone = aws.ToString(i.Placement.AvailabilityZone)
+	}
 	l["instance-id"] = aws.ToString(i.InstanceId)
 	l["instance-type"] = string(i.InstanceType)
 	m.CPU, _ = strconv.ParseFloat(l[provider.LabelCPU], 64)
@@ -718,11 +734,6 @@ func (e *EC2) List(ctx context.Context, owner string) ([]provider.Machine, error
 	}
 	return ms, nil
 }
-
-// Volumes: caches live on the instance disk and die with the instance.
-func (e *EC2) Volumes(context.Context, string) ([]provider.Volume, error) { return nil, nil }
-
-func (e *EC2) DeleteVolume(context.Context, string) error { return nil }
 
 // NativeStore implements provider.StoreSource: the stack's bucket below
 // cache/<pool>/ (deleted after one day by the bucket's lifecycle rule);

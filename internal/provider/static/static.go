@@ -394,13 +394,6 @@ func toMachine(st hostState) provider.Machine {
 	return m
 }
 
-// Volumes implements provider.Provider: volumes live and die with the
-// machine on its host.
-func (s *Static) Volumes(context.Context, string) ([]provider.Volume, error) { return nil, nil }
-
-// DeleteVolume implements provider.Provider.
-func (s *Static) DeleteVolume(context.Context, string) error { return nil }
-
 // PutSecrets implements provider.SecretChannel: secrets travel with the
 // apply payload over SSH; nothing is stored elsewhere.
 func (s *Static) PutSecrets(context.Context, string, map[string]string) error { return nil }

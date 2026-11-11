@@ -45,14 +45,21 @@ type MachineSpec struct {
 	InstanceTypes []string
 	CPU           float64
 	Memory        int64
-	Swap          bool // allow sessions to swap
-	ExpiresAt     time.Time
-	Finger        string        // expected server certificate fingerprint (public)
-	DepsTTL       time.Duration // lifetime of shared dependency cache volumes
-	IdleStop      time.Duration // machine stops itself after this long idle and unobserved (0: never)
-	Services      []Service
-	Env           map[string]string // OFFSHORE_* variables of the worker
-	SecretEnv     map[string]string // secret OFFSHORE_* variables
+	// Zone places the machine (empty: the provider's default zone; with
+	// Volume: the volume's zone).
+	Zone string
+	// Volume is the id of an available cache volume (Volumes part) the
+	// machine gets as its cache disk at creation; empty: the cache lives
+	// on the machine's own disk.
+	Volume    string
+	Swap      bool // allow sessions to swap
+	ExpiresAt time.Time
+	Finger    string        // expected server certificate fingerprint (public)
+	DepsTTL   time.Duration // lifetime of shared dependency cache volumes
+	IdleStop  time.Duration // machine stops itself after this long idle and unobserved (0: never)
+	Services  []Service
+	Env       map[string]string // OFFSHORE_* variables of the worker
+	SecretEnv map[string]string // secret OFFSHORE_* variables
 }
 
 // SortedKeys returns the keys of m in order.
@@ -94,15 +101,10 @@ type Machine struct {
 	CreatedAt   time.Time
 	ExpiresAt   time.Time
 	Fingerprint string
-	Labels      map[string]string
-}
-
-// Volume is a cache volume.
-type Volume struct {
-	Name      string
-	Kind      string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	// Zone is the machine's availability zone (aws-ec2) or domain (oci);
+	// volumes attach only within it.
+	Zone   string
+	Labels map[string]string
 }
 
 // Caps describes what a provider supports.
@@ -130,9 +132,6 @@ type Provider interface {
 	Destroy(ctx context.Context, id string) error
 	// List returns all machines of owner.
 	List(ctx context.Context, owner string) ([]Machine, error)
-	// Volumes lists cache volumes of owner; DeleteVolume removes one.
-	Volumes(ctx context.Context, owner string) ([]Volume, error)
-	DeleteVolume(ctx context.Context, name string) error
 }
 
 // ImageSpec describes an environment image to build.

@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -39,6 +38,7 @@ func init() {
 		if v, ok := opts["binary"].(string); ok {
 			d.Binary = v
 		}
+		d.StateDir = provider.String(opts, "state_dir", "")
 		if d.Binary == "" {
 			self, err := os.Executable()
 			if err != nil {
@@ -55,6 +55,13 @@ type Docker struct {
 	Command []string // docker CLI invocation
 	Host    string   // address of published ports
 	Binary  string   // static offshore binary mounted into machines
+	// StateDir keeps volume state Docker labels cannot hold (expiry
+	// after detach); default: the user cache directory.
+	StateDir string
+	// Exec runs the Docker CLI (nil: d.Command; fakes in tests).
+	Exec func(ctx context.Context, stdout io.Writer, args []string) error
+
+	volMu sync.Mutex
 
 	builderOnce sync.Once
 	builder     *image.DockerBuilder
@@ -69,6 +76,12 @@ func (d *Docker) Caps() provider.Caps {
 }
 
 func (d *Docker) run(ctx context.Context, stdout io.Writer, args ...string) error {
+	if d.Exec != nil {
+		if stdout == nil {
+			stdout = io.Discard
+		}
+		return d.Exec(ctx, stdout, args)
+	}
 	argv := append(append([]string{}, d.Command[1:]...), args...)
 	cmd := exec.CommandContext(ctx, d.Command[0], argv...)
 	var stderr bytes.Buffer
@@ -134,7 +147,13 @@ func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provide
 		volLabels[k] = v
 	}
 	cacheVol := "cs-cache-" + spec.ID
-	if err := d.run(ctx, nil, append(append([]string{"volume", "create"}, labels(volLabels)...), cacheVol)...); err != nil {
+	if spec.Volume != "" {
+		// An attachable volume (CreateVolume) outlives the machine.
+		if err := d.checkAttachable(ctx, spec.Volume); err != nil {
+			return provider.Machine{}, err
+		}
+		cacheVol = spec.Volume
+	} else if err := d.run(ctx, nil, append(append([]string{"volume", "create"}, labels(volLabels)...), cacheVol)...); err != nil {
 		return provider.Machine{}, err
 	}
 	depsVol, err := d.depsVolume(ctx, spec)
@@ -180,7 +199,9 @@ func (d *Docker) Create(ctx context.Context, spec provider.MachineSpec) (provide
 		if err != nil {
 			d.Destroy(context.Background(), spec.ID)
 			if i == 0 {
-				d.run(context.Background(), nil, "volume", "rm", "-f", cacheVol)
+				if spec.Volume == "" {
+					d.run(context.Background(), nil, "volume", "rm", "-f", cacheVol)
+				}
 				return provider.Machine{}, err
 			}
 			return provider.Machine{}, fmt.Errorf("service %s: %w", c.Name, err)
@@ -201,7 +222,7 @@ func (d *Docker) services(ctx context.Context, id string) []string {
 // depsVolume returns the newest unexpired shared dependency cache volume,
 // creating one if necessary.
 func (d *Docker) depsVolume(ctx context.Context, spec provider.MachineSpec) (string, error) {
-	vols, err := d.Volumes(ctx, spec.Owner)
+	vols, err := d.ListVolumes(ctx, spec.Owner)
 	if err != nil {
 		return "", err
 	}
@@ -209,7 +230,7 @@ func (d *Docker) depsVolume(ctx context.Context, spec provider.MachineSpec) (str
 	best := ""
 	var bestCreated time.Time
 	for _, v := range vols {
-		if v.Kind != "deps" || !now.Before(v.ExpiresAt) {
+		if v.Kind != provider.VolumeDeps || !now.Before(v.ExpiresAt) {
 			continue
 		}
 		if v.CreatedAt.After(bestCreated) {
@@ -226,7 +247,7 @@ func (d *Docker) depsVolume(ctx context.Context, spec provider.MachineSpec) (str
 	name := fmt.Sprintf("cs-deps-%s-%d", sanitize(spec.Owner), now.Unix())
 	l := map[string]string{
 		provider.LabelPool:      spec.Owner,
-		provider.LabelKind:      "deps",
+		provider.LabelKind:      provider.VolumeDeps,
 		provider.LabelCreatedAt: unix(now),
 		provider.LabelExpiresAt: unix(now.Add(ttl)),
 	}
@@ -370,56 +391,6 @@ func (d *Docker) List(ctx context.Context, owner string) ([]provider.Machine, er
 	}
 	names := strings.Fields(string(out))
 	return d.inspectNames(ctx, names)
-}
-
-// Volumes lists cache volumes of owner.
-func (d *Docker) Volumes(ctx context.Context, owner string) ([]provider.Volume, error) {
-	// One listing with the labels: inspecting the listed names separately
-	// fails as a whole when a volume disappears in between (a concurrent
-	// destroy), which made reconciles fail.
-	out, err := d.output(ctx, "volume", "ls", "--filter", "label="+provider.LabelPool+"="+owner, "--format", "{{.Name}}\t{{.Labels}}")
-	if err != nil {
-		return nil, err
-	}
-	type volInfo struct {
-		Name   string
-		Labels map[string]string
-	}
-	var res []volInfo
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		name, labels, _ := strings.Cut(line, "\t")
-		if name == "" {
-			continue
-		}
-		r := volInfo{Name: name, Labels: map[string]string{}}
-		for _, kv := range strings.Split(labels, ",") {
-			if k, v, ok := strings.Cut(kv, "="); ok {
-				r.Labels[k] = v
-			}
-		}
-		res = append(res, r)
-	}
-	var vs []provider.Volume
-	for _, r := range res {
-		v := provider.Volume{Name: r.Name, Kind: r.Labels[provider.LabelKind]}
-		if n, err := strconv.ParseInt(r.Labels[provider.LabelCreatedAt], 10, 64); err == nil {
-			v.CreatedAt = time.Unix(n, 0)
-		}
-		if n, err := strconv.ParseInt(r.Labels[provider.LabelExpiresAt], 10, 64); err == nil {
-			v.ExpiresAt = time.Unix(n, 0)
-		}
-		vs = append(vs, v)
-	}
-	return vs, nil
-}
-
-// DeleteVolume removes a volume. Volumes in use are left alone.
-func (d *Docker) DeleteVolume(ctx context.Context, name string) error {
-	err := d.run(ctx, nil, "volume", "rm", name)
-	if err != nil && strings.Contains(err.Error(), "in use") {
-		return errors.New("volume in use")
-	}
-	return err
 }
 
 func storeVolume(pool string) string { return "cs-store-" + sanitize(pool) }
