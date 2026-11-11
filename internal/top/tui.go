@@ -78,7 +78,7 @@ type model struct {
 func Run(fetch Fetcher, seed Seeder, interval time.Duration) error {
 	m := &model{fetch: fetch, seed: seed, interval: interval, hist: NewHistory(0), view: DefaultView(),
 		styles: NewStyles(lipgloss.DefaultRenderer())}
-	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	return err
 }
 
@@ -115,6 +115,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.snap, m.have = msg.s, true
 			m.hist.Add(msg.s)
 			m.cur = m.rates.Update(msg.s)
+			m.hist.AddSessions(msg.s, m.cur)
+			m.clamp()
 		}
 		return m, tea.Tick(m.interval, func(time.Time) tea.Msg { return tickMsg{} })
 	case tickMsg:
@@ -123,50 +125,197 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.hist.Seed(msg)
 	case tea.WindowSizeMsg:
 		m.view.Width, m.view.Height = msg.Width, msg.Height
+	case tea.MouseMsg:
+		return m, m.mouse(tea.MouseEvent(msg))
 	case tea.KeyMsg:
 		return m, m.key(msg.String())
 	}
 	return m, nil
 }
 
+// counts returns the rows of the session and machine tables.
+func (m *model) counts() (sessions, machines int) {
+	return len(sessionRows(m.snap, m.hist, m.view, m.cur)), len(m.snap.Up())
+}
+
+func (m *model) clamp() {
+	n, k := m.counts()
+	v := &m.view
+	v.Selected = min(max(v.Selected, 0), max(n-1, 0))
+	v.MSelected = min(max(v.MSelected, 0), max(k-1, 0))
+}
+
+// selectedID returns the detail target of the focused table's selection.
+func (m *model) selectedID() string {
+	if m.view.Focus == FocusMachines {
+		ms := Machines(m.snap, m.view)
+		if i := m.view.MSelected; i >= 0 && i < len(ms) {
+			return "machine:" + ms[i].ID
+		}
+		return ""
+	}
+	rows := sessionRows(m.snap, m.hist, m.view, m.cur)
+	if i := m.view.Selected; i >= 0 && i < len(rows) {
+		return "session:" + rows[i].Row.Session
+	}
+	return ""
+}
+
 // key applies one key press to the view; it returns tea.Quit to exit.
 func (m *model) key(k string) tea.Cmd {
 	v := &m.view
-	n := len(Rows(m.snap, m.cur))
+	if v.Detail != "" {
+		switch k {
+		case "esc", "q", "backspace", "enter":
+			v.Detail = ""
+		case "ctrl+c":
+			return tea.Quit
+		case "up", "k", "down", "j":
+			m.move(map[string]int{"up": -1, "k": -1, "down": 1, "j": 1}[k])
+			v.Detail = m.selectedID()
+		case "+", "=":
+			v.Window = zoom(v.Window, -1)
+		case "-", "_":
+			v.Window = zoom(v.Window, 1)
+		}
+		return nil
+	}
 	page := max(1, v.Height/3)
 	switch k {
 	case "q", "esc", "ctrl+c":
 		return tea.Quit
+	case "tab", "shift+tab":
+		if v.Focus == FocusSessions {
+			v.Focus = FocusMachines
+		} else {
+			v.Focus = FocusSessions
+		}
+	case "enter":
+		v.Detail = m.selectedID()
 	case "up", "k":
-		v.Selected--
+		m.move(-1)
 	case "down", "j":
-		v.Selected++
+		m.move(1)
 	case "pgup":
-		v.Selected -= page
+		m.move(-page)
 	case "pgdown":
-		v.Selected += page
+		m.move(page)
 	case "home", "g":
-		v.Selected = 0
+		m.move(-1 << 20)
 	case "end", "G":
-		v.Selected = n - 1
+		m.move(1 << 20)
 	case "+", "=":
 		v.Window = zoom(v.Window, -1)
 	case "-", "_":
 		v.Window = zoom(v.Window, 1)
 	case "r":
-		v.Asc = !v.Asc
+		if v.Focus == FocusMachines {
+			v.MAsc = !v.MAsc
+		} else {
+			v.Asc = !v.Asc
+		}
 	default:
-		keys := map[string]SortKey{"e": SortElapsed, "c": SortCPU, "m": SortMem, "a": SortAgent, "w": SortWorktree, "n": SortMachine}
+		if v.Focus == FocusMachines {
+			keys := map[string]MSortKey{"s": MSortState, "c": MSortCPU, "m": MSortMem, "d": MSortDisk, "p": MSortPrice, "a": MSortAge, "n": MSortName}
+			if s, ok := keys[k]; ok {
+				if v.MSort == s {
+					v.MAsc = !v.MAsc
+				} else {
+					v.MSort, v.MAsc = s, s == MSortName
+				}
+			}
+			break
+		}
+		keys := map[string]SortKey{"e": SortElapsed, "c": SortCPU, "m": SortMem, "w": SortWorktree, "n": SortMachine, "u": SortUser}
 		if s, ok := keys[k]; ok {
 			if v.Sort == s {
 				v.Asc = !v.Asc
 			} else {
-				v.Sort, v.Asc = s, s == SortAgent || s == SortWorktree || s == SortMachine
+				v.Sort, v.Asc = s, s == SortWorktree || s == SortMachine || s == SortUser
 			}
 		}
 	}
-	v.Selected = min(max(v.Selected, 0), max(n-1, 0))
+	m.clamp()
 	return nil
+}
+
+// move moves the selection of the focused table by d rows.
+func (m *model) move(d int) {
+	if m.view.Focus == FocusMachines {
+		m.view.MSelected += d
+	} else {
+		m.view.Selected += d
+	}
+	m.clamp()
+}
+
+// mouse selects the clicked table row (a second click on the selected
+// row opens it); the wheel moves the selection.
+func (m *model) mouse(e tea.MouseEvent) tea.Cmd {
+	v := &m.view
+	switch {
+	case e.Button == tea.MouseButtonWheelUp:
+		m.move(-1)
+		return nil
+	case e.Button == tea.MouseButtonWheelDown:
+		m.move(1)
+		return nil
+	case e.Button != tea.MouseButtonLeft || e.Action != tea.MouseActionPress:
+		return nil
+	}
+	if v.Detail != "" {
+		return nil
+	}
+	y := e.Y
+	if m.err != nil {
+		y-- // the refresh warning line
+	}
+	focus, idx, ok := HitTest(m.snap, m.hist, *v, m.cur, y)
+	if !ok {
+		return nil
+	}
+	same := focus == v.Focus && (focus == FocusMachines && idx == v.MSelected || focus == FocusSessions && idx == v.Selected)
+	v.Focus = focus
+	if focus == FocusMachines {
+		v.MSelected = idx
+	} else {
+		v.Selected = idx
+	}
+	m.clamp()
+	if same {
+		v.Detail = m.selectedID()
+	}
+	return nil
+}
+
+// HitTest maps a screen line of a frame to a table row (focus and row
+// index); ok is false outside the table rows.
+func HitTest(s Snapshot, h *History, v View, rates map[string]float64, y int) (Focus, int, bool) {
+	v = normalize(v)
+	ms := Machines(s, v)
+	srows := sessionRows(s, h, v, rates)
+	stor := storageRows(s)
+	l := ComputeLayout(v.Height, len(ms), len(stor), len(srows))
+	mTop := 1 + l.Graph + 3 + 3 // header, graph panels, machine panel border/title/column header
+	if y >= mTop && y < mTop+l.Machines {
+		off := window(min(max(v.MSelected, 0), max(len(ms)-1, 0)), v.MOffset, l.Machines, len(ms))
+		if i := off + y - mTop; i < len(ms) {
+			return FocusMachines, i, true
+		}
+		return 0, 0, false
+	}
+	sTop := mTop + l.Machines + 1
+	if l.Storage > 0 {
+		sTop += l.Storage + storageFixed
+	}
+	sTop += 3
+	if y >= sTop && y < sTop+l.Sessions {
+		off := window(min(max(v.Selected, 0), max(len(srows)-1, 0)), v.Offset, l.Sessions, len(srows))
+		if i := off + y - sTop; i < len(srows) {
+			return FocusSessions, i, true
+		}
+	}
+	return 0, 0, false
 }
 
 // zoom moves to the next shorter (dir < 0, "+") or longer window.

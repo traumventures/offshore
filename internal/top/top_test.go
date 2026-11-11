@@ -1,6 +1,7 @@
 package top
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +29,7 @@ func fakeSnapshot(cpuSec float64, at time.Time) Snapshot {
 			Sessions: []proto.Session{
 				{ID: "s1", Repo: "/home/u/app", Argv: []string{"cargo", "build"}, Started: at.Add(-90 * time.Second).Unix(),
 					CPU: 8, Memory: 16 * gib, UsedMemory: 12 * gib, CPUSeconds: cpuSec,
-					Labels: map[string]string{"agent": "codex", "worktree": "/home/u/cs-wt/feature-a", "branch": "wp/a"}},
+					Labels: map[string]string{"agent": "codex", "user": "u", "host": "box", "worktree": "/home/u/cs-wt/feature-a", "branch": "wp/a"}},
 				{ID: "s2", Repo: "/home/u/app", Argv: []string{"cargo", "test"}, Started: at.Add(-10 * time.Minute).Unix(),
 					CPU: 4, Memory: 8 * gib, UsedMemory: 2 * gib, CPUSeconds: 60,
 					Labels: map[string]string{"agent": "claude-code", "worktree": "/home/u/app", "branch": "main"}},
@@ -66,19 +67,22 @@ func TestOnceFrame(t *testing.T) {
 		t.Fatalf("plain frame has escape codes:\n%q", out)
 	}
 	for _, want := range []string{
-		"machines 2 (1 up)", "sessions 2", "queue 1", "$1.50/h now", "$7.25 today",
-		"CPU busy 10.0 / 32 cores", "Memory 20.0G / 64.0G", "Sessions 2  queue 1",
-		"m-aws-1", "aws/c7a.8xlarge", "10.0/32", "psi 0.12/0.00", "2 sess", "m-aws-2",
-		"codex", "claude-code", "~/cs-wt/feature-a", "wp/a", "4.0/8.0", "12.0G/16.0G", "cargo build", "1m30s",
-		"Queue (1)", "q1", "~/cs-wt/b", "r/cargo/check",
+		"machines 2 (1 up)", "sessions 2", "queue 1", "$1.50/h now · $7.25 today",
+		"CPU busy 10.0 / 32 cores", "Memory 20.0G / 64.0G",
+		"MACHINE", "PROVIDER/SIZE", "STATE", "SESS", "$/H",
+		"m-aws-1", "aws/c7a.8xlarge", "10.0/32", "20.0G/64.0G", "busy", "m-aws-2", "stopped",
+		"USER@HOST", "u@box", "~/cs-wt/feature-a", "wp/a", "4.0/8.0", "12.0G/16.0G", "cargo build", "1m30s",
+		"queued", "q1", "~/cs-wt/b", "cargo check", "need 2.0",
 		"█", "window 10m",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("frame lacks %q", want)
 		}
 	}
-	if strings.Contains(out, "m-old") {
-		t.Error("removed machine shown")
+	for _, bad := range []string{"m-old", "AGENT", "Sessions 2  queue 1", "Cost $", "psi "} {
+		if strings.Contains(out, bad) {
+			t.Errorf("frame has %q", bad)
+		}
 	}
 	// Default sort: longest running first.
 	if strings.Index(out, "cargo test") > strings.Index(out, "cargo build") {
@@ -90,6 +94,261 @@ func TestOnceFrame(t *testing.T) {
 		}
 	}
 	t.Log("\n" + out)
+}
+
+// Table columns are aligned: every row's cells start at the header's
+// column positions, numbers are right-aligned.
+func TestTableAlignment(t *testing.T) {
+	cols := []Col{{Title: "NAME"}, {Title: "CPU", Bar: true}, {Title: "N", Right: true}, {Title: "CMD", Flex: true, Min: 5}}
+	rows := [][]Cell{
+		{C("a"), B(1, 4, "1.0/4"), C("7"), C("cargo build --release")},
+		{C("longer-name"), B(4, 4, "4.0/16"), C("123"), C("x")},
+	}
+	ws := layoutCols(cols, rows, 60)
+	st := PlainStyles()
+	hdr := renderHeader(cols, ws, nil)
+	r0, r1 := renderRow(cols, ws, rows[0], st), renderRow(cols, ws, rows[1], st)
+	if len([]rune(r0)) != len([]rune(r1)) || len([]rune(r0)) != 60 || len([]rune(hdr)) != 60 {
+		t.Fatalf("widths %d %d %d:\n%s\n%s\n%s", len([]rune(hdr)), len([]rune(r0)), len([]rune(r1)), hdr, r0, r1)
+	}
+	ri := func(s, sub string) int { return len([]rune(s[:strings.Index(s, sub)])) }
+	if ri(hdr, "CPU") != ri(r0, "█") || ri(hdr, "CMD") != ri(r0, "cargo") {
+		t.Fatalf("columns not aligned:\n%s\n%s", hdr, r0)
+	}
+	// Right alignment: the values end at the same column.
+	if ri(r0, "1.0/4")+len("1.0/4") != ri(r1, "4.0/16")+len("4.0/16") ||
+		ri(r0, " 7 ")+2 != ri(r1, "123 ")+3 {
+		t.Fatalf("numbers not right-aligned:\n%s\n%s", r0, r1)
+	}
+	if !strings.Contains(r0, "██░░░░ ") || !strings.Contains(r1, "██████ ") {
+		t.Fatalf("bars:\n%s\n%s", r0, r1)
+	}
+	// Narrow: flex shrinks, then droppable columns go.
+	cols[2].Drop = 1
+	ws = layoutCols(cols, rows, 30)
+	if ws[2] != -1 || ws[3] < 4 {
+		t.Fatalf("narrow widths %v", ws)
+	}
+}
+
+func TestLayoutUsesFullHeight(t *testing.T) {
+	for _, tc := range []struct {
+		h, machines, storage, sessions int
+	}{{24, 3, 2, 5}, {40, 3, 4, 30}, {60, 10, 6, 100}, {80, 2, 0, 2}, {10, 3, 3, 3}, {0, 3, 2, 5}} {
+		l := ComputeLayout(tc.h, tc.machines, tc.storage, tc.sessions)
+		if l.Graph < 1 || l.Machines < 1 || l.Sessions < 1 || l.Graph > maxGraph {
+			t.Fatalf("%+v: %+v", tc, l)
+		}
+		if tc.h == 0 {
+			if l.Machines != tc.machines || l.Sessions != tc.sessions {
+				t.Fatalf("unlimited: %+v", l)
+			}
+			continue
+		}
+		used := fixedLines + l.Graph + l.Machines + l.Sessions
+		if l.Storage > 0 {
+			used += l.Storage + storageFixed
+		}
+		if tc.h >= fixedLines+3 && used != tc.h && l.Graph < maxGraph {
+			t.Errorf("%+v: layout %+v uses %d of %d lines", tc, l, used, tc.h)
+		}
+		if used > max(tc.h, fixedLines+3) {
+			t.Errorf("%+v: layout %+v overflows (%d)", tc, l, used)
+		}
+		if l.Machines > tc.machines {
+			t.Errorf("%+v: more machine rows than machines: %+v", tc, l)
+		}
+	}
+	// A taller terminal gets taller graphs and more session rows.
+	a, b := ComputeLayout(30, 3, 0, 100), ComputeLayout(60, 3, 0, 100)
+	if b.Graph <= a.Graph || b.Sessions <= a.Sessions {
+		t.Fatalf("30 lines %+v, 60 lines %+v", a, b)
+	}
+	// The rendered frame has exactly the terminal height.
+	s := fakeSnapshot(100, now)
+	for _, height := range []int{24, 40, 60} {
+		v := DefaultView()
+		v.Width, v.Height = 140, height
+		if n := strings.Count(Frame(s, NewHistory(0), v, nil, PlainStyles()), "\n") + 1; n != height {
+			t.Errorf("height %d: frame has %d lines", height, n)
+		}
+	}
+}
+
+func TestMachineSortByState(t *testing.T) {
+	mk := func(id string, st provider.State, sessions int, idle time.Duration, age time.Duration) orchestrator.Machine {
+		m := orchestrator.Machine{Machine: provider.Machine{ID: id, State: st, CreatedAt: now.Add(-age)}}
+		if st == provider.Running {
+			m.Status = &proto.Status{Ready: true}
+			for i := 0; i < sessions; i++ {
+				m.Status.Sessions = append(m.Status.Sessions, proto.Session{ID: id + fmt.Sprint(i)})
+			}
+			if sessions == 0 {
+				m.Status.IdleSince = now.Add(-idle).Unix()
+			}
+		}
+		return m
+	}
+	ms := []orchestrator.Machine{
+		mk("failed", provider.Failed, 0, 0, time.Hour), mk("stopped", provider.Stopped, 0, 0, time.Hour),
+		mk("idle-long", provider.Running, 0, 10*time.Minute, time.Hour), mk("starting", provider.Starting, 0, 0, time.Minute),
+		mk("busy-young", provider.Running, 1, 0, time.Minute), mk("idle-short", provider.Running, 0, time.Minute, time.Hour),
+		mk("busy-old", provider.Running, 2, 0, 2*time.Hour),
+	}
+	drain := mk("draining", provider.Running, 1, 0, time.Hour)
+	drain.Status.Draining = true
+	ms = append(ms, drain)
+	SortMachines(ms, MSortState, false, now)
+	var ids []string
+	for _, m := range ms {
+		ids = append(ids, m.ID)
+	}
+	want := "busy-old busy-young idle-short idle-long starting draining stopped failed"
+	if got := strings.Join(ids, " "); got != want {
+		t.Fatalf("order %s, want %s", got, want)
+	}
+	SortMachines(ms, MSortName, true, now)
+	if ms[0].ID != "busy-old" || ms[len(ms)-1].ID != "stopped" {
+		t.Fatalf("name sort %v", ms)
+	}
+}
+
+// The session table lists running sessions, then queued requests, then
+// recently finished sessions with exit code and duration.
+func TestSessionRowsRunningQueuedFinished(t *testing.T) {
+	homeDir = "/home/u"
+	s := fakeSnapshot(100, now)
+	h := NewHistory(0)
+	h.Events([]events.Event{
+		{Type: events.TaskPlaced, Task: "f1", Placement: "assign", Reason: "warm slot", WaitMs: 1500, Machine: "m-aws-1"},
+		{Type: events.TaskEnd, Time: now.Add(-time.Minute), Task: "f1", Machine: "m-aws-1", Key: "r/cargo/clippy",
+			Reserve: &scheduler.Resources{CPU: 4, Memory: 8 * gib}, Labels: map[string]string{"user": "u", "host": "box", "worktree": "/home/u/w"},
+			Usage: &scheduler.Usage{Wall: 2 * time.Minute, ExitCode: 101, CPUSeconds: 240, PeakMemory: 2 * gib}},
+	})
+	rows := sessionRows(s, h, DefaultView(), nil)
+	var kinds []string
+	for _, r := range rows {
+		kinds = append(kinds, r.Kind)
+	}
+	if strings.Join(kinds, ",") != "run,run,queued,done" {
+		t.Fatalf("kinds %v", kinds)
+	}
+	v := DefaultView()
+	v.Width, v.Height = 160, 40
+	out := Frame(s, h, v, nil, PlainStyles())
+	for _, want := range []string{"exit 101", "cargo clippy", "2m", "2.0/4.0", "Sessions (2 running, 1 queued)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("frame lacks %q\n%s", want, out)
+		}
+	}
+}
+
+func TestStoragePanel(t *testing.T) {
+	s := fakeSnapshot(100, now)
+	st0 := s.Machines[0].Status
+	st0.Disk = &proto.DiskStatus{Total: 200 * gib, Used: 120 * gib, Slots: 80 * gib, MachineCaches: 10 * gib, SlotBytes: map[string]int64{"repo-app": 30 * gib}}
+	st0.Heads = []proto.LayerHead{{Repo: "repo-app", Store: "aws", Bytes: 28 * gib, At: now.Add(-3 * time.Minute).Unix()}}
+	st0.VM = &proto.VMStats{PageInBytes: 1 << 30, WritebackBytes: 1 << 29}
+	h := NewHistory(0)
+	h.Add(s)
+	s2 := fakeSnapshot(100, now.Add(10*time.Second))
+	*s2.Machines[0].Status = *st0
+	vm2 := *st0.VM
+	vm2.PageInBytes += 100 << 20
+	s2.Machines[0].Status.VM = &vm2
+	h.Add(s2)
+	v := DefaultView()
+	v.Width, v.Height = 160, 50
+	out := Frame(s2, h, v, nil, PlainStyles())
+	for _, want := range []string{"Storage  store 28.0G in 1 repos", "page-in 10M/s", "REPO", "repo-app", "30.0G", "28.0G", "3m10s ago", "aws", "120.0G/200.0G"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("frame lacks %q\n%s", want, out)
+		}
+	}
+}
+
+func TestDetailViewsAndNavigation(t *testing.T) {
+	homeDir = "/home/u"
+	s := fakeSnapshot(108, now)
+	m := &model{snap: s, have: true, hist: NewHistory(0), view: DefaultView(), styles: PlainStyles(), cur: map[string]float64{"s1": 4, "s2": 0.1}}
+	m.Update(tea.WindowSizeMsg{Width: 150, Height: 45})
+	m.hist.Add(s)
+	m.hist.AddSessions(s, m.cur)
+	m.hist.Events([]events.Event{{Type: events.TaskPlaced, Task: "s1", Placement: "assign", Reason: "warm slot", WaitMs: 2000},
+		{Type: events.MachineState, Machine: "m-aws-1", State: "running", Time: now.Add(-time.Hour)}})
+	// Session detail of the selected (longest running) session.
+	m.key("enter")
+	if m.view.Detail != "session:s2" {
+		t.Fatalf("detail %q", m.view.Detail)
+	}
+	m.key("down")
+	if m.view.Detail != "session:s1" {
+		t.Fatalf("detail after down %q", m.view.Detail)
+	}
+	out := m.View()
+	for _, want := range []string{"Session s1", "cargo build", "u@box", "~/cs-wt/feature-a", "wp/a", "assign: warm slot (waited 2s", "m-aws-1 (aws/c7a.8xlarge", "CPU 4.0 cores"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("session detail lacks %q\n%s", want, out)
+		}
+	}
+	m.key("esc")
+	if m.view.Detail != "" {
+		t.Fatal("esc must close the detail")
+	}
+	// Tab to machines, open the first (busy) machine.
+	m.key("tab")
+	m.key("enter")
+	if m.view.Detail != "machine:m-aws-1" {
+		t.Fatalf("machine detail %q", m.view.Detail)
+	}
+	out = m.View()
+	for _, want := range []string{"Machine m-aws-1", "aws/c7a.8xlarge", "price", "$1.500/h", "cost today", "history", "running", "CPU busy", "Pressure", "Sessions", "cargo build"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("machine detail lacks %q\n%s", want, out)
+		}
+	}
+	if n := strings.Count(out, "\n") + 1; n > 45 {
+		t.Errorf("machine detail has %d lines for 45", n)
+	}
+	m.key("q")
+	if m.view.Detail != "" {
+		t.Fatal("q closes the detail first")
+	}
+	if m.key("q") == nil {
+		t.Fatal("q quits from the table view")
+	}
+}
+
+func TestMouseSelectsAndOpens(t *testing.T) {
+	s := fakeSnapshot(108, now)
+	m := &model{snap: s, have: true, hist: NewHistory(0), view: DefaultView(), styles: PlainStyles()}
+	m.Update(tea.WindowSizeMsg{Width: 150, Height: 40})
+	frame := strings.Split(m.View(), "\n")
+	row := func(text string) int {
+		for i, l := range frame {
+			if strings.Contains(l, text) {
+				return i
+			}
+		}
+		t.Fatalf("no line with %q", text)
+		return -1
+	}
+	click := func(y int) {
+		m.Update(tea.MouseMsg{X: 5, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	}
+	click(row("m-aws-2"))
+	if m.view.Focus != FocusMachines || Machines(m.snap, m.view)[m.view.MSelected].ID != "m-aws-2" {
+		t.Fatalf("click on m-aws-2: %+v", m.view)
+	}
+	click(row("m-aws-2"))
+	if m.view.Detail != "machine:m-aws-2" {
+		t.Fatalf("second click opens: %q", m.view.Detail)
+	}
+	m.key("esc")
+	click(row("cargo build"))
+	if m.view.Focus != FocusSessions || sessionRows(m.snap, m.hist, m.view, m.cur)[m.view.Selected].Row.Session != "s1" {
+		t.Fatalf("click on s1: %+v", m.view)
+	}
 }
 
 func TestSortAndKeys(t *testing.T) {
@@ -107,14 +366,16 @@ func TestSortAndKeys(t *testing.T) {
 	if !m.view.Asc {
 		t.Fatal("second press must reverse")
 	}
-	m.key("a")
+	m.key("w")
 	SortRows(rows, m.view.Sort, m.view.Asc)
-	if m.view.Sort != SortAgent || !m.view.Asc || rows[0].Agent != "claude-code" {
-		t.Fatalf("agent sort %+v %+v", m.view, rows)
+	if m.view.Sort != SortWorktree || !m.view.Asc || rows[0].Session != "s1" {
+		t.Fatalf("worktree sort %+v %+v", m.view, rows)
 	}
 	m.key("down")
-	m.key("down") // clamped to the last row
-	if m.view.Selected != 1 {
+	m.key("down")
+	m.key("down")
+	m.key("down") // clamped to the last row (2 running + 1 queued)
+	if m.view.Selected != 2 {
 		t.Fatalf("selected %d", m.view.Selected)
 	}
 	m.key("+")
@@ -126,8 +387,14 @@ func TestSortAndKeys(t *testing.T) {
 	if m.view.Window != 30*time.Minute {
 		t.Fatalf("zoom out: %v", m.view.Window)
 	}
-	if !strings.Contains(m.View(), "AGENT▲") {
+	if !strings.Contains(m.View(), "WORKTREE▲") {
 		t.Fatalf("sort marker missing:\n%s", m.View())
+	}
+	// Machine sort keys act on the machine table after Tab.
+	m.key("tab")
+	m.key("n")
+	if m.view.MSort != MSortName || m.view.Sort != SortWorktree {
+		t.Fatalf("machine sort %+v", m.view)
 	}
 	if lines := strings.Count(m.View(), "\n") + 1; lines > 40 {
 		t.Fatalf("frame has %d lines for a 40 line terminal", lines)
@@ -156,15 +423,15 @@ func TestMachineCacheColumns(t *testing.T) {
 	s.Machines[0].Status.VM = &proto.VMStats{Capacity: 50 * gib, ResidentBytes: 40 * gib, DirtyBytes: gib / 2,
 		WorkingSetBytes: 60 * gib, FaultRate: 12.5, Thrashing: true}
 	v := DefaultView()
-	v.Width = 260
+	v.Width = 200
 	out := Frame(s, NewHistory(0), v, nil, PlainStyles())
-	for _, want := range []string{"cache 40.0G/50.0G", "dirty 512M", "ws 60.0G", "12.5 flt/s", "THRASH"} {
+	for _, want := range []string{"CACHE", "DIRTY", "WS", "FAULTS", "40.0G/50.0G", "512M", "60.0G", "12.5/s", "THRASH"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
 		}
 	}
 	// Narrow frames drop the cache columns before the rest.
-	v.Width = 120
+	v.Width = 100
 	if out := Frame(s, NewHistory(0), v, nil, PlainStyles()); strings.Contains(out, "THRASH") || !strings.Contains(out, "m-aws-1") {
 		t.Errorf("narrow frame:\n%s", out)
 	}
