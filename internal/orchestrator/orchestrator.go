@@ -305,6 +305,7 @@ type Orchestrator struct {
 	recentEnvs map[string]time.Time      // env hash -> last use (warm pool)
 	images     map[string]string         // env hash -> image
 	removed    []*Machine                // destroyed machines (cost history)
+	seedUptime map[string]*Machine       // uptime replayed at start, merged on first listing
 	services   map[string][]provider.Service
 	changed    chan struct{}
 	// meter measures medium profiles from the workers' tier counters
@@ -342,6 +343,7 @@ type Orchestrator struct {
 	localDisksOnce sync.Once
 	startBlocked   map[string]time.Time     // machine -> no start before
 	createFail     map[string]createBackoff // env/provider -> create backoff
+	downing        map[string]bool          // machines with a stop or destroy running
 	forecast       *scheduler.Forecast
 
 	// Slots performs build slot operations on workers (prune, snapshot
@@ -382,7 +384,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
 		ProbeFunc: Probe, Clock: clk,
 		health: map[string]provHealth{}, leases: map[string]leaseInfo{}, heads: map[string]*repoLayers{},
-		volumes: map[string]*VolumeState{}, startBlocked: map[string]time.Time{}, createFail: map[string]createBackoff{}, forecast: scheduler.NewForecast(),
+		volumes: map[string]*VolumeState{}, startBlocked: map[string]time.Time{}, createFail: map[string]createBackoff{}, downing: map[string]bool{}, forecast: scheduler.NewForecast(),
 		meter: medium.NewMeter(),
 	}
 	medium.SetMeasured(o.meter.Profile)
@@ -390,6 +392,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 	o.loadVolumes()
 	o.metrics = newOrchMetrics(o)
 	o.obs = newObserver(stateDir, cfg.EventRetention)
+	o.loadUptime()
 	o.loadRecent()
 	return o, nil
 }
@@ -551,6 +554,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		m, ok := o.machines[pm.ID]
 		if !ok {
 			m = &Machine{Provider: tm.prov, pending: map[string]pendingLease{}}
+			o.mergeUptimeLocked(m, pm.ID, pm.State)
 			o.machines[pm.ID] = m
 		}
 		if listedAt.Before(m.listed) {
@@ -599,6 +603,9 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 			o.removeLocked(id)
 			down = append(down, id)
 		}
+	}
+	if o.seedUptime != nil {
+		o.settleUptimeLocked()
 	}
 	cb := o.OnMachineDown
 	o.mu.Unlock()
@@ -1081,7 +1088,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 				announced[msg] = true
 			}
 		}
-		o.execute(context.WithoutCancel(ctx), acts, false)
+		o.execute(context.WithoutCancel(ctx), acts, 0)
 		o.mu.Lock()
 		blocked := o.createBlockedLocked(task.EnvHash)
 		o.mu.Unlock()
@@ -1145,9 +1152,10 @@ func (o *Orchestrator) markLocked(acts []scheduler.Action) {
 	}
 }
 
-// execute performs actions. Create and Start always run in the background;
-// Stop and Destroy run synchronously when wait is set.
-func (o *Orchestrator) execute(ctx context.Context, acts []scheduler.Action, wait bool) {
+// execute performs actions in the background; it waits up to wait for
+// Stop and Destroy to finish (reconcile, so that tests and callers see
+// their effect without blocking on slow stops).
+func (o *Orchestrator) execute(ctx context.Context, acts []scheduler.Action, wait time.Duration) {
 	var wg sync.WaitGroup
 	for _, a := range acts {
 		a := a
@@ -1160,7 +1168,21 @@ func (o *Orchestrator) execute(ctx context.Context, acts []scheduler.Action, wai
 		case scheduler.Start:
 			go o.traced(ctx, a, func(ctx context.Context) { o.startMachine(ctx, a.Machine) })
 		case scheduler.Stop, scheduler.Destroy:
-			run := func() {
+			o.mu.Lock()
+			busy := o.downing[a.Machine]
+			o.downing[a.Machine] = true
+			o.mu.Unlock()
+			if busy { // a stop or destroy of it is still running
+				continue
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() {
+					o.mu.Lock()
+					delete(o.downing, a.Machine)
+					o.mu.Unlock()
+				}()
 				o.traced(ctx, a, func(ctx context.Context) {
 					if a.Kind == scheduler.Stop {
 						o.stopMachine(ctx, a.Machine, a.Reason)
@@ -1168,16 +1190,20 @@ func (o *Orchestrator) execute(ctx context.Context, acts []scheduler.Action, wai
 						o.destroyMachine(ctx, a.Machine, a.Reason)
 					}
 				})
-			}
-			if wait {
-				wg.Add(1)
-				go func() { defer wg.Done(); run() }()
-			} else {
-				go run()
-			}
+			}()
 		}
 	}
-	wg.Wait()
+	if wait <= 0 {
+		return
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(wait):
+		// Stops save build slots first and may take minutes: they finish
+		// in the background (downing keeps them from being repeated).
+	}
 }
 
 func (o *Orchestrator) stopMachine(ctx context.Context, id, reason string) {
@@ -1645,13 +1671,13 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	}
 	o.markLocked(invariant)
 	o.mu.Unlock()
-	o.execute(ctx, invariant, true)
+	o.execute(context.WithoutCancel(ctx), invariant, reconcileWait)
 
 	o.mu.Lock()
 	acts := o.planLocked()
 	o.markLocked(acts)
 	o.mu.Unlock()
-	o.execute(context.WithoutCancel(ctx), acts, true)
+	o.execute(context.WithoutCancel(ctx), acts, reconcileWait)
 	return o.reapVolumes(ctx)
 }
 
