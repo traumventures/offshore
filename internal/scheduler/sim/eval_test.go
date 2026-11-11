@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -126,22 +125,18 @@ func TestEvalTable(t *testing.T) {
 			cases = append(cases, c)
 		}
 	}
-	reports := make([][]Report, len(cases))
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 4)
-	for i, c := range cases {
-		reports[i] = make([]Report, len(runs))
-		for k, v := range runs {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				reports[i][k] = c.pool.Run(v.String(), c.trace, v.variant, v.r, c.down, c.resize)
-			}()
+	// One batch over cases x runs (RunAll: CPUs - 1 at a time).
+	var specs []Spec
+	for _, c := range cases {
+		for _, v := range runs {
+			specs = append(specs, c.pool.Spec(v.String(), c.trace, v.variant, v.r, c.down, c.resize))
 		}
 	}
-	wg.Wait()
+	all := RunAll(specs, 0)
+	reports := make([][]Report, len(cases))
+	for i := range cases {
+		reports[i] = all[i*len(runs) : (i+1)*len(runs)]
+	}
 	var b strings.Builder
 	fmt.Fprintln(&b, "| case | policy | cost $ | idle h | turn p50 | turn p95 | wait p95 | cold | flaps | late | regret p95 | failed |")
 	fmt.Fprintln(&b, "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")

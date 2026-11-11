@@ -148,14 +148,20 @@ type EvalPool struct {
 // Run simulates tr on the pool with policy variant and cost
 // optimization r.
 func (p EvalPool) Run(name string, tr Trace, variant string, r float64, down []Outage, resize bool) Report {
+	sp := p.Spec(name, tr, variant, r, down, resize)
+	return Run(sp.Trace, sp.Options)
+}
+
+// Spec is the simulation Run does, for a batch (RunAll).
+func (p EvalPool) Spec(name string, tr Trace, variant string, r float64, down []Outage, resize bool) Spec {
 	cfg := p.Cfg
 	cfg.Variant, cfg.CostOptimization = variant, r
 	var est scheduler.Estimator = scheduler.Static{}
 	if p.History {
 		est = scheduler.NewHistory("")
 	}
-	return Run(tr, Options{Name: name, Policy: scheduler.Default{Cfg: cfg}, Sizes: p.Sizes, Estimator: est,
-		Boot: p.Boot, Start: p.Start, Down: down, Resize: resize, QueueTimeout: cfg.QueueTimeout})
+	return Spec{Trace: tr, Options: Options{Name: name, Policy: scheduler.Default{Cfg: cfg}, Sizes: p.Sizes, Estimator: est,
+		Boot: p.Boot, Start: p.Start, Down: down, Resize: resize, QueueTimeout: cfg.QueueTimeout}}
 }
 
 // EvalPools are the pool configurations of the evaluation: the c7a sample
