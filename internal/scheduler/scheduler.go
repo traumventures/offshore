@@ -260,11 +260,14 @@ const (
 	SlotNone    SlotKind = iota
 	SlotPrune            // prune slots on the machine to free SlotAction.Bytes
 	SlotResize           // grow the machine disk to SlotAction.Bytes
-	SlotRestore          // restore SlotAction.Snapshot into the slot (move)
+	SlotRestore          // restore SlotAction.Snapshot into the slot
+	// SlotMove saves the warm slot on machine SlotAction.From (Bytes) to the
+	// store and restores that fresh snapshot into the slot here.
+	SlotMove
 )
 
 func (k SlotKind) String() string {
-	return [...]string{"none", "prune", "resize", "restore"}[k]
+	return [...]string{"none", "prune", "resize", "restore", "move"}[k]
 }
 
 // SlotAction prepares the build slot of a placed task.
@@ -273,6 +276,7 @@ type SlotAction struct {
 	Repo     string
 	Bytes    int64
 	Snapshot Snapshot
+	From     string // SlotMove: the machine holding the warm slot
 }
 
 // Placement is the decision for one task.

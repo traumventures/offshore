@@ -258,25 +258,50 @@ func restoreUsage(m slotMeta) (bool, float64) {
 	return m.Restored != 0 && m.Runs == 0, m.RestoreSeconds
 }
 
-// saveOnDrain snapshots the slots of every repository with a valid grant
-// when the machine drains at the end of its lifetime, so that a new
-// machine can restore them (reported in Status.Snapshots).
-func (s *Worker) saveOnDrain() {
-	repos := map[string]bool{}
-	for _, r := range s.slots.list() {
-		repos[r.Repo] = true
-	}
-	for repo := range repos {
+// saveOnDrain snapshots the changed slots when the machine drains at the
+// end of its lifetime, so that a new machine can restore them (reported in
+// Status.Snapshots).
+func (s *Worker) saveOnDrain() { s.saveChanged(8*time.Minute, "drain") }
+
+// saveChanged snapshots the most recent slot of every repository that has
+// a valid grant and changed since its last snapshot, all within limit (on
+// drain, and on SIGTERM before the worker exits).
+func (s *Worker) saveChanged(limit time.Duration, why string) {
+	deadline := time.Now().Add(limit)
+	for _, repo := range s.changedRepos() {
 		if _, ok := s.grants.get(repo, 10*time.Minute); !ok {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
 		res, err := s.saveSlot(ctx, repo)
 		cancel()
 		if err != nil {
-			s.log.Warn("snapshot on drain", "repo", repo, "err", err)
+			s.log.Warn("snapshot on "+why, "repo", repo, "err", err)
 			continue
 		}
-		s.log.Info("snapshot on drain", "repo", repo, "bytes", res.Snapshot.Bytes, "new_chunks", res.NewChunks, "seconds", res.Seconds)
+		s.log.Info("snapshot on "+why, "repo", repo, "bytes", res.Snapshot.Bytes, "new_chunks", res.NewChunks, "seconds", res.Seconds)
 	}
+}
+
+// changedRepos returns the repositories whose most recent slot was used
+// after its last snapshot (or never saved).
+func (s *Worker) changedRepos() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range s.slots.list() {
+		if seen[r.Repo] {
+			continue
+		}
+		seen[r.Repo] = true
+		ref, ok := s.latestSlot(r.Repo)
+		if !ok {
+			continue
+		}
+		if m, err := readLastManifest(ref.Path); err == nil && m.At >= ref.Meta.LastUsed {
+			continue
+		}
+		out = append(out, r.Repo)
+	}
+	sort.Strings(out)
+	return out
 }

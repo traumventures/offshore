@@ -78,6 +78,9 @@ type Plan struct {
 	// exec runs a split plan; nil runs the command as typed, locally or
 	// remotely as the phases say.
 	exec func(ctx context.Context, rt Runtime) (int, error)
+	// align returns the output alignment of remote phases (see
+	// AlignOutputs); nil: the tool needs none.
+	align func(env map[string]string) OutputAlignment
 }
 
 // Remote reports whether any phase runs remotely.

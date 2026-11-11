@@ -214,9 +214,23 @@ bound holds across machines.
 The scheduler decides when (`orchestrator.SlotOps`): `SaveSlot` and
 `RestoreSlot` call the worker's slot stream with a fresh grant; the first
 session on a restored slot reports `usage.restored` and
-`usage.restore_seconds`. A worker draining at the end of its lifetime saves
-the slots of every repository it holds a grant for and lists them in
-`Status.Snapshots`. Events: `snapshot_save`, `snapshot_restore`
+`usage.restore_seconds`. Saves happen:
+
+* before the orchestrator stops or destroys a machine (consolidation, idle
+  stop, expiry, making room; not after a failure), when its provider has a
+  store: every slot that changed since the worker's last snapshot is saved
+  and recorded with the machine's provider, so the scheduler's cache
+  affinity can restore it elsewhere;
+* for a **move** (`SlotMove`): the scheduler places a task on another
+  machine while an idle machine (typically draining) holds a newer warm
+  slot than any snapshot; the orchestrator saves it there and restores the
+  fresh snapshot on the target before the session starts;
+* by the worker itself when it drains at the end of its lifetime, and on
+  SIGTERM (the machine container has a 120 s stop timeout; the supervisor
+  stops it before an idle stop or termination of the instance). These
+  saves skip slots unchanged since their last snapshot.
+
+Snapshots are listed in `Status.Snapshots`. Events: `snapshot_save`, `snapshot_restore`
 ([operations.md](operations.md#event-log-and-reports)).
 
 Measured with `test/bench/snapshot.sh` (local directory store, small crate

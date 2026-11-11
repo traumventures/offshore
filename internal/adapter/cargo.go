@@ -58,6 +58,12 @@ var (
 )
 
 func (a Cargo) Classify(c Command) Plan {
+	p := a.classify(c)
+	p.align = cargoAlign(c)
+	return p
+}
+
+func (a Cargo) classify(c Command) Plan {
 	cc := parseCargo(c.Args)
 	sub := cc.Sub
 	plan := asTyped(c, sub, cargoPhase(sub), cargoTarget, cargoRegistry)

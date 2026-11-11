@@ -37,12 +37,19 @@ func TestSlotSaveAndRestore(t *testing.T) {
 	if res := a.slotOp(context.Background(), proto.SlotOp{Op: proto.SlotSave, Repo: "repo"}); res.Err == "" {
 		t.Fatal("save without grant")
 	}
+	if got := a.changedRepos(); len(got) != 1 || got[0] != "repo" {
+		t.Fatalf("changed before the first save: %v", got)
+	}
 	res := a.slotOp(context.Background(), proto.SlotOp{Op: proto.SlotSave, Repo: "repo", Store: gr})
 	if res.Err != "" || res.Snapshot == nil || res.Snapshot.Store != "local" || res.Snapshot.Bytes == 0 || res.NewChunks == 0 {
 		t.Fatalf("save: %+v", res)
 	}
 	if st := a.statusSnapshots(); len(st) != 1 || st[0].At != res.Snapshot.At {
 		t.Fatalf("status snapshots %+v", st)
+	}
+	// Saved and unused since: nothing to save on drain or SIGTERM.
+	if got := a.changedRepos(); len(got) != 0 {
+		t.Fatalf("changed after the save: %v", got)
 	}
 	// A second save reads only changes: nothing new.
 	if r2 := a.slotOp(context.Background(), proto.SlotOp{Op: proto.SlotSave, Repo: "repo", Store: gr}); r2.Err != "" || r2.NewChunks != 0 {

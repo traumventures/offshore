@@ -1040,6 +1040,7 @@ func (o *Orchestrator) execute(ctx context.Context, acts []scheduler.Action, wai
 }
 
 func (o *Orchestrator) stopMachine(ctx context.Context, id, reason string) {
+	o.saveBeforeStop(ctx, id, "stop: "+reason)
 	o.log.Info("stopping machine", "id", id, "reason", reason)
 	p, err := o.provOf(id)
 	if err != nil {
@@ -1058,6 +1059,9 @@ func (o *Orchestrator) stopMachine(ctx context.Context, id, reason string) {
 }
 
 func (o *Orchestrator) destroyMachine(ctx context.Context, id, reason string) {
+	if reason != "failed" {
+		o.saveBeforeStop(ctx, id, "destroy: "+reason)
+	}
 	o.log.Info("destroying machine", "id", id, "reason", reason)
 	p, err := o.provOf(id)
 	if err != nil {

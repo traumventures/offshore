@@ -85,7 +85,7 @@ func mainRun(tr *runTrace, tool string, args []string) int {
 		return local(plan.Why)
 	}
 	rec.Mode, rec.Why = events.Remote, plan.Why
-	rt := &phaseRuntime{repo: repo, profile: profile, tool: tool, args: args, cwd: cwd, rec: rec}
+	rt := &phaseRuntime{repo: repo, profile: profile, tool: tool, args: args, cwd: cwd, rec: rec, plan: plan}
 	code, err := plan.Execute(tr.ctx, rt)
 	if err != nil {
 		var fb *fallback
@@ -163,6 +163,9 @@ type remoteRun struct {
 	noTTY  bool              // never allocate a remote terminal
 	stdin  bool              // with noTTY: still forward stdin by the usual policy
 	env    map[string]string // additional environment
+	// align is the tool adapter's output alignment, applied with the
+	// output overlay ([outputs] mode = "fuse"); nil: none.
+	align func(env map[string]string) (adapter.OutputAlignment, bool)
 	// after runs once the remote command exited and its outputs arrived,
 	// while the lease is still held; code is the remote exit code.
 	after func(ctx context.Context, s *session, code int) error
@@ -353,12 +356,16 @@ func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, 
 		Eager: profile.Eager, Lease: prep.Lease,
 		Linker: repo.Environment.Linker, TraceParent: tracing.Inject(ctx), Labels: rec.Labels,
 	}
-	if repo.Outputs.Mode == config.OutputsFuse {
+	if repo.Outputs.Mode == config.OutputsFuse && opt.align != nil {
 		// The remote build directory appears locally (output overlay):
-		// align what cargo fingerprints so local cargo finds it fresh.
-		req.Toolchain = clientToolchain()
-		for k, v := range cargoHomeRustflags(req.Toolchain.CargoHome, env) {
-			env[k] = v
+		// the adapter aligns what the tool fingerprints.
+		if a, ok := opt.align(env); ok {
+			if a.CargoHome != "" || a.RustupHome != "" {
+				req.Toolchain = &proto.Toolchain{CargoHome: a.CargoHome, RustupHome: a.RustupHome}
+			}
+			for k, v := range a.Env {
+				env[k] = v
+			}
 		}
 	}
 	if useTTY {
@@ -605,7 +612,8 @@ func Prewarm(ctx context.Context, repo *config.Repo, argv []string, progress io.
 	l := labels.Merge(labels.Detect(repo.Root, "", os.Getenv), map[string]string{labels.Purpose: labels.PurposePrewarm})
 	rec := &events.Run{Time: time.Now(), Repo: repo.Root, Cwd: repo.Root, Tool: argv[0], Args: argv[1:],
 		Mode: events.Remote, Why: "offshore prewarm", Labels: labels.Clean(l)}
-	code, err := runRemote(ctx, repo, config.Tool{}, argv[0], argv[1:], repo.Root, rec, remoteRun{})
+	plan := adapter.Classify(adapter.Command{Tool: argv[0], Args: argv[1:], Config: repo.Tools[argv[0]]})
+	code, err := runRemote(ctx, repo, config.Tool{}, argv[0], argv[1:], repo.Root, rec, remoteRun{align: plan.AlignOutputs})
 	var fb *fallback
 	if errors.As(err, &fb) {
 		return 0, fb.err

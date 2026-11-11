@@ -343,8 +343,43 @@ func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 			slot: SlotAction{Kind: SlotRestore, Repo: t.RepoID, Snapshot: s}, reason: "restore snapshot from " + s.Store}
 		add(rc, slotNeed(m, t, s.Bytes))
 	}
+	if src, ok := p.moveSource(f, m, t); ok {
+		b := src.SlotBytes[t.RepoID]
+		st := storeOf(f, src.Provider)
+		_, upBW := p.egress(f, st, src.Provider)
+		price, downBW := p.egress(f, st, m.Provider)
+		move := time.Duration(float64(b)/float64(upBW)*float64(time.Second)) + time.Duration(float64(b)/float64(downBW)*float64(time.Second))
+		rc := runChoice{run: move + scale(t.Profile.WarmRun()), cost: float64(b) / 1e9 * price,
+			slot: SlotAction{Kind: SlotMove, Repo: t.RepoID, Bytes: b, From: src.ID,
+				Snapshot: Snapshot{Repo: t.RepoID, Provider: src.Provider, Store: st, Bytes: b, At: f.Now}},
+			reason: "move warm slot from " + src.ID}
+		add(rc, slotNeed(m, t, b))
+	}
 	add(runChoice{run: scale(t.Profile.ColdRun(m.Provider)), reason: "cold"}, slotNeed(m, t, 0))
 	return out
+}
+
+// moveSource returns an idle running machine other than m with a warm slot
+// of t's repository that is newer than every known snapshot of it (saved
+// and restored on m by a SlotMove). Busy machines are skipped: their slot
+// may be in use.
+func (p Default) moveSource(f Pool, m Machine, t Task) (Machine, bool) {
+	var newest time.Time
+	for _, s := range f.Snapshots[t.RepoID] {
+		if s.Bytes > 0 && s.At.After(newest) {
+			newest = s.At
+		}
+	}
+	for _, src := range f.Machines {
+		if src.ID == m.ID || src.State != Running || src.Sessions > 0 || !src.Warm(t.RepoID) || src.SlotBytes[t.RepoID] <= 0 {
+			continue
+		}
+		if !newest.IsZero() && !newest.Before(src.IdleSince) {
+			continue // the latest snapshot already holds this slot
+		}
+		return src, true
+	}
+	return Machine{}, false
 }
 
 // bestSnapshot returns the newest snapshot of t's repository, preferring

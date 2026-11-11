@@ -23,6 +23,7 @@ type phaseRuntime struct {
 	args    []string
 	cwd     string
 	rec     *events.Run
+	plan    adapter.Plan
 	calls   int
 }
 
@@ -50,7 +51,7 @@ func (r *phaseRuntime) Remote(ctx context.Context, argv []string, o adapter.Remo
 	if o.Why != "" {
 		rec.Why = o.Why
 	}
-	opt := remoteRun{argv: argv, stdout: o.Stdout, stderr: o.Stderr, noTTY: o.NoTTY, stdin: o.Stdin, env: o.Env}
+	opt := remoteRun{argv: argv, stdout: o.Stdout, stderr: o.Stderr, noTTY: o.NoTTY, stdin: o.Stdin, env: o.Env, align: r.plan.AlignOutputs}
 	var collected []string
 	if o.Collect != nil {
 		opt.after = func(ctx context.Context, s *session, code int) error {
