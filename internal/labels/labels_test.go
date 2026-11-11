@@ -79,3 +79,16 @@ func TestCleanLimits(t *testing.T) {
 		t.Fatalf("format %q", got)
 	}
 }
+
+func TestHostLabelAndUserHost(t *testing.T) {
+	old := hostname
+	hostname = func() (string, error) { return "buildhost", nil }
+	defer func() { hostname = old }()
+	l := Detect(t.TempDir(), "alice", env(nil))
+	if l[Host] != "buildhost" || UserHost(l) != "alice@buildhost" {
+		t.Fatalf("labels %v, client %q", l, UserHost(l))
+	}
+	if UserHost(map[string]string{User: "u"}) != "u" || UserHost(map[string]string{Host: "h"}) != "h" || UserHost(nil) != "" {
+		t.Fatal("partial client")
+	}
+}

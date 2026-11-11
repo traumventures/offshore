@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -57,5 +58,24 @@ func TestGroupsByLabel(t *testing.T) {
 	r.Write(&b)
 	if !strings.Contains(b.String(), "by agent") || !strings.Contains(b.String(), "1 prewarm") {
 		t.Fatalf("report text:\n%s", b.String())
+	}
+}
+
+func TestGroupByHost(t *testing.T) {
+	at := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	evs := []events.Event{
+		{Type: events.TaskEnd, Time: at, Task: "a", Labels: map[string]string{"host": "buildhost"}, Usage: &scheduler.Usage{Wall: time.Hour}},
+		{Type: events.TaskEnd, Time: at, Task: "b", Usage: &scheduler.Usage{Wall: time.Hour}},
+	}
+	g := Groups(evs, at.Add(-2*time.Hour), at.Add(time.Hour), "host")
+	keys := map[string]int{}
+	for _, x := range g.Groups {
+		keys[x.Key] = x.Sessions
+	}
+	if g.By != "host" || keys["buildhost"] != 1 || keys["(none)"] != 1 {
+		t.Fatalf("groups %+v", g)
+	}
+	if !slices.Contains(GroupKeys, "host") {
+		t.Fatal("host is not a --by key")
 	}
 }
