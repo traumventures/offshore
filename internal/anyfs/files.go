@@ -1,0 +1,430 @@
+package anyfs
+
+import (
+	"container/list"
+	"context"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+// Files materializes the contents of tree nodes as whole local files,
+// keyed by content digest (identical files share one), assembled from
+// the pages of a tier on first use. These read-only files back the FUSE
+// lower: opened files are handed to the kernel (passthrough). They are
+// resident data too: Reclaim drops the least recently used ones that
+// are not open; a later read faults them in again.
+type Files struct {
+	dir string
+	obs Observer
+
+	mu       sync.Mutex
+	files    map[string]*mfile
+	lru      *list.List
+	resident int64
+	inflight map[string]*fetch
+	faults   int64
+	faultB   int64
+	rate     rate
+
+	pmu   sync.Mutex
+	pages map[Key][]byte // last pages assembled (packed small files share them)
+	porder []Key
+}
+
+type mfile struct {
+	digest string
+	size   int64
+	open   int
+	// backed files can be faulted in again after reclaim (their pages
+	// are in a lower tier); others are the only copy and never reclaimed.
+	backed bool
+	elem   *list.Element
+}
+
+// OpenFiles opens the materialized file cache in dir (files found in dir
+// are resident and unbacked until SetBacked).
+func OpenFiles(dir string, obs Observer) (*Files, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	f := &Files{dir: dir, obs: obs, files: map[string]*mfile{}, lru: list.New(),
+		inflight: map[string]*fetch{}, pages: map[Key][]byte{}}
+	type found struct {
+		d   string
+		sz  int64
+		mod time.Time
+	}
+	var fs_ []found
+	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if !Key(d.Name()).Valid() {
+			os.Remove(p)
+			return nil
+		}
+		if fi, err := d.Info(); err == nil {
+			fs_ = append(fs_, found{d.Name(), fi.Size(), fi.ModTime()})
+		}
+		return nil
+	})
+	sort.Slice(fs_, func(i, j int) bool { return fs_[i].mod.Before(fs_[j].mod) })
+	for _, x := range fs_ {
+		m := &mfile{digest: x.d, size: x.sz}
+		m.elem = f.lru.PushBack(m)
+		f.files[x.d] = m
+		f.resident += x.sz
+	}
+	return f, nil
+}
+
+// SetBacked marks a resident file as backed by a lower tier (it may be
+// reclaimed and faulted in again).
+func (f *Files) SetBacked(digest string) {
+	f.mu.Lock()
+	if m := f.files[digest]; m != nil {
+		m.backed = true
+	}
+	f.mu.Unlock()
+}
+
+func (f *Files) path(digest string) string {
+	return filepath.Join(f.dir, digest[:2], digest)
+}
+
+// emptyDigest is the BLAKE3 of no bytes.
+var emptyDigest = string(KeyOf(nil))
+
+func digestOf(n *Node) string {
+	if n.Digest == "" && n.Size == 0 {
+		return emptyDigest
+	}
+	return n.Digest
+}
+
+// Local returns the path of a node's materialized content if resident.
+func (f *Files) Local(n *Node) (string, bool) {
+	d := digestOf(n)
+	if d == "" {
+		return "", false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m := f.files[d]
+	if m == nil {
+		return "", false
+	}
+	f.lru.MoveToBack(m.elem)
+	return f.path(d), true
+}
+
+// Acquire marks a materialized file open (not reclaimed until Release).
+func (f *Files) Acquire(n *Node) {
+	f.mu.Lock()
+	if m := f.files[digestOf(n)]; m != nil {
+		m.open++
+	}
+	f.mu.Unlock()
+}
+
+// Release ends an Acquire.
+func (f *Files) Release(n *Node) {
+	f.mu.Lock()
+	if m := f.files[digestOf(n)]; m != nil && m.open > 0 {
+		m.open--
+	}
+	f.mu.Unlock()
+}
+
+// Ensure materializes a node's content from the pages of tier (a page
+// fault if it is not resident) and returns its path. Concurrent calls
+// share one fetch.
+func (f *Files) Ensure(ctx context.Context, tier Tier, n *Node) (string, error) {
+	if p, ok := f.Local(n); ok {
+		return p, nil
+	}
+	d := digestOf(n)
+	if d == "" {
+		return "", fmt.Errorf("anyfs: %s has no content digest", n.Path)
+	}
+	f.mu.Lock()
+	if fl := f.inflight[d]; fl != nil {
+		f.mu.Unlock()
+		select {
+		case <-fl.done:
+			if fl.err != nil {
+				return "", fl.err
+			}
+			return f.path(d), nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	fl := &fetch{done: make(chan struct{})}
+	f.inflight[d] = fl
+	f.mu.Unlock()
+	begin := time.Now()
+	if tier == nil {
+		fl.err = fmt.Errorf("fault %s: %w", n.Path, ErrNotFound)
+	} else {
+		fl.err = f.assemble(ctx, tier, n, d)
+	}
+	f.mu.Lock()
+	delete(f.inflight, d)
+	if fl.err == nil {
+		f.faults++
+		f.faultB += n.Size
+	}
+	f.mu.Unlock()
+	close(fl.done)
+	if fl.err != nil {
+		return "", fl.err
+	}
+	f.rate.add(time.Now(), 1)
+	f.obs.emit(Event{Type: EvPageFault, Tier: "files", Path: n.Path, Pages: int64(len(n.Pages)), Bytes: n.Size, Seconds: time.Since(begin).Seconds()})
+	return f.path(d), nil
+}
+
+func (f *Files) assemble(ctx context.Context, tier Tier, n *Node, d string) error {
+	p := f.path(d)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	tmp := fmt.Sprintf("%s.%d.tmp", p, time.Now().UnixNano())
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o444)
+	if err != nil {
+		return err
+	}
+	var off int64
+	for _, r := range n.Pages {
+		b, err := f.page(ctx, tier, r.Key)
+		if err == nil && r.Off+r.Len > int64(len(b)) {
+			err = fmt.Errorf("page %s too short for %s", r.Key.Short(), n.Path)
+		}
+		if err == nil {
+			_, err = out.WriteAt(b[r.Off:r.Off+r.Len], off)
+		}
+		if err != nil {
+			out.Close()
+			os.Remove(tmp)
+			return fmt.Errorf("fault %s: %w", n.Path, err)
+		}
+		off += r.Len
+	}
+	if off != n.Size {
+		out.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("fault %s: pages hold %d of %d bytes", n.Path, off, n.Size)
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return f.add(tmp, d, n.Size, true)
+}
+
+// add renames a complete temporary file into place.
+func (f *Files) add(tmp, d string, size int64, backed bool) error {
+	if err := os.Rename(tmp, f.path(d)); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.files[d] == nil {
+		m := &mfile{digest: d, size: size, backed: backed}
+		m.elem = f.lru.PushBack(m)
+		f.files[d] = m
+		f.resident += size
+	} else if backed {
+		f.files[d].backed = true
+	}
+	return nil
+}
+
+// page returns a page, keeping the last few in memory: the small files
+// of one pack are usually read together.
+func (f *Files) page(ctx context.Context, tier Tier, k Key) ([]byte, error) {
+	f.pmu.Lock()
+	if b, ok := f.pages[k]; ok {
+		f.pmu.Unlock()
+		return b, nil
+	}
+	f.pmu.Unlock()
+	b, err := tier.Get(ctx, k)
+	if err != nil {
+		return nil, err
+	}
+	f.pmu.Lock()
+	if _, ok := f.pages[k]; !ok {
+		f.pages[k] = b
+		f.porder = append(f.porder, k)
+		for len(f.porder) > 4 {
+			delete(f.pages, f.porder[0])
+			f.porder = f.porder[1:]
+		}
+	}
+	f.pmu.Unlock()
+	return b, nil
+}
+
+// Adopt makes the content of a local file (e.g. just committed from an
+// upper directory) resident for node n without fetching it: a reflink
+// clone where the file system supports it, a copy otherwise (never a
+// hardlink: the source may be written in place later). With move the
+// source is renamed instead (it must not be used afterwards).
+func (f *Files) Adopt(n *Node, src string, backed, move bool) error {
+	d := digestOf(n)
+	if d == "" {
+		return nil
+	}
+	if _, ok := f.Local(n); ok {
+		return nil
+	}
+	p := f.path(d)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	tmp := fmt.Sprintf("%s.%d.tmp", p, time.Now().UnixNano())
+	if move {
+		if err := os.Rename(src, tmp); err != nil {
+			move = false
+		}
+	}
+	if !move {
+		if err := cloneFile(src, tmp); err != nil {
+			os.Remove(tmp)
+			return err
+		}
+	}
+	if fi, err := os.Stat(tmp); err != nil || fi.Size() != n.Size {
+		os.Remove(tmp)
+		return fmt.Errorf("adopt %s: changed while copying", n.Path)
+	}
+	os.Chmod(tmp, 0o444)
+	return f.add(tmp, d, n.Size, backed)
+}
+
+// cloneFile copies src to dst with a reflink if possible.
+func cloneFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if unix.IoctlFileClone(int(out.Fd()), int(in.Fd())) != nil {
+		if _, err := io.Copy(out, in); err != nil {
+			out.Close()
+			return err
+		}
+	}
+	return out.Close()
+}
+
+// Prefetch materializes the given nodes with parallel workers (e.g. all
+// small files at mount: cargo reads hundreds of fingerprints serially)
+// and returns the number fetched.
+func (f *Files) Prefetch(ctx context.Context, tier Tier, nodes []*Node, parallel int) int {
+	if parallel <= 0 {
+		parallel = 16
+	}
+	ch := make(chan *Node)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	n := 0
+	for range parallel {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for nd := range ch {
+				if _, ok := f.Local(nd); ok {
+					continue
+				}
+				if _, err := f.Ensure(ctx, tier, nd); err == nil {
+					mu.Lock()
+					n++
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	for _, nd := range nodes {
+		if ctx.Err() != nil {
+			break
+		}
+		ch <- nd
+	}
+	close(ch)
+	wg.Wait()
+	return n
+}
+
+// Reclaim drops least recently used backed materialized files that are
+// not open until at most target bytes are resident; it returns the bytes
+// freed.
+func (f *Files) Reclaim(target int64) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var freed, n int64
+	for e := f.lru.Front(); e != nil && f.resident > target; {
+		next := e.Next()
+		m := e.Value.(*mfile)
+		if m.open == 0 && m.backed {
+			os.Remove(f.path(m.digest))
+			f.lru.Remove(e)
+			delete(f.files, m.digest)
+			f.resident -= m.size
+			freed += m.size
+			n++
+		}
+		e = next
+	}
+	if freed > 0 {
+		f.obs.emit(Event{Type: EvReclaim, Tier: "files", Pages: n, Bytes: freed})
+	}
+	return freed
+}
+
+// Drop removes a resident file unless it is open (its content is no
+// longer referenced).
+func (f *Files) Drop(digest string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if m := f.files[digest]; m != nil && m.open == 0 {
+		os.Remove(f.path(digest))
+		f.lru.Remove(m.elem)
+		delete(f.files, digest)
+		f.resident -= m.size
+	}
+}
+
+// Digests returns the digests of the resident files.
+func (f *Files) Digests() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.files))
+	for d := range f.files {
+		out = append(out, d)
+	}
+	return out
+}
+
+// Stats reports the resident bytes of materialized files and the file
+// faults so far.
+func (f *Files) Stats() Stats {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return Stats{ResidentBytes: f.resident, Pages: int64(len(f.files)), Faults: f.faults, PageInBytes: f.faultB, FaultRate: f.rate.get(time.Now())}
+}
