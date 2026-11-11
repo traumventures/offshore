@@ -141,7 +141,7 @@ Resources:
               - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*"
             Condition:
               StringEquals:
-                ec2:CreateAction: [RunInstances, CreateSecurityGroup]
+                ec2:CreateAction: [RunInstances, CreateSecurityGroup, CreateVolume]
           - Sid: RetagOwnResources
             Effect: Allow
             Action: [ec2:CreateTags, ec2:DeleteTags]
@@ -280,9 +280,29 @@ Resources:
               - iam:ListRoleTags
             Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StackPrefix}*-*"
           - Sid: GrowMachineDisks
+            # root disks (no tag condition: RunInstances tags them, but
+            # older machines may predate it) and cache volumes
             Effect: Allow
             Action: ec2:ModifyVolume
             Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:volume/*"
+          - Sid: CreateCacheVolumes
+            Effect: Allow
+            Action: ec2:CreateVolume
+            Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:volume/*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/project: offshore
+          - Sid: ManageCacheVolumes
+            # attach/detach authorize on the volume and the instance; both
+            # carry project=offshore
+            Effect: Allow
+            Action: [ec2:AttachVolume, ec2:DetachVolume, ec2:DeleteVolume, ec2:CreateTags, ec2:DeleteTags]
+            Resource:
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:volume/*"
+              - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*"
+            Condition:
+              StringEquals:
+                aws:ResourceTag/project: offshore
           - Sid: WorkerStoreGrants
             Effect: Allow
             Action: sts:AssumeRole

@@ -90,8 +90,6 @@ func (p *hostProvider) Destroy(context.Context, string) error { return nil }
 func (p *hostProvider) List(context.Context, string) ([]provider.Machine, error) {
 	return nil, nil
 }
-func (p *hostProvider) Volumes(context.Context, string) ([]provider.Volume, error) { return nil, nil }
-func (p *hostProvider) DeleteVolume(context.Context, string) error                 { return nil }
 
 // localStore is the fake local Docker daemon.
 type localStore struct{ b *countingBuilder }

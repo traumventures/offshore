@@ -78,8 +78,6 @@ func (p *imgProvider) Destroy(context.Context, string) error { return nil }
 func (p *imgProvider) List(context.Context, string) ([]provider.Machine, error) {
 	return nil, nil
 }
-func (p *imgProvider) Volumes(context.Context, string) ([]provider.Volume, error) { return nil, nil }
-func (p *imgProvider) DeleteVolume(context.Context, string) error                 { return nil }
 
 func init() {
 	provider.Register("test-img", func(map[string]any) (provider.Provider, error) { return theProvider, nil })

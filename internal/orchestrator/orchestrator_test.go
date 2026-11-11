@@ -47,7 +47,7 @@ func (f *fakeProvider) Create(_ context.Context, s provider.MachineSpec) (provid
 		CreatedAt: time.Now(), ExpiresAt: s.ExpiresAt, Fingerprint: s.Finger, Labels: map[string]string{provider.LabelSize: s.Size}}
 	f.machines[s.ID] = m
 	f.status[s.ID] = &proto.Status{Machine: s.ID, Ready: true, CPU: s.CPU, Memory: s.Memory, IdleSince: time.Now().Unix()}
-	f.volumes["cs-cache-"+s.ID] = provider.Volume{Name: "cs-cache-" + s.ID, Kind: "cache"}
+	f.volumes["cs-cache-"+s.ID] = cacheVolume(s.ID)
 	return *m, nil
 }
 
@@ -87,7 +87,50 @@ func (f *fakeProvider) List(context.Context, string) ([]provider.Machine, error)
 	return out, nil
 }
 
-func (f *fakeProvider) Volumes(context.Context, string) ([]provider.Volume, error) {
+// cacheVolume is the per-machine cache volume of a fake machine.
+func cacheVolume(id string) provider.Volume {
+	return provider.Volume{ID: "cs-cache-" + id, Name: "cs-cache-" + id, Kind: provider.VolumeCache,
+		State: provider.VolumeAvailable, Labels: map[string]string{provider.LabelMachine: id}}
+}
+
+func (f *fakeProvider) VolumeCaps() provider.VolumeCaps { return provider.VolumeCaps{} }
+
+func (f *fakeProvider) CreateVolume(_ context.Context, s provider.VolumeSpec) (provider.Volume, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v := provider.Volume{ID: s.Name, Name: s.Name, Kind: provider.VolumeCache, Bytes: s.Bytes, State: provider.VolumeAvailable, ExpiresAt: s.ExpiresAt}
+	f.volumes[v.ID] = v
+	return v, nil
+}
+
+func (f *fakeProvider) AttachVolume(_ context.Context, id, machine string) (provider.Volume, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v := f.volumes[id]
+	v.State, v.Machine, v.ExpiresAt = provider.VolumeAttached, machine, time.Time{}
+	f.volumes[id] = v
+	return v, nil
+}
+
+func (f *fakeProvider) DetachVolume(_ context.Context, id string, exp time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v := f.volumes[id]
+	v.State, v.Machine, v.ExpiresAt = provider.VolumeAvailable, "", exp
+	f.volumes[id] = v
+	return nil
+}
+
+func (f *fakeProvider) ResizeVolume(_ context.Context, id string, bytes int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v := f.volumes[id]
+	v.Bytes = bytes
+	f.volumes[id] = v
+	return nil
+}
+
+func (f *fakeProvider) ListVolumes(context.Context, string) ([]provider.Volume, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []provider.Volume
@@ -97,10 +140,10 @@ func (f *fakeProvider) Volumes(context.Context, string) ([]provider.Volume, erro
 	return out, nil
 }
 
-func (f *fakeProvider) DeleteVolume(_ context.Context, name string) error {
+func (f *fakeProvider) DeleteVolume(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.volumes, name)
+	delete(f.volumes, id)
 	return nil
 }
 
@@ -293,9 +336,11 @@ func TestReconcileIdleExpiryAndWarmPool(t *testing.T) {
 	// The lifetime ends: machines are destroyed together with their volumes.
 	clk.Advance(24 * time.Hour)
 	f.mu.Lock()
-	f.volumes["orphan"] = provider.Volume{Name: "orphan", Kind: "cache"}
-	f.volumes["deps-old"] = provider.Volume{Name: "deps-old", Kind: "deps", ExpiresAt: clk.Now().Add(-time.Second)}
-	f.volumes["deps-new"] = provider.Volume{Name: "deps-new", Kind: "deps", ExpiresAt: clk.Now().Add(time.Hour)}
+	orphan := cacheVolume("gone")
+	orphan.ID = "orphan"
+	f.volumes["orphan"] = orphan
+	f.volumes["deps-old"] = provider.Volume{ID: "deps-old", Kind: provider.VolumeDeps, State: provider.VolumeAvailable, ExpiresAt: clk.Now().Add(-time.Second)}
+	f.volumes["deps-new"] = provider.Volume{ID: "deps-new", Kind: provider.VolumeDeps, State: provider.VolumeAvailable, ExpiresAt: clk.Now().Add(time.Hour)}
 	f.mu.Unlock()
 	if err := o.Reconcile(ctx); err != nil {
 		t.Fatal(err)
@@ -510,8 +555,14 @@ func TestReapKeepsVolumeOfMachineBeingCreated(t *testing.T) {
 	f := newFake()
 	o := newTestOrch(t, f, nil)
 	f.mu.Lock()
-	f.volumes["cs-cache-new1"] = provider.Volume{Name: "cs-cache-new1", Kind: "cache"}
-	f.volumes["cs-cache-gone"] = provider.Volume{Name: "cs-cache-gone", Kind: "cache"}
+	f.volumes["cs-cache-new1"] = cacheVolume("new1")
+	f.volumes["cs-cache-gone"] = cacheVolume("gone")
+	kept := cacheVolume("old")
+	kept.ID, kept.ExpiresAt = "kept", o.now().Add(time.Hour)
+	f.volumes["kept"] = kept
+	expired := cacheVolume("old")
+	expired.ID, expired.ExpiresAt = "expired", o.now().Add(-time.Second)
+	f.volumes["expired"] = expired
 	f.mu.Unlock()
 	o.mu.Lock()
 	o.creating["new1"] = creation{prov: "fake", env: "env1env1env1env1", at: o.now()}
@@ -526,5 +577,11 @@ func TestReapKeepsVolumeOfMachineBeingCreated(t *testing.T) {
 	}
 	if _, ok := f.volumes["cs-cache-gone"]; ok {
 		t.Fatal("orphaned cache volume survived")
+	}
+	if _, ok := f.volumes["kept"]; !ok {
+		t.Fatal("detached volume kept for reuse was deleted before its expiry")
+	}
+	if _, ok := f.volumes["expired"]; ok {
+		t.Fatal("expired volume survived")
 	}
 }
