@@ -8,7 +8,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/traumventures/offshore/internal/access"
 	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/proto"
 	"github.com/traumventures/offshore/internal/store"
@@ -266,6 +265,9 @@ func (s *Worker) slotReleased(slot, repo string) {
 		s.log.Warn("build slot snapshot commit", "slot", slot, "err", err)
 		return
 	}
+	if res.changed {
+		s.scheduleHeadFlush(repo)
+	}
 	if s.cfs.opt.DirtyBytes <= 0 {
 		return
 	}
@@ -302,7 +304,7 @@ func (s *Worker) maintainSlots(ctx context.Context) {
 		if r.Meta.LastUsed > r.Meta.Committed && now.Sub(time.Unix(r.Meta.LastUsed, 0)) >= s.cfs.opt.Idle {
 			s.maintainSlot(ctx, r, "idle")
 		} else if s.unflushed(r) {
-			s.flushWhenClean(ctx, r)
+			s.flushWhenClean(ctx, r, false)
 		} else if r.Meta.Head != r.Meta.Base && r.Meta.UpperBytes > s.cfs.opt.RebaseBytes {
 			s.rebaseSlot(ctx, r)
 		}
@@ -311,19 +313,23 @@ func (s *Worker) maintainSlots(ctx context.Context) {
 
 // maintainSlot commits a slot and writes it back when the store is
 // reachable: an idle commit leaves the pages to the class writeback and
-// moves the store head once they are clean (flushWhenClean), other
-// reasons flush right away.
+// moves the store head once they are clean (flushWhenClean) or at the
+// head flush deadline, other reasons flush right away.
 func (s *Worker) maintainSlot(ctx context.Context, r slotRef, why string) {
 	if why == "idle" {
-		if _, err := s.commitSlot(ctx, r); err != nil {
+		res, err := s.commitSlot(ctx, r)
+		if err != nil {
 			if !errors.Is(err, errSlotBusy) {
 				s.log.Warn("build slot commit", "repo", r.Repo, "slot", r.Path, "err", err)
 			}
 			return
 		}
+		if res.changed {
+			s.scheduleHeadFlush(r.Repo)
+		}
 		if m, err := readMeta(r.Path); err == nil {
 			r.Meta = m
-			s.flushWhenClean(ctx, r)
+			s.flushWhenClean(ctx, r, false)
 		}
 		return
 	}
@@ -409,15 +415,70 @@ func (s *Worker) reclaimSlots(over func() int64) int64 {
 	return over()
 }
 
-// maxFlushLag bounds how long a committed head waits for its pages'
-// class writeback before it is flushed whole (ephemeral and churn pages
-// included): at most this much committed work is only on the machine.
-const maxFlushLag = access.ChurnWritebackDelay
+// headFlushDeadline bounds how long a committed head waits for its
+// pages' class writeback before it is flushed whole: the store head is
+// at most this far behind the first commit it lacks, so losing the
+// machine loses about the last session. The long class writeback delay
+// of churn (access.ChurnWritebackDelay) only spares the upload of pages
+// superseded (deleted or rewritten, then discarded at the next commit)
+// before the deadline; pages the committed head still references are
+// flushed by it, ephemeral (NoWriteback) ones included: a head in the
+// store never references a page the store lacks.
+const headFlushDeadline = 30 * time.Second
+
+// scheduleHeadFlush arms the repository's head flush deadline unless it
+// is armed already (the deadline counts from the first unflushed
+// commit; later commits are flushed with it).
+func (s *Worker) scheduleHeadFlush(repo string) {
+	s.headMu.Lock()
+	defer s.headMu.Unlock()
+	if s.headTimers == nil {
+		s.headTimers = map[string]*time.Timer{}
+	}
+	if s.headTimers[repo] != nil {
+		return
+	}
+	s.headTimers[repo] = time.AfterFunc(s.cfs.opt.FlushDeadline, func() {
+		s.headMu.Lock()
+		delete(s.headTimers, repo)
+		s.headMu.Unlock()
+		s.flushHeadDeadline(repo)
+	})
+}
+
+// stopHeadFlushes disarms the head flush deadlines (shutdown).
+func (s *Worker) stopHeadFlushes() {
+	s.headMu.Lock()
+	defer s.headMu.Unlock()
+	for repo, t := range s.headTimers {
+		t.Stop()
+		delete(s.headTimers, repo)
+	}
+}
+
+// flushHeadDeadline flushes the most recent committed head of a
+// repository when the store lacks it (its deadline passed).
+func (s *Worker) flushHeadDeadline(repo string) {
+	ref, ok := s.latestSlot(repo)
+	if !ok || ref.Meta.Head == "" {
+		return
+	}
+	s.cfs.mu.Lock()
+	flushed := s.cfs.heads[repo].Layer == ref.Meta.Head
+	s.cfs.mu.Unlock()
+	if flushed {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	s.flushWhenClean(ctx, ref, true)
+}
 
 // flushWhenClean moves the store head to a slot's committed head once
 // the class writeback has written all its pages (cheap: layer objects
-// and the head), or flushes it whole after maxFlushLag.
-func (s *Worker) flushWhenClean(ctx context.Context, ref slotRef) {
+// and the head), or flushes it whole at the deadline (force, or the
+// commit is older than the flush deadline).
+func (s *Worker) flushWhenClean(ctx context.Context, ref slotRef, force bool) {
 	if ref.Meta.Head == "" || s.connectStore(ref.Repo, nil) != nil {
 		return
 	}
@@ -432,7 +493,7 @@ func (s *Worker) flushWhenClean(ctx context.Context, ref slotRef) {
 	res := commitResult{repo: r, chain: ch, tree: ch.Tree()}
 	lag := s.cfg.now().Sub(time.Unix(ref.Meta.Committed, 0))
 	dirty := s.cfs.dirtyIn(r, res.tree)
-	if dirty > 0 && lag < maxFlushLag {
+	if dirty > 0 && !force && lag < s.cfs.opt.FlushDeadline {
 		return
 	}
 	h, err := s.cfs.flush(ctx, res)
@@ -440,6 +501,10 @@ func (s *Worker) flushWhenClean(ctx context.Context, ref slotRef) {
 		s.log.Warn("build slot head flush", "repo", ref.Repo, "err", err)
 		return
 	}
-	s.log.Info("build slot written back", "why", "clean", "repo", ref.Repo, "layer", h.Layer, "dirty_pages", dirty,
-		"pages", h.Pages, "page_bytes", h.PageBytes)
+	why := "clean"
+	if dirty > 0 {
+		why = "deadline"
+	}
+	s.log.Info("build slot written back", "why", why, "repo", ref.Repo, "layer", h.Layer, "dirty_pages", dirty,
+		"pages", h.Pages, "page_bytes", h.PageBytes, "lag_seconds", lag.Seconds())
 }

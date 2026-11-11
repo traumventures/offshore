@@ -46,6 +46,7 @@ func fsWorkerAt(t *testing.T, mode fsMode, cache, storeDir string, opt cacheFSOp
 	sl.remove = cfs.removeSlot
 	t.Cleanup(cfs.unmountAll)
 	w := &Worker{cfg: Config{CacheDir: cache, DepsDir: filepath.Join(cache, "deps"), BuildTTL: 24 * time.Hour}, slots: sl, cfs: cfs, log: log}
+	t.Cleanup(w.stopHeadFlushes)
 	g, err := store.NewGranter(context.Background(), store.Config{Name: "local", Dir: storeDir, Prefix: "cache"})
 	if err != nil {
 		t.Fatal(err)

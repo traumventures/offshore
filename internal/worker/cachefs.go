@@ -94,6 +94,9 @@ type cacheFSOptions struct {
 	// WritebackInterval is how often dirty pages are checked against
 	// their class's writeback delay (default 2s).
 	WritebackInterval time.Duration
+	// FlushDeadline bounds how long a committed head waits before it is
+	// flushed to the store (default headFlushDeadline).
+	FlushDeadline time.Duration
 }
 
 // cacheFS mounts and commits the build slots of a machine.
@@ -156,6 +159,9 @@ func newCacheFS(dir string, opt cacheFSOptions) (*cacheFS, error) {
 	}
 	if opt.Idle <= 0 {
 		opt.Idle = 30 * time.Second
+	}
+	if opt.FlushDeadline <= 0 {
+		opt.FlushDeadline = headFlushDeadline
 	}
 	if opt.CompactDepth <= 0 {
 		opt.CompactDepth = 16

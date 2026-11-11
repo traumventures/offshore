@@ -52,6 +52,8 @@ type Local struct {
 	st      Stats
 	thrash  bool
 	journal *os.File
+	hints   *os.File // hint journal (hints.journal)
+	hintN   int      // lines appended since the last rewrite
 	demote  func(Key, []byte)
 	faults  rate
 }
@@ -69,7 +71,8 @@ type lpage struct {
 }
 
 // PageHint is the access-class policy of a resident page (set by the
-// owner after a commit, in memory only; a restart forgets it).
+// owner after a commit; persisted in the tier's hint journal, so it
+// survives a restart).
 type PageHint struct {
 	// Expire is the page's dirty expiry (0: the link's DirtyExpire,
 	// negative: written back at the next pass).
@@ -89,7 +92,8 @@ type ghost struct {
 }
 
 // OpenLocal opens (or creates) a local tier. Pages found on disk are
-// resident; those the dirty journal lists are dirty.
+// resident; those the dirty journal lists are dirty and those the hint
+// journal lists get their hint back.
 func OpenLocal(opt LocalOptions) (*Local, error) {
 	if opt.Window == 0 {
 		opt.Window = 10 * time.Minute
@@ -106,6 +110,7 @@ func OpenLocal(opt LocalOptions) (*Local, error) {
 		return nil, err
 	}
 	dirty := l.readJournal()
+	hints := l.readHints()
 	now := opt.Now()
 	err := filepath.WalkDir(l.dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -129,6 +134,7 @@ func OpenLocal(opt LocalOptions) (*Local, error) {
 			pg.state = Dirty
 			l.st.DirtyBytes += pg.size
 		}
+		pg.hint = hints[k]
 		l.insert(pg)
 		return nil
 	})
@@ -136,6 +142,9 @@ func OpenLocal(opt LocalOptions) (*Local, error) {
 		return nil, err
 	}
 	if err := l.rewriteJournal(); err != nil {
+		return nil, err
+	}
+	if err := l.rewriteHints(); err != nil {
 		return nil, err
 	}
 	return l, nil
@@ -162,13 +171,86 @@ func (l *Local) removeFile(k Key) {
 	}
 }
 
-// Hint sets the access-class policy of a resident page.
+// Hint sets the access-class policy of a resident page (persisted).
 func (l *Local) Hint(k Key, h PageHint) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if pg := l.pages[k]; pg != nil {
-		pg.hint = h
+	pg := l.pages[k]
+	if pg == nil || pg.hint == h {
+		return
 	}
+	pg.hint = h
+	if l.hints == nil {
+		return
+	}
+	fmt.Fprintln(l.hints, formatHint(k, h))
+	if l.hintN++; l.hintN > 2*len(l.pages)+1024 {
+		l.hints.Close()
+		l.hints = nil
+		l.rewriteHints() // compact (best effort: hints are policy, not data)
+	}
+}
+
+func (l *Local) hintsPath() string { return filepath.Join(l.opt.Dir, "hints.journal") }
+
+// formatHint is a hint journal line: key, expiry (ns), flags (n:
+// NoWriteback, l: LocalOnly, -: none).
+func formatHint(k Key, h PageHint) string {
+	flags := ""
+	if h.NoWriteback {
+		flags += "n"
+	}
+	if h.LocalOnly {
+		flags += "l"
+	}
+	if flags == "" {
+		flags = "-"
+	}
+	return fmt.Sprintf("%s %d %s", k, int64(h.Expire), flags)
+}
+
+// readHints replays the hint journal (the last line of a key wins).
+func (l *Local) readHints() map[Key]PageHint {
+	out := map[Key]PageHint{}
+	f, err := os.Open(l.hintsPath())
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var ks, flags string
+		var exp int64
+		if n, _ := fmt.Sscanf(sc.Text(), "%s %d %s", &ks, &exp, &flags); n != 3 || !Key(ks).Valid() {
+			continue // torn line of a crash
+		}
+		out[Key(ks)] = PageHint{Expire: time.Duration(exp), NoWriteback: strings.Contains(flags, "n"), LocalOnly: strings.Contains(flags, "l")}
+	}
+	return out
+}
+
+// rewriteHints writes the hints of the resident pages and reopens the
+// journal for appending (locked or during open).
+func (l *Local) rewriteHints() error {
+	tmp := l.hintsPath() + ".tmp"
+	var b strings.Builder
+	for k, pg := range l.pages {
+		if pg.hint != (PageHint{}) {
+			b.WriteString(formatHint(k, pg.hint) + "\n")
+		}
+	}
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, l.hintsPath()); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(l.hintsPath(), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	l.hints, l.hintN = f, 0
+	return nil
 }
 
 // PageHint returns a resident page's hint.
@@ -250,10 +332,14 @@ func (l *Local) logDirty(k Key, dirty bool) {
 	fmt.Fprintf(l.journal, "%s%s\n", c, k)
 }
 
-// Close closes the dirty journal.
+// Close closes the dirty and hint journals.
 func (l *Local) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.hints != nil {
+		l.hints.Close()
+		l.hints = nil
+	}
 	if l.journal == nil {
 		return nil
 	}

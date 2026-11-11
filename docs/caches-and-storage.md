@@ -116,8 +116,8 @@ persisted as a small JSON file per repository, and classifies:
 | --- | --- | --- |
 | `immutable` | read-mostly, (almost) never written | upload early, prefetch after a restore, reclaimed last, deduplicated across slots |
 | `write-once` | new files most sessions, never overwritten | upload after 5 s, prefetch, reclaimed last, deduplicated |
-| `churn` | overwritten or replaced most sessions | stays local (never paged out to a volume), dirty for 10 min, pages of files deleted before the flush are skipped, reclaimed early |
-| `ephemeral` | created and deleted within about a session, never read | never written back, reclaimed first |
+| `churn` | overwritten or replaced most sessions | stays local (never paged out to a volume), dirty for up to 10 min but flushed with its head by the 30 s head deadline; pages superseded before that are skipped, reclaimed early |
+| `ephemeral` | created and deleted within about a session, never read | never written back by itself (only with a committed head that still references it), reclaimed first |
 
 Tool adapters seed the classifier with priors (cargo: `deps/` immutable,
 `incremental/` and `.fingerprint/` churn, `build/` write-once,
@@ -159,12 +159,20 @@ The commit also applies the rest of the table to the pages it creates:
   (`anyfs.PageHint`); the repository's link to the store writes dirty
   pages back in the background when their delay expires (immutable at the
   next pass, write-once after 5 s, unknown after 30 s, churn after 10 min,
-  ephemeral never by itself). Pages of files deleted before that are
-  discarded unwritten at the next commit. An idle commit only moves the
-  store head (layer objects + `heads/slot`, cheap) once all pages of the
-  head are clean, or flushes the head whole after 10 min (the most
-  committed work that lives only on the machine); save, move, drain,
-  SIGTERM and a session over the dirty threshold flush right away.
+  ephemeral never by itself). Pages of files deleted or rewritten before
+  that are discarded unwritten at the next commit. The class delay never
+  holds back the store head: every commit (session end or idle) arms the
+  repository's **head flush deadline** (30 s from the first commit the
+  store lacks); the store head moves early once all pages of the head are
+  clean (layer objects + `heads/slot`, cheap), and at the deadline the
+  latest committed head is flushed whole, its churn and ephemeral pages
+  included (a head in the store never references a page the store
+  lacks). So losing the machine loses at most the work committed in the
+  last 30 s (about one session); the churn delay only saves the upload of
+  pages superseded before the deadline. Save, move, drain, SIGTERM and a
+  session over the dirty threshold flush right away. Page hints are
+  persisted next to the dirty journal (`hints.journal` of the local tier),
+  so a restarted worker keeps applying them.
 * **Placement.** Churn and ephemeral pages are local-only: an exclusive
   link (local over a volume) never demotes them on reclaim; they reach the
   store only as part of a committed layer.
