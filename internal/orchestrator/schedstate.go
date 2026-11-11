@@ -46,8 +46,8 @@ type provHealth struct {
 	disabled    provider.ErrorClass
 	disabledErr string
 	disabledAt  time.Time
-	boot     time.Duration // learned create -> ready latency (EWMA)
-	start    time.Duration // learned start -> ready latency (EWMA)
+	boot        time.Duration // learned create -> ready latency (EWMA)
+	start       time.Duration // learned start -> ready latency (EWMA)
 }
 
 // createBackoff blocks creates of an environment on a provider after a

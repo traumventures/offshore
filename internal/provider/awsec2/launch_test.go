@@ -79,7 +79,7 @@ func TestLaunchFallsBackOnCapacityErrors(t *testing.T) {
 		"m7a.xlarge": apiErr("InsufficientInstanceCapacity"),
 	}}
 	_, _, _, err = launch(context.Background(), f.run, baseInput(), typedSpec())
-	if err == nil || !strings.Contains(err.Error(), "no capacity for size x4") || len(f.tried) != 3 {
+	if err == nil || !strings.Contains(err.Error(), "no machine of size x4") || provider.Classify(err) != provider.ClassCapacity || len(f.tried) != 3 {
 		t.Fatalf("want a capacity error after 3 attempts, got %v (tried %v)", err, f.tried)
 	}
 }

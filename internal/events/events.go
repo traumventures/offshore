@@ -32,8 +32,15 @@ const (
 	// TaskPlaced: a request was decided (Placement: assign, reject,
 	// timeout, canceled, error), with arrival time and queue wait.
 	TaskPlaced = "task_placed"
-	// TaskEnd: a session finished and its usage was reported.
+	// TaskEnd: a session finished and its usage was reported, with
+	// Predicted (what the scheduler expected) next to Usage.
 	TaskEnd = "task_end"
+	// TaskWaiting: a queued request is still waiting (every
+	// WaitingInterval): what for (Waiting) and the reason.
+	TaskWaiting = "task_waiting"
+	// SessionSample: a running session's cgroup, sampled by the worker
+	// every 5 s (Sample; Task, Machine, Repo, Key, Labels).
+	SessionSample = "session_sample"
 
 	MachineCreate  = "machine_create"  // creation requested (capacity on its way)
 	MachineReady   = "machine_ready"   // server reported ready
@@ -112,6 +119,17 @@ type Event struct {
 	Placement string           `json:"placement,omitempty"`
 	Reason    string           `json:"reason,omitempty"`
 	Usage     *scheduler.Usage `json:"usage,omitempty"`
+	// Decision lists the options the policy considered (task_placed,
+	// machine_create, machine_start).
+	Decision *scheduler.Decision `json:"decision,omitempty"`
+	// Estimate is where Need came from (task_placed, task_end).
+	Estimate *scheduler.Estimate `json:"estimate,omitempty"`
+	// Predicted is what the scheduler expected of the run (task_end).
+	Predicted *Predicted `json:"predicted,omitempty"`
+	// Waiting is what a queued task waits for (task_waiting).
+	Waiting *Waiting `json:"waiting,omitempty"`
+	// Sample is one sample of a session (session_sample).
+	Sample *Sample `json:"sample,omitempty"`
 
 	// Machine fields (also set on task events for the leased machine).
 	Machine  string               `json:"machine,omitempty"`
@@ -156,6 +174,76 @@ type Event struct {
 
 	// TraceID correlates the event with a distributed trace.
 	TraceID string `json:"trace_id,omitempty"`
+}
+
+// WaitingInterval is how often a queued task emits task_waiting.
+const WaitingInterval = 15 * time.Second
+
+// Predicted is what the scheduler expected of a run when it placed it:
+// the run time of the chosen option (median and pessimistic end), the
+// mean busy cores and the peak memory of the estimate.
+type Predicted struct {
+	RunSeconds      float64 `json:"run_seconds,omitempty"`
+	ExpectedSeconds float64 `json:"expected_seconds,omitempty"`
+	Cores           float64 `json:"cores,omitempty"`
+	PeakMemory      int64   `json:"peak_memory,omitempty"`
+	// Actual values of the same quantities (from Usage) and the ratios
+	// actual / predicted (0: unknown).
+	ActualRunSeconds float64 `json:"actual_run_seconds,omitempty"`
+	ActualCores      float64 `json:"actual_cores,omitempty"`
+	ActualPeakMemory int64   `json:"actual_peak_memory,omitempty"`
+	RunRatio         float64 `json:"run_ratio,omitempty"`
+	CoresRatio       float64 `json:"cores_ratio,omitempty"`
+	MemoryRatio      float64 `json:"memory_ratio,omitempty"`
+}
+
+// Compare fills in the actual values from u and the ratios.
+func (p *Predicted) Compare(u scheduler.Usage) {
+	p.ActualRunSeconds = round1(u.Wall.Seconds())
+	if u.Wall > 0 {
+		p.ActualCores = round2(u.CPUSeconds / u.Wall.Seconds())
+	}
+	p.ActualPeakMemory = u.PeakMemory
+	ratio := func(a, b float64) float64 {
+		if a <= 0 || b <= 0 {
+			return 0
+		}
+		return round2(a / b)
+	}
+	p.RunRatio = ratio(p.ActualRunSeconds, p.RunSeconds)
+	p.CoresRatio = ratio(p.ActualCores, p.Cores)
+	p.MemoryRatio = ratio(float64(p.ActualPeakMemory), float64(p.PeakMemory))
+}
+
+func round1(v float64) float64 { return float64(int64(v*10+0.5)) / 10 }
+func round2(v float64) float64 { return float64(int64(v*100+0.5)) / 100 }
+
+// Waiting is what a queued task waits for: For is wait_machine (a busy
+// or starting Machine), wait_capacity (machines being created or started
+// for the environment) or none (nothing on its way yet). ETASeconds is
+// the expected time until it can start (0: unknown).
+type Waiting struct {
+	For        string  `json:"for"`
+	Machine    string  `json:"machine,omitempty"`
+	Provider   string  `json:"provider,omitempty"`
+	Size       string  `json:"size,omitempty"`
+	Creating   int     `json:"creating,omitempty"` // machines of the environment on their way
+	ETASeconds float64 `json:"eta_seconds,omitempty"`
+}
+
+// Sample is one sample of a running session's cgroup: busy cores since
+// the previous sample, current memory, cumulative IO bytes and PSI "some
+// avg10" (0..1) of cpu, memory and io.
+type Sample struct {
+	Time       time.Time `json:"time"`
+	CPU        float64   `json:"cpu"`
+	Memory     int64     `json:"memory"`
+	IORead     int64     `json:"io_read_bytes,omitempty"`
+	IOWrite    int64     `json:"io_write_bytes,omitempty"`
+	PSICPU     float64   `json:"psi_cpu,omitempty"`
+	PSIMemory  float64   `json:"psi_memory,omitempty"`
+	PSIIO      float64   `json:"psi_io,omitempty"`
+	MemoryHigh int64     `json:"memory_high,omitempty"` // memory.high events so far (throttling)
 }
 
 // Disk is a machine's disk usage in bytes.

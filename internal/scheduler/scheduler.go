@@ -383,6 +383,9 @@ type Placement struct {
 	// Run is the model's median run time (Expected is its pessimistic
 	// end); 0 when the policy has no estimate.
 	Run time.Duration
+	// Decision lists the options considered (cost model policies; nil
+	// otherwise).
+	Decision *Decision
 }
 
 // ActionKind is a pool change.
@@ -411,6 +414,9 @@ type Action struct {
 	// fresh volume for volume sizes, none for local ones).
 	Volume string
 	Reason string
+	// Decision is the scale-out decision behind a Start or Create (cost
+	// model policies; nil otherwise).
+	Decision *Decision
 }
 
 // Policy makes all placement and scaling decisions. Implementations must be
@@ -502,6 +508,8 @@ type Estimator interface {
 	// Estimate returns the expected need for key. fallback is the
 	// configured value used until enough observations exist.
 	Estimate(key string, fallback Resources) Resources
+	// Explain is Estimate with where the need came from.
+	Explain(key string, fallback Resources) Estimate
 	// Observe records a finished run.
 	Observe(key string, u Usage)
 	// Profile returns what is known about the runs of key (durations,

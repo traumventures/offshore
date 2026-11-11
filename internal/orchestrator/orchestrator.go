@@ -74,6 +74,9 @@ type Request struct {
 	RepoID   string
 	Key      string              // learning key (repo/tool/subcommand)
 	Need     scheduler.Resources // estimated need
+	// Estimate is where Need came from (estimator key, source, runs,
+	// statistic); recorded on task_placed (nil: unknown).
+	Estimate *scheduler.Estimate `json:",omitempty"`
 	Limit    scheduler.Resources // hard ceiling (0 = none)
 	// BuildTTL bounds the age of the session's build slot data
 	// (shortest slot-scope cache ttl; 0 = DefaultBuildTTL). The effective value, capped
@@ -104,6 +107,9 @@ type QueuedTask struct {
 	Key    string              `json:"key,omitempty"`
 	Need   scheduler.Resources `json:"need"`
 	Labels map[string]string   `json:"labels,omitempty"`
+	// Waiting is what the task waits for (updated every placement round).
+	Waiting *events.Waiting `json:"waiting,omitempty"`
+	Reason  string          `json:"reason,omitempty"`
 }
 
 // buildTTL returns the effective build TTL of a request.
@@ -172,6 +178,11 @@ type Lease struct {
 	// Store grants the session's worker access to the repository's and
 	// environment's prefixes of the machine's store (nil: no store).
 	Store *store.Grant `json:",omitempty"`
+	// Decision is the placement decision (event log only; also set on
+	// failed acquires: the last decision before the timeout or reject).
+	Decision *scheduler.Decision `json:"-"`
+	// Predicted is what the policy expected of the run (event log only).
+	Predicted *events.Predicted `json:"-"`
 }
 
 // Machine is the orchestrator view of a machine.
@@ -412,7 +423,7 @@ func (o *Orchestrator) SetConfig(cfg Config) {
 	}
 	o.cfg = cfg
 	o.localDisksOnce = sync.Once{} // sizes are new: resolve their disks again
-	for name := range o.provs { // a configuration change may fix credentials or the account
+	for name := range o.provs {    // a configuration change may fix credentials or the account
 		o.resetProviderLocked(name, "configuration reloaded")
 	}
 }
@@ -1000,7 +1011,13 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 	return lease, err
 }
 
-func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) (Lease, error) {
+func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) (lease Lease, err error) {
+	var last *scheduler.Decision
+	defer func() {
+		if lease.Decision == nil {
+			lease.Decision = last
+		}
+	}()
 	now := o.now()
 	task := scheduler.Task{ID: newID(8), EnvHash: req.EnvHash, RepoID: req.RepoID, Key: req.Key, Request: req.Need, Limit: req.Limit, Since: now}
 	if o.Profile != nil && req.Key != "" {
@@ -1030,11 +1047,15 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 	}()
 	deadline := now.Add(o.cfg.QueueTimeout)
 	announced := map[string]bool{}
+	lastWaiting := time.Now() // the first task_waiting after WaitingInterval
 	refreshed := false
 	for {
 		o.mu.Lock()
 		f := o.poolLocked(o.now())
 		pl := o.policy.Place(f, task)
+		if pl.Decision != nil {
+			last = pl.Decision
+		}
 		switch pl.Kind {
 		case scheduler.Assign:
 			m := o.machines[pl.Machine]
@@ -1043,7 +1064,8 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 				ID: task.ID, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: o.sessionToken(m.Machine, task.ID),
 				Grant: pl.Grant, MemoryOvercommit: o.cfg.Policy.MemoryOvercommit,
 				Provider: m.Provider, Size: size, PricePerHour: o.machinePriceLocked(m), Reason: pl.Reason,
-				BuildTTL: req.buildTTL(o.cfg.MaxLifetime),
+				BuildTTL: req.buildTTL(o.cfg.MaxLifetime), Decision: pl.Decision,
+				Predicted: predicted(pl, req),
 			}
 			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: o.now().Add(2*time.Minute + slotTimeout)}
 			exp := pl.Expected
@@ -1078,8 +1100,17 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 		o.queue[task.ID] = task
 		acts := o.planLocked()
 		o.markLocked(acts)
+		w := o.waitingLocked(task.EnvHash, pl)
+		if qt, ok := o.waiting[task.ID]; ok {
+			qt.Waiting, qt.Reason = &w, pl.Reason
+			o.waiting[task.ID] = qt
+		}
 		ch := o.changed
 		o.mu.Unlock()
+		if time.Since(lastWaiting) >= waitingInterval {
+			lastWaiting = time.Now()
+			o.waitingEvent(ctx, task, req, now, pl.Reason, w)
+		}
 		for _, a := range acts {
 			msg := ""
 			switch a.Kind {

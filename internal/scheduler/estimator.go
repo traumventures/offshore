@@ -2,9 +2,11 @@ package scheduler
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -85,27 +87,39 @@ func (h *History) Observe(key string, u Usage) {
 
 // Estimate implements Estimator.
 func (h *History) Estimate(key string, fallback Resources) Resources {
+	return h.Explain(key, fallback).Need
+}
+
+// Explain implements Estimator.
+func (h *History) Explain(key string, fallback Resources) Estimate {
 	_, minSamples, headroom, minMem, oomFactor := h.defaults()
 	h.mu.Lock()
 	rs := append([]Usage{}, h.runs[key]...)
 	h.mu.Unlock()
+	e := Estimate{Key: key, Need: fallback, Fallback: fallback, Samples: len(rs), MinSamples: minSamples,
+		CPUSource: SourceFallback, MemorySource: SourceFallback, PeakMemory: fallback.Memory, Cores: fallback.CPU}
 	if len(rs) == 0 {
-		return fallback
+		e.Statistic = "no runs"
+		return e
 	}
 	// An OOM kill in the last run overrides everything: grow from the
 	// reservation that failed (or the fallback).
 	if last := rs[len(rs)-1]; last.OOM {
 		base := max(last.PeakMemory, fallback.Memory)
-		return Resources{CPU: fallback.CPU, Memory: int64(float64(base) * oomFactor)}
+		e.Need = Resources{CPU: fallback.CPU, Memory: int64(float64(base) * oomFactor)}
+		e.MemorySource, e.Statistic = SourceOOMBackoff, fmt.Sprintf("last run OOM: max(peak, fallback) x %.2g", oomFactor)
+		e.PeakMemory = e.Need.Memory
+		return e
 	}
 	if len(rs) < minSamples {
-		out := fallback
 		for _, u := range rs {
-			if m := int64(float64(u.PeakMemory) * (1 + headroom)); m > out.Memory {
-				out.Memory = m
+			if m := int64(float64(u.PeakMemory) * (1 + headroom)); m > e.Need.Memory {
+				e.Need.Memory, e.PeakMemory = m, u.PeakMemory
+				e.MemorySource = SourceLearnedMax
 			}
 		}
-		return out
+		e.Statistic = fmt.Sprintf("max(fallback, max peak x %.2g) until %d runs", 1+headroom, minSamples)
+		return e
 	}
 	var peaks []int64
 	var cores []float64
@@ -117,20 +131,26 @@ func (h *History) Estimate(key string, fallback Resources) Resources {
 			cores = append(cores, u.CPUSeconds/u.Wall.Seconds())
 		}
 	}
-	out := fallback
+	var stats []string
 	if len(peaks) >= minSamples {
 		sort.Slice(peaks, func(i, j int) bool { return peaks[i] < peaks[j] })
 		p90 := peaks[int(math.Ceil(0.9*float64(len(peaks))))-1]
-		out.Memory = max(int64(float64(p90)*(1+headroom)), minMem)
+		e.Need.Memory = max(int64(float64(p90)*(1+headroom)), minMem)
+		e.PeakMemory, e.MemorySource = p90, SourceLearned
+		stats = append(stats, fmt.Sprintf("memory p90 of %d peaks x %.2g", len(peaks), 1+headroom))
 	}
 	if len(cores) >= minSamples && fallback.CPU > 0 {
 		sum := 0.0
 		for _, c := range cores {
 			sum += c
 		}
-		out.CPU = math.Min(math.Max(sum/float64(len(cores)), 0.25), fallback.CPU)
+		e.Cores = sum / float64(len(cores))
+		e.Need.CPU = math.Min(math.Max(e.Cores, 0.25), fallback.CPU)
+		e.CPUSource = SourceLearned
+		stats = append(stats, fmt.Sprintf("cpu mean of %d runs capped by fallback", len(cores)))
 	}
-	return out
+	e.Statistic = strings.Join(stats, "; ")
+	return e
 }
 
 // Profile implements Estimator.
@@ -145,5 +165,41 @@ func (h *History) Profile(key string) Profile {
 type Static struct{}
 
 func (Static) Estimate(_ string, fallback Resources) Resources { return fallback }
-func (Static) Observe(string, Usage)                           {}
-func (Static) Profile(string) Profile                          { return Profile{} }
+func (Static) Explain(key string, fallback Resources) Estimate {
+	return Estimate{Key: key, Need: fallback, Fallback: fallback, CPUSource: SourceFallback, MemorySource: SourceFallback,
+		PeakMemory: fallback.Memory, Cores: fallback.CPU, Statistic: "static"}
+}
+func (Static) Observe(string, Usage)  {}
+func (Static) Profile(string) Profile { return Profile{} }
+
+// Sources of an estimate (per resource).
+const (
+	// SourceFallback: the repository's configured resources (fewer runs
+	// than needed, or none).
+	SourceFallback = "repo_config"
+	// SourceLearnedMax: before enough runs, the largest observed peak plus
+	// headroom raised the fallback.
+	SourceLearnedMax = "learned_max"
+	// SourceLearned: the statistic over the learned runs of the key.
+	SourceLearned = "learned"
+	// SourceOOMBackoff: the last run was OOM killed; memory grows.
+	SourceOOMBackoff = "oom_backoff"
+)
+
+// Estimate is a need with where it came from (traceable reservations):
+// the estimator key, the runs known for it and the statistic used.
+type Estimate struct {
+	Key  string    `json:"key"`
+	Need Resources `json:"need"`
+	// Fallback is the configured value (repository resources).
+	Fallback     Resources `json:"fallback"`
+	CPUSource    string    `json:"cpu_source"`
+	MemorySource string    `json:"memory_source"`
+	Samples      int       `json:"samples"`
+	MinSamples   int       `json:"min_samples,omitempty"`
+	Statistic    string    `json:"statistic,omitempty"`
+	// PeakMemory and Cores are the predicted peak memory (without
+	// headroom) and mean busy cores of a run (task_end compares them).
+	PeakMemory int64   `json:"peak_memory,omitempty"`
+	Cores      float64 `json:"cores,omitempty"`
+}

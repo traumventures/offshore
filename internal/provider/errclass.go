@@ -109,6 +109,8 @@ func ClassifyText(msg string) ErrorClass {
 		"invalidclienttokenid", "expiredtoken", "signaturedoesnotmatch", "accessdenied", "access denied",
 		"no valid credential", "credentials", "401 ", "403 ", "status code: 401", "status code: 403", "forbidden"):
 		return ClassAuth
+	case has("requestlimitexceeded", "throttl", "toomanyrequests", "too many requests"):
+		return ClassTransient
 	case has("vcpulimitexceeded", "instancelimitexceeded", "quotaexceeded", "limitexceeded", "service limit",
 		"maxspotinstancecountexceeded", "volumelimitexceeded", "addresslimitexceeded"):
 		return ClassQuota

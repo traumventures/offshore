@@ -29,8 +29,11 @@ func TestSizeArchSelectsImagePlatform(t *testing.T) {
 type fixedEstimator struct{ r scheduler.Resources }
 
 func (f fixedEstimator) Estimate(string, scheduler.Resources) scheduler.Resources { return f.r }
-func (fixedEstimator) Observe(string, scheduler.Usage)                            {}
-func (fixedEstimator) Profile(string) scheduler.Profile                           { return scheduler.Profile{} }
+func (f fixedEstimator) Explain(k string, fb scheduler.Resources) scheduler.Estimate {
+	return scheduler.Estimate{Key: k, Need: f.r, Fallback: fb}
+}
+func (fixedEstimator) Observe(string, scheduler.Usage)  {}
+func (fixedEstimator) Profile(string) scheduler.Profile { return scheduler.Profile{} }
 
 // A learned need above every size is capped at the largest admissible
 // size instead of making the key unschedulable.
@@ -40,7 +43,7 @@ func TestEstimateCappedAtLargestSize(t *testing.T) {
 		Scheduler: config.Scheduler{CPUOvercommit: 2, MemoryOvercommit: 1},
 	}}, est: fixedEstimator{scheduler.Resources{CPU: 1.9, Memory: 16182154240}}}
 	got, _ := l.Estimate(context.Background(), "k", scheduler.Resources{CPU: 5, Memory: 4 << 30})
-	if got.Memory != 15<<30 || got.CPU != 1.9 {
+	if got.Need.Memory != 15<<30 || got.Need.CPU != 1.9 {
 		t.Fatalf("%+v", got)
 	}
 }
