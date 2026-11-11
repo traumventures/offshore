@@ -222,7 +222,7 @@ func splitCargoTestRun(ctx context.Context, repo *config.Repo, profile config.To
 			os.Stdout.Write(rest)
 			var rels []string
 			for _, exe := range build.exes {
-				rel, ok := insideBuildPaths(repo.Root, repo.Cache.Build.Paths, exe)
+				rel, ok := insideBuildPaths(repo.Root, repo.SlotPaths(), exe)
 				if !ok {
 					outside = exe
 					return nil
@@ -247,7 +247,7 @@ func splitCargoTestRun(ctx context.Context, repo *config.Repo, profile config.To
 		return code, err
 	}
 	if outside != "" {
-		return runTestsRemotely(ctx, repo, profile, "cargo", args, cwd, rec, fmt.Sprintf("test binary %s is outside the [cache.build] paths", outside))
+		return runTestsRemotely(ctx, repo, profile, "cargo", args, cwd, rec, fmt.Sprintf("test binary %s is outside the slot-scope cache paths", outside))
 	}
 	if why := platform.CheckRun(build.exes); why != "" {
 		return runTestsRemotely(ctx, repo, profile, "cargo", args, cwd, rec, why)

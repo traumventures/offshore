@@ -48,16 +48,16 @@ cargo build ──► proxy ──► daemon ── QUIC ────► server
   into a content addressed store.
 * **Writes** to sources (e.g. `Cargo.lock`, `cargo fmt`) go to an overlay and
   are written back after the run, unless the local file changed meanwhile.
-* **Build caches.** Worker-local directories (`target/`) are bind-mounted from
+* **Caches** (`[cache.<name>]`, see [Caches](#caches)) have a scope:
+  `slot` caches (`target/`) are worker-local directories bind-mounted from
   build slots. A session leases a slot exclusively, so parallel builds of one
   repository never block each other; slots are reused warm and never older
-  than the repository's build TTL (`cache.build.ttl`, default 24 h, recorded
-  per slot, so repositories with different TTLs share machines). Machines
-  themselves live at most `max_lifetime`, which also caps the build TTL.
-* **Compiler cache.** With `[cache.compiler] tool = "sccache"` sessions run
-  cargo with `RUSTC_WRAPPER=sccache` against a WebDAV cache (see below), so a
-  fresh machine reuses compiled dependencies. Entries are never served after
-  24 h.
+  than the cache's `ttl` (default 24 h, recorded per slot, so repositories
+  with different TTLs share machines). `machine` caches (cargo registry,
+  `node_modules` per lockfile digest) are shared by the sessions of a
+  machine, `global` caches (sccache, ccache, Go) by all machines of the
+  pool; their entries are never served after 24 h. Machines themselves live
+  at most `max_lifetime`, which also caps the slot TTL.
 * **Placement** prefers machines that already hold a warm slot for the
   repository, then rendezvous hashing; memory is never overcommitted, CPU is
   (`cpu_overcommit`). Several sessions share one machine; more machines are
@@ -153,7 +153,7 @@ remote mode pool sections in the client file have no effect (the client warns);
 the control plane ignores `[control_plane]` and `user`. `user` (default `$USER`)
 salts repository ids; `pool.id` (default `$USER`) names the pool and is the
 `cloudsourced.pool` label of its machines and volumes. Repository settings
-such as `cache.build.ttl`/`cache.deps.ttl` travel in each request, so
+such as the cache TTLs travel in each request, so
 repositories with different settings share one pool without affecting each
 other. Pool settings change only by reload: the daemon applies a changed pool
 file on the next request and on `cloudsourced reconcile`; the control plane
@@ -380,18 +380,28 @@ run = "cargo install --locked cargo-nextest"
 paths = ["vendor/**"]
 mode  = "immutable"         # watch (default) | immutable | hidden
 
-[cache.build]
-paths = ["target"]          # worker-local, never synchronised
-ttl   = "24h"               # per build slot, capped by the pool's max_lifetime
+[cache.target]
+scope    = "slot"           # worker-local build slot, never synchronised
+paths    = ["target"]
+ttl      = "24h"            # per build slot, capped by the pool's max_lifetime
+max_size = "100G"           # slot budget, enforced by pruning
+prune    = "rust"           # rust | lru (default) | none
 
 [cache.deps]
+scope = "machine"           # shared by the sessions of a machine
 paths = ["$CARGO_HOME/registry", "$CARGO_HOME/git"]
-ttl   = "7d"                # lifetime of a dependency volume a new machine starts
+ttl   = "7d"                # lifetime of the machine cache a new machine starts
 
-[cache.compiler]            # optional shared compiler cache
-tool = "sccache"            # installs a pinned sccache into the image
-ttl  = "12h"                # optional, at most 24h
-# incremental = false       # CARGO_INCREMENTAL=0: workspace crates cacheable too
+[cache.node]
+scope   = "machine"
+paths   = ["web/node_modules"]     # generated remotely, hidden from the projection
+digest  = ["web/bun.lock"]         # immutable per content hash (+ platform)
+install = "cd web && bun install --frozen-lockfile"
+
+[cache.sccache]             # shared compiler cache across machines
+scope = "global"
+tool  = "sccache"           # sccache | ccache | go; installs the tool if needed
+ttl   = "12h"               # optional, at most 24h
 
 [services.postgres]         # sidecar, reachable on localhost in sessions
 image = "postgres:17"
@@ -604,14 +614,37 @@ the upper layer).
 Known gaps (cargo rebuilds the affected units locally, which is correct but
 slower): environment variables that differ locally and are tracked by
 `env!`/`option_env!` or a build script's `rerun-if-env-changed` (e.g. `CC`
-from a local `[env]` section); `incremental = false` in `[cache.compiler]`
-(set `CARGO_INCREMENTAL=0` locally too); other settings of the local
+from a local `[env]` section); `CARGO_INCREMENTAL=0` set only remotely
+(set it locally too); other settings of the local
 `$CARGO_HOME/config.toml` that cargo fingerprints (`target.<triple>.linker`,
 `[profile]` overrides); a different local toolchain version.
 
+### Caches
+
+Every `[cache.<name>]` table of the repository configuration is one cache
+with a `scope`:
+
+| scope | lives | keys |
+| --- | --- | --- |
+| `slot` | in the session's exclusive build slot on the machine, reused warm by the next session of the repository | `paths` (plain directories inside the repository), `ttl` (default 24h), `max_size`, `prune` |
+| `machine` | in the machine cache directory, shared by all sessions of the machine | `paths` (`$VAR`, `~`, absolute or inside the repository), `ttl` (default 7d), `max_size`, `prune`; with `digest` + `install`: generated per lockfile |
+| `global` | in the pool's store, shared by all machines | `tool` (`sccache`, `ccache`, `go`), `ttl` (at most 24h) |
+
+Without `scope`, a table with `tool` is global, otherwise slot. Slot and
+machine paths are hidden from the source projection (they never come from
+the laptop).
+
+Global caches use the result-cache endpoint of the machine (see
+[Compiler cache and linker](#compiler-cache-and-linker)): `sccache` sets
+`RUSTC_WRAPPER`, `ccache` installs the Debian package and points
+`CCACHE_REMOTE_STORAGE` at the endpoint (local `CCACHE_DIR` on the machine
+disk), `go` sets `GOCACHEPROG` to `cloudsourced gocacheprog`, which keeps
+outputs on the machine disk (go reads them from there) and shares them through
+the endpoint. A `ttl` below 24h lowers the age of reused entries.
+
 ### Compiler cache and linker
 
-`[cache.compiler] tool = "sccache"` adds the pinned static sccache release
+A global cache with `tool = "sccache"` adds the pinned static sccache release
 (checksum verified, downloaded once on the client into the user cache
 directory, `CLOUDSOURCED_TOOL_CACHE` overrides) to the environment image.
 Each session gets its own sccache server on a unix socket inside the session
@@ -948,7 +981,7 @@ protected). See [docs/SCHEDULER.md](docs/SCHEDULER.md#calibrating-the-simulator-
 | machines | `max_lifetime` (default 24h) | server drains and exits at expiry; orchestrator destroys; AWS: instance shuts down (terminate on shutdown), reaper Lambda terminates 5 min after `expires-at` every 10 min |
 | build slots | build TTL ≤ 24h ≤ `max_lifetime` | server garbage collection; die with the machine's cache volume |
 | compiler cache | 24h | blobcache never serves older entries; S3 lifecycle `cache/` 1 day |
-| dependency caches | `[cache.deps] ttl` (default 7 days) | volume expiry label, orchestrator reaps volumes |
+| machine caches | `ttl` of `scope = "machine"` caches (default 7 days) | volume expiry label, orchestrator reaps volumes |
 | machine secrets (AWS SSM) | until the supervisor reads them | agent deletes after reading; reaper deletes parameters under `/cloudsourced/<stack>/machines/` without a live machine (after 15 min) |
 | server binaries (S3 `bin/`) | 30 days | bucket lifecycle |
 | environment images (ECR) | 30 days | repository lifecycle |

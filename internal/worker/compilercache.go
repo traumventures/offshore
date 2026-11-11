@@ -85,7 +85,7 @@ func sccacheDir(session string) string {
 // image or the request) and must not be overridden.
 func (s *Worker) compilerCacheEnv(req proto.Exec, session string, has func(string) bool) [][2]string {
 	var out [][2]string
-	if cc := req.CompilerCache; cc != nil && cc.Tool == config.CompilerCacheSccache && s.ccEndpoint != "" {
+	if cc := req.GlobalCache(config.CacheToolSccache); cc != nil && s.ccEndpoint != "" {
 		dir := sccacheDir(session)
 		if !has("RUSTC_WRAPPER") {
 			out = append(out, [2]string{"RUSTC_WRAPPER", "sccache"})
@@ -96,15 +96,24 @@ func (s *Worker) compilerCacheEnv(req proto.Exec, session string, has func(strin
 			[2]string{"SCCACHE_SERVER_UDS", filepath.Join(dir, "server.sock")},
 			[2]string{"SCCACHE_IDLE_TIMEOUT", "0"}, // lives as long as the session
 		)
-		if cc.TTLSeconds > 0 {
-			out = append(out, [2]string{"SCCACHE_WEBDAV_KEY_PREFIX", fmt.Sprintf("_ttl/%d", cc.TTLSeconds)})
+		if p := ttlPrefix(cc); p != "" {
+			out = append(out, [2]string{"SCCACHE_WEBDAV_KEY_PREFIX", strings.TrimSuffix(p, "/")})
 		}
-		// sccache cannot cache incremental compilations (cargo's default
-		// for workspace crates in dev profiles); dependencies are cached
-		// either way. Only an explicit incremental = false turns it off.
-		if cc.Incremental != nil && !*cc.Incremental && !has("CARGO_INCREMENTAL") {
-			out = append(out, [2]string{"CARGO_INCREMENTAL", "0"})
+	}
+	if cc := req.GlobalCache(config.CacheToolCcache); cc != nil && s.ccEndpoint != "" {
+		// ccache's http remote storage on the same endpoint; the local
+		// ccache directory is the machine's.
+		if !has("CCACHE_REMOTE_STORAGE") {
+			out = append(out, [2]string{"CCACHE_REMOTE_STORAGE", s.ccEndpoint + ttlPrefix(cc) + "ccache|layout=subdirs"})
 		}
+		if !has("CCACHE_DIR") {
+			out = append(out, [2]string{"CCACHE_DIR", filepath.Join(s.cfg.CacheDir, "ccache")})
+		}
+	}
+	if cc := req.GlobalCache(config.CacheToolGo); cc != nil && s.ccEndpoint != "" && s.self != "" && !has("GOCACHEPROG") {
+		// cloudsourced gocacheprog: outputs on the machine's disk, shared
+		// through the endpoint.
+		out = append(out, [2]string{"GOCACHEPROG", fmt.Sprintf("%s gocacheprog %s %s", s.self, filepath.Join(s.cfg.CacheDir, "gocache"), s.ccEndpoint+ttlPrefix(cc))})
 	}
 	if l := req.Linker; l != "" && req.Toolchain == nil {
 		// With a relocated toolchain the linker comes from a "cc" on PATH
@@ -247,4 +256,13 @@ func runSccache(env []string, args ...string) ([]byte, error) {
 	cmd.Env = env
 	cmd.Dir = "/"
 	return cmd.Output()
+}
+
+// ttlPrefix is the endpoint path prefix that lowers the maximum age of
+// reused entries to the cache's TTL ("" for the store's own limit).
+func ttlPrefix(c *proto.Cache) string {
+	if c.TTLSeconds <= 0 || c.TTLSeconds >= int64(blobcache.MaxTTL/time.Second) {
+		return ""
+	}
+	return fmt.Sprintf("_ttl/%d/", c.TTLSeconds)
 }
