@@ -71,8 +71,17 @@ Requirements: Linux, Docker, `/dev/fuse`, Go ≥ 1.24.
 ```sh
 make build                       # static binary in bin/cloudsourced
 bin/cloudsourced shim install cargo
-export PATH="$HOME/.cloudsourced/bin:$PATH"
+export PATH="$HOME/.cloudsourced/bin:$PATH"   # in ~/.profile or ~/.zshrc
+bin/cloudsourced shim status     # checks that the shims are first in PATH
 ```
+
+Shims are the standard setup: with `~/.cloudsourced/bin` first in PATH,
+plain `cargo build`, `cargo test` and `cargo nextest run` in a repository
+with a `.cloudsourced.toml` go through cloudsourced, for people, scripts and
+coding agents alike. `cloudsourced shim install` without tools installs the
+tools of the current repository's `[tool.*]` sections; `cloudsourced shim
+status` exits 1 when a shim is missing from PATH or shadowed by an earlier
+entry. `cloudsourced run <tool> ...` is the explicit form without shims.
 
 ### Configuration files
 
@@ -341,6 +350,7 @@ NPM_TOKEN = "cmd:agentpass get npm/token"   # or env:VAR, file:PATH
 local = ["publish", "login", "install", "new", "init", "add", "remove"]
 eager = ["target/debug/myapp"]              # copied back after every run
 env   = ["RUSTFLAGS", "CARGO_TERM_*", "RUST_LOG", "RUST_BACKTRACE"]
+# split = ["test", "nextest"]               # default: remote build, local test run
 
 [tool.npm]
 ports = [8080, "3000:3001"]  # forward 127.0.0.1:local -> session port while it runs
@@ -530,6 +540,47 @@ libraries and build script outputs must be available locally:
   must exist locally). The local toolchain must match the remote one
   (`rust-toolchain.toml`), otherwise rust-analyzer's proc-macro server
   rejects the libraries.
+
+### Tests: remote build, local run
+
+`cargo test` and `cargo nextest run` are split: the test binaries are built
+remotely and run on this machine, with the local environment and local
+services (e.g. the developer's Postgres via `APP_TEST_DATABASE_URL`). Type
+the command as usual (`cargo nextest run -p app-store foo`, `cargo test foo
+-- --nocapture`); output and exit code are those of a local run.
+
+* **cargo test**: the remote phase runs `cargo test --no-run
+  --message-format=json-render-diagnostics` with the build options; the
+  executables it reports are transferred and run in cargo's order with
+  cargo's working directory (package root), environment (`CARGO_MANIFEST_DIR`,
+  `CARGO_PKG_*`, `CARGO_BIN_EXE_*`), arguments (test name, `--quiet` with
+  `-q`, everything after `--`), status lines and `error: test failed, to
+  rerun pass ...` messages, `--no-fail-fast` summary and exit code 101.
+  Doc tests are compiled while they run, so they run remotely afterwards
+  (`cargo test --doc` with the same options), as cargo runs them last.
+* **nextest**: the remote phase runs `cargo nextest archive` with the cargo
+  build options (`-p`, `--workspace`, features, `--cargo-profile`, ...); the
+  zstd archive is transferred and `cargo nextest run --archive-file ...`
+  runs locally with the filters, runner and reporter options, `-P`/
+  `--profile`, `-- args` and `NEXTEST_*` variables. Configuration options
+  (`--config-file`, `-P`) go to both.
+
+Commands that do not run tests (`--no-run`, `--doc`, `--message-format`,
+`nextest list`, `nextest archive`, reuse options such as `--archive-file`)
+and unknown options run remotely as typed. The tests run remotely instead,
+with one line saying why, when this machine cannot execute the binaries:
+another OS or architecture, an older glibc than the environment image, a
+missing shared library or dynamic loader (checked on the ELF files), no
+local `cargo-nextest`, nextest failing to list the tests locally (exit 104),
+or test binaries outside the `[cache.build]` paths.
+
+`[tool.cargo] split = ["test", "nextest"]` is the default; `split = []`
+turns it off for a repository, `CLOUDSOURCED_SPLIT=0` for one run.
+Binaries are transferred over the session that built them (only files whose
+content changed); the transport sits behind one interface so the target
+overlay can replace it. Not reproduced locally: cargo `[env]` configuration
+and build-script `rustc-env` values at test run time, and files a test reads
+from `OUT_DIR` at run time.
 
 ## Compatibility
 
