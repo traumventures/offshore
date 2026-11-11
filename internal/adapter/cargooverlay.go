@@ -1,4 +1,4 @@
-package proxy
+package adapter
 
 import (
 	"os"
@@ -6,16 +6,48 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
-	"github.com/traumventures/offshore/internal/platform"
-	"github.com/traumventures/offshore/internal/proto"
 )
 
-// clientToolchain returns the client's toolchain locations (CARGO_HOME and
-// RUSTUP_HOME as rustup resolves them).
-func clientToolchain() *proto.Toolchain {
-	home, _ := os.UserHomeDir()
+// OutputAlignment makes the outputs of a remote build fresh for the local
+// tool when they appear locally through the output overlay ([outputs] mode
+// = "fuse"): the remote session mirrors the client's tool homes at their
+// local paths and gets variables the tool fingerprints.
+type OutputAlignment struct {
+	// CargoHome and RustupHome are the client's tool homes, mounted at the
+	// same paths in the session ("" = none).
+	CargoHome, RustupHome string
+	// Env is added to the remote environment (forwarded variables win).
+	Env map[string]string
+}
+
+// AlignOutputs returns the output alignment of the plan's tool for a remote
+// phase with environment env, or false when the tool needs none.
+func (p Plan) AlignOutputs(env map[string]string) (OutputAlignment, bool) {
+	if p.align == nil {
+		return OutputAlignment{}, false
+	}
+	return p.align(env), true
+}
+
+// cargoAlign: cargo hashes paths below CARGO_HOME/RUSTUP_HOME (registry
+// sources, the toolchain's sysroot) and the effective rustflags into every
+// fingerprint, so the session uses the client's homes and the rustflags of
+// the client's $CARGO_HOME/config.toml.
+func cargoAlign(c Command) func(env map[string]string) OutputAlignment {
+	return func(env map[string]string) OutputAlignment {
+		cargoHome, rustupHome := clientHomes(c)
+		return OutputAlignment{CargoHome: cargoHome, RustupHome: rustupHome, Env: cargoHomeRustflags(cargoHome, hostTriple(c), env)}
+	}
+}
+
+// clientHomes returns CARGO_HOME and RUSTUP_HOME as rustup resolves them.
+func clientHomes(c Command) (cargoHome, rustupHome string) {
+	home := c.getenv("HOME")
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
 	abs := func(env, def string) string {
-		p := os.Getenv(env)
+		p := c.getenv(env)
 		if p == "" {
 			p = filepath.Join(home, def)
 		}
@@ -24,13 +56,13 @@ func clientToolchain() *proto.Toolchain {
 		}
 		return p
 	}
-	return &proto.Toolchain{CargoHome: abs("CARGO_HOME", ".cargo"), RustupHome: abs("RUSTUP_HOME", ".rustup")}
+	return abs("CARGO_HOME", ".cargo"), abs("RUSTUP_HOME", ".rustup")
 }
 
 // hostTriple is the Rust host triple of this machine (Linux only, like the
 // build machines).
-func hostTriple() string {
-	if platform.Local().Arch == "arm64" {
+func hostTriple(c Command) string {
+	if c.host().Arch == "arm64" {
 		return "aarch64-unknown-linux-gnu"
 	}
 	return "x86_64-unknown-linux-gnu"
@@ -42,7 +74,7 @@ func hostTriple() string {
 // fingerprint: without them, local cargo would rebuild everything the
 // remote build produced. Variables already set (forwarded environment)
 // win; repository .cargo/config.toml files are projected anyway.
-func cargoHomeRustflags(cargoHome string, env map[string]string) map[string]string {
+func cargoHomeRustflags(cargoHome, host string, env map[string]string) map[string]string {
 	b, err := os.ReadFile(filepath.Join(cargoHome, "config.toml"))
 	if err != nil {
 		if b, err = os.ReadFile(filepath.Join(cargoHome, "config")); err != nil {
@@ -85,7 +117,6 @@ func cargoHomeRustflags(cargoHome string, env map[string]string) map[string]stri
 			out[key] = strings.Join(parts, " ")
 		}
 	}
-	host := hostTriple()
 	set("CARGO_BUILD_RUSTFLAGS", cfg.Build.Rustflags)
 	set("CARGO_TARGET_"+strings.ToUpper(strings.ReplaceAll(host, "-", "_"))+"_RUSTFLAGS", cfg.Target[host].Rustflags)
 	return out
