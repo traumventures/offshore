@@ -16,6 +16,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -232,6 +233,7 @@ const LateMargin = 30 * time.Second
 type job struct {
 	Job
 	n        int
+	id       string // task ID ("j<n>")
 	arrival  time.Time
 	since    time.Time // waiting since (current attempt)
 	wait     time.Duration
@@ -341,7 +343,7 @@ func Run(trace Trace, o Options) Report {
 	last := 0.0
 	for i, tj := range trace.Jobs {
 		at := trace.Start.Add(time.Duration(tj.At * float64(time.Second)))
-		jobs[i] = &job{Job: tj, n: i, arrival: at}
+		jobs[i] = &job{Job: tj, n: i, id: "j" + strconv.Itoa(i), arrival: at}
 		last = math.Max(last, tj.At)
 	}
 	end := trace.Start.Add(time.Duration(math.Max(trace.End, last+6*3600) * float64(time.Second)))
@@ -663,7 +665,7 @@ func (s *sim) task(j *job) scheduler.Task {
 		}
 		s.est[j.Repo] = e
 	}
-	return scheduler.Task{ID: fmt.Sprintf("j%d", j.n), EnvHash: j.Env, RepoID: j.Repo, Key: j.Repo,
+	return scheduler.Task{ID: j.id, EnvHash: j.Env, RepoID: j.Repo, Key: j.Repo,
 		Request: e.need, Since: j.since, Profile: e.profile}
 }
 
@@ -677,6 +679,9 @@ func (s *sim) pool() scheduler.Pool {
 	for _, sz := range s.o.Sizes {
 		f.Providers[sz.Provider] = scheduler.ProviderState{Boot: latency(s.o.Boot, sz.Provider, 60*time.Second),
 			Start: latency(s.o.Start, sz.Provider, 20*time.Second)}
+	}
+	if len(s.machines) > 0 {
+		f.Machines = make([]scheduler.Machine, 0, len(s.machines))
 	}
 	for _, m := range s.machines {
 		sm := scheduler.Machine{ID: m.id, Provider: m.prov, EnvHash: m.env, Size: m.size.Name, State: m.state,
@@ -729,6 +734,9 @@ func (s *sim) pool() scheduler.Pool {
 		}
 		f.Machines = append(f.Machines, sm)
 	}
+	if len(s.queue) > 0 {
+		f.Queue = make([]scheduler.Task, 0, len(s.queue))
+	}
 	for _, j := range s.queue {
 		f.Queue = append(f.Queue, s.task(j))
 	}
@@ -758,7 +766,7 @@ func (s *sim) fitDisk(m *machine, keep string) {
 		victim, vb := "", int64(0)
 		for repo, b := range m.slots {
 			used += b
-			if repo != keep && b > vb {
+			if repo != keep && (b > vb || b == vb && victim != "" && repo < victim) {
 				victim, vb = repo, b
 			}
 		}
@@ -808,6 +816,18 @@ func (s *sim) settle(tick bool) {
 }
 
 func (s *sim) placeQueued() {
+	// The policy's view only changes when a task is assigned, rejected or
+	// times out (time stands still here): build it once and again only
+	// after such a change, instead of once per waiting task.
+	var (
+		base  scheduler.Pool
+		tasks []scheduler.Task // base.Queue
+		at    map[*job]int     // index in tasks
+		buf   []scheduler.Task
+		ex    = -1 // index of tasks missing in buf (-1: buf not built)
+		mbuf  []scheduler.Machine
+		dirty = true
+	)
 	for _, j := range append([]*job(nil), s.queue...) {
 		if s.o.QueueTimeout <= 0 && len(s.queue) > 0 && !s.anyFree(j) {
 			continue // no machine of its environment has room: Place would wait
@@ -815,21 +835,61 @@ func (s *sim) placeQueued() {
 		if s.o.QueueTimeout > 0 && s.now.Sub(j.since) > s.o.QueueTimeout {
 			s.dequeue(j)
 			s.r.TimedOut++
+			dirty = true
 			continue
 		}
+		if dirty {
+			base = s.pool()
+			tasks = base.Queue
+			clear(at)
+			if at == nil {
+				at = make(map[*job]int, len(s.queue))
+			}
+			for i, q := range s.queue {
+				at[q] = i
+			}
+			dirty, ex = false, -1
+		}
+		// The queue without j, in order. Successive tasks are in queue
+		// order, so buf is updated incrementally from the previous
+		// exclusion (the policy must not modify f.Queue). Machines are a
+		// fresh copy (small).
+		f := base
+		i, ok := at[j]
+		switch {
+		case !ok:
+			buf, ex = append(buf[:0], tasks...), -1
+		case ex < 0:
+			buf = append(append(buf[:0], tasks[:i]...), tasks[i+1:]...)
+			ex = i
+		case i > ex:
+			copy(buf[ex:i], tasks[ex:i])
+			ex = i
+		case i < ex:
+			copy(buf[i:ex], tasks[i+1:ex+1])
+			ex = i
+		}
+		f.Queue = nil
+		if len(buf) > 0 {
+			f.Queue = buf[:len(buf):len(buf)]
+		}
+		if base.Machines != nil {
+			mbuf = append(mbuf[:0], base.Machines...)
+			f.Machines = mbuf[:len(mbuf):len(mbuf)]
+		}
 		t := s.task(j)
-		f := s.pool()
-		f.Queue = slices.DeleteFunc(f.Queue, func(o scheduler.Task) bool { return o.ID == t.ID })
 		pl := s.o.Policy.Place(f, t)
 		switch pl.Kind {
 		case scheduler.Assign:
 			if m := s.find(pl.Machine); m != nil && m.state == scheduler.Running {
 				s.dequeue(j)
 				s.assign(m, j, pl, expected(pl, t, m))
+				dirty = true
 			}
 		case scheduler.Reject:
 			s.dequeue(j)
 			s.r.Rejected++
+			dirty = true
 		}
 	}
 }
@@ -880,7 +940,7 @@ func (s *sim) prune(m *machine, repo string, bytes int64) float64 {
 	for freed < bytes {
 		victim, vb := "", int64(0)
 		for r, b := range m.slots {
-			if r != repo && b > vb {
+			if r != repo && (b > vb || b == vb && victim != "" && r < victim) {
 				victim, vb = r, b
 			}
 		}
