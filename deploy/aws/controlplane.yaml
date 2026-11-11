@@ -215,6 +215,7 @@ Resources:
                   - ec2:DescribeTags
                   - ec2:DescribeVolumes
                   - ec2:DescribeInstanceTypes
+                  - servicequotas:GetServiceQuota
                   - ecr:GetAuthorizationToken
                   - logs:DescribeLogGroups
                 Resource: "*"

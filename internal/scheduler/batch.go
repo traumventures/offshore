@@ -67,7 +67,7 @@ func (p Default) placeBatch(f Pool, t Task) (Placement, bool) {
 		others = others[:batchSize-1]
 	}
 	tasks := append([]Task{t}, others...)
-	if !abl("regret") {
+	if !exp("regret") {
 		// Priority order (SRPT, aging, owners round robin): every task
 		// takes its best option on the state the ones before it left.
 		st := f
@@ -139,9 +139,18 @@ func (p Default) book(st *Pool, q Task, pl Placement) {
 }
 
 // abl disables parts of the default policy for ablations in the
-// simulator (OFFSHORE_ABLATE=noproj,nostat,...).
+// simulator (OFFSHORE_ABLATE=nogate).
 func abl(part string) bool {
 	return strings.Contains(","+os.Getenv("OFFSHORE_ABLATE")+",", ","+part+",")
+}
+
+// exp enables experimental parts of the default policy that did not win
+// in the simulator (OFFSHORE_EXPERIMENT=batch,regret,dist,stat,decay; see
+// docs/scheduling.md, round 2): batch placement, its regret order, the
+// remaining-time distribution of waits, statistical memory admission, one
+// idle stop per environment and StopDecay.
+func exp(part string) bool {
+	return strings.Contains(","+os.Getenv("OFFSHORE_EXPERIMENT")+",", ","+part+",")
 }
 
 // regret is what a request loses when it does not get its chosen option:
@@ -302,7 +311,7 @@ func (p Default) admitZ() float64 { return 3.1 - 0.8*p.costOptimization() }
 // memory), and every reservation fits physically (physical). CPU is
 // admitted by reservation (overcommit).
 func (p Default) admits(f Pool, m Machine, t Task) bool {
-	if !p.global() || abl("nostat") {
+	if !p.global() || !exp("stat") {
 		return p.Free(m).Fits(t.Request)
 	}
 	if p.Free(m).Fits(t.Request) { // the reservations fit: never stricter

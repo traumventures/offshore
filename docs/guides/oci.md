@@ -173,7 +173,10 @@ function as on AWS.
 
 * Service limits per shape family and availability domain (cores, memory)
   cap the pool; check them in the console (Governance, Limits, Quotas and
-  Usage) and size `max_machines` accordingly.
+  Usage). They are not read ahead of time: a `LimitExceeded` caps the
+  provider at the vCPUs it runs for an hour. A free-tier tenancy
+  (`LimitExceeded ... upgrade`) disables the provider; set
+  `enabled = false` to keep it off.
 * Preemptible capacity is not supported.
 * Ampere A1 (arm64) sizes are implemented but only x86 shapes were tested
   live ([ROADMAP.md](../ROADMAP.md)).

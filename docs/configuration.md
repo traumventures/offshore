@@ -69,7 +69,7 @@ id             = "alice"   # labels machines and volumes (offshore.pool); defaul
 machine_cpu    = 8         # size of the implicit "default" size
 machine_memory = "16G"
 min_machines   = 0         # warm machines per recently used environment
-max_machines   = 4         # whole pool
+# max_spend_per_hour = 5   # optional circuit breaker ($/h of running machines)
 idle_stop      = "20m"     # stop idle machines (disk kept)
 max_lifetime   = "24h"     # destroy machines (and their caches) after this
 queue_timeout  = "2m"      # a request waiting longer for capacity fails
@@ -98,10 +98,20 @@ price_per_hour = 0.1
 | `id` | `$USER` (sanitised) | 1-63 letters, digits, `.`, `_`, `-`; an orchestrator only manages resources of its own pool |
 | `machine_cpu`, `machine_memory` | `8`, `"16G"` | capacity of the size `default` that providers without sizes get |
 | `min_machines` | 0 | warm pool per environment used in the last 24 hours |
-| `max_machines` | 4 | upper bound of the pool (also for starting stopped machines) |
+| `max_spend_per_hour` | unset (off) | circuit breaker: no machine is created or started while the running and starting machines cost this much per hour, whatever the queue |
 | `idle_stop` | `"20m"` | idle machines stop; disks and warm slots survive |
 | `max_lifetime` | `"24h"` | machines are destroyed at this age; caps the slot TTL |
 | `queue_timeout` | `"2m"` | requests that cannot be placed within this time fail; the proxy then runs the command locally (unless `OFFSHORE_REQUIRE_REMOTE=1`) |
+
+The pool has no machine count limit. The scheduler adds a machine only
+for a request that would otherwise start later than the machine is ready,
+a runaway guard bounds the pool by its offered load (⌈R + β√R⌉ plus one
+per environment; exceeded only for a request that waited longer than a
+create takes, logged as `capacity exception`), and the providers' own
+limits are discovered: the EC2 vCPU quota (Service Quotas `L-1216C47A`
+minus the account's other instances) and, on any provider, a limit error
+caps it at the vCPUs it runs for an hour. See
+[scheduling.md](scheduling.md#scale-out-bounds).
 
 `[scheduler]` and `[[scheduler.warm_pool]]` are documented in
 [scheduling.md](scheduling.md), `[storage]` in
@@ -120,11 +130,11 @@ back to the store
 ### Providers
 
 Every `[providers.NAME]` table is one provider instance; `type` selects the
-backend, `max_machines` caps the machines of this provider (unset: only
-the pool's `max_machines` applies; `0` disables the provider: no machine is
-created or started there, its machines take no new sessions and are
-destroyed once their running sessions end), every other key is a provider
-option. Without `[providers]` the pool has one local-docker
+backend, `enabled = false` disables the provider (no machine is created or
+started there, its machines take no new sessions and are destroyed once
+their running sessions end; default `true`), every other key is a provider
+option. There is no per-provider machine count (`max_machines` is
+rejected): account quotas are discovered, see above. Without `[providers]` the pool has one local-docker
 provider `local` (command `$OFFSHORE_DOCKER`, default `docker`).
 
 Sizes are `[[providers.NAME.size]]` tables:

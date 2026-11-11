@@ -6,10 +6,17 @@ import (
 )
 
 // Warm but busy: the request waits for its warm machine when that frees
-// soon (the remaining-time distribution of its session), and restores its
-// slot on another running machine of the environment (copy cost
-// included) when it frees late.
+// soon, and restores its slot on another running machine of the
+// environment (copy cost of the second warm copy included) when it frees
+// late; also with the remaining-time distribution (experiment "dist").
 func TestWarmBusyTradeoff(t *testing.T) {
+	for _, e := range []string{"", "dist"} {
+		t.Setenv("OFFSHORE_EXPERIMENT", e)
+		warmBusy(t)
+	}
+}
+
+func warmBusy(t *testing.T) {
 	place := func(left time.Duration) Placement {
 		b := busy("warm", res(8, 16), res(8, 16), 1)
 		b.Size, b.WarmRepos = "m", []string{"r"}
@@ -31,9 +38,10 @@ func TestWarmBusyTradeoff(t *testing.T) {
 	}
 }
 
-// Statistical admission packs on peak beliefs beyond the reservations but
-// is never stricter than them.
+// Statistical admission (experiment "stat", off by default) packs on peak
+// beliefs beyond the reservations but is never stricter than them.
 func TestStatisticalAdmission(t *testing.T) {
+	t.Setenv("OFFSHORE_EXPERIMENT", "stat")
 	p := Default{Cfg: Config{CPUOvercommit: 2, MemoryOvercommit: 1, CostOptimization: 0.5}}
 	m := machine("m", res(16, 30), res(4, 20))
 	m.Releases = []Release{{At: now.Add(time.Minute), Res: res(4, 20), MemMean: 6 * gib, MemSD: gib}}
@@ -77,8 +85,10 @@ func ids(ts []Task) []string {
 	return out
 }
 
-// Idle stops decay one machine per environment per StopDecay.
+// Idle stops decay one machine per environment per StopDecay (experiment
+// "decay").
 func TestStopDecay(t *testing.T) {
+	t.Setenv("OFFSHORE_EXPERIMENT", "decay")
 	var ms []Machine
 	for _, id := range []string{"a", "b", "c"} {
 		m := machine(id, res(4, 8), Resources{})

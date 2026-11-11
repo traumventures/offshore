@@ -40,14 +40,14 @@ to       = "19:00"                               # earlier than from spans midni
 machines = 1                                     # per recently used environment
 timezone = "Europe/Berlin"                       # default: local time
 
-[providers.aws]
-type         = "aws-ec2"
-max_machines = 4                                 # per provider, below pool.max_machines
+[providers.oci]
+type    = "oci"
+enabled = false                                  # no machines here (default true)
 ```
 
 | key | default | |
 |---|---|---|
-| `policy` | `"default"` | `default` (option policy); `costmodel`, `binpack` and `classic` are earlier policies kept for comparison |
+| `policy` | `"default"` | `default` (option policy with the projected-start gate and stop decay of round 2); `option` (the option policy of round 1), `costmodel`, `binpack` and `classic` are earlier policies kept for comparison |
 | `cost_optimization` | 0.5 | 0..1, the single trade-off knob: an hour of turnaround is worth (1-r)/r hours of the cheapest size; 1 = cheapest, 0 = fastest result |
 | `[[egress]]` | free within a provider, 0.09/GB at 50 MB/s across | `from` (provider or `storage`), `to` (provider), `price_per_gb`, `bandwidth` |
 | `disk_price_per_gb_month` | 0.08 | price of extra disk, for resize decisions |
@@ -65,12 +65,56 @@ max_machines = 4                                 # per provider, below pool.max_
 | `[[warm_pool]]` | none | scheduled warm machines in addition to `pool.min_machines` |
 
 Memory is never overcommitted beyond `memory_overcommit`; CPU is. Lifetimes
-(`idle_stop`, `max_lifetime`), `min_machines`, `max_machines` and
+(`idle_stop`, `max_lifetime`), `min_machines`, `max_spend_per_hour` and
 `queue_timeout` are in `[pool]` ([configuration.md](configuration.md#pool-configuration)).
+
+## Scale-out bounds
+
+There is no configured machine count (`max_machines` is gone, also per
+provider). Three things bound the pool instead (`internal/scheduler/limits.go`):
+
+- **The policy**: the default policy starts or creates a machine only for
+  a queued request whose projected start is later than the machine would
+  be ready. The projection list-schedules the queue (SRPT with aging,
+  owners round robin) on the running and starting machines using the
+  sessions' pessimistic release ETAs; a reservation without a lease
+  estimate is not counted on to end. "Later" means the request's total
+  wait would exceed the start/create latency plus the hedge margin
+  (30s/(1-r)), at cost_optimization 1 half the queue timeout. Rejected
+  candidates carry `no queued request would wait longer than the machine
+  takes` in their decision.
+- **Runaway guard** against bugs and feedback loops: at most
+  ⌈R + β√R⌉ running and starting machines plus one per environment with
+  machines or queued requests plus the warm pool. R is the offered load in
+  machines: per environment the larger of the 15-minute time average of the
+  reservation (running plus queued, `Demand.Load`: arrival rate × resource
+  seconds by Little's law) and the present one, divided by the mean
+  admissible capacity of its sizes, in the dominant resource. β is
+  2 - 1.5·r (2 when time counts, 0.5 when only money does). A request
+  that waited longer than the fastest create plus the hedge margin (at
+  r = 1: 80 % of the queue timeout) lifts the guard for its environment;
+  such actions carry `capacity exception (guard N): …` in their reason and
+  the orchestrator logs them as `capacity exception`. Decisions blocked by
+  the guard carry `runaway guard reached`.
+- **Hard limits**, never lifted: providers with `enabled = false`, the
+  provider accounts' limits (`Pool.ProviderLimit`) and the optional
+  `[pool] max_spend_per_hour` (hourly price of running and starting
+  machines). Account limits are discovered: aws-ec2 reads the On-Demand
+  standard vCPU quota (Service Quotas `L-1216C47A`) every 10 minutes and
+  subtracts the account's other running instances; any provider that
+  answers a create with a quota/limit error is capped at the vCPUs the pool
+  runs there for an hour (not disabled, no cooldown; without a machine
+  there it cools down as before). Account-type limits (free tier) and auth
+  errors still disable the provider. Hard limits are enforced after every
+  plan step (`enforceLimits`), whichever step proposed the machine.
 
 ## Default policy: option policy
 
-`[scheduler] policy = "default"` (`internal/scheduler/options.go`, on the
+`[scheduler] policy = "default"` is the option policy below plus the
+projected-start gate of *Scale-out bounds* (round 2); `policy = "option"`
+is the option policy without it (round 1).
+
+`internal/scheduler/options.go`, on the
 candidate machinery of `model.go` and `modelpolicy.go`) enumerates every
 way to serve a request explicitly: run now on a machine (warm slot,
 restore, move, cold; each after prune or resize), wait for a busy or
@@ -98,8 +142,9 @@ every r below 1:
   0.5, 2.5m at 0.8, unbounded at 1. Waits beyond it are dropped from
   `Place` and from the scale-out timeline, so `Plan` starts or creates
   the machine; the request then takes whatever frees first (a start does
-  not commit it). The bound does not apply when the pool or every
-  provider is at its machine limit.
+  not commit it). The bound does not apply when no machine can be
+  started or created (hard limits, runaway guard without a capacity
+  exception, provider outages).
 
 Release ETAs of running sessions are pessimistic (the 80th percentile of
 the key's run times; sessions running longer than expected need as long
@@ -315,11 +360,11 @@ without one, cost-only decisions may leave tasks waiting indefinitely.
   the size absorbs (measured in the dominant resource). A single small task
   gets the cheapest fitting size; several queued tasks may justify one
   larger machine when it is cheaper per unit, and at equal cost per unit
-  fewer machines win. Sizes that would need more machines than
-  `max_machines` still allows lose against sizes that absorb more; a small
+  fewer machines win. Sizes that would need more machines than the
+  runaway guard still allows lose against sizes that absorb more; a small
   stopped machine is not started when its slot is needed for a larger new
   machine, and an empty running machine is stopped to make room for a larger
-  one when the pool is at its limit. Unknown prices (0) prefer the size
+  one when the pool is at its guard. Unknown prices (0) prefer the size
   absorbing the most demand, then the smaller one.
 - **Architecture**: machines are only created from sizes of the
   environment's architecture (the repository's `resources.arch`; unknown
@@ -335,8 +380,8 @@ without one, cost-only decisions may leave tasks waiting indefinitely.
 - **Idle stop and warm pool**: idle machines stop after `idle_stop` unless
   the warm pool keeps them: `min_machines` per environment used in the last
   24 hours, raised by the scheduled `[[scheduler.warm_pool]]` windows.
-- **Limits**: `max_machines` (pool and per provider) also bounds starting
-  stopped machines.
+- **Limits**: the runaway guard and the hard limits (see *Scale-out
+  bounds*) also bound starting stopped machines.
 - **Lifetime**: machines past `max_lifetime` drain and are destroyed with
   their volumes; idle machines stop and keep their disk.
 
@@ -619,6 +664,104 @@ and the production regressions; `TestCheapestBeatsBinpack` now allows r=1
 up to 10 % above binpack (the price of the physical-fit invariant on the
 static c7a traces), and `TestThrashingPicksBiggerSize` expects the bigger
 size up to r = 0.3 (8 minutes of thrashing against twice the price).
+
+## Round 2: no machine limits, projected-start gate, experiments (Nov 2026)
+
+The production pool of 2026-11-12 in the simulator (`sim.EvalPools`
+`prod`: AWS x8 8 cores/30G $0.58, x16 16/30G $0.98, OCI disabled,
+idle_stop 1m) and the c7a sample pool, without any machine limit (the old
+limits: `OFFSHORE_EVAL_LIMIT=aws:4`). Ratios are geometric means over the
+cases at the same r; *failed* are requests that timed out in the queue.
+
+**Today (option policy, AWS at most 4 machines) → round 2 (default, no
+limit)**, prod pool, 11 cases:
+
+| r | cost | idle h | turn p95 | late | failed | max running (sum / max) |
+|---|---:|---:|---:|---:|---:|---:|
+| 0.0 | +1.0 % | +6.0 % | -3.3 % | 217 → 27 | 73 → 0 | 27 → 46 / 4 → 20 |
+| 0.2 | +0.8 % | +6.5 % | -0.9 % | 268 → 32 | 66 → 0 | 28 → 46 / 4 → 20 |
+| 0.5 | +1.0 % | +4.1 % | -4.2 % | 444 → 60 | 71 → 0 | 28 → 40 / 4 → 12 |
+| 0.8 | +1.4 % | +5.0 % | -3.9 % | 532 → 183 | 80 → 0 | 28 → 36 / 4 → 8 |
+| 1.0 | +1.5 % | +7.7 % | -3.5 % | 775 → 674 | 107 → 0 | 24 → 31 / 4 → 8 |
+
+Per case at r = 0.2 (cost / idle h / turn p95 / late / failed / max running):
+
+| case | today | round 2 |
+|---|---|---|
+| team-week/prod | $66.75 / 13.9 / 12m31s / 143 / 12 / 4 | $67.08 / 14.2 / 12m19s / 23 / 0 / 7 |
+| small-week/prod | $23.16 / 9.5 / 5m54s / 4 / 0 / 4 | $23.19 / 9.5 / 6m21s / 4 / 0 / 3 |
+| prod-nov10/prod | $4.54 / 1.8 / 3m45s / 0 / 0 / 2 | $4.54 / 1.8 / 3m45s / 0 / 0 / 2 |
+| prod-nov11/prod | $0.54 / 0.1 / 8m21s / 0 / 0 / 1 | $0.54 / 0.1 / 8m21s / 0 / 0 / 1 |
+| burst/prod | $1.59 / 0.5 / 6m59s / 0 / 0 / 3 | $1.59 / 0.5 / 7m8s / 0 / 0 / 3 |
+| multienv/prod | $16.02 / 1.4 / 25m56s / 121 / 54 / 4 | $17.46 / 2.8 / 21m16s / 5 / 0 / 20 |
+| warmbusy/prod | $2.52 / 0.5 / 32m26s / 0 / 0 / 1 | $2.52 / 0.5 / 32m26s / 0 / 0 / 1 |
+
+The production traces (prod-flap, nov10, nov11) never reached the limit
+and are unchanged; the limit only cost waiting and timeouts where demand
+exceeded four machines (multienv: four environments at once). On the c7a
+pool, today's option policy with its old `max_machines = 16` against
+round 2 without limit: cost +0.0..1.2 %, p95 -0.7..-0.1 %, failed 10 → 4
+at r = 0.2.
+
+**Ablations** (default with one part removed, or an experiment added;
+all 23 cases, r = 0.2 / 0.5 / 0.8):
+
+| part | cost | turn p95 | other | kept |
+|---|---:|---:|---|---|
+| projected-start gate (`nogate`) | ±0.1 % | ±0.2 % | late 232 → 225 / 431 → 441 | yes: the provisioning rule that replaces the machine limit, neutral |
+| stop decay, one idle stop per env per minute (`decay`) | +0.5 % | ±0.3 % | idle h +2 % | no (experiment) |
+| batch placement, SRPT + aging + owner round robin (`batch`) | ±0.1 % | -0.9..+0.8 % | late 1496 → 1546 without at 0.8 | no (experiment) |
+| remaining-time distribution of waits (`dist`) | ±0.3 % | ±0.4 % | OOMs 15 → 25 at r = 0.8 | no (experiment) |
+| statistical memory admission, Σmean + z·√Σvar (`stat`) | ±0.1 % | +1.3..2.4 % | OOMs unchanged | no (experiment) |
+
+`OFFSHORE_EXPERIMENT=batch,regret,dist,stat,decay` turns the experiments
+on (simulator only), `OFFSHORE_ABLATE=nogate` turns the gate off.
+Statistical admission is never stricter than the reservations: an early
+version refused what the reservations admitted and stalled the queue
+(`TestSampleTraces` at r = 1 ran for minutes). The second warm copy's
+disk cost (restore while the warm machine keeps its slot) and the
+writeback snapshots stay in the model. Round 2 default against round 1
+(`policy = "option"`), both without limits: cost -0.5..+0.6 %, p95
+-0.6..+0.5 %, failed 6 → 4 at r = 0.5. Against the cost model: cost
+-1.4..-10.8 %, p95 -5.2 % at r ≥ 0.5, late 1240 → 462 at r = 0.5. Against
+binpack: +9 % cost / -8 % p95 at r = 0.2, -8 % cost / +19 % p95 at r = 1.
+
+Warm but busy (`warmbusy` scenario, `TestWarmBusyTradeoff`): a request
+waits for its warm machine when it frees within the hedge bound and
+otherwise restores its slot on another running machine of the
+environment; the restore is charged the egress and the second warm copy's
+disk. On the prod pool all policies give the same result ($2.52, p95
+32m26s: the long builds dominate); on c7a r = 0.2 round 2 is $3.20 vs
+$3.45.
+
+Diagnosis of "3 cores/3G waited although x8 had room" (2026-11-11): at
+13:09 the request was assigned in 74 ms to a warm slot. The wait at
+13:12-13:13 came from a `cargo check` request that reserved 11.4G: its
+key had learned the peak of a clippy run sharing the same usage key, so
+the x8 was reserved for 8 cores and the 3-core request did not fit. Usage
+keys are now scoped by package (`?p=a,b`, `?workspace`), `offshore fetch`
+has its own key with a small need, and keys without history fall back to
+their parent key (`learned_parent`).
+
+**Follow-ups** (not implemented):
+
+- *Work fraction*: a seam for change impact: the client sends the paths
+  changed since the slot's base (`git diff --name-only slot_base..HEAD`
+  plus pseudo-inputs such as toolchain and lockfile) with the request; the
+  worker labels usage with the observed fraction of work done (CPU seconds
+  between the no-op floor and the cold ceiling of the key), and the
+  estimator learns run time and memory as a function of it.
+- *Runtime safety* on shared machines: a machine-wide jobserver shared by
+  the sessions (cargo/make honour `MAKEFLAGS`/`CARGO_MAKEFLAGS`), a link
+  pool limiting concurrent rustc links (the memory peaks), zram as a
+  compressed swap tier instead of OOM kills, and freezing the newest
+  session (cgroup freezer) instead of killing it on memory pressure. All
+  four are feasible on the worker; the first two need a token server in
+  the supervisor.
+- OCI quota discovery (Limits API `GetResourceAvailability` per shape
+  family and availability domain): the scheduler's limit is one vCPU
+  figure per provider while OCI limits are per shape family, so only the
+  limit-error cap applies there.
 
 ## Calibrating the simulator from real runs
 

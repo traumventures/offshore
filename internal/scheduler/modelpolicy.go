@@ -14,7 +14,7 @@ import (
 // resizing a full disk), or wait for a machine (a warm slot freeing soon, a
 // machine starting) when that scores better.
 func (p Default) placeModel(f Pool, t Task) Placement {
-	if p.global() && !abl("nobatch") {
+	if p.global() && exp("batch") {
 		if pl, ok := p.placeBatch(f, t); ok {
 			return pl
 		}
@@ -100,7 +100,7 @@ func (p Default) placeScored(f Pool, t Task) (Placement, []option, int) {
 		// expected wait over the distribution of the sessions' remaining
 		// times (default policy).
 		expWait := wait
-		if p.global() && !abl("nodist") {
+		if p.global() && exp("dist") {
 			if mean, ok := p.waitDist(f, m, t.Request); ok {
 				expWait = mean
 			}
@@ -503,16 +503,18 @@ func (p Default) scaleOutModel(st *planState, env string) {
 			if projected == nil {
 				return true
 			}
-			margin, ok := p.hedgeMargin()
-			if !ok {
-				margin = 8 * time.Hour
-				if c.QueueTimeout > 0 {
-					margin = c.QueueTimeout * 8 / 10
-				}
+			// Wait limit: the hedge bound; at cost_optimization 1 (only
+			// money) half the queue timeout, so that a request whose
+			// projection was optimistic still starts in time.
+			limit := 8 * time.Hour
+			if margin, ok := p.hedgeMargin(); ok {
+				limit = lat + margin
+			} else if c.QueueTimeout > 0 {
+				limit = c.QueueTimeout / 2
 			}
 			for _, t := range tasks {
 				at, ok := projected[t.ID]
-				if !ok || at.Sub(f.Now)+f.Now.Sub(t.Since) > lat+margin {
+				if !ok || at.Sub(t.Since) > limit {
 					return true
 				}
 			}

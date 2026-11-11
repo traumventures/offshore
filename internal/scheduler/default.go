@@ -688,10 +688,10 @@ func (p Default) idleStop(st *planState) map[string]int {
 			}
 			continue
 		}
-		// Default policy: an environment's idle machines stop one at a
-		// time, at most one a minute (decay): after a burst the pool
-		// shrinks gradually and the next burst finds a warm tail.
-		if !consolidated && p.global() && !abl("nodecay") && p.usable(m, f.Now) {
+		// Experiment "decay": an environment's idle machines stop one at
+		// a time, at most one a minute, so that after a burst the pool
+		// shrinks gradually (cost +0.5 % in the simulator: off).
+		if !consolidated && p.global() && exp("decay") && p.usable(m, f.Now) {
 			last := f.Demand[m.EnvHash].LastStop
 			if stoppedNow[m.EnvHash] || !last.IsZero() && f.Now.Sub(last) < StopDecay {
 				continue
