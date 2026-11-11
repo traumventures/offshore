@@ -75,9 +75,10 @@ type Stats struct {
 	// Faults counts page faults (misses of the upper tier), PageIns the
 	// pages fetched from below, PageOuts the pages written below
 	// (writeback and demotion), Refaults faults of recently reclaimed
-	// pages.
+	// pages (RefaultBytes their bytes).
 	Faults       int64 `json:"faults"`
 	Refaults     int64 `json:"refaults,omitempty"`
+	RefaultBytes int64 `json:"refault_bytes,omitempty"`
 	PageIns      int64 `json:"page_ins"`
 	PageInBytes  int64 `json:"page_in_bytes"`
 	PageOuts     int64 `json:"page_outs"`
@@ -104,6 +105,7 @@ func (s Stats) Add(o Stats) Stats {
 	s.Pages += o.Pages
 	s.Faults += o.Faults
 	s.Refaults += o.Refaults
+	s.RefaultBytes += o.RefaultBytes
 	s.PageIns += o.PageIns
 	s.PageInBytes += o.PageInBytes
 	s.PageOuts += o.PageOuts

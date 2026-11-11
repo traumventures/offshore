@@ -366,6 +366,9 @@ type Placement struct {
 	Slot SlotAction
 	// Expected is the expected run time (for release forecasts).
 	Expected time.Duration
+	// Run is the model's median run time (Expected is its pessimistic
+	// end); 0 when the policy has no estimate.
+	Run time.Duration
 }
 
 // ActionKind is a pool change.
@@ -438,6 +441,20 @@ type Usage struct {
 	// (reported by the cache file system; 0 = unknown). The estimator
 	// learns it per key (Profile.WorkingSet).
 	WorkingSetBytes int64 `json:"working_set_bytes,omitempty"`
+	// RefaultBytes are the slot pages faulted in again during the session
+	// after the local tier reclaimed them (thrashing; machine wide, an
+	// upper bound with concurrent sessions); LocalCapacity is the local
+	// tier's capacity then (0 = unknown). The estimator learns the refetch
+	// factor per key from them: RefaultBytes / (WorkingSetBytes -
+	// LocalCapacity).
+	RefaultBytes  int64 `json:"refault_bytes,omitempty"`
+	LocalCapacity int64 `json:"local_capacity,omitempty"`
+	// ThrashSeconds is the part of Wall spent faulting refaulted pages in
+	// (reported, or derived by the orchestrator from RefaultBytes and the
+	// machine's tier stack, see RefaultTime). The estimator subtracts it
+	// from the learned run times; the model adds the thrash predicted for
+	// the candidate machine instead, so thrashing is counted once.
+	ThrashSeconds float64 `json:"thrash_seconds,omitempty"`
 	// Provider ran the session (cold durations are learned per provider).
 	Provider string `json:"provider,omitempty"`
 }

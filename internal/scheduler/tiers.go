@@ -17,9 +17,14 @@ import (
 //   - thrashing: when the working set of the builds on a machine exceeds
 //     its local capacity (the top tier), reclaimed pages fault back in
 //     during the build: the refetch factor times the excess is faulted
-//     in again from the tier below. The factor is calibrated from the
-//     cache file systems' page_in/reclaim/thrash events per provider
-//     (Pool.Refetch, see events.Refetch); DefaultRefetch without data.
+//     in again from the tier below. The factor is learned per build key
+//     from the sessions' refaulted bytes (Profile.Refetch), else
+//     calibrated from the cache file systems' page_in/reclaim/thrash
+//     events per provider and globally (Pool.Refetch, see
+//     events.Refetch), else DefaultRefetch.
+//     Learned run times exclude the thrash time the runs observed
+//     (Usage.ThrashSeconds, see profileOf): the penalty predicted for
+//     the candidate machine is added once.
 //     A machine reporting VM.Thrashing (or a working set
 //     larger than its capacity) gets this penalty for every placement,
 //     and the cost model weighs a disk resize or a size with more local
@@ -43,6 +48,15 @@ func (f Pool) RefetchOf(prov string) float64 {
 		return r
 	}
 	return DefaultRefetch
+}
+
+// refetchOf is the refetch factor of t on machines of provider prov:
+// learned for t's key, else the provider's or global calibration.
+func refetchOf(f Pool, prov string, t Task) float64 {
+	if r := t.Profile.Refetch; r > 0 {
+		return r
+	}
+	return f.RefetchOf(prov)
 }
 
 // levelOf returns the profile of medium med in a stack (ok false: none).
@@ -121,16 +135,25 @@ func ThrashTime(stack medium.Stack, capacity, ws int64, refetch float64) time.Du
 	if refetch <= 0 {
 		refetch = DefaultRefetch
 	}
-	excess := ws - capacity
+	return time.Duration(refetch * float64(RefaultTime(stack, ws-capacity)))
+}
+
+// RefaultTime is the time to fault bytes in again from the tier below
+// the top of stack (DefaultBandwidth without a stack): the build time a
+// session's refaulted bytes cost (Usage.ThrashSeconds).
+func RefaultTime(stack medium.Stack, bytes int64) time.Duration {
+	if bytes <= 0 {
+		return 0
+	}
 	below := stack
 	if len(stack.Levels) >= 2 {
 		below = medium.Stack{Levels: stack.Levels[:2]}
 	}
-	d := below.FaultTime(excess)
+	d := below.FaultTime(bytes)
 	if d <= 0 {
-		d = time.Duration(float64(excess) / float64(DefaultBandwidth) * float64(time.Second))
+		d = time.Duration(float64(bytes) / float64(DefaultBandwidth) * float64(time.Second))
 	}
-	return time.Duration(refetch * float64(d))
+	return d
 }
 
 // RefetchBytes is what a build with working set ws refaults on a local
@@ -183,7 +206,7 @@ func demand(m Machine, t Task, capacity int64) int64 {
 func thrashOf(f Pool, m Machine, t Task) (pen time.Duration, need, capacity int64) {
 	capacity = localCapacity(m)
 	ws := demand(m, t, capacity)
-	return ThrashTime(m.Stack, capacity, ws, f.RefetchOf(m.Provider)), ws, capacity
+	return ThrashTime(m.Stack, capacity, ws, refetchOf(f, m.Provider, t)), ws, capacity
 }
 
 // growsCapacity reports whether growing m's disk grows its local tier:

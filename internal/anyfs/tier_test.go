@@ -156,6 +156,9 @@ func TestLocalThrashDetection(t *testing.T) {
 	if !s.Thrashing || s.Refaults == 0 || s.WorkingSetBytes < 8000 {
 		t.Fatalf("expected thrashing: %+v", s)
 	}
+	if s.RefaultBytes != 1000*s.Refaults {
+		t.Fatalf("refault bytes %d for %d refaults of 1000 bytes", s.RefaultBytes, s.Refaults)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	found := false

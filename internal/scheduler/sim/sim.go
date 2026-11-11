@@ -16,6 +16,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/traumventures/offshore/internal/events"
@@ -183,6 +184,12 @@ type Report struct {
 	Refetch     float64       `json:"refetch,omitempty"`
 	ThrashTime  time.Duration `json:"thrash_time"`
 	PageInBytes int64         `json:"page_in_bytes"`
+	// ThrashBias is the policy's predicted run time (Placement.Run) over
+	// the actual run time, summed over the builds that thrashed or were
+	// placed expecting to (0: none): above 1 the model overestimates
+	// thrashing builds (e.g. counts the thrash time twice), below 1 it
+	// underestimates them.
+	ThrashBias float64 `json:"thrash_bias,omitempty"`
 }
 
 type job struct {
@@ -211,6 +218,10 @@ type run struct {
 	// ws, capacity and refault describe a thrashing build (refault > 0):
 	// its cache events are reported when it ends.
 	ws, capacity, refault int64
+	// pred is the policy's median run time (Placement.Run); predThrash
+	// is set when it expected the build to thrash.
+	pred       time.Duration
+	predThrash bool
 }
 
 type machine struct {
@@ -295,6 +306,7 @@ func Run(trace Trace, o Options) Report {
 	next := 0
 	tick := trace.Start
 	var waits, turns []time.Duration
+	var predSum, actSum time.Duration // ThrashBias
 	var slow float64
 	for {
 		s.speeds()
@@ -358,7 +370,14 @@ func Run(trace Trace, o Options) Report {
 				}
 				u := scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), CPUSeconds: r.j.CPU * r.j.Duration,
 					Wall: r.j.runFor, Warm: r.warm, Provider: m.prov, SlotBytesBefore: r.before, SlotBytesAfter: after,
-					WorkingSetBytes: int64(r.j.WorkingSet)}
+					WorkingSetBytes: int64(r.j.WorkingSet), LocalCapacity: r.capacity, RefaultBytes: r.refault}
+				// The cache file system reports the refaulted bytes; the
+				// orchestrator turns them into thrash time (RefaultTime).
+				u.ThrashSeconds = scheduler.RefaultTime(m.size.Stack, r.refault).Seconds()
+				if r.pred > 0 && (r.refault > 0 || r.predThrash) {
+					predSum += r.pred
+					actSum += r.j.runFor
+				}
 				if r.restored {
 					u.Warm, u.Restored = false, true
 				}
@@ -414,6 +433,9 @@ func Run(trace Trace, o Options) Report {
 		s.r.WarmRate = float64(s.r.WarmHits) / float64(s.r.Completed+s.r.OOMs)
 	}
 	s.r.Refetch = s.cal.Factors()[""]
+	if actSum > 0 {
+		s.r.ThrashBias = float64(predSum) / float64(actSum)
+	}
 	return s.r
 }
 
@@ -684,7 +706,7 @@ func (s *sim) placeQueued() {
 		case scheduler.Assign:
 			if m := s.find(pl.Machine); m != nil && m.state == scheduler.Running {
 				s.dequeue(j)
-				s.assign(m, j, pl.Grant.Reserve, expected(pl, t, m), pl.Slot)
+				s.assign(m, j, pl, expected(pl, t, m))
 			}
 		case scheduler.Reject:
 			s.dequeue(j)
@@ -778,7 +800,8 @@ func expected(pl scheduler.Placement, t scheduler.Task, m *machine) time.Duratio
 	return t.Profile.High(t.Profile.ColdRun(m.prov))
 }
 
-func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.Duration, slot scheduler.SlotAction) {
+func (s *sim) assign(m *machine, j *job, pl scheduler.Placement, exp time.Duration) {
+	reserve, slot := pl.Grant.Reserve, pl.Slot
 	j.wait += s.now.Sub(j.since)
 	j.attempts++
 	work := j.Duration
@@ -835,17 +858,22 @@ func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.D
 	// the build (the cache file system reports thrashing).
 	m.ws, m.thrash = int64(j.WorkingSet), false
 	refault := int64(0)
-	if pen := scheduler.ThrashTime(m.size.Stack, m.capacity(), m.ws, s.o.Refetch); pen > 0 {
+	refetch := j.Refetch
+	if refetch <= 0 {
+		refetch = s.o.Refetch
+	}
+	if pen := scheduler.ThrashTime(m.size.Stack, m.capacity(), m.ws, refetch); pen > 0 {
 		work += pen.Seconds()
 		m.thrash = true
 		s.r.Thrashed++
 		s.r.ThrashTime += pen
-		refault = scheduler.RefetchBytes(m.capacity(), m.ws, s.o.Refetch)
+		refault = scheduler.RefetchBytes(m.capacity(), m.ws, refetch)
 		s.r.PageInBytes += refault
 	}
 	s.seq++
 	m.runs = append(m.runs, &run{j: j, reserve: reserve, work: work, seq: s.seq, start: s.now, expected: exp, warm: warm,
-		restored: restored, before: m.slots[j.Repo], ws: m.ws, capacity: m.capacity(), refault: refault})
+		restored: restored, before: m.slots[j.Repo], ws: m.ws, capacity: m.capacity(), refault: refault,
+		pred: pl.Run, predThrash: strings.Contains(pl.Reason, "thrashing")})
 	m.idle = time.Time{}
 	if !s.o.Swap {
 		s.oom(m)

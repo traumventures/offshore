@@ -60,6 +60,10 @@ type Job struct {
 	// the build proceeds; beyond the machine's local capacity the build
 	// thrashes.
 	WorkingSet Bytes `json:"working_set,omitempty"`
+	// Refetch is the true refetch factor of this build when it thrashes
+	// (0: Options.Refetch): repositories differ in how often a build
+	// touches its working set again.
+	Refetch float64 `json:"refetch,omitempty"`
 }
 
 // Trace is a sequence of jobs.

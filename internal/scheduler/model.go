@@ -323,7 +323,7 @@ func slotsToPrune(m Machine, t Task, missing int64) int {
 // The result is empty when nothing makes room.
 func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) []runChoice {
 	_, ws, capacity := thrashOf(f, m, t)
-	refetch := f.RefetchOf(m.Provider)
+	refetch := refetchOf(f, m.Provider, t)
 	missing := int64(0)
 	if m.DiskTotal > 0 && need > 0 {
 		limit := m.DiskBudget
