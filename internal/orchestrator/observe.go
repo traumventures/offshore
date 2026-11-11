@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"github.com/traumventures/offshore/internal/labels"
+	"math"
 	"sync"
 	"time"
 
@@ -107,7 +108,7 @@ func (o *Orchestrator) traced(ctx context.Context, a scheduler.Action, fn func(c
 		scheduler.Stop: events.MachineStop, scheduler.Destroy: events.MachineDestroy,
 	}[a.Kind]
 	ev := o.machineEvent(typ, a.Machine)
-	ev.Reason = a.Reason
+	ev.Reason, ev.Decision = a.Reason, a.Decision
 	if a.Kind == scheduler.Create {
 		ev.Env, ev.Provider, ev.Size, ev.Price = a.EnvHash, a.Size.Provider, a.Size.Name, a.Size.PricePerHour
 		cp := a.Size.Capacity
@@ -192,6 +193,7 @@ func (o *Orchestrator) endAcquire(ctx context.Context, span trace.Span, req Requ
 		Arrival: arrival.UTC(), WaitMs: wait.Milliseconds(), Placement: kind, Reason: lease.Reason,
 		Machine: lease.MachineID, Provider: lease.Provider, Size: lease.Size, Price: lease.PricePerHour,
 		TraceID: tracing.TraceID(ctx), Labels: labels.Clean(req.Labels),
+		Decision: lease.Decision, Estimate: req.Estimate, Predicted: lease.Predicted,
 	}
 	need, limit := req.Need, req.Limit
 	ev.Need = &need
@@ -251,6 +253,12 @@ func (o *Orchestrator) Finish(ctx context.Context, leaseID, key string, u *sched
 		ev = events.Event{Task: leaseID, Key: key}
 	}
 	ev.Type, ev.Time, ev.Error = events.TaskEnd, time.Time{}, ""
+	ev.Decision = nil // logged on task_placed
+	if ev.Predicted != nil {
+		pr := *ev.Predicted
+		pr.Compare(*u)
+		ev.Predicted = &pr
+	}
 	if key != "" {
 		ev.Key = key
 	}
@@ -294,3 +302,72 @@ func (o *Orchestrator) thrashUsage(prov, size string, u *scheduler.Usage) {
 		u.ThrashSeconds = scheduler.RefaultTime(medium.Stack{}, u.RefaultBytes).Seconds()
 	}
 }
+
+// predicted is what a placement expects of the run: the chosen option's
+// run time and the estimate's cores and peak memory (the need when the
+// request carries no estimate).
+func predicted(pl scheduler.Placement, req Request) *events.Predicted {
+	p := &events.Predicted{RunSeconds: pl.Run.Seconds(), ExpectedSeconds: pl.Expected.Seconds(),
+		Cores: req.Need.CPU, PeakMemory: req.Need.Memory}
+	if e := req.Estimate; e != nil {
+		if e.Cores > 0 {
+			p.Cores = e.Cores
+		}
+		if e.PeakMemory > 0 {
+			p.PeakMemory = e.PeakMemory
+		}
+	}
+	if p.RunSeconds == 0 && p.ExpectedSeconds == 0 && p.Cores == 0 && p.PeakMemory == 0 {
+		return nil
+	}
+	return p
+}
+
+// waitingLocked describes what a waiting task waits for: the busy or
+// starting machine its placement chose to wait for, else the machines of
+// its environment on their way (ETA: the earliest expected ready time).
+func (o *Orchestrator) waitingLocked(env string, pl scheduler.Placement) events.Waiting {
+	if c, ok := pl.Decision.ChosenOption(); ok && c.Kind == scheduler.OptWaitMachine {
+		return events.Waiting{For: c.Kind, Machine: c.Machine, Provider: c.Provider, Size: c.Size, ETASeconds: c.WaitSeconds}
+	}
+	w := events.Waiting{For: "none"}
+	now := o.now()
+	eta := time.Duration(-1)
+	for _, c := range o.creating {
+		if c.env != env {
+			continue
+		}
+		w.For = scheduler.OptWaitCapacity
+		w.Creating++
+		h := o.health[c.prov]
+		lat := h.boot
+		if c.started {
+			lat = h.start
+			if lat <= 0 {
+				lat = scheduler.DefaultStart
+			}
+		} else if lat <= 0 {
+			lat = scheduler.DefaultBoot
+		}
+		left := max(c.at.Add(lat).Sub(now), 0)
+		if eta < 0 || left < eta {
+			eta, w.Provider, w.Size = left, c.prov, c.size.Name
+		}
+	}
+	if eta > 0 {
+		w.ETASeconds = math.Round(eta.Seconds()*10) / 10
+	}
+	return w
+}
+
+// waitingEvent records that a queued task still waits (task_waiting).
+func (o *Orchestrator) waitingEvent(ctx context.Context, t scheduler.Task, req Request, arrival time.Time, reason string, w events.Waiting) {
+	need := t.Request
+	o.obs.log.Append(events.Event{Type: events.TaskWaiting, Task: t.ID, Repo: t.RepoID, Env: t.EnvHash, Key: t.Key,
+		Arrival: arrival.UTC(), WaitMs: o.now().Sub(arrival).Milliseconds(), Need: &need, Reason: reason, Waiting: &w,
+		Labels: labels.Clean(req.Labels), TraceID: tracing.TraceID(ctx)})
+}
+
+// waitingInterval is how often a queued task emits task_waiting (a var
+// for tests).
+var waitingInterval = events.WaitingInterval

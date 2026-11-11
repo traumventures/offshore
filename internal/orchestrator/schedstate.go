@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -39,8 +41,13 @@ var reconcileWait = 5 * time.Second
 type provHealth struct {
 	down     time.Time
 	cooldown time.Duration
-	boot     time.Duration // learned create -> ready latency (EWMA)
-	start    time.Duration // learned start -> ready latency (EWMA)
+	// disabled is the class of the error that disabled the provider
+	// (account_limit, auth; "" = enabled).
+	disabled    provider.ErrorClass
+	disabledErr string
+	disabledAt  time.Time
+	boot        time.Duration // learned create -> ready latency (EWMA)
+	start       time.Duration // learned start -> ready latency (EWMA)
 }
 
 // createBackoff blocks creates of an environment on a provider after a
@@ -64,28 +71,114 @@ func ewma(old, v time.Duration) time.Duration {
 	return (old*7 + v*3) / 10
 }
 
-// providerFailedLocked records a failed create or start: capacity and
-// quota errors downgrade the provider for a cooldown with backoff.
-func (o *Orchestrator) providerFailedLocked(prov string, err error) {
-	if !errors.Is(err, provider.ErrCapacity) {
+// providerFailedLocked records a failed create or start of prov and
+// reports whether the provider took it (a cooldown or a disable; else the
+// caller applies the per-environment create backoff). The error class
+// decides (provider.Classify): capacity and quota errors downgrade the
+// provider for a cooldown with backoff; account limits and auth errors
+// disable it until the configuration changes or an operator resets it
+// (ResetProvider), loudly: waiting does not heal them.
+func (o *Orchestrator) providerFailedLocked(prov string, err error) bool {
+	class := provider.Classify(err)
+	h := o.health[prov]
+	switch {
+	case class.Disables():
+		first := h.disabled == ""
+		h.disabled, h.disabledErr, h.disabledAt = class, err.Error(), o.now()
+		h.down = disabledUntil
+		o.health[prov] = h
+		if first {
+			o.log.Error("PROVIDER DISABLED: it gets no machines until its configuration changes or `offshore provider reset "+prov+"`",
+				"provider", prov, "class", class, "err", err)
+		}
+		o.obs.log.Append(events.Event{Type: events.ProviderDown, Provider: prov, Error: err.Error(), ErrorClass: string(class), Reason: "disabled"})
+		return true
+	case class.CoolsDown():
+		if h.cooldown <= 0 {
+			h.cooldown = baseCooldown
+		} else {
+			h.cooldown = min(h.cooldown*2, maxCooldown)
+		}
+		h.down = o.now().Add(h.cooldown)
+		o.health[prov] = h
+		o.log.Warn("provider out of "+string(class)+", cooling down", "provider", prov, "until", h.down, "err", err)
+		o.obs.log.Append(events.Event{Type: events.ProviderDown, Provider: prov, Error: err.Error(), ErrorClass: string(class), Reason: "cooldown", Seconds: h.cooldown.Seconds()})
+		return true
+	}
+	return false
+}
+
+// disabledUntil stands in for "no end" in the scheduler's provider state.
+var disabledUntil = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// ProviderHealth is the scheduling state of a provider for status and
+// doctor.
+type ProviderHealth struct {
+	Name string `json:"name"`
+	// State is ok, cooldown (capacity or quota, until Until) or disabled
+	// (account limit or auth error, until a configuration change or a
+	// reset).
+	State      string    `json:"state"`
+	ErrorClass string    `json:"error_class,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	Since      time.Time `json:"since,omitzero"`
+	Until      time.Time `json:"until,omitzero"`
+	// BootSeconds and StartSeconds are the learned create and start
+	// latencies (0: unknown).
+	BootSeconds  float64 `json:"boot_seconds,omitempty"`
+	StartSeconds float64 `json:"start_seconds,omitempty"`
+}
+
+// Providers returns the health of every configured provider, by name.
+func (o *Orchestrator) Providers() []ProviderHealth {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	now := o.now()
+	var out []ProviderHealth
+	for name := range o.provs {
+		h := o.health[name]
+		ph := ProviderHealth{Name: name, State: "ok", BootSeconds: h.boot.Seconds(), StartSeconds: h.start.Seconds()}
+		switch {
+		case h.disabled != "":
+			ph.State, ph.ErrorClass, ph.Error, ph.Since = "disabled", string(h.disabled), h.disabledErr, h.disabledAt
+		case now.Before(h.down):
+			ph.State, ph.Until = "cooldown", h.down
+		}
+		out = append(out, ph)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// ResetProvider re-enables a disabled provider and ends its cooldown.
+func (o *Orchestrator) ResetProvider(name string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if _, ok := o.provs[name]; !ok {
+		return fmt.Errorf("unknown provider %q", name)
+	}
+	o.resetProviderLocked(name, "manual reset")
+	o.notify()
+	return nil
+}
+
+func (o *Orchestrator) resetProviderLocked(name, why string) {
+	h := o.health[name]
+	if h.disabled == "" && h.down.IsZero() {
 		return
 	}
-	h := o.health[prov]
-	if h.cooldown <= 0 {
-		h.cooldown = baseCooldown
-	} else {
-		h.cooldown = min(h.cooldown*2, maxCooldown)
+	if h.disabled != "" {
+		o.log.Warn("provider re-enabled", "provider", name, "why", why)
 	}
-	h.down = o.now().Add(h.cooldown)
-	o.health[prov] = h
-	o.log.Warn("provider out of capacity, cooling down", "provider", prov, "until", h.down, "err", err)
-	o.obs.log.Append(events.Event{Type: events.ProviderDown, Provider: prov, Error: err.Error(), Seconds: h.cooldown.Seconds()})
+	h.disabled, h.disabledErr, h.disabledAt, h.down, h.cooldown = "", "", time.Time{}, time.Time{}, 0
+	o.health[name] = h
 }
 
 // providerReadyLocked records a machine of prov that became ready after d.
 func (o *Orchestrator) providerReadyLocked(prov string, d time.Duration, started bool) {
 	h := o.health[prov]
 	h.cooldown, h.down = 0, time.Time{}
+	h.disabled, h.disabledErr, h.disabledAt = "", "", time.Time{}
 	if started {
 		h.start = ewma(h.start, d)
 	} else {

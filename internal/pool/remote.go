@@ -174,8 +174,8 @@ func (r *Remote) Unreachable(ctx context.Context, leaseID, machineID string) err
 	return r.callJSON(ctx, pathUnreachable, unreachableReq{Lease: leaseID, Machine: machineID}, nil, nil)
 }
 
-func (r *Remote) Estimate(ctx context.Context, key string, fallback scheduler.Resources) (scheduler.Resources, error) {
-	var res scheduler.Resources
+func (r *Remote) Estimate(ctx context.Context, key string, fallback scheduler.Resources) (scheduler.Estimate, error) {
+	var res scheduler.Estimate
 	err := r.callJSON(ctx, pathEstimate, estimateReq{Key: key, Fallback: fallback}, nil, &res)
 	return res, err
 }

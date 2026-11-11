@@ -534,21 +534,24 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 	if req.Tool == "" {
 		fallback = FetchNeed // offshore fetch: no build runs in the session
 	}
-	need, err := d.pool.Estimate(ectx, key, fallback)
+	est, err := d.pool.Estimate(ectx, key, fallback)
 	tracing.End(sp, err)
 	if err != nil {
 		return nil, err
 	}
+	need := est.Need
 	span.SetAttributes(attribute.Float64("offshore.need.cpu", need.CPU), attribute.Int64("offshore.need.memory", need.Memory))
 	if max := repo.MaxMemoryBytes(); max > 0 && need.Memory > max {
 		need.Memory = max
+		est.Statistic += "; capped at max_memory"
 	}
+	est.Need = need
 	buildTTL, depsTTL := repo.CacheTTLs()
 	var lease orchestrator.Lease
 	for attempt := 1; ; attempt++ {
 		lease, err = d.pool.Acquire(ctx, orchestrator.Request{
 			EnvHash: plan.Hash, Image: plan.Tag, Services: plan.Services, RepoID: repoID,
-			Key: key, Need: need, Limit: scheduler.Resources{Memory: repo.MaxMemoryBytes()}, Arch: repo.Resources.Arch,
+			Key: key, Need: need, Estimate: &est, Limit: scheduler.Resources{Memory: repo.MaxMemoryBytes()}, Arch: repo.Resources.Arch,
 			BuildTTL: buildTTL, DepsTTL: depsTTL, Labels: lbl,
 		}, progress)
 		if err != nil {

@@ -61,7 +61,7 @@ func launch(ctx context.Context, run launchFunc, base core.LaunchInstanceDetails
 		}
 		failed = append(failed, fmt.Sprintf("%s: %s", s, apiError(err)))
 	}
-	return core.Instance{}, "", failed, fmt.Errorf("oci: %w for size %s (%s)", provider.ErrCapacity, spec.Size, strings.Join(failed, "; "))
+	return core.Instance{}, "", failed, provider.LaunchError("oci", spec.Size, failed)
 }
 
 func apiError(err error) string {

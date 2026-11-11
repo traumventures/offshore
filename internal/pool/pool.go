@@ -29,8 +29,9 @@ type Pool interface {
 	Release(ctx context.Context, leaseID, usageKey string, usage *scheduler.Usage) error
 	// Unreachable reports that a leased machine could not be reached.
 	Unreachable(ctx context.Context, leaseID, machineID string) error
-	// Estimate returns the expected need of a task, learned from earlier runs.
-	Estimate(ctx context.Context, key string, fallback scheduler.Resources) (scheduler.Resources, error)
+	// Estimate returns the expected need of a task, learned from earlier
+	// runs, with where it came from.
+	Estimate(ctx context.Context, key string, fallback scheduler.Resources) (scheduler.Estimate, error)
 	// Status returns all machines with their last known server status.
 	Status(ctx context.Context) ([]orchestrator.Machine, error)
 	// Reconcile runs one maintenance pass (expiry, idle stop, warm pool).

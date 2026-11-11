@@ -64,6 +64,7 @@ type option struct {
 	time time.Duration // time to result
 	tie  string        // rendezvous tie breaker (larger first)
 	fit  float64       // leftover after a fit (smaller first)
+	info *Option       // description for the decision log (nil: none)
 }
 
 func (p Default) costOptimization() float64 {
@@ -75,26 +76,8 @@ func (p Default) pick(opts []option) int {
 	if len(opts) == 0 {
 		return -1
 	}
-	minC, minT := math.Inf(1), math.Inf(1)
-	for _, o := range opts {
-		if o.cost > 0 && o.cost < minC {
-			minC = o.cost
-		}
-		if t := o.time.Seconds(); t > 0 && t < minT {
-			minT = t
-		}
-	}
 	r := p.costOptimization()
-	score := func(o option) float64 {
-		s := 0.0
-		if !math.IsInf(minC, 1) {
-			s += r * o.cost / minC
-		}
-		if !math.IsInf(minT, 1) {
-			s += (1 - r) * o.time.Seconds() / minT
-		}
-		return s
-	}
+	score := p.pickScore(opts)
 	best := 0
 	for i := 1; i < len(opts); i++ {
 		a, b := opts[i], opts[best]
@@ -125,6 +108,31 @@ func (p Default) pick(opts []option) int {
 		}
 	}
 	return best
+}
+
+// pickScore is the cost model's score: cost and time normalised against
+// the cheapest and fastest of opts, weighted by r = cost_optimization.
+func (p Default) pickScore(opts []option) func(option) float64 {
+	minC, minT := math.Inf(1), math.Inf(1)
+	for _, o := range opts {
+		if o.cost > 0 && o.cost < minC {
+			minC = o.cost
+		}
+		if t := o.time.Seconds(); t > 0 && t < minT {
+			minT = t
+		}
+	}
+	r := p.costOptimization()
+	return func(o option) float64 {
+		s := 0.0
+		if !math.IsInf(minC, 1) {
+			s += r * o.cost / minC
+		}
+		if !math.IsInf(minT, 1) {
+			s += (1 - r) * o.time.Seconds() / minT
+		}
+		return s
+	}
 }
 
 // priceOf returns the hourly price of a machine: its size's, plus the
@@ -262,6 +270,8 @@ func slowdown(m Machine, t Task) float64 {
 // from a restored snapshot or cold, after optional slot preparation.
 type runChoice struct {
 	run    time.Duration // preparation + run
+	thrash time.Duration // predicted page-in (refault) time of a working set beyond the local tier
+	prep   time.Duration // the preparation part of run (restore, move, prune, resize, thrash)
 	cost   float64       // egress, extra disk
 	slot   SlotAction
 	reason string
@@ -337,6 +347,7 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) []
 	finish := func(c runChoice, cap int64) {
 		if pen := ThrashTime(m.Stack, cap, ws, refetch); pen > 0 {
 			c.run += pen
+			c.thrash = pen
 			c.reason += ", thrashing"
 		}
 		out = append(out, c)
@@ -347,7 +358,9 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) []
 	} else if !joint && prunable(m, t) >= missing {
 		c := rc
 		// Pruning other repositories' slots makes their next builds cold.
-		c.run += DefaultPrune + time.Duration(slotsToPrune(m, t, missing))*time.Duration(float64(DefaultRun)*DefaultColdPenalty)
+		pr := DefaultPrune + time.Duration(slotsToPrune(m, t, missing))*time.Duration(float64(DefaultRun)*DefaultColdPenalty)
+		c.run += pr
+		c.prep += pr
 		c.slot = SlotAction{Kind: SlotPrune, Repo: t.RepoID, Bytes: missing}
 		c.reason += ", prune slots"
 		finish(c, capacity)
@@ -385,6 +398,7 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) []
 		seen[target] = true
 		c := rc
 		c.run += DefaultResize
+		c.prep += DefaultResize
 		c.cost += float64(g) / 1e9 * p.diskPriceOf(m) * hours(left)
 		if joint {
 			c.slot.Grow = target
@@ -438,7 +452,7 @@ func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 		if restore <= 0 || s.Store != storeOf(f, m.Provider) {
 			restore = restoreTime(m, t, s.Bytes, bw)
 		}
-		rc := runChoice{run: restore + scale(t.Profile.WarmRun()), cost: float64(s.Bytes) / 1e9 * price,
+		rc := runChoice{run: restore + scale(t.Profile.WarmRun()), prep: restore, cost: float64(s.Bytes) / 1e9 * price,
 			slot: SlotAction{Kind: SlotRestore, Repo: t.RepoID, Snapshot: s}, reason: "restore snapshot from " + s.Store}
 		add(rc, slotNeed(m, t, s.Bytes))
 	}
@@ -448,7 +462,7 @@ func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 		_, upBW := p.egress(f, st, src.Provider)
 		price, downBW := p.egress(f, st, m.Provider)
 		move := saveTime(src, b, upBW) + restoreTime(m, t, b, downBW)
-		rc := runChoice{run: move + scale(t.Profile.WarmRun()), cost: float64(b) / 1e9 * price,
+		rc := runChoice{run: move + scale(t.Profile.WarmRun()), prep: move, cost: float64(b) / 1e9 * price,
 			slot: SlotAction{Kind: SlotMove, Repo: t.RepoID, Bytes: b, From: src.ID,
 				Snapshot: Snapshot{Repo: t.RepoID, Provider: src.Provider, Store: st, Bytes: b, At: f.Now}},
 			reason: "move warm slot from " + src.ID}

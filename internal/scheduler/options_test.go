@@ -174,3 +174,23 @@ func TestHistoryEarlyPeakAndQuantile(t *testing.T) {
 		t.Fatalf("19 runs at 2G and one at 12G: want 2.5G (p90 + 25%%) and 2 cores, got %+v", got)
 	}
 }
+
+// A key without enough runs uses its parent key's statistic (another
+// package scope of the same subcommand), raised by its own peaks.
+func TestHistoryParentKey(t *testing.T) {
+	h := NewHistory("")
+	for i := 0; i < 5; i++ {
+		h.Observe("r/cargo/check", Usage{PeakMemory: 2 * gib, CPUSeconds: 90, Wall: time.Minute})
+	}
+	e := h.Explain("r/cargo/check?p=api", res(5, 4))
+	if e.Key != "r/cargo/check" || e.Requested != "r/cargo/check?p=api" || e.MemorySource != SourceLearnedParent || e.Need != (Resources{CPU: 1.5, Memory: 5 * gib / 2}) {
+		t.Fatalf("parent estimate: %+v", e)
+	}
+	h.Observe("r/cargo/check?p=api", Usage{PeakMemory: 4 * gib, CPUSeconds: 60, Wall: time.Minute})
+	if e := h.Explain("r/cargo/check?p=api", res(5, 4)); e.Need.Memory != 5*gib {
+		t.Fatalf("own 4G peak raises the parent's 2.5G: %+v", e)
+	}
+	if got := ParentKeys("r/cargo/build/release?workspace"); len(got) != 2 || got[0] != "r/cargo/build/release" || got[1] != "r/cargo/build" {
+		t.Fatalf("parents %v", got)
+	}
+}

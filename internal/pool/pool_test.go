@@ -156,7 +156,7 @@ func TestControlPlaneRoundTrip(t *testing.T) {
 
 	fallback := scheduler.Resources{CPU: 2, Memory: 1 << 30}
 	got, err := r.Estimate(ctx, "k", fallback)
-	if err != nil || got != fallback {
+	if err != nil || got.Need != fallback || got.MemorySource != scheduler.SourceFallback {
 		t.Fatalf("estimate: %v %v", got, err)
 	}
 	if err := r.Release(ctx, "lease", "k", &scheduler.Usage{PeakMemory: 1}); err != nil {

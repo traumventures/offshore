@@ -383,6 +383,9 @@ type Placement struct {
 	// Run is the model's median run time (Expected is its pessimistic
 	// end); 0 when the policy has no estimate.
 	Run time.Duration
+	// Decision lists the options considered (cost model policies; nil
+	// otherwise).
+	Decision *Decision
 }
 
 // ActionKind is a pool change.
@@ -411,6 +414,9 @@ type Action struct {
 	// fresh volume for volume sizes, none for local ones).
 	Volume string
 	Reason string
+	// Decision is the scale-out decision behind a Start or Create (cost
+	// model policies; nil otherwise).
+	Decision *Decision
 }
 
 // Policy makes all placement and scaling decisions. Implementations must be
@@ -431,8 +437,20 @@ type Usage struct {
 	CPUSeconds float64       `json:"cpu_seconds"`
 	Wall       time.Duration `json:"wall"`
 	OOM        bool          `json:"oom"`
-	Warm       bool          `json:"warm"` // build cache was reused
-	ExitCode   int           `json:"exit_code"`
+	// Signal terminated the command (or, for a wrapper exiting 129..192,
+	// the signal it reports); Killer is who ended it: cgroup_oom,
+	// machine_oom, client_disconnect, client_signal, worker_shutdown,
+	// signal, sigkill_unknown ("" = it exited on its own).
+	Signal int    `json:"signal,omitempty"`
+	Killer string `json:"killer,omitempty"`
+	// OOMKills are the processes of the session killed by an OOM killer;
+	// MemoryMaxEvents and MemoryHighEvents how often its usage hit
+	// memory.max and exceeded memory.high (cgroup memory.events).
+	OOMKills         int64 `json:"oom_kills,omitempty"`
+	MemoryMaxEvents  int64 `json:"memory_max_events,omitempty"`
+	MemoryHighEvents int64 `json:"memory_high_events,omitempty"`
+	Warm             bool  `json:"warm"` // build cache was reused
+	ExitCode         int   `json:"exit_code"`
 	// CPUStall and MemoryStall are the seconds at least one task of the
 	// session waited for CPU or memory (cgroup PSI "some total"): how much
 	// contention (overcommit, neighbours) slowed it down. Recorded in the
@@ -490,6 +508,8 @@ type Estimator interface {
 	// Estimate returns the expected need for key. fallback is the
 	// configured value used until enough observations exist.
 	Estimate(key string, fallback Resources) Resources
+	// Explain is Estimate with where the need came from.
+	Explain(key string, fallback Resources) Estimate
 	// Observe records a finished run.
 	Observe(key string, u Usage)
 	// Profile returns what is known about the runs of key (durations,

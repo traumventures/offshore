@@ -54,7 +54,7 @@ type Options struct {
 	// continuously), so other machines can restore a warm slot while its
 	// machine is busy (default true; set NoWriteback to disable).
 	NoWriteback bool
-	Retries      int
+	Retries     int
 	// RecentTTL drops environments from the warm pool after this long
 	// without use (default 24h, like the orchestrator).
 	RecentTTL time.Duration

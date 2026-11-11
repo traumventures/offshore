@@ -212,3 +212,40 @@ func TestReconcileDoesNotBlockOnSlowDestroy(t *testing.T) {
 		t.Fatalf("%d destroys, want 1", calls)
 	}
 }
+
+// Account limits and auth errors disable a provider until a reset or a
+// configuration change; capacity errors only cool it down.
+func TestAccountLimitDisablesProvider(t *testing.T) {
+	o := newTestOrch(t, newFake(), nil)
+	name := ""
+	for n := range o.provs {
+		name = n
+	}
+	o.mu.Lock()
+	took := o.providerFailedLocked(name, provider.ClassError(provider.ClassAccountLimit, errors.New("LimitExceeded, please upgrade")))
+	other := o.providerFailedLocked(name, errors.New("InvalidAMIID.NotFound"))
+	o.mu.Unlock()
+	if !took || other {
+		t.Fatalf("took %v other %v", took, other)
+	}
+	ph := o.Providers()
+	if len(ph) != 1 || ph[0].State != "disabled" || ph[0].ErrorClass != "account_limit" {
+		t.Fatalf("%+v", ph)
+	}
+	o.mu.Lock()
+	f := o.poolLocked(time.Now())
+	o.mu.Unlock()
+	if f.CanCreate("env", name) {
+		t.Fatal("disabled provider still creates")
+	}
+	if err := o.ResetProvider(name); err != nil || o.Providers()[0].State != "ok" {
+		t.Fatalf("reset: %v %+v", err, o.Providers())
+	}
+	o.mu.Lock()
+	o.providerFailedLocked(name, provider.ClassError(provider.ClassAuth, errors.New("expired")))
+	o.mu.Unlock()
+	o.SetConfig(o.Config())
+	if o.Providers()[0].State != "ok" {
+		t.Fatal("config change does not re-enable")
+	}
+}

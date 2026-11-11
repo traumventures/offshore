@@ -287,6 +287,73 @@ trace.json` converts the real runs into a simulator trace (both work
 embedded and remote, via the control plane's `POST /v1/events`, API key
 protected). See [scheduling.md](scheduling.md#calibrating-the-simulator-from-real-runs).
 
+### Explainable scheduling and traceable reservations
+
+Every placement and every scale-out start/create carries a `decision`:
+
+```json
+{"policy": "options", "cost_optimization": 0.5, "time_value_per_hour": 0.4, "chosen": 0,
+ "options": [
+  {"kind": "assign", "machine": "m-b", "provider": "aws", "size": "c7a.4xlarge", "slot": "restore",
+   "reason": "restore snapshot from aws", "prep_seconds": 42, "page_in_seconds": 0, "run_seconds": 342,
+   "time_seconds": 342, "cost": 0.031, "score": 0.069, "chosen": true},
+  {"kind": "wait_machine", "machine": "m-a", "slot": "warm", "wait_seconds": 480, "run_seconds": 300,
+   "time_seconds": 780, "cost": 0.027, "score": 0.114},
+  {"kind": "assign", "machine": "m-b", "slot": "cold", "time_seconds": 600, "cost": 0.05, "score": 0.117},
+  {"kind": "wait_machine", "machine": "m-c", "wait_seconds": 900, "rejected": "wait exceeds start/create ETA + margin (2m0s)"}]}
+```
+
+- `kind`: `assign` (run now), `wait_machine` (wait for a busy or starting machine), `wait_capacity`
+  (scale-out: let the queued tasks wait for what is there or on its way), `start`, `create`, `reject`.
+- `slot`: `warm`, `cold`, `restore` (snapshot from the store), `move` (save the warm slot elsewhere and
+  restore it here: the "move cache" option next to waiting for the warm machine), `prune+…`, `resize+…`.
+- Times in seconds: `wait`, `latency` (start/boot), `prep` (restore/move/prune/resize), `page_in`
+  (predicted thrash of a working set beyond the local tier), `run` (prep + run), `time` (time to result;
+  for scale-out summed over the queued tasks, `tasks` of which the option takes). `cost` is money.
+- `score` is what the policy ranked by: option policy `cost + time_value_per_hour × hours`
+  (`time_value_per_hour` -1: only time counts); `costmodel` the normalised score. Lower wins; the chosen
+  option comes first, rejected options (not scored, with `rejected`) last.
+- `task_placed.decision` is the placement (also on timeouts/rejects: the last decision), scale-out
+  decisions are on `machine_create`/`machine_start`.
+
+`task_placed.estimate` traces the reservation: `key` (estimator key), `need`, `fallback` (repository
+resources), `cpu_source`/`memory_source` (`repo_config`, `learned_max` (before `min_samples` runs),
+`learned`, `oom_backoff`), `samples`, `statistic` (e.g. `memory p90 of 20 peaks x 1.25`), and the
+predicted `peak_memory`/`cores`.
+
+While a request is queued, `task_waiting` is written every 15 s: `reason`, `wait_ms`, and `waiting`
+`{for: wait_machine|wait_capacity|none, machine, provider, size, creating, eta_seconds}`; `offshore top`
+shows the same in the queue (`QueuedTask.waiting`).
+
+`task_end.predicted` compares the placement's prediction with the run: `run_seconds`/`expected_seconds`
+(median/pessimistic), `cores`, `peak_memory` vs. `actual_*` and the ratios `run_ratio`, `cores_ratio`,
+`memory_ratio` (actual / predicted).
+
+### OOM and kill attribution
+
+The worker reads the session cgroup's `memory.events` and the machine's `/proc/vmstat oom_kill`. In
+`task_end.usage`: `oom`, `signal` (also the signal a wrapper reports with exit 129–192, e.g. a shell
+exiting 137 for a SIGKILLed child), `killer` (`cgroup_oom`, `machine_oom`, `client_disconnect`,
+`client_signal`, `worker_shutdown`, `signal`, `sigkill_unknown`), `oom_kills`, `memory_max_events`,
+`memory_high_events`. Exit 137 with `killer: sigkill_unknown` means something outside offshore
+(earlyoom, systemd-oomd, a user) killed it.
+
+### Provider errors
+
+Failed creates/starts are classified (`error_class` on `provider_down` and on the `machine_destroy`
+with `reason: create_failed`): `capacity` and `quota` cool the provider down (2 min doubling up to
+30 min, `reason: cooldown`); `account_limit` (e.g. OCI `LimitExceeded … upgrade`, free tier) and `auth`
+**disable** it (`reason: disabled`, logged as `PROVIDER DISABLED` once) until the pool configuration is
+reloaded or `offshore provider reset NAME`; `transient` and `other` use the per-environment create
+backoff. `offshore status` and `offshore doctor` show disabled and cooling providers.
+
+### Robust raw data
+
+Each event is one line written with a single `write(2)` on an `O_APPEND` file; a short or failed write
+(ENOSPC) is truncated away, so files never contain partial lines. Dropped events are counted in
+`offshore_events_dropped_total` and the first drop is logged; readers skip unparsable lines and count
+them in `offshore_events_skipped_lines_total`.
+
 ## 24 h guarantees and cleanup
 
 | What | Bound | Enforced by |
