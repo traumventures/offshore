@@ -23,7 +23,8 @@ A run goes through these steps:
   from the manifest without a network round trip; kernel caches are kept for
   an hour and invalidated precisely when deltas arrive. Content is fetched
   once per hash into a content addressed store (a cache: reclaimed least
-  recently used beyond an eighth of the disk budget and under disk
+  recently used beyond `[scheduler] source_cache` (default an eighth of
+  the disk budget) and under disk
   pressure, never while open). Clean files are opened with FUSE
   passthrough when the worker runs as root on Linux >= 6.9: reads and
   mmaps go straight to the cached file, the daemon sees only the open.
@@ -166,8 +167,13 @@ offshore outputs unmount    # unmount and discard local writes
   anyfs pages in a local page tier (`$STATE/outputs/pages`) plus
   materialized files (`$STATE/outputs/files`), reused as long as path,
   size and mtime are unchanged; both are reclaimed least recently used
-  beyond 8 GiB and fault in again from the local pages, the machine or the
-  store. Every remote run starts a new generation: listings and kernel
+  beyond the client's `[outputs] cache_size` (default 8G) and fault in
+  again from the local pages, the machine or the store. Contents the
+  laptop fetched or received as eager outputs are pinned (never
+  reclaimed) until the machine's commit is in the store (checked every
+  5 minutes) or a newer listing replaced them; the index of known
+  contents and pins survives daemon restarts
+  (`$STATE/outputs/index/`). Every remote run starts a new generation: listings and kernel
   caches are dropped, unchanged contents are kept. Exact mtimes
   (nanoseconds) are served, which cargo compares.
 - Layer rules: for a path present in both layers the newer mtime wins, ties
@@ -181,16 +187,23 @@ offshore outputs unmount    # unmount and discard local writes
   content cannot be renamed (`EXDEV`); `mv` falls back to copying.
 - Eager outputs inside a mounted directory are spooled by the proxy
   (`$STATE/outputs/incoming`) and moved into the page cache by the daemon
-  instead of being written below the mount point.
+  instead of being written below the mount point. Contents the cache
+  already holds (same digest) are not downloaded again
+  (`outputs-have`), only re-indexed at their new mtime.
 - When the machine is stopped or gone, cached listings and contents are
   still served, and the rest comes from the object store: the daemon asks
   the control plane for the repository's newest committed slot head and a
   store grant for the repository's prefix (`/v1/outputs-store`, the same
   grant its sessions' workers get), loads the head's layer chain and reads
-  the pages from the store (stack local -> machine -> store). Files whose
-  listed version the store does not hold (built after the last commit)
-  fail with `EIO`, unknown directories look empty, and the daemon log says
-  which machine was unreachable. Neither machine nor control plane is
+  the pages from the store (stack local -> machine -> store). Listings from
+  the store are merged with the pinned outputs (fetched, not yet
+  committed; newer mtime wins), so outputs built after the last commit
+  that the laptop has seen survive the machine's loss. Files neither
+  fetched nor committed fail with `EIO`; the daemon log names the path
+  and the reason ("machine gone, output not committed; rerun the build"),
+  and `offshore outputs status` lists them (`unavailable: PATH: REASON`,
+  until the next remote run) together with the number of pinned outputs.
+  Unknown directories look empty. Neither machine nor control plane is
   asked again for 20 s.
 - The mount and its upper layer survive daemon restarts (state in
   `$STATE/outputs/state.json`).

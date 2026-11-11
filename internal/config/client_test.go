@@ -141,3 +141,44 @@ func TestConfigValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// [outputs] cache_size bounds the daemon's output cache; the pool loader
+// ignores it as a client setting, [writeback] is a pool section.
+func TestClientOutputsCacheSize(t *testing.T) {
+	p := writeFile(t, `
+[outputs]
+cache_size = "2G"
+
+[writeback]
+dirty_ratio = 0.2
+
+[scheduler]
+source_cache = "10%"
+`)
+	t.Setenv("OFFSHORE_CONFIG", p)
+	t.Setenv("OFFSHORE_POOL_CONFIG", "")
+	c, err := LoadClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Outputs.CacheBytes(); got != 2<<30 {
+		t.Fatalf("cache bytes %d", got)
+	}
+	if got := (ClientOutputs{}).CacheBytes(); got != 8<<30 {
+		t.Fatalf("default cache bytes %d", got)
+	}
+	f, err := LoadPool(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Writeback.DirtyRatio != 0.2 || f.Pool.Scheduler.SourceCache != "10%" {
+		t.Fatalf("pool %+v %+v", f.Writeback, f.Pool.Scheduler)
+	}
+	if !hasWarning(f.Warnings, "[outputs]") {
+		t.Fatalf("warnings %v", f.Warnings)
+	}
+	bad := writeFile(t, "[outputs]\ncache_size = \"lots\"\n")
+	if _, err := LoadClientFrom(bad); err == nil || !strings.Contains(err.Error(), "outputs.cache_size") {
+		t.Fatalf("bad size: %v", err)
+	}
+}

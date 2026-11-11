@@ -114,6 +114,7 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 		},
 	}
 	c.DirtyRatio = u.Writeback.DirtyRatio
+	c.SourceCache = f.SourceCache
 	if u.Writeback.DirtyExpire != "" {
 		c.DirtyExpire, _ = config.ParseDuration(u.Writeback.DirtyExpire)
 	}

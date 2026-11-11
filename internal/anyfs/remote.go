@@ -3,6 +3,7 @@ package anyfs
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,6 +42,10 @@ var ErrUnavailable = errors.New("remote build outputs unavailable and not cached
 // ErrStale means a file changed on the machine after it was listed.
 var ErrStale = errors.New("remote output changed while reading")
 
+// NotCommitted is the reason reported for an output the laptop never
+// fetched whose machine is gone before the build slot was committed.
+const NotCommitted = "machine gone, output not committed; rerun the build"
+
 // downFor is how long an unreachable remote is not asked again.
 const downFor = 20 * time.Second
 
@@ -60,6 +66,13 @@ type Backing func(ctx context.Context) (*Tree, Tier, error)
 // peer or the store. When the peer is unreachable, listings and contents
 // come from the Backing (SetBacking). Source(prefix) serves one build
 // directory as the lower layer of a UserOverlay.
+//
+// Contents the laptop fetched or ingested (eager outputs) are pinned in
+// Files until they are known to be committed (CheckCommitted) or
+// superseded by a newer listing: when the machine disappears before its
+// slot is committed, they still appear in listings served from the
+// backing and keep their contents. Outputs that are neither fetched nor
+// committed fail with NotCommitted and are reported by Unavailable.
 type RemoteTree struct {
 	files *Files
 	local Tier
@@ -71,12 +84,17 @@ type RemoteTree struct {
 	dirs      map[string]map[string]proto.OutEntry // current generation
 	missing   map[string]bool                      // dirs absent remotely in this generation
 	index     map[string]indexed
+	pinned    map[string]bool // index paths whose content is pinned
+	unavail   []Unavailable   // most recent first
 	downUntil time.Time
 	downErr   error
 	downGen   uint64 // generation of the last "unreachable" log line
 	flights   map[string]*flight
 	hooks     []func()
 	now       func() time.Time
+
+	indexPath string      // persisted index ("": in memory only)
+	saveTimer *time.Timer // pending debounced save
 
 	backing  Backing
 	bGen     uint64 // generation of the resolution below
@@ -87,12 +105,23 @@ type RemoteTree struct {
 	ingested atomic.Uint64
 }
 
-// indexed is the known content of a remote file: Node carries its digest
-// and pages.
+// Unavailable is an output that could not be served.
+type Unavailable struct {
+	Path   string    `json:"path"`
+	Reason string    `json:"reason"`
+	At     time.Time `json:"at"`
+}
+
+// maxUnavailable bounds the reported unavailable outputs.
+const maxUnavailable = 50
+
+// indexed is the known content of a remote file: Node carries its digest,
+// mode and pages. Pinned contents are not known to be committed.
 type indexed struct {
-	Size    int64
-	MtimeNs int64
-	Node    Node
+	Size    int64 `json:"size"`
+	MtimeNs int64 `json:"mtime_ns"`
+	Node    Node  `json:"node"`
+	Pinned  bool  `json:"pinned,omitempty"`
 }
 
 type flight struct {
@@ -105,7 +134,7 @@ type flight struct {
 // in local and materialized by files.
 func NewRemoteTree(files *Files, local Tier, log *slog.Logger) *RemoteTree {
 	return &RemoteTree{files: files, local: local, log: log, dirs: map[string]map[string]proto.OutEntry{}, missing: map[string]bool{},
-		index: map[string]indexed{}, flights: map[string]*flight{}, now: time.Now}
+		index: map[string]indexed{}, pinned: map[string]bool{}, flights: map[string]*flight{}, now: time.Now}
 }
 
 // SetBacking sets the store fallback (nil: none).
@@ -184,6 +213,7 @@ func (t *RemoteTree) Update(src Remote) {
 	t.dirs = map[string]map[string]proto.OutEntry{}
 	t.missing = map[string]bool{}
 	t.downUntil, t.downErr = time.Time{}, nil
+	t.unavail = nil // reported for the build they belong to
 	hooks := append([]func(){}, t.hooks...)
 	t.mu.Unlock()
 	for _, h := range hooks {
@@ -196,9 +226,16 @@ func (t *RemoteTree) Close() {
 	t.mu.Lock()
 	src := t.src
 	t.src = nil
+	if t.saveTimer != nil {
+		t.saveTimer.Stop()
+		t.saveTimer = nil
+	}
 	t.mu.Unlock()
 	if src != nil {
 		src.Close()
+	}
+	if err := t.SaveIndex(); err != nil {
+		t.log.Warn("outputs: cannot save index", "err", err)
 	}
 }
 
@@ -226,11 +263,13 @@ func (t *RemoteTree) Stats() (dirs, files int) {
 	return len(t.dirs), len(t.index)
 }
 
-// Ingest stores the content of the remote file rel (size and mtime as
-// listed) from r as pages in the local tier and as a materialized file,
-// so it is served without the machine (e.g. eager outputs the proxy
+// Ingest stores the content of the remote file rel (size, mtime and mode
+// as listed in e) from r as pages in the local tier and as a materialized
+// file, so it is served without the machine (e.g. eager outputs the proxy
 // already transferred), and returns the path of the materialized file.
-func (t *RemoteTree) Ingest(ctx context.Context, rel string, size, mtimeNs int64, r io.Reader) (string, error) {
+// The content stays pinned until it is known to be committed.
+func (t *RemoteTree) Ingest(ctx context.Context, rel string, e proto.OutEntry, r io.Reader) (string, error) {
+	size, mtimeNs := e.Size, e.MtimeNs
 	rel = cleanRel(rel)
 	tmp := filepath.Join(t.files.dir, fmt.Sprintf(".ingest-%d-%d", time.Now().UnixNano(), t.ingested.Add(1)))
 	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
@@ -240,7 +279,7 @@ func (t *RemoteTree) Ingest(ctx context.Context, rel string, size, mtimeNs int64
 	defer os.Remove(tmp) // moved into place on success
 	h := blake3.New()
 	buf := make([]byte, PageSize)
-	n := Node{Path: rel, Kind: File, MtimeNs: mtimeNs}
+	n := Node{Path: rel, Kind: File, Mode: e.Mode, MtimeNs: mtimeNs}
 	for {
 		k, rerr := io.ReadFull(r, buf)
 		if k > 0 {
@@ -273,12 +312,17 @@ func (t *RemoteTree) Ingest(ctx context.Context, rel string, size, mtimeNs int64
 		return "", fmt.Errorf("short read: %d of %d bytes", n.Size, size)
 	}
 	n.Digest = hex.EncodeToString(h.Sum(nil))
-	if err := t.files.Adopt(&n, tmp, true, true); err != nil {
+	t.files.Pin(&n) // before it is resident: no reclaim in between
+	err = t.files.Adopt(&n, tmp, true, true)
+	if err == nil {
+		t.mu.Lock()
+		t.setIndexLocked(rel, indexed{Size: size, MtimeNs: mtimeNs, Node: n, Pinned: true})
+		t.mu.Unlock()
+	}
+	t.files.Unpin(&n)
+	if err != nil {
 		return "", err
 	}
-	t.mu.Lock()
-	t.index[rel] = indexed{Size: size, MtimeNs: mtimeNs, Node: n}
-	t.mu.Unlock()
 	p, ok := t.files.Local(&n)
 	if !ok {
 		return "", fmt.Errorf("ingest %s: %w", rel, ErrNotFound)
@@ -412,6 +456,7 @@ func (t *RemoteTree) List(ctx context.Context, dir string) (map[string]proto.Out
 			if gen == t.gen {
 				t.dirs[dir] = m
 			}
+			t.supersedeLocked(dir, m)
 			t.mu.Unlock()
 			return "", nil
 		})
@@ -427,22 +472,34 @@ func (t *RemoteTree) List(ctx context.Context, dir string) (map[string]proto.Out
 	}
 }
 
-// listBacking lists dir from the committed tree of the backing; cause is
-// returned if there is none.
+// listBacking lists dir from the committed tree of the backing merged
+// with the pinned outputs (fetched but maybe not committed; newest mtime
+// wins); cause is returned if there is neither.
 func (t *RemoteTree) listBacking(ctx context.Context, dir string, cause error) (map[string]proto.OutEntry, error) {
 	tr, _, err := t.resolveBacking(ctx)
+	t.mu.Lock()
+	pinned := t.pinnedChildrenLocked(dir)
+	t.mu.Unlock()
+	m := map[string]proto.OutEntry{}
 	if err != nil {
-		return nil, cause
-	}
-	if dir != "" {
-		if n, ok := tr.Get(dir); !ok || n.Kind != Dir {
-			return nil, fs.ErrNotExist
+		if len(pinned) == 0 {
+			return nil, cause
 		}
+	} else if n, ok := tr.Get(dir); dir == "" || ok && n.Kind == Dir {
+		for _, n := range tr.Children(dir) {
+			m[path.Base(n.Path)] = entryOfNode(n)
+		}
+	} else if len(pinned) == 0 {
+		return nil, fs.ErrNotExist
 	}
-	ch := tr.Children(dir)
-	m := make(map[string]proto.OutEntry, len(ch))
-	for _, n := range ch {
-		m[path.Base(n.Path)] = entryOfNode(n)
+	for name, e := range pinned {
+		c, ok := m[name]
+		switch {
+		case !ok:
+			m[name] = e
+		case e.Kind == manifest.File && c.Kind != manifest.Dir && e.MtimeNs > c.MtimeNs:
+			m[name] = e
+		}
 	}
 	return m, nil
 }
@@ -493,7 +550,7 @@ func (t *RemoteTree) Content(ctx context.Context, rel string, e proto.OutEntry) 
 			}
 			pw.CloseWithError(err)
 		}()
-		p, err := t.Ingest(rctx, rel, e.Size, e.MtimeNs, pr)
+		p, err := t.Ingest(rctx, rel, e, pr)
 		pr.CloseWithError(err)
 		if err != nil {
 			err = t.classify(gen, rel, err)
@@ -514,25 +571,23 @@ func (t *RemoteTree) Content(ctx context.Context, rel string, e proto.OutEntry) 
 }
 
 // contentBacking materializes rel from the store pages of the committed
-// slot if it holds the listed version (same size and mtime); cause is
-// returned otherwise.
+// slot if it holds the listed version (same size and mtime); otherwise
+// the output is unavailable (reported with the reason).
 func (t *RemoteTree) contentBacking(ctx context.Context, rel string, e proto.OutEntry, cause error) (string, error) {
 	tr, tier, err := t.resolveBacking(ctx)
 	if err != nil {
-		t.log.Info("outputs: not available locally", "path", rel)
-		return "", cause
+		return "", t.unavailable(rel, NotCommitted+" (committed outputs unavailable too)", cause)
 	}
 	n, ok := tr.Get(rel)
 	if !ok || n.Kind != File || n.Size != e.Size || n.MtimeNs != e.MtimeNs {
-		t.log.Info("outputs: listed version not in the store", "path", rel)
-		return "", cause
+		return "", t.unavailable(rel, NotCommitted, cause)
 	}
 	p, err := t.files.Ensure(ctx, tier, n)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return "", t.unavailable(rel, "committed output cannot be read from the store", err)
 	}
 	t.mu.Lock()
-	t.index[rel] = indexed{Size: n.Size, MtimeNs: n.MtimeNs, Node: *n}
+	t.setIndexLocked(rel, indexed{Size: n.Size, MtimeNs: n.MtimeNs, Node: *n})
 	t.mu.Unlock()
 	return p, nil
 }
@@ -638,4 +693,220 @@ func (s *RemoteSource) Local(n *Node) (string, bool) {
 // Fetch implements Source.
 func (s *RemoteSource) Fetch(ctx context.Context, n *Node) (string, error) {
 	return s.t.Content(ctx, s.full(n.Path), entryOfNode(n))
+}
+
+// setIndexLocked records the content of rel, moving the pin from the
+// previous content to the new one.
+func (t *RemoteTree) setIndexLocked(rel string, ix indexed) {
+	old, had := t.index[rel]
+	t.index[rel] = ix
+	delete(t.pinned, rel)
+	if ix.Pinned {
+		t.files.Pin(&ix.Node) // first: the same content stays pinned throughout
+		t.pinned[rel] = true
+	}
+	if had && old.Pinned {
+		t.files.Unpin(&old.Node)
+	}
+	t.scheduleSaveLocked()
+}
+
+// unpinLocked releases the pin of rel (committed or superseded).
+func (t *RemoteTree) unpinLocked(rel string) {
+	ix, ok := t.index[rel]
+	if !ok || !ix.Pinned {
+		return
+	}
+	ix.Pinned = false
+	t.index[rel] = ix
+	delete(t.pinned, rel)
+	t.files.Unpin(&ix.Node)
+	t.scheduleSaveLocked()
+}
+
+// SetIndexFile persists the index (known contents and their pins) in
+// path, loading what a previous run saved there: pinned outputs survive
+// daemon restarts.
+func (t *RemoteTree) SetIndexFile(path string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.indexPath = path
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var saved map[string]indexed
+	if err := json.Unmarshal(b, &saved); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	for rel, ix := range saved {
+		if _, ok := t.index[rel]; !ok {
+			t.setIndexLocked(rel, ix)
+		}
+	}
+	return nil
+}
+
+func (t *RemoteTree) scheduleSaveLocked() {
+	if t.indexPath == "" || t.saveTimer != nil {
+		return
+	}
+	t.saveTimer = time.AfterFunc(2*time.Second, func() {
+		t.mu.Lock()
+		t.saveTimer = nil
+		t.mu.Unlock()
+		t.SaveIndex()
+	})
+}
+
+// SaveIndex writes the persisted index now.
+func (t *RemoteTree) SaveIndex() error {
+	t.mu.Lock()
+	p := t.indexPath
+	if p == "" {
+		t.mu.Unlock()
+		return nil
+	}
+	b, err := json.Marshal(t.index)
+	t.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+// Known reports whether rel is indexed with the content digest in the
+// version e (size and mtime) and that content is resident.
+func (t *RemoteTree) Known(rel string, e proto.OutEntry, digest string) bool {
+	t.mu.Lock()
+	ix, ok := t.index[cleanRel(rel)]
+	t.mu.Unlock()
+	if !ok || ix.Size != e.Size || ix.MtimeNs != e.MtimeNs || ix.Node.Digest != digest || ix.Node.Mode != e.Mode {
+		return false
+	}
+	_, ok = t.files.Local(&ix.Node)
+	return ok
+}
+
+// Pinned returns the number of pinned (not known to be committed)
+// outputs and their bytes.
+func (t *RemoteTree) Pinned() (n int, bytes int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for rel := range t.pinned {
+		n++
+		bytes += t.index[rel].Size
+	}
+	return n, bytes
+}
+
+// Unavailable returns the most recent outputs that could not be served,
+// newest first.
+func (t *RemoteTree) Unavailable() []Unavailable {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]Unavailable(nil), t.unavail...)
+}
+
+// unavailable records and logs an output that cannot be served and
+// returns the error for the caller (ErrUnavailable).
+func (t *RemoteTree) unavailable(rel, reason string, cause error) error {
+	t.mu.Lock()
+	machine := ""
+	if t.src != nil {
+		machine = t.src.Name()
+	}
+	u := Unavailable{Path: rel, Reason: reason, At: t.now()}
+	out := []Unavailable{u}
+	for _, o := range t.unavail {
+		if o.Path != rel && len(out) < maxUnavailable {
+			out = append(out, o)
+		}
+	}
+	t.unavail = out
+	t.mu.Unlock()
+	t.log.Warn("outputs: "+rel+": "+reason, "path", rel, "machine", machine, "err", cause)
+	return fmt.Errorf("%s: %s: %w", rel, reason, ErrUnavailable)
+}
+
+// CheckCommitted resolves the committed state of the slot (the backing)
+// and releases the pins of outputs it holds in the same or a newer
+// version; it returns the number released.
+func (t *RemoteTree) CheckCommitted(ctx context.Context) (int, error) {
+	t.mu.Lock()
+	b := t.backing
+	empty := len(t.pinned) == 0
+	t.mu.Unlock()
+	if b == nil || empty {
+		return 0, nil
+	}
+	tr, _, err := b(ctx)
+	if err != nil {
+		return 0, err
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	released := 0
+	for rel := range t.pinned {
+		ix := t.index[rel]
+		n, ok := tr.Get(rel)
+		if !ok || n.Kind != File {
+			continue
+		}
+		if n.Digest == ix.Node.Digest || (n.Size == ix.Size && n.MtimeNs == ix.MtimeNs) || n.MtimeNs > ix.MtimeNs {
+			t.unpinLocked(rel)
+			released++
+		}
+	}
+	return released, nil
+}
+
+// supersedeLocked releases the pins of dir's indexed files that a fresh
+// listing m of the peer no longer holds in the same version.
+func (t *RemoteTree) supersedeLocked(dir string, m map[string]proto.OutEntry) {
+	for rel := range t.pinned {
+		if parent := path.Dir(rel); parent != dir && !(parent == "." && dir == "") {
+			continue
+		}
+		ix := t.index[rel]
+		if e, ok := m[path.Base(rel)]; !ok || e.Kind != File || e.Size != ix.Size || e.MtimeNs != ix.MtimeNs {
+			t.unpinLocked(rel)
+		}
+	}
+}
+
+// pinnedChildrenLocked returns the entries of dir implied by pinned
+// outputs: their files and the directories leading to them.
+func (t *RemoteTree) pinnedChildrenLocked(dir string) map[string]proto.OutEntry {
+	prefix := ""
+	if dir != "" {
+		prefix = dir + "/"
+	}
+	out := map[string]proto.OutEntry{}
+	for rel := range t.pinned {
+		rest, ok := strings.CutPrefix(rel, prefix)
+		if !ok || rest == "" {
+			continue
+		}
+		ix := t.index[rel]
+		name, _, nested := strings.Cut(rest, "/")
+		if !nested {
+			out[name] = proto.OutEntry{Name: name, Kind: manifest.File, Mode: ix.Node.Mode, Size: ix.Size, MtimeNs: ix.MtimeNs}
+			continue
+		}
+		if e, ok := out[name]; !ok || e.Kind == manifest.Dir && e.MtimeNs < ix.MtimeNs {
+			out[name] = proto.OutEntry{Name: name, Kind: manifest.Dir, Mode: 0o755, MtimeNs: ix.MtimeNs}
+		}
+	}
+	return out
 }

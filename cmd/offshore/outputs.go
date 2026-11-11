@@ -66,6 +66,12 @@ func outputsCmd(args []string) error {
 			}
 			fmt.Printf("%s: %s (latest build on %s, generation %d, %d cached directories, %d known files)\n",
 				s.Root, mounted, machine, s.Generation, s.CachedDirs, s.KnownFiles)
+			if s.PinnedFiles > 0 {
+				fmt.Printf("  %d outputs (%.1f MiB) kept locally until the machine commits them\n", s.PinnedFiles, float64(s.PinnedBytes)/(1<<20))
+			}
+			for _, u := range s.Unavailable {
+				fmt.Printf("  unavailable: %s: %s\n", u.Path, u.Reason)
+			}
 		}
 		return nil
 	}

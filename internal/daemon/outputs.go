@@ -35,12 +35,22 @@ func OutputsSpoolDir() string { return filepath.Join(StateDir(), "outputs", "inc
 
 // The output cache: contents of remote outputs as anyfs pages in a local
 // page tier and as materialized files, both reclaimed least recently
-// used beyond outputsCacheBytes (they fault in again from the local
-// pages, the machine or the store).
+// used beyond [outputs] cache_size of the client configuration (they
+// fault in again from the local pages, the machine or the store).
+// Contents not known to be committed are pinned (see anyfs.RemoteTree).
 func outputsPagesDir() string { return filepath.Join(StateDir(), "outputs", "pages") }
 func outputsFilesDir() string { return filepath.Join(StateDir(), "outputs", "files") }
 
-const outputsCacheBytes = 8 << 30
+// outputsIndexPath persists a repository's known output contents and
+// their pins across daemon restarts.
+func outputsIndexPath(root string) string {
+	h := sha256.Sum256([]byte(filepath.Clean(root)))
+	return filepath.Join(StateDir(), "outputs", "index", hex.EncodeToString(h[:8])+".json")
+}
+
+// commitCheckEvery is how often pinned outputs are checked against the
+// committed slot in the store (their pins are released once committed).
+const commitCheckEvery = 5 * time.Minute
 
 // OutputsUpperDir is the upper (local, writable) layer of the output
 // overlay mounted at mountpoint. It lives in the client state, never in
@@ -128,6 +138,13 @@ type OutputsStatus struct {
 	Generation  uint64   `json:"generation"`
 	CachedDirs  int      `json:"cached_dirs"`
 	KnownFiles  int      `json:"known_files"`
+	// PinnedFiles and PinnedBytes are outputs kept locally because they
+	// are not known to be committed (they survive the machine's loss).
+	PinnedFiles int   `json:"pinned_files,omitempty"`
+	PinnedBytes int64 `json:"pinned_bytes,omitempty"`
+	// Unavailable are outputs of the latest build that could not be
+	// served (e.g. the machine is gone and they were not committed).
+	Unavailable []anyfs.Unavailable `json:"unavailable,omitempty"`
 }
 
 type outputsMgr struct {
@@ -141,7 +158,7 @@ type outputsMgr struct {
 	leases map[string]leaseRef
 }
 
-func newOutputsMgr(d *Daemon) (*outputsMgr, error) {
+func newOutputsMgr(d *Daemon, cacheBytes int64) (*outputsMgr, error) {
 	spool, err := cas.New(OutputsSpoolDir())
 	if err != nil {
 		return nil, err
@@ -151,8 +168,8 @@ func newOutputsMgr(d *Daemon) (*outputsMgr, error) {
 		return nil, err
 	}
 	files.MarkAllBacked()
-	files.SetLimit(outputsCacheBytes)
-	local, err := anyfs.OpenLocal(anyfs.LocalOptions{Dir: outputsPagesDir(), Capacity: outputsCacheBytes})
+	files.SetLimit(cacheBytes)
+	local, err := anyfs.OpenLocal(anyfs.LocalOptions{Dir: outputsPagesDir(), Capacity: cacheBytes})
 	if err != nil {
 		return nil, err
 	}
@@ -177,6 +194,9 @@ func (m *outputsMgr) repoLocked(root string) *outputsRepo {
 		r = &outputsRepo{root: root, tree: anyfs.NewRemoteTree(m.files, m.local, m.d.log)}
 		r.repoID.Store("")
 		r.tree.SetBacking(m.backing(r))
+		if err := r.tree.SetIndexFile(outputsIndexPath(root)); err != nil {
+			m.d.log.Warn("outputs: cannot load index", "root", root, "err", err)
+		}
 		m.repos[root] = r
 	}
 	return r
@@ -299,30 +319,91 @@ func (m *outputsMgr) released(leaseID string, ran bool) {
 }
 
 // hint moves eager outputs that the proxy stored in the spool into the
-// output cache, so the mount serves them without the machine.
+// output cache, so the mount serves them without the machine. Entries
+// whose content the cache already holds (have) are indexed from it.
 func (m *outputsMgr) hint(root string, files []manifest.Entry) {
 	m.mu.Lock()
 	r := m.repoLocked(root)
 	m.mu.Unlock()
 	done := map[string]bool{}
 	for _, e := range files {
-		if e.Kind != manifest.File || e.Hash == "" || !m.spool.Has(e.Hash) {
+		if e.Kind != manifest.File || e.Hash == "" {
 			continue
 		}
-		f, err := os.Open(m.spool.Path(e.Hash))
+		oe := proto.OutEntry{Kind: manifest.File, Mode: e.Mode, Size: e.Size, MtimeNs: e.MtimeNs}
+		src, spooled := m.spool.Path(e.Hash), m.spool.Has(e.Hash)
+		if !spooled && r.tree.Known(e.Path, oe, e.Hash) {
+			continue // unchanged since an earlier run
+		}
+		if !spooled {
+			p, ok := m.files.Local(&anyfs.Node{Digest: e.Hash, Size: e.Size})
+			if !ok {
+				continue
+			}
+			src = p
+		}
+		f, err := os.Open(src)
 		if err != nil {
 			continue
 		}
-		_, err = r.tree.Ingest(context.Background(), e.Path, e.Size, e.MtimeNs, f)
+		_, err = r.tree.Ingest(context.Background(), e.Path, oe, f)
 		f.Close()
 		if err != nil {
 			m.d.log.Warn("outputs: cannot cache eager output", "path", e.Path, "err", err)
 			continue
 		}
-		done[e.Hash] = true
+		if spooled {
+			done[e.Hash] = true
+		}
 	}
 	for h := range done {
 		os.Remove(m.spool.Path(h))
+	}
+}
+
+// have returns the content hashes of files the output cache already
+// holds: the proxy does not download them again (op "outputs-have").
+func (m *outputsMgr) have(files []manifest.Entry) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, e := range files {
+		if e.Kind != manifest.File || e.Hash == "" || seen[e.Hash] {
+			continue
+		}
+		seen[e.Hash] = true
+		if _, ok := m.files.Local(&anyfs.Node{Digest: e.Hash, Size: e.Size}); ok || m.spool.Has(e.Hash) {
+			out = append(out, e.Hash)
+		}
+	}
+	return out
+}
+
+// checkCommitted releases the pins of outputs the repositories' committed
+// slots hold, every commitCheckEvery until ctx ends.
+func (m *outputsMgr) checkCommitted(ctx context.Context) {
+	t := time.NewTicker(commitCheckEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		m.mu.Lock()
+		var trees []*anyfs.RemoteTree
+		for _, r := range m.repos {
+			trees = append(trees, r.tree)
+		}
+		m.mu.Unlock()
+		for _, tr := range trees {
+			cctx, cancel := context.WithTimeout(ctx, time.Minute)
+			if n, err := tr.CheckCommitted(cctx); err != nil {
+				m.d.log.Debug("outputs: commit check failed", "err", err)
+			} else if n > 0 {
+				m.d.log.Debug("outputs: committed outputs unpinned", "files", n)
+			}
+			cancel()
+		}
 	}
 }
 
@@ -418,6 +499,8 @@ func (m *outputsMgr) unmountAll() {
 func statusLocked(root string, r *outputsRepo) OutputsStatus {
 	s := OutputsStatus{Root: root, Machine: r.state.Machine, Generation: r.tree.Generation()}
 	s.CachedDirs, s.KnownFiles = r.tree.Stats()
+	s.PinnedFiles, s.PinnedBytes = r.tree.Pinned()
+	s.Unavailable = r.tree.Unavailable()
 	for _, f := range r.mounts {
 		s.Mountpoints = append(s.Mountpoints, f.Mountpoint())
 		s.Uppers = append(s.Uppers, f.Upper())

@@ -69,6 +69,10 @@ type Config struct {
 	// long a slot stays idle before its commit, default 30s).
 	DirtyRatio  float64
 	DirtyExpire time.Duration
+	// SourceCache bounds the fetched source contents: a share of the disk
+	// budget or a size ([scheduler] source_cache: OFFSHORE_SOURCE_CACHE;
+	// zero: config.DefaultSourceCache).
+	SourceCache config.DiskBudget
 	// SlotMode forces the build slot mount mode (tests; nil: probe).
 	SlotMode *fsMode
 }
@@ -153,6 +157,13 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.DirtyExpire = d
 	}
+	if s := os.Getenv("OFFSHORE_SOURCE_CACHE"); s != "" {
+		b, err := config.ParseSourceCache(s)
+		if err != nil {
+			return c, fmt.Errorf("server: OFFSHORE_SOURCE_CACHE: %w", err)
+		}
+		c.SourceCache = b
+	}
 	if s := os.Getenv("OFFSHORE_PROVISION"); s != "" {
 		if err := json.Unmarshal([]byte(s), &c.Provision); err != nil {
 			return c, fmt.Errorf("server: OFFSHORE_PROVISION: %w", err)
@@ -236,11 +247,12 @@ func New(cfg Config, log *slog.Logger) (*Worker, error) {
 	}
 	// Faulted-in source contents are a cache of the laptop's files: any
 	// of them can be fetched again, so they are reclaimed least recently
-	// used beyond an eighth of the disk budget (open files never; local
-	// modifications live in the projections' upper directories).
+	// used beyond [scheduler] source_cache (default an eighth of the disk
+	// budget; open files never; local modifications live in the
+	// projections' upper directories).
 	srcFiles.MarkAllBacked()
 	if total, _, ok := fsUsage(cfg.CacheDir); ok {
-		srcFiles.SetLimit(budgetBytes(cfg.DiskBudget, total) / 8)
+		srcFiles.SetLimit(sourceCacheBytes(cfg, total))
 	}
 	var env []string
 	for _, kv := range os.Environ() {

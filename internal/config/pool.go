@@ -101,7 +101,11 @@ type Scheduler struct {
 	// DiskBudget is how much of a machine's cache disk build slots and
 	// machine caches may fill before the worker prunes: "90%" (default) of
 	// the file system or a size ("150G"). Sizes may override it.
-	DiskBudget        string  `toml:"disk_budget"`
+	DiskBudget string `toml:"disk_budget"`
+	// SourceCache bounds the source contents a worker fetched from the
+	// laptop and keeps as a cache (reclaimed least recently used beyond
+	// it): a share of the disk budget ("12.5%", default) or a size ("20G").
+	SourceCache       string  `toml:"source_cache"`
 	Estimator         string  `toml:"estimator"` // "history" (learn from runs) | "static" (repo config)
 	CPUOvercommit     float64 `toml:"cpu_overcommit"`
 	MemoryOvercommit  float64 `toml:"memory_overcommit"`
@@ -330,7 +334,7 @@ func LoadPool(path string) (*PoolConfig, error) {
 		if err := decodeStrict(data, &raw); err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
-		f.Pool, f.Telemetry, f.Storage = raw.Pool, raw.Telemetry, raw.Storage
+		f.Pool, f.Telemetry, f.Storage, f.Writeback = raw.Pool, raw.Telemetry, raw.Storage, raw.Writeback
 		f.Pool.Scheduler = raw.Scheduler
 		f.Pool.Provision = raw.Machine.Setup
 		if f.Providers, f.Pool.Sizes, f.Volumes, f.Profiles, err = splitProviders(raw.Providers); err != nil {
@@ -538,6 +542,11 @@ func (u *PoolConfig) Validate() error {
 	if f.DiskBudget != "" {
 		if _, err := ParseDiskBudget(f.DiskBudget); err != nil {
 			errs = append(errs, "scheduler.disk_budget: "+err.Error())
+		}
+	}
+	if f.SourceCache != "" {
+		if _, err := ParseSourceCache(f.SourceCache); err != nil {
+			errs = append(errs, "scheduler.source_cache: "+err.Error())
 		}
 	}
 	if r := u.Writeback.DirtyRatio; r < 0 || r > 1 {

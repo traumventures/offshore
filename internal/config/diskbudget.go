@@ -18,18 +18,29 @@ type DiskBudget struct {
 }
 
 // ParseDiskBudget parses "90%" (of the file system) or a size ("150G").
-func ParseDiskBudget(s string) (DiskBudget, error) {
+func ParseDiskBudget(s string) (DiskBudget, error) { return parseShare("disk budget", s) }
+
+// DefaultSourceCache is the share of the disk budget a worker keeps of
+// source contents fetched from the laptop.
+const DefaultSourceCache = "12.5%"
+
+// ParseSourceCache parses [scheduler] source_cache: "12.5%" (of the disk
+// budget) or a size ("20G"); Of then applies to the disk budget.
+func ParseSourceCache(s string) (DiskBudget, error) { return parseShare("source cache", s) }
+
+// parseShare parses a percentage or a size.
+func parseShare(what, s string) (DiskBudget, error) {
 	s = strings.TrimSpace(s)
 	if p, ok := strings.CutSuffix(s, "%"); ok {
 		f, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
 		if err != nil || f <= 0 || f > 100 {
-			return DiskBudget{}, fmt.Errorf("invalid disk budget %q (want 1%%..100%% or a size like 150G)", s)
+			return DiskBudget{}, fmt.Errorf("invalid %s %q (want 1%%..100%% or a size like 150G)", what, s)
 		}
 		return DiskBudget{Fraction: f / 100}, nil
 	}
 	n, err := ParseBytes(s)
 	if err != nil || n <= 0 {
-		return DiskBudget{}, fmt.Errorf("invalid disk budget %q (want 1%%..100%% or a size like 150G)", s)
+		return DiskBudget{}, fmt.Errorf("invalid %s %q (want 1%%..100%% or a size like 150G)", what, s)
 	}
 	return DiskBudget{Bytes: n}, nil
 }
