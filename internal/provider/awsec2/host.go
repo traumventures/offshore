@@ -7,9 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -21,7 +19,6 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/traumventures/cloudsourced/internal/blobcache"
-	"github.com/traumventures/cloudsourced/internal/machine"
 	"github.com/traumventures/cloudsourced/internal/supervisor"
 )
 
@@ -138,68 +135,4 @@ func (h *host) StopSelf(ctx context.Context) error {
 	}
 	_, err = h.ec2.StopInstances(ctx, &ec2.StopInstancesInput{InstanceIds: []string{strings.TrimSpace(string(b))}})
 	return err
-}
-
-// Interruption reports a pending spot interruption (instance-action) or a
-// rebalance recommendation from the instance metadata service; nil when
-// there is neither (always for on-demand instances).
-func (h *host) Interruption(ctx context.Context) (*machine.DrainNotice, error) {
-	return spotNotice(ctx, h.metadata, time.Now())
-}
-
-// metadata reads an instance metadata path; found is false on 404.
-func (h *host) metadata(ctx context.Context, path string) (b []byte, found bool, err error) {
-	md, err := h.imds.GetMetadata(ctx, &imds.GetMetadataInput{Path: path})
-	if err != nil {
-		var re interface{ HTTPStatusCode() int }
-		if errors.As(err, &re) && re.HTTPStatusCode() == http.StatusNotFound {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	defer md.Content.Close()
-	b, err = io.ReadAll(io.LimitReader(md.Content, 1<<16))
-	return b, err == nil, err
-}
-
-// spotNotice turns the metadata service's spot notices into a drain
-// notice. An interruption (two minutes' warning, action stop or
-// terminate) wins over a rebalance recommendation (elevated risk, no
-// deadline).
-func spotNotice(ctx context.Context, get func(context.Context, string) ([]byte, bool, error), now time.Time) (*machine.DrainNotice, error) {
-	b, found, err := get(ctx, "spot/instance-action")
-	if err != nil {
-		return nil, err
-	}
-	if found {
-		var ia struct {
-			Action string `json:"action"`
-			Time   string `json:"time"`
-		}
-		if err := json.Unmarshal(b, &ia); err != nil {
-			return nil, fmt.Errorf("spot/instance-action: %w", err)
-		}
-		n := &machine.DrainNotice{Reason: machine.DrainSpotInterruption, Action: ia.Action, Noticed: now.Unix()}
-		if t, err := time.Parse(time.RFC3339, ia.Time); err == nil {
-			n.Deadline = t.Unix()
-		} else {
-			n.Deadline = now.Add(2 * time.Minute).Unix()
-		}
-		return n, nil
-	}
-	b, found, err = get(ctx, "events/recommendations/rebalance")
-	if err != nil || !found {
-		return nil, err
-	}
-	var rb struct {
-		NoticeTime string `json:"noticeTime"`
-	}
-	if err := json.Unmarshal(b, &rb); err != nil {
-		return nil, fmt.Errorf("events/recommendations/rebalance: %w", err)
-	}
-	n := &machine.DrainNotice{Reason: machine.DrainSpotRebalance, Noticed: now.Unix()}
-	if t, err := time.Parse(time.RFC3339, rb.NoticeTime); err == nil {
-		n.Noticed = t.Unix()
-	}
-	return n, nil
 }

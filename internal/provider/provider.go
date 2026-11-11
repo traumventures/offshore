@@ -24,9 +24,7 @@ const (
 	LabelMemory    = "cloudsourced.memory"
 	LabelFinger    = "cloudsourced.fingerprint"
 	LabelSize      = "cloudsourced.size"
-	LabelArch      = "cloudsourced.arch"   // machine architecture (amd64, arm64)
-	LabelMarket    = "cloudsourced.market" // capacity market: spot or on-demand
-	LabelSpot      = "cloudsourced.spot"   // "true" on spot machines
+	LabelArch      = "cloudsourced.arch" // machine architecture (amd64, arm64)
 )
 
 // MachineSpec describes a machine to create. Providers treat the server
@@ -44,20 +42,16 @@ type MachineSpec struct {
 	// InstanceTypes are the provider machine types providing Size, tried
 	// in order (empty: Size itself).
 	InstanceTypes []string
-	// Spot asks for interruptible spot capacity; SpotFallback allows
-	// on-demand capacity when no spot capacity is available.
-	Spot         bool
-	SpotFallback bool
-	CPU          float64
-	Memory       int64
-	Swap         bool // allow sessions to swap
-	ExpiresAt    time.Time
-	Finger       string        // expected server certificate fingerprint (public)
-	DepsTTL      time.Duration // lifetime of shared dependency cache volumes
-	IdleStop     time.Duration // machine stops itself after this long idle and unobserved (0: never)
-	Services     []Service
-	Env          map[string]string // CLOUDSOURCED_* variables of the worker
-	SecretEnv    map[string]string // secret CLOUDSOURCED_* variables
+	CPU           float64
+	Memory        int64
+	Swap          bool // allow sessions to swap
+	ExpiresAt     time.Time
+	Finger        string        // expected server certificate fingerprint (public)
+	DepsTTL       time.Duration // lifetime of shared dependency cache volumes
+	IdleStop      time.Duration // machine stops itself after this long idle and unobserved (0: never)
+	Services      []Service
+	Env           map[string]string // CLOUDSOURCED_* variables of the worker
+	SecretEnv     map[string]string // secret CLOUDSOURCED_* variables
 }
 
 // SortedKeys returns the keys of m in order.
@@ -114,7 +108,6 @@ type Volume struct {
 type Caps struct {
 	FUSE          bool
 	StopKeepsDisk bool
-	Spot          bool
 	// PollInterval is how often the orchestrator polls a starting machine
 	// for readiness (0: 500ms); with PollMax > PollInterval the interval
 	// backs off up to PollMax.
@@ -156,12 +149,6 @@ type ImageHost interface {
 	// ImageBuilder builds images for this provider (its Docker CLI).
 	ImageBuilder() image.Builder
 }
-
-// Market values of LabelMarket.
-const (
-	MarketSpot     = "spot"
-	MarketOnDemand = "on-demand"
-)
 
 // Factory creates a provider.
 type Factory func(opts map[string]any) (Provider, error)

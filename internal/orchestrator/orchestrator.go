@@ -546,10 +546,6 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		if st := r.status; st != nil && st.InterruptAt > 0 && (m.Status == nil || m.Status.InterruptAt == 0) {
-			o.log.Warn("machine interruption notice", "id", r.id, "reason", st.DrainReason,
-				"deadline", time.Unix(st.InterruptAt, 0).UTC().Format(time.RFC3339), "sessions", len(st.Sessions))
-		}
 		if r.status == nil && m.Status != nil && m.State == provider.Running && time.Since(m.StatusAt) < statusGrace {
 			// A single failed probe (e.g. a timeout on a loaded host) does
 			// not make a running machine unschedulable: keep the last
@@ -740,12 +736,6 @@ func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
 			if st.IdleSince > 0 {
 				sm.IdleSince = time.Unix(st.IdleSince, 0)
 			}
-			// A machine with an interruption notice (spot) drains and is
-			// not undrained for new work: capacity is planned elsewhere.
-			if st.InterruptAt > 0 {
-				sm.Interrupted, sm.Draining = true, true
-			}
-			sm.AtRisk = st.AtRisk
 		}
 		for lid, p := range m.pending {
 			if now.After(p.expires) {
@@ -854,7 +844,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			lease := Lease{
 				ID: task.ID, MachineID: m.ID, Addr: m.Addr, Fingerprint: m.Fingerprint, Token: o.sessionToken(m.Machine, task.ID),
 				Grant: pl.Grant, MemoryOvercommit: o.cfg.Policy.MemoryOvercommit,
-				Provider: m.Provider, Size: size, PricePerHour: o.priceLocked(m.Provider, size, m.Labels[provider.LabelMarket]), Reason: pl.Reason,
+				Provider: m.Provider, Size: size, PricePerHour: o.priceLocked(m.Provider, size), Reason: pl.Reason,
 				BuildTTL: req.buildTTL(o.cfg.MaxLifetime),
 			}
 			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: o.now().Add(2 * time.Minute)}
@@ -1109,7 +1099,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	provision, _ := json.Marshal(cfg.Provision)
 	spec := provider.MachineSpec{
 		ID: id, Owner: cfg.Owner, Image: image, EnvHash: envHash, Size: size.Name,
-		Arch: size.ArchOf(), InstanceTypes: size.InstanceTypes, Spot: size.Spot, SpotFallback: size.SpotFallback,
+		Arch: size.ArchOf(), InstanceTypes: size.InstanceTypes,
 		CPU: size.Capacity.CPU, Memory: size.Capacity.Memory, Swap: cfg.Swap,
 		ExpiresAt: expires, Finger: ident.Fingerprint, DepsTTL: params.DepsTTL,
 		IdleStop: cfg.Policy.IdleStop, Services: services,
@@ -1291,7 +1281,7 @@ func (o *Orchestrator) Snapshot() []Machine {
 		c := *m
 		c.pending = nil
 		c.Uptime = append([]Span(nil), m.Uptime...)
-		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize], m.Labels[provider.LabelMarket])
+		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize])
 		out = append(out, c)
 	}
 	kept := o.removed[:0]
@@ -1302,7 +1292,7 @@ func (o *Orchestrator) Snapshot() []Machine {
 		kept = append(kept, m)
 		c := *m
 		c.Uptime = append([]Span(nil), m.Uptime...)
-		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize], m.Labels[provider.LabelMarket])
+		c.PricePerHour = o.priceLocked(m.Provider, m.Labels[provider.LabelSize])
 		out = append(out, c)
 	}
 	o.removed = kept
@@ -1310,15 +1300,10 @@ func (o *Orchestrator) Snapshot() []Machine {
 	return out
 }
 
-// priceLocked returns the hourly price of a pool size (0: unknown). A
-// machine of a spot size that fell back to on-demand capacity (market)
-// costs the on-demand price.
-func (o *Orchestrator) priceLocked(prov, size, market string) float64 {
+// priceLocked returns the hourly price of a pool size (0: unknown).
+func (o *Orchestrator) priceLocked(prov, size string) float64 {
 	for _, sz := range o.cfg.Sizes {
 		if sz.Name == size && (sz.Provider == prov || sz.Provider == "") {
-			if sz.Spot && market == provider.MarketOnDemand && sz.OnDemandPrice > 0 {
-				return sz.OnDemandPrice
-			}
 			return sz.PricePerHour
 		}
 	}

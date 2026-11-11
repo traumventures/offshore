@@ -77,7 +77,6 @@ type Event struct {
 	Provider string               `json:"provider,omitempty"`
 	Size     string               `json:"size,omitempty"`
 	Price    float64              `json:"price_per_hour,omitempty"`
-	Spot     bool                 `json:"spot,omitempty"`
 	Capacity *scheduler.Resources `json:"capacity,omitempty"`
 	State    string               `json:"state,omitempty"` // MachineState: new provider state
 	// LatencyMs is the provider call duration of a machine action.

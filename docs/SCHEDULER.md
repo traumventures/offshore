@@ -32,19 +32,10 @@ can be tested and simulated without machines.
   empty running machine is stopped to make room for a larger one when the
   pool is at its limit. Unknown prices (0) prefer the size absorbing the
   most demand, then the smaller one.
-- **Spot and architecture**: spot sizes count with their expected price
-  (`price_per_hour × (1 − spot_discount)`), so they win when cheaper per
-  unit, and at equal cost a spot size wins over an on-demand one. Machines
-  are only created from sizes of the environment's architecture (the
-  repository's `resources.arch`; unknown environments are amd64), and a
-  task no size of its architecture can hold is rejected. A machine with an
-  interruption notice (`Machine.Interrupted`, reported by its server)
-  drains, is never undrained or counted as capacity, and stops as soon as
-  it is empty, even inside the warm pool; the demand creates capacity
-  elsewhere. A rebalance recommendation only marks a machine `AtRisk`: it
-  keeps serving, but placement prefers other machines at equal fit
-  (rebalance recommendations often come without an interruption, and
-  draining on them would make spot machines useless in busy pools).
+- **Architecture**: machines are only created from sizes of the
+  environment's architecture (the repository's `resources.arch`; unknown
+  environments are amd64), and a task no size of its architecture can hold
+  is rejected.
 - **Consolidation**: when the machines of an environment are reserved below
   `consolidate_below` (default 0.5) and the others stay below
   `consolidate_target` (default 0.75) after taking its share, the least
@@ -167,7 +158,7 @@ seconds, wall time, OOM, warm build cache, sccache counters). Machine events
 record the pool (`machine_create`, `machine_ready`, `machine_start`,
 `machine_stop`, `machine_destroy`, `machine_drain`, `machine_undrain` and
 `machine_state` for changes observed from the provider, e.g. a machine that
-stopped itself when idle) with provider, size, price, capacity, spot flag
+stopped itself when idle) with provider, size, price, capacity
 and provider latency. In remote mode the daemon already reports usage on
 release, so the control plane's log covers every client.
 

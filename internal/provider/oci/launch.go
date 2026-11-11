@@ -3,7 +3,6 @@ package oci
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
@@ -12,43 +11,13 @@ import (
 	"github.com/traumventures/cloudsourced/internal/provider"
 )
 
-// attempt is one way to launch a machine: a shape, preemptible or not.
-type attempt struct {
-	shape string
-	spot  bool // preemptible capacity
-}
-
-func (a attempt) market() string {
-	if a.spot {
-		return provider.MarketSpot
-	}
-	return provider.MarketOnDemand
-}
-
-func (a attempt) String() string { return a.shape + " (" + a.market() + ")" }
-
-// launchPlan lists the attempts for a machine in order: every shape as a
-// preemptible instance, then (spot fallback) every shape on regular
-// capacity, as on aws-ec2.
-func launchPlan(spec provider.MachineSpec) []attempt {
-	var out []attempt
-	if spec.Spot {
-		for _, s := range shapes(spec) {
-			out = append(out, attempt{shape: s, spot: true})
-		}
-		if !spec.SpotFallback {
-			return out
-		}
-	}
-	for _, s := range shapes(spec) {
-		out = append(out, attempt{shape: s})
-	}
-	return out
-}
+// launchPlan lists the shapes to try for a machine, in order, as on
+// aws-ec2: any capacity error moves on to the next shape.
+func launchPlan(spec provider.MachineSpec) []string { return shapes(spec) }
 
 // capacityError reports whether a LaunchInstance error means "no capacity
 // for this shape right now" (or none allowed by the service limits), so
-// another attempt may work.
+// another shape may work.
 func capacityError(err error) bool {
 	se, ok := common.IsServiceError(err)
 	if !ok {
@@ -68,46 +37,31 @@ func capacityError(err error) bool {
 	return false
 }
 
-// applyAttempt sets the shape and capacity type of a launch request.
-// Preemptible instances terminate on preemption (OCI offers no stop
-// action for them); their boot volume goes with them.
-func applyAttempt(d *core.LaunchInstanceDetails, a attempt, spec provider.MachineSpec) {
-	d.Shape = common.String(a.shape)
-	d.ShapeConfig = shapeConfig(a.shape, spec.CPU, spec.Memory)
-	d.PreemptibleInstanceConfig = nil
-	if a.spot {
-		d.PreemptibleInstanceConfig = &core.PreemptibleInstanceConfigDetails{
-			PreemptionAction: core.TerminatePreemptionAction{PreserveBootVolume: common.Bool(false)},
-		}
-	}
-	tags := make(map[string]string, len(d.FreeformTags)+2)
-	for k, v := range d.FreeformTags {
-		tags[k] = v
-	}
-	setLabel(tags, provider.LabelMarket, a.market())
-	setLabel(tags, provider.LabelSpot, strconv.FormatBool(a.spot))
-	d.FreeformTags = tags
+// applyShape sets the shape of a launch request.
+func applyShape(d *core.LaunchInstanceDetails, shape string, spec provider.MachineSpec) {
+	d.Shape = common.String(shape)
+	d.ShapeConfig = shapeConfig(shape, spec.CPU, spec.Memory)
 }
 
 type launchFunc func(ctx context.Context, req core.LaunchInstanceRequest) (core.LaunchInstanceResponse, error)
 
-// launch runs the attempts of a machine in order until one gets capacity.
+// launch runs the shapes of a machine in order until one gets capacity.
 // Errors other than capacity errors end the launch at once. failed lists
-// the capacity errors of earlier attempts.
-func launch(ctx context.Context, run launchFunc, base core.LaunchInstanceDetails, spec provider.MachineSpec) (out core.Instance, a attempt, failed []string, err error) {
-	for _, a := range launchPlan(spec) {
+// the capacity errors of earlier shapes.
+func launch(ctx context.Context, run launchFunc, base core.LaunchInstanceDetails, spec provider.MachineSpec) (out core.Instance, shape string, failed []string, err error) {
+	for _, s := range launchPlan(spec) {
 		d := base
-		applyAttempt(&d, a, spec)
+		applyShape(&d, s, spec)
 		resp, err := run(ctx, core.LaunchInstanceRequest{LaunchInstanceDetails: d})
 		if err == nil {
-			return resp.Instance, a, failed, nil
+			return resp.Instance, s, failed, nil
 		}
 		if !capacityError(err) {
-			return core.Instance{}, a, failed, fmt.Errorf("oci: launch instance %s: %w", a, err)
+			return core.Instance{}, s, failed, fmt.Errorf("oci: launch instance %s: %w", s, err)
 		}
-		failed = append(failed, fmt.Sprintf("%s: %s", a, apiError(err)))
+		failed = append(failed, fmt.Sprintf("%s: %s", s, apiError(err)))
 	}
-	return core.Instance{}, attempt{}, failed, fmt.Errorf("oci: no capacity for size %s (%s)", spec.Size, strings.Join(failed, "; "))
+	return core.Instance{}, "", failed, fmt.Errorf("oci: no capacity for size %s (%s)", spec.Size, strings.Join(failed, "; "))
 }
 
 func apiError(err error) string {

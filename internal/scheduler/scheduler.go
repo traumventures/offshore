@@ -40,21 +40,13 @@ type Size struct {
 	Provider     string    `json:"provider"` // provider instance that creates it
 	Name         string    `json:"name"`
 	Capacity     Resources `json:"capacity"`
-	PricePerHour float64   `json:"price_per_hour"` // expected price (spot: after the discount); 0 when unknown
+	PricePerHour float64   `json:"price_per_hour"` // 0 when unknown
 	// Arch is the machine architecture ("amd64", "arm64"; empty: amd64).
 	// Machines are only created for environments of their architecture.
 	Arch string `json:"arch,omitempty"`
-	// Spot sizes are cheaper but can be interrupted; at equal cost the
-	// policy prefers them.
-	Spot bool `json:"spot,omitempty"`
-	// OnDemandPrice is the price of a spot size's machines that fell back
-	// to on-demand capacity (0: PricePerHour).
-	OnDemandPrice float64 `json:"on_demand_price,omitempty"`
-	// InstanceTypes and SpotFallback are passed to the provider: machine
-	// types providing this size, in order, and whether a spot size may
-	// launch on-demand when no spot capacity is available.
+	// InstanceTypes are passed to the provider: machine types providing
+	// this size, tried in order on capacity errors.
 	InstanceTypes []string `json:"instance_types,omitempty"`
-	SpotFallback  bool     `json:"spot_fallback,omitempty"`
 }
 
 // ArchOf returns a size's architecture (amd64 when unset).
@@ -94,20 +86,12 @@ type Pressure struct {
 
 // Machine is the scheduler's view of one machine.
 type Machine struct {
-	ID       string
-	Provider string
-	EnvHash  string
-	Size     string
-	State    State
-	Draining bool // no new sessions; stop when empty
-	// Interrupted machines are being taken away (spot interruption or
-	// rebalance notice): they drain and are never undrained, started or
-	// counted as capacity again.
-	Interrupted bool
-	// AtRisk machines got a rebalance recommendation (spot): an
-	// interruption is more likely, so new sessions go elsewhere when
-	// another machine fits equally.
-	AtRisk    bool
+	ID        string
+	Provider  string
+	EnvHash   string
+	Size      string
+	State     State
+	Draining  bool      // no new sessions; stop when empty
 	Capacity  Resources // physical capacity
 	Reserved  Resources // sum of reservations of sessions and pending leases
 	Used      Resources // measured usage (best effort)
