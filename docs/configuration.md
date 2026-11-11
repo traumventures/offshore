@@ -204,6 +204,7 @@ See the [AWS guide](guides/aws.md) for IAM, quotas and costs.
 | `allow_cidrs` | embedded: the orchestrator's public IP (checkip.amazonaws.com), added to the existing rules; shared control plane: required | CIDRs of the clients that may reach machines (UDP 7443). An explicit list is authoritative: UDP 7443 rules for other sources are revoked. `["0.0.0.0/0"]` admits any client (sessions still need a lease token) |
 | `subnet` | default VPC | subnet of the machines |
 | `disk_gb` | 100 | gp3 root volume |
+| `disk_iops`, `disk_throughput` | 6000, 500 (MiB/s) | provisioned gp3 performance of the root volume (3000..80000 IOPS, at most 500 per GiB; 125..2000 MiB/s, at most IOPS/4). gp3's baseline (3000/125) saturates with concurrent builds: cargo's writes, the slot hasher, page-ins and writeback share the volume (~$0.05/h per machine for the defaults) |
 | `docker_command` | `["docker"]` | builds and pushes environment images |
 | `ami`, `ami_arm64` | newest Amazon Linux 2023 | AMI override per architecture |
 | `binary`, `binary_amd64`, `binary_arm64` | this executable, `offshore-linux-<arch>` next to it | worker binaries uploaded for the machines |
@@ -225,6 +226,7 @@ See the [OCI guide](guides/oci.md).
 | `repository`, `registry` | `offshore-env`, the region's OCIR | environment image repository |
 | `iam` | `true` | create the dynamic group and policy; `false` when the API user may not |
 | `disk_gb` | 100 (minimum 50) | boot volume |
+| `disk_vpus` | 20 | boot volume performance units per GB (10 balanced, 20 higher performance, 30..120 ultra high); throughput grows with VPUs and size (20 VPUs: 600 KB/s per GB, 120 MB/s at 200 GB), so a larger `disk_gb` is also faster |
 | `docker_command` | `["docker"]` | |
 | `binary`, `binary_amd64`, `binary_arm64` | as aws-ec2 | |
 

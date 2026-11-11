@@ -329,6 +329,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 
 	var ptmx *os.File
 	var stdin io.WriteCloser
+	units := &unitScanner{}
 	outDone := make(chan struct{})
 	if req.TTY != nil {
 		ptmx, err = pty.StartWithSize(cmd, &pty.Winsize{Rows: req.TTY.Rows, Cols: req.TTY.Cols})
@@ -342,6 +343,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 			for {
 				n, err := ptmx.Read(buf)
 				if n > 0 {
+					units.Write(buf[:n])
 					pc.Write(proto.TStdout, buf[:n])
 				}
 				if err != nil {
@@ -352,7 +354,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	} else {
 		cmd.SysProcAttr.Setpgid = true
 		cmd.Stdout = frameWriter{pc, proto.TStdout}
-		cmd.Stderr = frameWriter{pc, proto.TStderr}
+		cmd.Stderr = teeWriter{frameWriter{pc, proto.TStderr}, units}
 		stdin, err = cmd.StdinPipe()
 		if err != nil {
 			return prepErr(err)
@@ -442,6 +444,7 @@ loop:
 	exit.Usage.PeakMemory, exit.Usage.CPUSeconds = s.cg.usage(cgDir)
 	exit.Usage.CPUStall, exit.Usage.MemoryStall = s.cg.stall(cgDir)
 	exit.Usage.Warm = warm
+	exit.Usage.Units, exit.Usage.UnitsSample, exit.Usage.DirtyReasons = units.result()
 	reads, readBytes, tracked := s.cfs.sessionEnded(slot, req.RepoID)
 	if !tracked {
 		reads = nil // the read index falls back to atime

@@ -489,6 +489,14 @@ type Usage struct {
 	ThrashSeconds float64 `json:"thrash_seconds,omitempty"`
 	// Provider ran the session (cold durations are learned per provider).
 	Provider string `json:"provider,omitempty"`
+	// Units are the build units the session's output reported building
+	// (cargo: "Compiling"/"Checking" lines; a no-op build has 0),
+	// UnitsSample the first of them; DirtyReasons counts cargo's
+	// fingerprint reasons (when CARGO_LOG enables
+	// cargo::core::compiler::fingerprint=info). Recorded, not learned.
+	Units        int            `json:"units,omitempty"`
+	UnitsSample  []string       `json:"units_sample,omitempty"`
+	DirtyReasons map[string]int `json:"dirty_reasons,omitempty"`
 }
 
 // Snapshot is a saved build slot of a repository in an object store.
