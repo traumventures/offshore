@@ -66,25 +66,24 @@ func init() {
 
 // EC2 is the aws-ec2 provider.
 type EC2 struct {
-	region     string
-	stack      string
-	allow      []string // CIDRs allowed to reach machines
-	diskGB     int32
-	amis       map[string]string // optional fixed AMI per architecture
-	docker     []string
-	binaries   map[string]string // server binary per architecture
-	subnet     string
-	cfg        aws.Config
-	ec2        *ec2.Client
-	ecr        *ecr.Client
-	s3         *s3.Client
-	cf         *cloudformation.Client
-	ssm        *ssm.Client
-	infraMu    sync.Mutex
-	infra      *infra
-	binMu      sync.Mutex
-	binKeys    map[string]string // architecture -> uploaded binary key
-	ingressSet bool
+	region   string
+	stack    string
+	ingress  provider.Ingress // allow_cidrs
+	diskGB   int32
+	amis     map[string]string // optional fixed AMI per architecture
+	docker   []string
+	binaries map[string]string // server binary per architecture
+	subnet   string
+	cfg      aws.Config
+	ec2      *ec2.Client
+	ecr      *ecr.Client
+	s3       *s3.Client
+	cf       *cloudformation.Client
+	ssm      *ssm.Client
+	infraMu  sync.Mutex
+	infra    *infra
+	binMu    sync.Mutex
+	binKeys  map[string]string // architecture -> uploaded binary key
 
 	builderOnce sync.Once
 	builder     *image.DockerBuilder
@@ -106,7 +105,11 @@ func open(opts map[string]any) (provider.Provider, error) {
 	if v := provider.String(opts, "stack", ""); v != "" {
 		e.stack = v
 	}
-	e.allow = provider.StringList(opts["allow_cidrs"])
+	ing, err := provider.ParseIngress("aws-ec2", opts)
+	if err != nil {
+		return nil, err
+	}
+	e.ingress = ing
 	e.amis[archAMD64] = provider.String(opts, "ami", "")
 	e.amis[archARM64] = provider.String(opts, "ami_arm64", "")
 	e.subnet = provider.String(opts, "subnet", "")
@@ -292,34 +295,61 @@ func (e *EC2) failureReason(ctx context.Context, stackID *string) string {
 	return reason
 }
 
-// ensureIngress allows QUIC from the configured CIDRs; by default from the
-// public address of this orchestrator.
+// ensureIngress reconciles the QUIC ingress (UDP 7443) of the security
+// group. An explicit allow_cidrs is authoritative: rules for other sources
+// are revoked. Without it (embedded mode only) the orchestrator's public
+// address is added and other rules are kept.
 func (e *EC2) ensureIngress(ctx context.Context, sg string) error {
-	cidrs := e.allow
-	if len(cidrs) == 0 {
+	desired := e.ingress.CIDRs
+	if !e.ingress.Explicit() {
 		ip, err := publicIP(ctx)
 		if err != nil {
 			return fmt.Errorf("aws-ec2: detecting the public address for allow_cidrs: %w", err)
 		}
-		cidrs = []string{ip + "/32"}
+		desired = []string{ip + "/32"}
 	}
-	var ranges []ec2types.IpRange
-	for _, c := range cidrs {
-		ranges = append(ranges, ec2types.IpRange{CidrIp: aws.String(c), Description: aws.String("offshore clients")})
+	out, err := e.ec2.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupIds: []string{sg}})
+	if err != nil {
+		return fmt.Errorf("aws-ec2: security group %s: %w", sg, err)
 	}
-	for _, r := range ranges {
-		_, err := e.ec2.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
-			GroupId: aws.String(sg),
-			IpPermissions: []ec2types.IpPermission{{
-				IpProtocol: aws.String("udp"), FromPort: aws.Int32(serverPort), ToPort: aws.Int32(serverPort),
-				IpRanges: []ec2types.IpRange{r},
-			}},
-		})
+	var current []string
+	for _, g := range out.SecurityGroups {
+		current = append(current, quicSources(g.IpPermissions)...)
+	}
+	add, remove := provider.DiffCIDRs(current, desired, e.ingress.Explicit())
+	perm := func(c string) []ec2types.IpPermission {
+		return []ec2types.IpPermission{{
+			IpProtocol: aws.String("udp"), FromPort: aws.Int32(serverPort), ToPort: aws.Int32(serverPort),
+			IpRanges: []ec2types.IpRange{{CidrIp: aws.String(c), Description: aws.String("offshore clients")}},
+		}}
+	}
+	for _, c := range add {
+		_, err := e.ec2.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{GroupId: aws.String(sg), IpPermissions: perm(c)})
 		if err != nil && !strings.Contains(err.Error(), "InvalidPermission.Duplicate") {
-			return fmt.Errorf("aws-ec2: security group ingress %s: %w", aws.ToString(r.CidrIp), err)
+			return fmt.Errorf("aws-ec2: security group ingress %s: %w", c, err)
+		}
+	}
+	for _, c := range remove {
+		_, err := e.ec2.RevokeSecurityGroupIngress(ctx, &ec2.RevokeSecurityGroupIngressInput{GroupId: aws.String(sg), IpPermissions: perm(c)})
+		if err != nil && !strings.Contains(err.Error(), "InvalidPermission.NotFound") {
+			return fmt.Errorf("aws-ec2: revoking stale ingress %s: %w", c, err)
 		}
 	}
 	return nil
+}
+
+// quicSources returns the IPv4 sources of the UDP 7443 rules.
+func quicSources(perms []ec2types.IpPermission) []string {
+	var out []string
+	for _, p := range perms {
+		if aws.ToString(p.IpProtocol) != "udp" || aws.ToInt32(p.FromPort) != serverPort || aws.ToInt32(p.ToPort) != serverPort {
+			continue
+		}
+		for _, r := range p.IpRanges {
+			out = append(out, aws.ToString(r.CidrIp))
+		}
+	}
+	return out
 }
 
 func publicIP(ctx context.Context) (string, error) {

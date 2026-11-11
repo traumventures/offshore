@@ -260,7 +260,7 @@ func serveControlplane(o *cpOptions) error {
 		tc.ClientAuth = tls.RequireAndVerifyClientCert
 		log.Info("client auth: mutual TLS", "ca", o.ClientCA)
 	}
-	local, err := pool.NewLocal(u, dir, log)
+	local, err := pool.NewControlPlane(u, dir, log)
 	if err != nil {
 		return err
 	}
@@ -758,7 +758,7 @@ func readCPState(dir string) (*cpState, error) {
 }
 
 func controlplaneInfo(args []string) error {
-	fs := flag.NewFlagSet("controlplane info", flag.ContinueOnError)
+	fs := newFlagSet("controlplane info")
 	stateDir := fs.String("state-dir", "", "state directory of the control plane")
 	showKey := fs.Bool("show-key", false, "also print the API key itself")
 	if err := fs.Parse(args); err != nil {
@@ -801,7 +801,7 @@ func controlplaneInfo(args []string) error {
 }
 
 func controlplaneClientConfig(args []string) error {
-	fs := flag.NewFlagSet("controlplane client-config", flag.ContinueOnError)
+	fs := newFlagSet("controlplane client-config")
 	stateDir := fs.String("state-dir", "", "state directory of a control plane on this host (default URL and fingerprint)")
 	url := fs.String("url", "", "control plane URL for clients (default: the first URL of the state)")
 	fp := fs.String("fingerprint", "", "certificate fingerprint to pin (default: from the state, else fetched from --url unless it is publicly trusted)")
@@ -886,7 +886,7 @@ func probeCertificate(rawURL string) (string, bool, error) {
 // controlplaneHealth checks /healthz of the control plane of a state
 // directory (container health check).
 func controlplaneHealth(args []string) error {
-	fs := flag.NewFlagSet("controlplane health", flag.ContinueOnError)
+	fs := newFlagSet("controlplane health")
 	stateDir := fs.String("state-dir", "", "state directory of the control plane")
 	if err := fs.Parse(args); err != nil {
 		return err

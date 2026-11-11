@@ -45,7 +45,7 @@ func prewarmLog() string { return filepath.Join(daemon.StateDir(), "prewarm.log"
 
 // prewarmCmd runs `offshore prewarm [--wait] [--force] [--quiet]`.
 func prewarmCmd(args []string) error {
-	fs := flag.NewFlagSet("prewarm", flag.ContinueOnError)
+	fs := newFlagSet("prewarm")
 	wait := fs.Bool("wait", false, "run in the foreground and wait until the environment is warm")
 	force := fs.Bool("force", false, "prewarm even if the environment looks warm")
 	quiet := fs.Bool("quiet", false, "print nothing (for git hooks); outside a offshore repository do nothing")

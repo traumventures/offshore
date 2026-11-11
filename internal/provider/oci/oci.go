@@ -65,7 +65,7 @@ type OCI struct {
 	compartment string // name below the tenancy root, or an OCID
 	ad          string // availability domain (name or suffix; default: the first)
 	subnet      string // optional existing subnet
-	allow       []string
+	ingress     provider.Ingress
 	images      map[string]string // optional fixed image OCID per architecture
 	diskGB      int64
 	docker      []string
@@ -125,7 +125,11 @@ func open(opts map[string]any) (provider.Provider, error) {
 	}
 	o.ad = provider.String(opts, "availability_domain", "")
 	o.subnet = provider.String(opts, "subnet", "")
-	o.allow = provider.StringList(opts["allow_cidrs"])
+	ing, err := provider.ParseIngress("oci", opts)
+	if err != nil {
+		return nil, err
+	}
+	o.ingress = ing
 	o.images[archAMD64] = provider.String(opts, "image", "")
 	o.images[archARM64] = provider.String(opts, "image_arm64", "")
 	if v := provider.String(opts, "bucket", ""); v != "" {

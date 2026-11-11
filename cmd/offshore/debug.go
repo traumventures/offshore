@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,7 +58,7 @@ func debugCmd(args []string) error {
 		fmt.Printf("offset %s, now %s\n", off, time.Now().Add(off).UTC().Format(time.RFC3339))
 		return nil
 	case "token":
-		fs := flag.NewFlagSet("debug token", flag.ContinueOnError)
+		fs := newFlagSet("debug token")
 		dir := fs.String("state-dir", "", "orchestrator state directory holding master.key")
 		scope := fs.String("scope", string(auth.ScopeProbe), "probe, session or admin")
 		machine := fs.String("machine", "", "machine id")

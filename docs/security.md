@@ -80,8 +80,12 @@ before it starts sessions.
   policy that only allows instance and volume management in the
   compartment, objects of the one bucket and reading repositories. See the
   [OCI guide](guides/oci.md).
-* Machines accept QUIC only from `allow_cidrs` (default: the orchestrator's
-  own public IP); there is no SSH ingress on cloud machines.
+* Machines accept QUIC only from `allow_cidrs`; there is no SSH ingress on
+  cloud machines. A shared control plane refuses to start a cloud provider
+  without an explicit `allow_cidrs` (the clients do not connect from the
+  control plane's address); the list is authoritative and stale UDP 7443
+  rules are revoked. Only an embedded orchestrator defaults to its own
+  public IP, which is added without removing other rules.
 
 ## Telemetry and logs
 

@@ -58,7 +58,7 @@ func window(since, until string) (from, to time.Time, err error) {
 }
 
 func reportCmd(args []string) error {
-	fs := flag.NewFlagSet("report", flag.ContinueOnError)
+	fs := newFlagSet("report")
 	since := fs.String("since", "7d", "start of the window: 7d, 36h, 2026-11-01 or RFC 3339")
 	until := fs.String("until", "", "end of the window (default now; same formats, durations count back from now)")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
@@ -98,7 +98,7 @@ func reportCmd(args []string) error {
 }
 
 func simExport(args []string) error {
-	fs := flag.NewFlagSet("sim export", flag.ContinueOnError)
+	fs := newFlagSet("sim export")
 	since := fs.String("since", "7d", "start of the window: 7d, 36h, 2026-11-01 or RFC 3339")
 	until := fs.String("until", "", "end of the window (default now)")
 	out := fs.String("o", "trace.json", "output trace (JSON)")

@@ -162,22 +162,33 @@ func TestToMachine(t *testing.T) {
 func TestSecurityRules(t *testing.T) {
 	ssh := core.IngressSecurityRule{Protocol: common.String("6"), Source: common.String(allCIDR)}
 	sl := core.SecurityList{IngressSecurityRules: []core.IngressSecurityRule{ssh}}
-	in, out, changed := securityRules(sl, []string{"198.51.100.1/32"}, true)
+	in, out, changed := securityRules(sl, []string{"198.51.100.1/32"}, true, true)
 	if !changed || len(in) != 2 || *in[0].Protocol != "1" || !isQUIC(in[1], "198.51.100.1/32") || len(out) != 1 {
 		t.Fatalf("fresh: %+v %+v", in, out)
 	}
 	sl = core.SecurityList{IngressSecurityRules: in, EgressSecurityRules: out}
-	if _, _, changed := securityRules(sl, []string{"198.51.100.1/32"}, false); changed {
+	if _, _, changed := securityRules(sl, []string{"198.51.100.1/32"}, false, true); changed {
 		t.Error("rules already present: no update")
 	}
-	in, _, changed = securityRules(sl, []string{"198.51.100.1/32", "192.0.2.0/24"}, false)
+	in, _, changed = securityRules(sl, []string{"198.51.100.1/32", "192.0.2.0/24"}, false, false)
 	if !changed || len(in) != 3 {
 		t.Errorf("added cidr: %+v", in)
 	}
 	// An existing (user's) security list keeps its other rules.
-	in, _, _ = securityRules(core.SecurityList{IngressSecurityRules: []core.IngressSecurityRule{ssh}}, []string{"192.0.2.0/24"}, false)
+	in, _, _ = securityRules(core.SecurityList{IngressSecurityRules: []core.IngressSecurityRule{ssh}}, []string{"192.0.2.0/24"}, false, true)
 	if len(in) != 2 || *in[0].Protocol != "6" {
 		t.Errorf("kept rules: %+v", in)
+	}
+	// Authoritative: a stale QUIC source is removed, other rules stay.
+	stale := core.SecurityList{IngressSecurityRules: []core.IngressSecurityRule{ssh, quicRule("203.0.113.9/32"), quicRule("192.0.2.0/24")}}
+	in, _, changed = securityRules(stale, []string{"192.0.2.0/24"}, false, true)
+	if !changed || len(in) != 2 || *in[0].Protocol != "6" || !isQUIC(in[1], "192.0.2.0/24") {
+		t.Errorf("stale rule removed: %+v", in)
+	}
+	// Additive (own address, embedded mode): stale sources are kept.
+	in, _, _ = securityRules(stale, []string{"198.51.100.7/32"}, false, false)
+	if len(in) != 4 {
+		t.Errorf("additive keeps rules: %+v", in)
 	}
 }
 

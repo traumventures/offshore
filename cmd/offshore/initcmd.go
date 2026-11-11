@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -18,7 +17,7 @@ import (
 // detected from the repository's Cargo workspace, CI workflows and
 // Dockerfiles.
 func initCmd(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	fs := newFlagSet("init")
 	write := fs.Bool("write", false, "write "+config.RepoFileName+" instead of printing it")
 	force := fs.Bool("force", false, "with --write: replace an existing "+config.RepoFileName)
 	if err := fs.Parse(args); err != nil {

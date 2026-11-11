@@ -192,7 +192,7 @@ func (o *OCI) ensureNetwork(ctx context.Context, compartment string) (string, er
 		if len(sr.SecurityListIds) == 0 {
 			return "", fmt.Errorf("oci: subnet %s has no security list", o.subnet)
 		}
-		return o.subnet, o.ensureIngress(ctx, sr.SecurityListIds[0], cidrs, false)
+		return o.subnet, o.ensureIngress(ctx, sr.SecurityListIds[0], cidrs, false, o.ingress.Explicit())
 	}
 	var vcn core.Vcn
 	created := false
@@ -228,7 +228,7 @@ func (o *OCI) ensureNetwork(ctx context.Context, compartment string) (string, er
 	if err := o.ensureGateway(ctx, compartment, vcn); err != nil {
 		return "", err
 	}
-	if err := o.ensureIngress(ctx, *vcn.DefaultSecurityListId, cidrs, created); err != nil {
+	if err := o.ensureIngress(ctx, *vcn.DefaultSecurityListId, cidrs, created, o.ingress.Explicit()); err != nil {
 		return "", err
 	}
 	sr, err := o.network.ListSubnets(ctx, core.ListSubnetsRequest{CompartmentId: common.String(compartment), VcnId: vcn.Id, DisplayName: common.String(project)})
@@ -298,13 +298,14 @@ func (o *OCI) ensureGateway(ctx context.Context, compartment string, vcn core.Vc
 // ensureIngress makes a security list admit QUIC from cidrs. On a security
 // list of a VCN created here (fresh), the default rules (SSH from
 // anywhere, ICMP) are replaced: machines take only QUIC, plus the ICMP
-// messages path MTU discovery needs. Egress is open.
-func (o *OCI) ensureIngress(ctx context.Context, list string, cidrs []string, fresh bool) error {
+// messages path MTU discovery needs. Egress is open. With an authoritative
+// (explicit) allow_cidrs, QUIC rules for other sources are removed.
+func (o *OCI) ensureIngress(ctx context.Context, list string, cidrs []string, fresh, authoritative bool) error {
 	sl, err := o.network.GetSecurityList(ctx, core.GetSecurityListRequest{SecurityListId: common.String(list)})
 	if err != nil {
 		return fmt.Errorf("oci: security list: %w", err)
 	}
-	ingress, egress, changed := securityRules(sl.SecurityList, cidrs, fresh)
+	ingress, egress, changed := securityRules(sl.SecurityList, cidrs, fresh, authoritative)
 	if !changed {
 		return nil
 	}
@@ -325,14 +326,23 @@ func quicRule(cidr string) core.IngressSecurityRule {
 }
 
 func isQUIC(r core.IngressSecurityRule, cidr string) bool {
-	return r.Protocol != nil && *r.Protocol == "17" && r.Source != nil && *r.Source == cidr &&
+	return quicRuleSource(r) == cidr
+}
+
+// quicRuleSource returns the source of a QUIC (UDP 7443) rule, or "".
+func quicRuleSource(r core.IngressSecurityRule) string {
+	if r.Protocol != nil && *r.Protocol == "17" && r.Source != nil &&
 		r.UdpOptions != nil && r.UdpOptions.DestinationPortRange != nil &&
-		r.UdpOptions.DestinationPortRange.Min != nil && *r.UdpOptions.DestinationPortRange.Min == serverPort
+		r.UdpOptions.DestinationPortRange.Min != nil && *r.UdpOptions.DestinationPortRange.Min == serverPort {
+		return *r.Source
+	}
+	return ""
 }
 
 // securityRules returns the rules a security list should have and whether
-// they differ from its current ones.
-func securityRules(sl core.SecurityList, cidrs []string, fresh bool) (in []core.IngressSecurityRule, out []core.EgressSecurityRule, changed bool) {
+// they differ from its current ones. authoritative removes QUIC rules for
+// sources not in cidrs.
+func securityRules(sl core.SecurityList, cidrs []string, fresh, authoritative bool) (in []core.IngressSecurityRule, out []core.EgressSecurityRule, changed bool) {
 	in = slices.Clone(sl.IngressSecurityRules)
 	out = slices.Clone(sl.EgressSecurityRules)
 	if fresh {
@@ -342,6 +352,14 @@ func securityRules(sl core.SecurityList, cidrs []string, fresh bool) (in []core.
 			IcmpOptions: &core.IcmpOptions{Type: common.Int(3), Code: common.Int(4)},
 		}}
 		changed = true
+	}
+	if authoritative {
+		n := len(in)
+		in = slices.DeleteFunc(in, func(r core.IngressSecurityRule) bool {
+			src := quicRuleSource(r)
+			return src != "" && !slices.Contains(cidrs, src)
+		})
+		changed = changed || len(in) != n
 	}
 	for _, c := range cidrs {
 		if !slices.ContainsFunc(in, func(r core.IngressSecurityRule) bool { return isQUIC(r, c) }) {
@@ -360,8 +378,8 @@ func securityRules(sl core.SecurityList, cidrs []string, fresh bool) (in []core.
 }
 
 func (o *OCI) allowCIDRs(ctx context.Context) ([]string, error) {
-	if len(o.allow) > 0 {
-		return o.allow, nil
+	if o.ingress.Explicit() {
+		return o.ingress.CIDRs, nil
 	}
 	ip, err := publicIP(ctx)
 	if err != nil {
