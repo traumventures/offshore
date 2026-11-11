@@ -53,6 +53,10 @@ type Size struct {
 	// InstanceTypes are passed to the provider: machine types providing
 	// this size, tried in order on capacity errors.
 	InstanceTypes []string `json:"instance_types,omitempty"`
+	// DiskBudget is how much of the cache disk machines of this size may
+	// fill before pruning ("90%" or "150G"; empty = the worker's default),
+	// passed to the worker.
+	DiskBudget string `json:"disk_budget,omitempty"`
 }
 
 // ArchOf returns a size's architecture (amd64 when unset).
@@ -111,6 +115,9 @@ type Machine struct {
 	// the size of each repository's build slot (repo id -> bytes).
 	DiskTotal int64
 	DiskUsed  int64
+	// DiskBudget is the bytes the worker lets the disk fill before pruning
+	// (0 = unknown: diskFull of DiskTotal).
+	DiskBudget int64
 	SlotBytes map[string]int64
 	IdleSince time.Time // zero while sessions run
 	CreatedAt time.Time

@@ -363,14 +363,20 @@ func slotBudget(m slotMeta) int64 {
 
 // diskBudget returns the bytes the cache disk may use (0: unknown).
 func (s *Worker) diskBudget() int64 {
-	if s.cfg.DiskBudget > 0 {
-		return s.cfg.DiskBudget
-	}
 	total, _, ok := fsUsage(s.cfg.CacheDir)
 	if !ok {
-		return 0
+		total = 0
 	}
-	return total * 9 / 10
+	return budgetBytes(s.cfg.DiskBudget, total)
+}
+
+// budgetBytes applies a budget (zero: config.DefaultDiskBudget) to a file
+// system of total bytes (0: unknown).
+func budgetBytes(b config.DiskBudget, total int64) int64 {
+	if b == (config.DiskBudget{}) {
+		b, _ = config.ParseDiskBudget(config.DefaultDiskBudget)
+	}
+	return b.Of(total)
 }
 
 // enforceBudgets prunes a released slot over its budget and then the

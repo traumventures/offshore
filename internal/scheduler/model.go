@@ -42,7 +42,8 @@ const (
 	// DefaultDiskPrice is the price of one GB of machine disk per hour
 	// (~0.08 per GB-month, EBS gp3).
 	DefaultDiskPrice = 0.08 / 730
-	// diskFull is the fraction of the disk the scheduler fills at most.
+	// diskFull is the fraction of the disk the scheduler fills at most
+	// when the worker does not report its budget.
 	diskFull = 0.9
 )
 
@@ -268,7 +269,11 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) (r
 	if m.DiskTotal <= 0 || need <= 0 {
 		return rc, true
 	}
-	free := int64(diskFull*float64(m.DiskTotal)) - m.DiskUsed
+	limit := m.DiskBudget
+	if limit <= 0 {
+		limit = int64(diskFull * float64(m.DiskTotal))
+	}
+	free := limit - m.DiskUsed
 	if need <= free {
 		return rc, true
 	}

@@ -84,3 +84,23 @@ func TestRequestTTLDefaults(t *testing.T) {
 		t.Fatalf("persisted deps TTL %v", p.DepsTTL)
 	}
 }
+
+// The size's disk budget reaches the worker; the worker's reported budget
+// reaches the scheduler's machine view.
+func TestDiskBudgetToWorker(t *testing.T) {
+	f := newFake()
+	o := newTestOrch(t, f, func(c *Config) {
+		for i := range c.Sizes {
+			c.Sizes[i].DiskBudget = "80%"
+		}
+	})
+	if _, err := o.Acquire(context.Background(), req("r"), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	got := f.specs[0].Env["OFFSHORE_DISK_BUDGET"]
+	f.mu.Unlock()
+	if got != "80%" {
+		t.Fatalf("OFFSHORE_DISK_BUDGET = %q, want 80%%", got)
+	}
+}

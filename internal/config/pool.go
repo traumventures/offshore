@@ -79,6 +79,10 @@ type Scheduler struct {
 	Egress []Egress `toml:"egress"`
 	// DiskPricePerGBMonth prices extra disk of a resize (default 0.08).
 	DiskPricePerGBMonth float64 `toml:"disk_price_per_gb_month"`
+	// DiskBudget is how much of a machine's cache disk build slots and
+	// machine caches may fill before the worker prunes: "90%" (default) of
+	// the file system or a size ("150G"). Sizes may override it.
+	DiskBudget string `toml:"disk_budget"`
 	Estimator           string  `toml:"estimator"` // "history" (learn from runs) | "static" (repo config)
 	CPUOvercommit       float64 `toml:"cpu_overcommit"`
 	MemoryOvercommit    float64 `toml:"memory_overcommit"`
@@ -173,6 +177,8 @@ type Size struct {
 	// Disk is the machine disk ("200G"; empty = unknown). The scheduler
 	// plans build slots against it (resize, prune, move).
 	Disk string `toml:"disk,omitempty"`
+	// DiskBudget overrides [scheduler] disk_budget for machines of this size.
+	DiskBudget string `toml:"disk_budget,omitempty"`
 	// Arch is the machine architecture, "amd64" (default) or "arm64".
 	// Environments are built per architecture; a repository pins its
 	// architecture with resources.arch, and only sizes of that
@@ -428,6 +434,11 @@ func (u *PoolConfig) Validate() error {
 			}
 		}
 	}
+	if f.DiskBudget != "" {
+		if _, err := ParseDiskBudget(f.DiskBudget); err != nil {
+			errs = append(errs, "scheduler.disk_budget: "+err.Error())
+		}
+	}
 	if f.ConsolidateTarget < 0 || f.ConsolidateTarget > 1 {
 		errs = append(errs, "pool.consolidate_target: must be between 0 and 1")
 	}
@@ -458,6 +469,11 @@ func (u *PoolConfig) Validate() error {
 		if sz.Disk != "" {
 			if _, err := ParseBytes(sz.Disk); err != nil {
 				errs = append(errs, fmt.Sprintf("pool.size[%d].disk: %v", i, err))
+			}
+		}
+		if sz.DiskBudget != "" {
+			if _, err := ParseDiskBudget(sz.DiskBudget); err != nil {
+				errs = append(errs, fmt.Sprintf("pool.size[%d].disk_budget: %v", i, err))
 			}
 		}
 		if _, ok := u.Providers[sz.Provider]; !ok {

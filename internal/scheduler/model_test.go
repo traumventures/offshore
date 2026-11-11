@@ -52,6 +52,12 @@ func TestPlaceFullDiskPrunesOrResizes(t *testing.T) {
 	if pl.Kind != Assign || pl.Slot.Kind != SlotPrune || pl.Slot.Bytes != 20*gib-(90-88)*gib {
 		t.Fatalf("want prune of the missing bytes, got %+v", pl)
 	}
+	// The worker's reported budget replaces the default 90%.
+	mb := m
+	mb.DiskBudget = 99 * gib
+	if pl := pol.Place(Pool{Now: now, Sizes: priced, Machines: []Machine{mb}}, tk); pl.Slot.Kind != SlotPrune || pl.Slot.Bytes != 20*gib-(99-88)*gib {
+		t.Fatalf("budget 99G: want prune of 9G, got %+v", pl)
+	}
 	// Nothing to prune: resize when the provider can.
 	m.SlotBytes = nil
 	if pl := pol.Place(Pool{Now: now, Sizes: priced, Machines: []Machine{m}}, tk); pl.Kind != Wait {

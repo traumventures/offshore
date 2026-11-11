@@ -90,7 +90,8 @@ func (s *Worker) diskStatus() *proto.DiskStatus {
 	if !ok {
 		return nil
 	}
-	d := &proto.DiskStatus{Total: total, Used: used, MachineCaches: s.machineCacheBytes.Load(), SlotBytes: map[string]int64{}}
+	d := &proto.DiskStatus{Total: total, Used: used, MachineCaches: s.machineCacheBytes.Load(), SlotBytes: map[string]int64{},
+		Budget: budgetBytes(s.cfg.DiskBudget, total)}
 	for _, r := range s.slots.list() {
 		d.Slots += r.Meta.Bytes
 		d.SlotBytes[r.Repo] += r.Meta.Bytes

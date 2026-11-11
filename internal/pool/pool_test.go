@@ -198,3 +198,13 @@ func TestConfigMapsSchedulingKeys(t *testing.T) {
 		t.Fatalf("%+v", p)
 	}
 }
+
+func TestConfigDiskBudget(t *testing.T) {
+	u := &config.PoolConfig{Pool: config.Pool{MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s",
+		Scheduler: config.Scheduler{DiskBudget: "85%"},
+		Sizes: []config.Size{{Provider: "p", Name: "a", CPU: 2, Memory: "4G"}, {Provider: "p", Name: "b", CPU: 2, Memory: "4G", DiskBudget: "150G"}}}}
+	s := Config(u).Sizes
+	if s[0].DiskBudget != "85%" || s[1].DiskBudget != "150G" {
+		t.Fatalf("budgets %q %q", s[0].DiskBudget, s[1].DiskBudget)
+	}
+}

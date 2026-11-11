@@ -74,8 +74,9 @@ machines restore them instead of running the install.
 
 Slots are pruned against two budgets: per slot the sum of the slot caches'
 `max_size` (unset: unbounded) after every session, per machine
-90 % of the cache file system (the worker variable
-`OFFSHORE_DISK_BUDGET`, in bytes, overrides it; no pool key sets it). The worker tracks reads per
+`[scheduler] disk_budget` of the cache file system (default `"90%"`, or a
+size like `"150G"`; a size's own `disk_budget` overrides it). The
+orchestrator passes it to each new machine. The worker tracks reads per
 session: after a run it records for every slot file the last run (session
 number of the slot) that read or wrote it, using the atime (relatime
 re-armed by resetting the atime of read files to their mtime; on `noatime`
