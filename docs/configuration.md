@@ -120,8 +120,11 @@ back to the store
 ### Providers
 
 Every `[providers.NAME]` table is one provider instance; `type` selects the
-backend, `max_machines` caps the machines of this provider, every other key
-is a provider option. Without `[providers]` the pool has one local-docker
+backend, `max_machines` caps the machines of this provider (unset: only
+the pool's `max_machines` applies; `0` disables the provider: no machine is
+created or started there, its machines take no new sessions and are
+destroyed once their running sessions end), every other key is a provider
+option. Without `[providers]` the pool has one local-docker
 provider `local` (command `$OFFSHORE_DOCKER`, default `docker`).
 
 Sizes are `[[providers.NAME.size]]` tables:

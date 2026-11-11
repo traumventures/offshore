@@ -249,3 +249,57 @@ func TestAccountLimitDisablesProvider(t *testing.T) {
 		t.Fatal("config change does not re-enable")
 	}
 }
+
+// A disabled provider (max_machines = 0) gets no machine, whatever the
+// policy plans.
+func TestDisabledProviderGetsNoMachine(t *testing.T) {
+	f := newFake()
+	o := newTestOrch(t, f, func(c *Config) {
+		c.Policy.ProviderMax = map[string]int{"fake": 0}
+		c.QueueTimeout = 300 * time.Millisecond
+	})
+	if _, err := o.Acquire(context.Background(), req("r"), io.Discard); err == nil {
+		t.Fatal("lease on a disabled provider")
+	}
+	o.mu.Lock()
+	acts := o.planLocked()
+	o.mu.Unlock()
+	if f.created != 0 || len(acts) != 0 {
+		t.Fatalf("created %d, planned %+v", f.created, acts)
+	}
+}
+
+// Existing machines of a disabled provider take no sessions; idle ones
+// are destroyed by reconcile, busy ones after their sessions.
+func TestDisabledProviderDrainsExistingMachines(t *testing.T) {
+	old := reconcileWait
+	reconcileWait = 2 * time.Second
+	defer func() { reconcileWait = old }()
+	f := newFake()
+	o := newTestOrch(t, f, nil)
+	l, err := o.Acquire(context.Background(), req("r1"), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.startSession(l.MachineID, l.ID, 1, gib)
+	// A second idle machine of the provider.
+	o2 := newTestOrch(t, f, func(c *Config) {
+		c.Policy.ProviderMax = map[string]int{"fake": 0}
+		c.QueueTimeout = 300 * time.Millisecond
+	})
+	f.mu.Lock()
+	f.machines["idle"] = &provider.Machine{ID: "idle", State: provider.Stopped, EnvHash: req("r").EnvHash}
+	f.mu.Unlock()
+	if _, err := o2.Acquire(context.Background(), req("r2"), io.Discard); err == nil {
+		t.Fatal("lease on a disabled provider's machine")
+	}
+	if err := o2.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	destroyed := append([]string(nil), f.destroyed...)
+	f.mu.Unlock()
+	if len(destroyed) != 1 || destroyed[0] != "idle" {
+		t.Fatalf("destroyed %v, want only the idle machine (the busy one finishes first)", destroyed)
+	}
+}
