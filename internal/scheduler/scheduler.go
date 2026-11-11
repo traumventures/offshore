@@ -118,10 +118,10 @@ type Machine struct {
 	// DiskBudget is the bytes the worker lets the disk fill before pruning
 	// (0 = unknown: diskFull of DiskTotal).
 	DiskBudget int64
-	SlotBytes map[string]int64
-	IdleSince time.Time // zero while sessions run
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	SlotBytes  map[string]int64
+	IdleSince  time.Time // zero while sessions run
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
 	// ReadyAt is when a starting machine is expected to accept sessions
 	// (zero: unknown, the provider's boot or start latency applies).
 	ReadyAt time.Time

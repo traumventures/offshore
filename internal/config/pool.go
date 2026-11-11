@@ -82,15 +82,15 @@ type Scheduler struct {
 	// DiskBudget is how much of a machine's cache disk build slots and
 	// machine caches may fill before the worker prunes: "90%" (default) of
 	// the file system or a size ("150G"). Sizes may override it.
-	DiskBudget string `toml:"disk_budget"`
-	Estimator           string  `toml:"estimator"` // "history" (learn from runs) | "static" (repo config)
-	CPUOvercommit       float64 `toml:"cpu_overcommit"`
-	MemoryOvercommit    float64 `toml:"memory_overcommit"`
-	MaxCPUPressure      float64 `toml:"max_cpu_pressure"`    // 0..1, PSI some avg10; 0 = off
-	MaxMemoryPressure   float64 `toml:"max_memory_pressure"` // 0..1; 0 = off
-	SoftLimit           float64 `toml:"soft_limit"`          // memory.high = need * soft_limit; 0 = off
-	Swap                bool    `toml:"swap"`
-	LimitJobs           bool    `toml:"limit_jobs"` // pass reserved CPU as build parallelism
+	DiskBudget        string  `toml:"disk_budget"`
+	Estimator         string  `toml:"estimator"` // "history" (learn from runs) | "static" (repo config)
+	CPUOvercommit     float64 `toml:"cpu_overcommit"`
+	MemoryOvercommit  float64 `toml:"memory_overcommit"`
+	MaxCPUPressure    float64 `toml:"max_cpu_pressure"`    // 0..1, PSI some avg10; 0 = off
+	MaxMemoryPressure float64 `toml:"max_memory_pressure"` // 0..1; 0 = off
+	SoftLimit         float64 `toml:"soft_limit"`          // memory.high = need * soft_limit; 0 = off
+	Swap              bool    `toml:"swap"`
+	LimitJobs         bool    `toml:"limit_jobs"` // pass reserved CPU as build parallelism
 	// ConsolidateBelow drains the least loaded machine of an environment
 	// when its machines are reserved below this fraction (default 0.5,
 	// 0 = off). ConsolidateTarget caps the share the others may reach.
