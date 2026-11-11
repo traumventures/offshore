@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/traumventures/offshore/internal/events"
@@ -18,6 +19,12 @@ const (
 	maxCooldown  = 30 * time.Minute
 	// startBackoff blocks starting a stopped machine after a failed start.
 	startBackoff = 2 * time.Minute
+	// Any other failed create (environment image, provider error, machine
+	// not becoming ready) blocks creates of the environment on the
+	// provider for a backoff that doubles per further failure up to
+	// maxCreateBackoff and resets on the next ready machine.
+	baseCreateBackoff = 10 * time.Second
+	maxCreateBackoff  = 10 * time.Minute
 	// slotTimeout bounds slot preparation (prune, resize, restore) before
 	// a lease is handed out; on failure the session runs cold.
 	slotTimeout = 5 * time.Minute
@@ -29,6 +36,14 @@ type provHealth struct {
 	cooldown time.Duration
 	boot     time.Duration // learned create -> ready latency (EWMA)
 	start    time.Duration // learned start -> ready latency (EWMA)
+}
+
+// createBackoff blocks creates of an environment on a provider after a
+// failed create.
+type createBackoff struct {
+	until time.Time
+	delay time.Duration
+	err   string
 }
 
 // leaseInfo is the expected end of a lease's session.
@@ -74,6 +89,33 @@ func (o *Orchestrator) providerReadyLocked(prov string, d time.Duration, started
 	o.health[prov] = h
 }
 
+// createFailedLocked records a failed create of env on prov and returns
+// the backoff before the next create there.
+func (o *Orchestrator) createFailedLocked(env, prov string, err error) time.Duration {
+	key := scheduler.CreateKey(env, prov)
+	b := o.createFail[key]
+	if b.delay <= 0 {
+		b.delay = baseCreateBackoff
+	} else {
+		b.delay = min(b.delay*2, maxCreateBackoff)
+	}
+	b.until, b.err = o.now().Add(b.delay), err.Error()
+	o.createFail[key] = b
+	return b.delay
+}
+
+// createBlockedLocked returns the active create backoffs of env.
+func (o *Orchestrator) createBlockedLocked(env string) []createBackoff {
+	var out []createBackoff
+	now := o.now()
+	for key, b := range o.createFail {
+		if strings.HasPrefix(key, env+"/") && now.Before(b.until) {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
 // schedPoolLocked adds the cost model's inputs to a pool snapshot:
 // provider latencies and health, snapshots, expected releases, readiness,
 // disk resizability and the demand forecast.
@@ -82,6 +124,10 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 	for name := range o.provs {
 		h := o.health[name]
 		f.Providers[name] = scheduler.ProviderState{Boot: h.boot, Start: h.start, Down: h.down, Store: name}
+	}
+	f.CreateBlocked = map[string]time.Time{}
+	for key, b := range o.createFail {
+		f.CreateBlocked[key] = b.until
 	}
 	f.Snapshots = map[string][]scheduler.Snapshot{}
 	for repo, rl := range o.heads {
@@ -132,10 +178,20 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 	o.forecast.Apply(f)
 }
 
-// planLocked runs the policy's Plan on the current pool.
+// planLocked runs the policy's Plan on the current pool. Creates the
+// pool does not allow (provider cooldown, create backoff) are dropped
+// whatever the policy decided: a failing create must never spin.
 func (o *Orchestrator) planLocked() []scheduler.Action {
 	f := o.poolLocked(o.now())
 	acts := o.policy.Plan(f)
+	kept := acts[:0]
+	for _, a := range acts {
+		if a.Kind == scheduler.Create && !f.CanCreate(a.EnvHash, a.Size.Provider) {
+			continue
+		}
+		kept = append(kept, a)
+	}
+	acts = kept
 	o.forecast.Note(f, acts)
 	return acts
 }

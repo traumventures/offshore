@@ -340,7 +340,8 @@ type Orchestrator struct {
 	layersGC       time.Time
 	volumes        map[string]*VolumeState // managed cache volumes by id
 	localDisksOnce sync.Once
-	startBlocked   map[string]time.Time // machine -> no start before
+	startBlocked   map[string]time.Time     // machine -> no start before
+	createFail     map[string]createBackoff // env/provider -> create backoff
 	forecast       *scheduler.Forecast
 
 	// Slots performs build slot operations on workers (prune, snapshot
@@ -381,7 +382,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
 		ProbeFunc: Probe, Clock: clk,
 		health: map[string]provHealth{}, leases: map[string]leaseInfo{}, heads: map[string]*repoLayers{},
-		volumes: map[string]*VolumeState{}, startBlocked: map[string]time.Time{}, forecast: scheduler.NewForecast(),
+		volumes: map[string]*VolumeState{}, startBlocked: map[string]time.Time{}, createFail: map[string]createBackoff{}, forecast: scheduler.NewForecast(),
 		meter: medium.NewMeter(),
 	}
 	medium.SetMeasured(o.meter.Profile)
@@ -1081,6 +1082,15 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			}
 		}
 		o.execute(context.WithoutCancel(ctx), acts, false)
+		o.mu.Lock()
+		blocked := o.createBlockedLocked(task.EnvHash)
+		o.mu.Unlock()
+		for _, b := range blocked {
+			if msg := "create failed: " + b.err; !announced[msg] {
+				fmt.Fprintf(log, "offshore: creating a machine failed: %s (retrying in %s)\n", b.err, b.delay)
+				announced[msg] = true
+			}
+		}
 		if len(acts) == 0 && !announced["wait"] {
 			fmt.Fprintf(log, "offshore: waiting for machine capacity\n")
 			announced["wait"] = true
@@ -1260,15 +1270,29 @@ func (o *Orchestrator) createMachine(ctx context.Context, id, envHash, image str
 	start := time.Now()
 	err := o.CreateMachine(ctx, id, envHash, image, size)
 	o.mu.Lock()
-	if err != nil {
+	if err == nil {
+		o.providerReadyLocked(size.Provider, time.Since(start), false)
+		delete(o.createFail, scheduler.CreateKey(envHash, size.Provider))
+		o.mu.Unlock()
+		return
+	}
+	var delay time.Duration
+	if errors.Is(err, provider.ErrCapacity) {
 		o.providerFailedLocked(size.Provider, err)
 	} else {
-		o.providerReadyLocked(size.Provider, time.Since(start), false)
+		delay = o.createFailedLocked(envHash, size.Provider, err)
+	}
+	// The machine_create event opened a machine record: close it when no
+	// machine exists, so failed creates do not accumulate as running
+	// machines (one event per failure).
+	if _, exists := o.machines[id]; !exists {
+		ev := o.machineEventLocked(events.MachineDestroy, id)
+		ev.Env, ev.Provider, ev.Size = envHash, size.Provider, size.Name
+		ev.Reason, ev.Error = "create_failed", err.Error()
+		o.obs.log.Append(ev)
 	}
 	o.mu.Unlock()
-	if err != nil {
-		o.log.Error("create machine", "id", id, "err", err)
-	}
+	o.log.Error("create machine", "id", id, "provider", size.Provider, "err", err, "retry_in", delay)
 }
 
 // paramsLocked returns the repository parameters for a new machine of an
