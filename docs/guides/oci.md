@@ -118,7 +118,9 @@ request per granted prefix** (`cache/<pool>/repos/<repo id>/`,
 `cache/<pool>/envs/<env hash>/`): read and write for objects below that
 prefix only, listing denied, valid for twice the grant time (24 h), and
 reused while it outlives a new grant. Expired requests are deleted once an
-hour. Pre-authenticated requests cannot delete objects; offshore never needs
+hour. A new request takes a few seconds to reach every Object
+Storage frontend (some answer `404 BucketNotFound` meanwhile); workers retry
+such answers for about ten seconds. Pre-authenticated requests cannot delete objects; offshore never needs
 to (expired objects are not served and the lifecycle rule removes them).
 OCI's S3 compatibility API is not used: it needs a user's customer secret
 keys, which cannot be scoped.

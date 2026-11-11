@@ -99,3 +99,32 @@ func TestURLStore(t *testing.T) {
 		t.Fatalf("foreign scope: %v", err)
 	}
 }
+
+// A fresh pre-authenticated request is unknown to some frontends for a few
+// seconds (404 BucketNotFound): requests are retried.
+func TestURLStorePropagation(t *testing.T) {
+	var mu sync.Mutex
+	fails := 2
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if fails > 0 {
+			fails--
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"code":"BucketNotFound","message":"Either the bucket does not exist or you are not authorized"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	st := newURLStore(srv.URL+"/p/t/o/x/", 0)
+	if err := st.Put(context.Background(), "k", strings.NewReader("data"), 4); err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != 3 || bodies[2] != "data" {
+		t.Fatalf("attempts %q", bodies)
+	}
+}

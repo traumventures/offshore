@@ -26,6 +26,9 @@ var _ provider.StoreGranter = (*OCI)(nil)
 // credentials: OCI's S3 compatible API would need a user's customer secret
 // keys, which cannot be scoped.
 func (o *OCI) NativeGranter(ctx context.Context, name, pool string) (store.Granter, bool, error) {
+	if err := o.init(); err != nil {
+		return nil, false, err
+	}
 	in, err := o.ensureInfra(ctx)
 	if err != nil {
 		return nil, false, err
