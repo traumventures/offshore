@@ -25,6 +25,7 @@ import (
 	"github.com/traumventures/offshore/internal/auth"
 	"github.com/traumventures/offshore/internal/cas"
 	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/hostfs"
 	"github.com/traumventures/offshore/internal/labels"
 	"github.com/traumventures/offshore/internal/machine"
 	"github.com/traumventures/offshore/internal/manifest"
@@ -75,6 +76,11 @@ type Config struct {
 	SourceCache config.DiskBudget
 	// SlotMode forces the build slot mount mode (tests; nil: probe).
 	SlotMode *fsMode
+	// CacheFSPolicy is what the cache medium must be (machine.CacheFSEnv:
+	// hostfs.RequireXFS on cloud machines; empty: anything, warned).
+	CacheFSPolicy hostfs.Policy
+	// FSProbes inspect the cache medium (tests; zero: the real calls).
+	FSProbes hostfs.Probes
 }
 
 func (c Config) now() time.Time {
@@ -169,6 +175,9 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("server: OFFSHORE_PROVISION: %w", err)
 		}
 	}
+	if c.CacheFSPolicy, err = hostfs.ParsePolicy(os.Getenv(machine.CacheFSEnv)); err != nil {
+		return c, fmt.Errorf("server: %s: %w", machine.CacheFSEnv, err)
+	}
 	return c, nil
 }
 
@@ -193,9 +202,12 @@ type Worker struct {
 	rcStore    *tieredStore // its store
 	grants     grantCache   // latest store grants per repository
 	cfs        *cacheFS     // build slot file system (anyfs)
-	maintMu    sync.Mutex   // one slot maintenance pass at a time
-	headMu     sync.Mutex
-	headTimers map[string]*time.Timer // repo -> armed head flush deadline
+	// cacheMedium is the cache directory's file system checked against
+	// the policy at startup.
+	cacheMedium *proto.CacheFSStatus
+	maintMu     sync.Mutex // one slot maintenance pass at a time
+	headMu      sync.Mutex
+	headTimers  map[string]*time.Timer // repo -> armed head flush deadline
 	// tiers counts the cache file system's transfers per medium
 	// (anyfs.RecordTransfers), reported in the status.
 	tiers medium.Recorder
@@ -232,6 +244,7 @@ func New(cfg Config, log *slog.Logger) (*Worker, error) {
 	if err != nil {
 		return nil, err
 	}
+	cacheMed := checkCacheMedium(cfg.CacheDir, cfg.CacheFSPolicy, cfg.FSProbes, log)
 	store, err := cas.New(filepath.Join(cfg.CacheDir, "cas"))
 	if err != nil {
 		return nil, err
@@ -265,7 +278,7 @@ func New(cfg Config, log *slog.Logger) (*Worker, error) {
 	s := &Worker{
 		cfg: cfg, log: log, store: store, slots: sl, self: self, env: env,
 		mounts: map[string]*anyfs.WritableFS{}, srcFiles: srcFiles, sources: map[string]*quic.Conn{},
-		sessions: map[string]*session{}, idleSince: cfg.now(), lastProbe: cfg.now(),
+		sessions: map[string]*session{}, idleSince: cfg.now(), lastProbe: cfg.now(), cacheMedium: cacheMed,
 	}
 	if s.cfs, err = newWorkerCacheFS(cfg, log, anyfs.RecordTransfers(&s.tiers, nil)); err != nil {
 		return nil, err
@@ -591,6 +604,7 @@ func (s *Worker) statusOnly() proto.Status {
 	}
 	st.WarmRepos = s.slots.warmRepos(s.cfg.BuildTTL)
 	st.Disk = s.diskStatus()
+	st.CacheFS = s.cacheMedium
 	if s.cfs != nil {
 		st.Heads = s.cfs.flushedHeads()
 		st.VM = s.cfs.vm()

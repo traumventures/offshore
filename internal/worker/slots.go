@@ -3,13 +3,15 @@ package worker
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/traumventures/offshore/internal/clock"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/traumventures/offshore/internal/clock"
+	"github.com/traumventures/offshore/internal/hostfs"
 )
 
 // slots manages warm, worker-local build directories per repository.
@@ -119,11 +121,9 @@ func readMeta(slot string) (slotMeta, error) {
 
 func writeMeta(slot string, m slotMeta) error {
 	b, _ := json.Marshal(m)
-	tmp := filepath.Join(slot, "meta.json.tmp")
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(slot, "meta.json"))
+	// The slot's head is the commit point of a build slot: durable before
+	// the layer it names is relied on.
+	return hostfs.WriteFileSync(filepath.Join(slot, "meta.json"), b, 0o644)
 }
 
 // lease returns an exclusive slot directory for repoID and whether it holds

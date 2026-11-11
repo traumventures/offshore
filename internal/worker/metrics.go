@@ -79,6 +79,20 @@ func newServerMetrics(s *Worker) *serverMetrics {
 				metrics.GaugeFamily("offshore_cache_thrashing", "1 while the working set exceeds the local capacity with refaults.", metrics.Sample{Value: thrash}),
 			)
 		}
+		if c := st.CacheFS; c != nil {
+			ok, reflink := 0.0, 0.0
+			if c.OK {
+				ok = 1
+			}
+			if c.Reflink {
+				reflink = 1
+			}
+			fams = append(fams,
+				metrics.GaugeFamily("offshore_worker_cache_fs_ok", "1 when the cache medium meets the machine's file system policy (cloud: xfs with reflink); 0: degraded.",
+					metrics.Sample{Labels: metrics.L("type", c.Type, "policy", c.Policy), Value: ok}),
+				metrics.GaugeFamily("offshore_worker_cache_fs_reflink", "1 when the cache medium supports reflinks.", metrics.Sample{Value: reflink}),
+			)
+		}
 		return fams
 	})
 	return m

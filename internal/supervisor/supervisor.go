@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/traumventures/offshore/internal/hostfs"
 	"github.com/traumventures/offshore/internal/machine"
 )
 
@@ -53,6 +54,31 @@ func (s Spec) Expires() time.Time {
 
 // IdleStopAfter returns the idle stop duration.
 func (s Spec) IdleStopAfter() time.Duration { return time.Duration(s.IdleStop) * time.Second }
+
+// CacheFSPolicy is the cache medium policy of the machine: cloud
+// machines (whose medium the supervisor formats) require xfs with
+// reflink; static hosts belong to the user and may run any file system.
+func (s Spec) CacheFSPolicy() hostfs.Policy {
+	if s.Provider == StaticProvider {
+		return hostfs.Lenient
+	}
+	return hostfs.RequireXFS
+}
+
+// WorkerLayout is the layout with the worker's cache medium policy in
+// its environment (machine.CacheFSEnv).
+func (s Spec) WorkerLayout() machine.Layout {
+	l := s.Layout
+	env := make(map[string]string, len(l.Env)+1)
+	for k, v := range l.Env {
+		env[k] = v
+	}
+	if p := s.CacheFSPolicy(); p != hostfs.Lenient {
+		env[machine.CacheFSEnv] = string(p)
+	}
+	l.Env = env
+	return l
+}
 
 // LoadSpec reads a spec file.
 func LoadSpec(path string) (Spec, error) {
@@ -163,6 +189,8 @@ type Supervisor struct {
 	Host     HostRunner
 	BootID   func() string
 	SysBlock string
+	// FSProbes inspect the mounted cache medium (zero: the real calls).
+	FSProbes hostfs.Probes
 
 	touched time.Time // last touchCache
 }
@@ -234,23 +262,7 @@ func (a *Supervisor) Secrets(ctx context.Context) (map[string]string, error) {
 }
 
 func writeFileSync(path string, b []byte, mode os.FileMode) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return hostfs.WriteFileSync(path, b, mode)
 }
 
 func (a *Supervisor) exists(ctx context.Context, kind, name string) bool {
@@ -276,7 +288,7 @@ func (a *Supervisor) waitDocker(ctx context.Context) error {
 // starts all of them in boot order. The secrets are only needed (and
 // fetched) when the machine container is created.
 func (a *Supervisor) EnsureContainers(ctx context.Context) error {
-	l := a.Spec.Layout
+	l := a.Spec.WorkerLayout()
 	if l.StatusDir != "" {
 		if err := os.MkdirAll(l.StatusDir, 0o755); err != nil {
 			return err

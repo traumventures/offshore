@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/traumventures/offshore/internal/hostfs"
 )
 
 // CacheSpec says where the machine's cache directory lives on the host
@@ -134,9 +136,19 @@ func (a *Supervisor) PrepareCache(ctx context.Context) error {
 		}
 	} else if !mounted {
 		out, _ := run(ctx, "blkid", "-o", "value", "-s", "TYPE", dev)
-		if strings.TrimSpace(string(out)) == "" {
+		switch typ := strings.TrimSpace(string(out)); typ {
+		case "":
 			a.Log.Info("formatting the new cache volume", "device", dev)
 			if err := a.mkfs(ctx, dev, false); err != nil {
+				return err
+			}
+		case "xfs":
+		default:
+			// The volume is a cache: a foreign file system (ext4 from a
+			// manual format) would break snapshot capture, so it is
+			// replaced.
+			a.Log.Warn("cache volume is not xfs, reformatting it (its content is lost)", "device", dev, "type", typ)
+			if err := a.mkfs(ctx, dev, true); err != nil {
 				return err
 			}
 		}
@@ -152,8 +164,23 @@ func (a *Supervisor) PrepareCache(ctx context.Context) error {
 		}
 		a.GrowCache(ctx)
 	}
+	a.checkCacheFS(dir)
 	a.Spec.Layout.CacheVolume = dir
 	return nil
+}
+
+// checkCacheFS logs when the mounted cache medium is not xfs with
+// reflink (an old xfs formatted without it, a mount that failed over to
+// another device); the worker reports the same in its status.
+func (a *Supervisor) checkCacheFS(dir string) {
+	info, err := a.FSProbes.Inspect(dir, true)
+	if err != nil {
+		a.Log.Warn("cache medium not inspectable", "dir", dir, "err", err)
+		return
+	}
+	for _, p := range hostfs.Check(info, a.Spec.CacheFSPolicy()).Problems {
+		a.Log.Error("cache medium breaks the machine policy", "dir", dir, "problem", p)
+	}
 }
 
 func (a *Supervisor) mkfs(ctx context.Context, dev string, force bool) error {

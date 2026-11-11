@@ -10,6 +10,9 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/traumventures/offshore/internal/anyfs"
+	"github.com/traumventures/offshore/internal/hostfs"
 )
 
 // Session snapshots: every session of an overlay slot is committed, even
@@ -115,16 +118,39 @@ func (s *Worker) snapshotSlot(ctx context.Context, slot, repo string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "plan.json.tmp"), b, 0o644); err != nil {
-		os.RemoveAll(dir)
-		return err
-	}
-	if err := os.Rename(filepath.Join(dir, "plan.json.tmp"), filepath.Join(dir, "plan.json")); err != nil {
+	// plan.json marks the capture complete: fsynced with its directory.
+	// The captured files are not fsynced one by one (hundreds per session);
+	// recovery checks their sizes against the plan instead (capturedIntact).
+	if err := hostfs.WriteFileSync(filepath.Join(dir, "plan.json"), b, 0o644); err != nil {
 		os.RemoveAll(dir)
 		return err
 	}
 	s.log.Debug("build slot session captured", "slot", slot, "files", len(p.Changes.Read), "seconds", time.Since(begin).Seconds())
 	return nil
+}
+
+// capturedIntact reports whether every captured file has the size the
+// plan recorded. A crash after plan.json was made durable but before the
+// captured data reached the disk (delayed allocation on ext4 or xfs) leaves
+// such files short or empty; committing them would publish wrong content.
+func capturedIntact(cs *anyfs.ChangeSet, files string) bool {
+	size := make(map[string]int64, len(cs.Nodes))
+	for _, n := range cs.Nodes {
+		if n.Kind == anyfs.File {
+			size[n.Path] = n.Size
+		}
+	}
+	for _, p := range cs.Read {
+		want, ok := size[p]
+		if !ok {
+			continue
+		}
+		fi, err := os.Lstat(filepath.Join(files, filepath.FromSlash(p)))
+		if err != nil || fi.Size() != want {
+			return false
+		}
+	}
+	return true
 }
 
 // pendingSnapshots returns a slot's snapshot directories, oldest first.
@@ -170,8 +196,9 @@ func (s *Worker) commitPendingLocked(ctx context.Context, slot, repo string) (co
 		if head == "" {
 			head = m.Base
 		}
-		if err != nil || p.Changes == nil || p.Head != head {
-			s.log.Warn("dropping build slot snapshot", "slot", slot, "snapshot", filepath.Base(dir), "complete", err == nil)
+		intact := err == nil && p.Changes != nil && capturedIntact(p.Changes, filepath.Join(dir, "files"))
+		if err != nil || p.Changes == nil || p.Head != head || !intact {
+			s.log.Warn("dropping build slot snapshot", "slot", slot, "snapshot", filepath.Base(dir), "complete", err == nil, "intact", intact)
 			os.RemoveAll(dir)
 			continue
 		}

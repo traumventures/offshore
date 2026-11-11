@@ -393,3 +393,72 @@ func reflectPaths(a, b *Tree) bool {
 	}
 	return true
 }
+
+// A crash can leave page files empty or short (renamed into place
+// without fsync): reopening drops them instead of serving or writing
+// back wrong content.
+func TestLocalDropsTornPagesAtOpen(t *testing.T) {
+	dir := t.TempDir()
+	l := openLocal(t, dir, 1<<20)
+	clean, ck := page(100)
+	dirty, dk := page(200)
+	short, sk := page(300)
+	empty, ek := []byte{}, KeyOf(nil)
+	for _, p := range []struct {
+		b []byte
+		k Key
+		s State
+	}{{clean, ck, Clean}, {dirty, dk, Dirty}, {short, sk, Dirty}, {empty, ek, Clean}} {
+		if err := l.Put(ctx, p.k, p.b, p.s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Simulate the crash: the clean page lost its data, the short dirty
+	// page half of it.
+	for k, n := range map[Key]int64{ck: 0, sk: 10} {
+		os.Chmod(l.path(k), 0o644) // page files are read-only
+		if err := os.Truncate(l.path(k), n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l2 := openLocal(t, dir, 1<<20)
+	for k, want := range map[Key]bool{ck: false, dk: true, sk: false, ek: true} {
+		if got := l2.Has(ctx, k); got != want {
+			t.Errorf("page %s present %v, want %v", k.Short(), got, want)
+		}
+	}
+	var keys []Key
+	for _, d := range l2.DirtyKeys() {
+		keys = append(keys, d.Key)
+	}
+	if len(keys) != 1 || keys[0] != dk {
+		t.Fatalf("dirty after reopen: %v", keys)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "dirty.journal")); err != nil || bytes.Contains(b, []byte(sk)) {
+		t.Fatalf("journal keeps the torn page: %q %v", b, err)
+	}
+}
+
+func TestOpenFilesDropsEmptiedFiles(t *testing.T) {
+	dir := t.TempDir()
+	f, err := OpenFiles(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, emptied := string(KeyOf([]byte("full"))), string(KeyOf([]byte("lost")))
+	for d, b := range map[string][]byte{full: []byte("full"), emptied: nil, emptyDigest: nil} {
+		os.MkdirAll(filepath.Dir(f.path(d)), 0o755)
+		os.WriteFile(f.path(d), b, 0o444)
+	}
+	f2, err := OpenFiles(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, d := range f2.Digests() {
+		got[d] = true
+	}
+	if !got[full] || !got[emptyDigest] || got[emptied] || len(got) != 2 {
+		t.Fatalf("digests after reopen: %v", got)
+	}
+}

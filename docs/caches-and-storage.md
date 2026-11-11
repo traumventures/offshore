@@ -431,6 +431,44 @@ A commit from the live slot commits pending snapshots first; on start the
 worker commits complete snapshots and drops incomplete ones before
 serving: a crash loses at most the session that was running.
 
+**Cache medium file system.** The cache medium must be **xfs with
+reflink** on cloud machines (aws-ec2, oci): snapshot capture clones
+changed files, committed upper files are cloned into the file cache.
+The supervisor formats instance-store disks and new volumes so
+(`mkfs.xfs -m reflink=1`), reformats an attached cache volume that holds
+another file system (it is a cache; the content is lost) and logs an
+error when the mounted medium is xfs without reflink. It passes the
+policy to the worker (`OFFSHORE_CACHE_FS=xfs-reflink`). At start the
+worker inspects the file system of its cache directory (statfs type,
+refined by `/proc/self/mountinfo`, and a FICLONE probe;
+`internal/hostfs`). A cloud worker whose medium breaks the policy (a
+machine without cache disk whose root file system is ext4, e.g. an oci
+Ubuntu image) does not refuse to start: it serves degraded, logs an
+error and reports it in `Status.CacheFS` (`ok: false`, the problems)
+and in `offshore_worker_cache_fs_ok{type,policy} 0`. Degraded means
+session snapshots copy instead of cloning (above 256 MiB the idle
+commit takes the session). local-docker and static hosts accept any
+file system with a warning (`offshore doctor` checks Docker's data root
+for local-docker).
+
+**Crash consistency** does not depend on ext4's `auto_da_alloc` (which
+flushes a file renamed over another, and which `noauto_da_alloc` turns
+off) nor on xfs, which has no such heuristic: the commit points are
+fsynced. The slot metadata (`meta.json`, the head), the snapshot plan
+(`plan.json`, written after the captured files) and the dirty page
+journal are written to a temporary file, fsynced, renamed and the
+directory fsynced (`hostfs.WriteFileSync`). Data files (pages, captured
+files, materialized files) are renamed into place without fsync for
+speed; what a crash can leave of them is checked instead: at open a page
+file that is empty (but not the empty page) is dropped and dirty pages
+are verified against their content key (a clean page is fetched again, a
+torn dirty page is lost rather than written back wrong), empty
+materialized files are dropped, and a snapshot whose captured files do
+not have the sizes its plan recorded is dropped (the idle commit takes
+the slot). `noauto_da_alloc` therefore costs no correctness; doctor and
+the worker still warn about it because tools in sessions that replace
+files by rename without fsync lose that protection.
+
 **Concurrent sessions** of a repository get another overlay over the same
 committed head (no copy). A **rebase** (fresh upper over the new head; the
 committed upper files move into the file cache) runs on idle slots whose
