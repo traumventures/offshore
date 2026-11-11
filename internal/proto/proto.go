@@ -137,15 +137,12 @@ type Exec struct {
 	Grant scheduler.Grant `json:"grant"`
 	// MemoryOvercommit bounds the sum of memory reservations on the
 	// machine (server side safety net for the scheduler).
-	MemoryOvercommit float64  `json:"memory_overcommit"`
-	Build            []string `json:"build"`     // worker-local dirs relative to Repo
-	BuildTTL         string   `json:"build_ttl"` // e.g. "24h"
-	Deps             []string `json:"deps"`      // shared dependency cache paths
-	Eager            []string `json:"eager"`     // output globs relative to Repo
-	Lease            string   `json:"lease,omitempty"`
-	// CompilerCache enables a compiler cache in the session (repository
-	// [cache.compiler]); nil means off.
-	CompilerCache *CompilerCache `json:"compiler_cache,omitempty"`
+	MemoryOvercommit float64 `json:"memory_overcommit"`
+	// Caches are the repository's [cache.<name>] tables.
+	Caches  []Cache  `json:"caches,omitempty"`
+	SlotTTL string   `json:"slot_ttl"` // effective slot TTL, e.g. "24h"
+	Eager   []string `json:"eager"`    // output globs relative to Repo
+	Lease   string   `json:"lease,omitempty"`
 	// Linker is the repository's environment.linker ("", "mold", "lld").
 	Linker string `json:"linker,omitempty"`
 	// Toolchain relocates the image's Rust toolchain to the client's
@@ -160,13 +157,38 @@ type Exec struct {
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
-// CompilerCache is the session's compiler cache configuration.
-type CompilerCache struct {
-	Tool string `json:"tool"` // "sccache"
-	// TTLSeconds lowers the maximum age of reused entries (0 = cache limit).
-	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
-	// Incremental false sets CARGO_INCREMENTAL=0; nil keeps cargo's default.
-	Incremental *bool `json:"incremental,omitempty"`
+// Cache is a repository cache (config.Cache with parsed sizes).
+type Cache struct {
+	Name       string   `json:"name"`
+	Scope      string   `json:"scope"` // slot, machine, global
+	Paths      []string `json:"paths,omitempty"`
+	Digest     []string `json:"digest,omitempty"`
+	Install    string   `json:"install,omitempty"`
+	Tool       string   `json:"tool,omitempty"`
+	MaxBytes   int64    `json:"max_bytes,omitempty"`
+	Prune      string   `json:"prune,omitempty"`
+	TTLSeconds int64    `json:"ttl_seconds,omitempty"`
+}
+
+// SlotPaths returns the paths of the slot-scope caches.
+func (e Exec) SlotPaths() []string {
+	var out []string
+	for _, c := range e.Caches {
+		if c.Scope == "slot" {
+			out = append(out, c.Paths...)
+		}
+	}
+	return out
+}
+
+// GlobalCache returns the global cache of tool, if any.
+func (e Exec) GlobalCache(tool string) *Cache {
+	for i, c := range e.Caches {
+		if c.Scope == "global" && c.Tool == tool {
+			return &e.Caches[i]
+		}
+	}
+	return nil
 }
 
 // Toolchain holds the client's toolchain locations. Cargo hashes the
@@ -279,9 +301,34 @@ type Status struct {
 	// by the orchestrator).
 	DrainReason string   `json:"drain_reason,omitempty"`
 	WarmRepos   []string `json:"warm_repos,omitempty"` // repo IDs with unexpired build slots
+	// Disk is the machine disk usage (nil: not measured).
+	Disk *DiskStatus `json:"disk,omitempty"`
+	// Snapshots are build slot snapshots the server saved on its own (e.g.
+	// on drain or stop), so the orchestrator knows where they are.
+	Snapshots []SnapshotInfo `json:"snapshots,omitempty"`
 	// Metrics is the server's metrics snapshot; the orchestrator republishes
 	// it with machine labels (no extra port or scope on the machine).
 	Metrics []metrics.Family `json:"metrics,omitempty"`
+}
+
+// DiskStatus is a machine's disk usage in bytes.
+type DiskStatus struct {
+	Total         int64 `json:"total"`
+	Used          int64 `json:"used"`
+	Slots         int64 `json:"slots"`          // all build slots
+	MachineCaches int64 `json:"machine_caches"` // machine scope caches
+	// SlotBytes is the size of each repository's build slot (repo id ->
+	// bytes).
+	SlotBytes map[string]int64 `json:"slot_bytes,omitempty"`
+}
+
+// SnapshotInfo describes a saved build slot snapshot.
+type SnapshotInfo struct {
+	Repo     string `json:"repo"`
+	Store    string `json:"store"`
+	Provider string `json:"provider"`
+	Bytes    int64  `json:"bytes"`
+	At       int64  `json:"at"` // unix seconds
 }
 
 // Session is a running remote process.

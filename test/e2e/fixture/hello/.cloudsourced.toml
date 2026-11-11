@@ -28,13 +28,17 @@ respect_gitignore = true
 paths = ["vendor/**"]
 mode = "immutable"
 
-[cache.build]
+[cache.target]
+scope = "slot"
 paths = ["target"]
+prune = "rust"
 
-[cache.compiler]
+[cache.sccache]
+scope = "global"
 tool = "sccache"
 
 [cache.deps]
+scope = "machine"
 paths = ["$CARGO_HOME/registry", "$CARGO_HOME/git"]
 
 [tool.cargo]

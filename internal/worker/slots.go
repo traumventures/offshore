@@ -39,6 +39,9 @@ type slotMeta struct {
 	Created  int64 `json:"created"`       // unix seconds of the oldest contained data
 	LastUsed int64 `json:"last_used"`     // unix seconds
 	TTL      int64 `json:"ttl,omitempty"` // seconds; TTL of the last session (0 = machine TTL)
+	// Bytes is the slot size measured when the last session ended (or
+	// when it was cloned).
+	Bytes int64 `json:"bytes,omitempty"`
 }
 
 // expired reports whether the slot data is too old under the slot's TTL,
@@ -167,13 +170,55 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 }
 
 func (s *slots) release(slot string) {
+	s.releaseSized(slot, -1)
+}
+
+// releaseSized releases a slot and records its size (bytes < 0: keep).
+func (s *slots) releaseSized(slot string, bytes int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.leased, slot)
 	if m, err := readMeta(slot); err == nil {
 		m.LastUsed = s.now().Unix()
+		if bytes >= 0 {
+			m.Bytes = bytes
+		}
 		writeMeta(slot, m)
 	}
+}
+
+// size returns the recorded size of a slot, measuring it if unknown.
+func (s *slots) size(slot string) int64 {
+	m, err := readMeta(slot)
+	if err == nil && m.Bytes > 0 {
+		return m.Bytes
+	}
+	return treeSize(filepath.Join(slot, "data"))
+}
+
+// slotRef is a slot with its metadata.
+type slotRef struct {
+	Repo, Path string
+	Meta       slotMeta
+	Leased     bool
+}
+
+// list returns all slots with readable metadata.
+func (s *slots) list() []slotRef {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []slotRef
+	repos, _ := os.ReadDir(s.dir)
+	for _, r := range repos {
+		des, _ := os.ReadDir(filepath.Join(s.dir, r.Name()))
+		for _, de := range des {
+			p := filepath.Join(s.dir, r.Name(), de.Name())
+			if m, err := readMeta(p); err == nil {
+				out = append(out, slotRef{Repo: r.Name(), Path: p, Meta: m, Leased: s.leased[p]})
+			}
+		}
+	}
+	return out
 }
 
 // latest returns the most recently used unexpired slot of a repo; ttl is

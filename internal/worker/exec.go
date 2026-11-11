@@ -23,6 +23,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/quic-go/quic-go"
 	"github.com/traumventures/cloudsourced/internal/auth"
+	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/manifest"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/sandbox"
@@ -180,18 +181,20 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	defer unregister()
 
 	ttl := s.cfg.BuildTTL
-	if d, err := time.ParseDuration(req.BuildTTL); err == nil && d > 0 && d < ttl {
+	if d, err := time.ParseDuration(req.SlotTTL); err == nil && d > 0 && d < ttl {
 		ttl = d
 	}
 	slot, warm, err := s.slots.lease(req.RepoID, ttl)
 	if err != nil {
 		return prepErr(fmt.Errorf("build slot: %w", err))
 	}
-	defer s.slots.release(slot)
 	data := filepath.Join(slot, "data")
+	slotBefore := s.slots.size(slot)
+	slotAfter := int64(-1)
+	defer func() { s.slots.releaseSized(slot, slotAfter) }()
 
 	env := s.sessionEnv(req, se.id)
-	sccache := req.CompilerCache != nil && s.ccEndpoint != ""
+	sccache := req.GlobalCache(config.CacheToolSccache) != nil && s.ccEndpoint != ""
 	if sccache {
 		if err := os.MkdirAll(sccacheDir(se.id), 0o700); err != nil {
 			return prepErr(fmt.Errorf("compiler cache: %w", err))
@@ -200,18 +203,11 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	}
 	// Toolchain first: dependency caches ($CARGO_HOME/registry) nest in it.
 	binds := s.relocation(req).binds
-	for _, b := range req.Build {
-		b = filepath.Clean(b)
-		binds = append(binds, sandbox.Bind{Src: filepath.Join(data, b), Dst: filepath.Join(req.Repo, b)})
+	cb, err := s.cacheBinds(req, data, env)
+	if err != nil {
+		return prepErr(err)
 	}
-	for _, d := range req.Deps {
-		dst := expandPath(d, env)
-		if !filepath.IsAbs(dst) {
-			continue
-		}
-		src := filepath.Join(s.cfg.DepsDir, strings.ReplaceAll(strings.Trim(dst, "/"), "/", "__"))
-		binds = append(binds, sandbox.Bind{Src: src, Dst: dst})
-	}
+	binds = append(binds, cb...)
 	cgDir, err := s.cg.create(se.id, req.Grant)
 	if err != nil {
 		s.log.Warn("session cgroup", "err", err)
@@ -352,6 +348,8 @@ loop:
 	exit.Usage.PeakMemory, exit.Usage.CPUSeconds = s.cg.usage(cgDir)
 	exit.Usage.CPUStall, exit.Usage.MemoryStall = s.cg.stall(cgDir)
 	exit.Usage.Warm = warm
+	slotAfter = treeSize(data)
+	exit.Usage.SlotBytesBefore, exit.Usage.SlotBytesAfter = slotBefore, slotAfter
 	exit.Usage.ExitCode = exit.Code
 	if s.cg.oomKilled(cgDir) {
 		exit.Usage.OOM = true
@@ -374,7 +372,7 @@ loop:
 		return err
 	}
 	_, ospan := tracing.Start(ctx, "worker.outputs")
-	err = s.sendOutputs(pc, frames, req.Repo, data, req.Build, req.Eager)
+	err = s.sendOutputs(pc, frames, req.Repo, data, req.SlotPaths(), req.Eager)
 	tracing.End(ospan, err)
 	if err != nil {
 		return err

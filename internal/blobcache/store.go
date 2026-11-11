@@ -12,7 +12,7 @@
 // cannot reach other environments. A Handler without one (a supervisor
 // serving several machines) takes the first path segment as the namespace.
 // The optional _ttl segment lowers the maximum age for reads below the
-// store's TTL (repository setting cache.compiler.ttl).
+// store's TTL (repository setting the ttl of the global [cache.<name>] table).
 package blobcache
 
 import (

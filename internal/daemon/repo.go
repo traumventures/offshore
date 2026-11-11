@@ -56,7 +56,7 @@ func rulesFor(r *config.Repo, rootPath string) manifest.Rules {
 			}
 			rules.Rules = append(rules.Rules, mr)
 		}
-		for _, b := range r.Cache.Build.Paths {
+		for _, b := range append(r.SlotPaths(), r.DigestPaths()...) {
 			rules.Hidden = append(rules.Hidden, filepath.ToSlash(filepath.Clean(b)))
 		}
 	} else {

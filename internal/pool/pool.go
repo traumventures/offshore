@@ -57,8 +57,12 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 	var sizes []scheduler.Size
 	for _, sz := range u.Pool.Sizes {
 		mem, _ := config.ParseBytes(sz.Memory)
+		var disk int64
+		if sz.Disk != "" {
+			disk, _ = config.ParseBytes(sz.Disk)
+		}
 		s := scheduler.Size{Provider: sz.Provider, Name: sz.Name,
-			Capacity: scheduler.Resources{CPU: sz.CPU, Memory: mem}, PricePerHour: sz.PricePerHour,
+			Capacity: scheduler.Resources{CPU: sz.CPU, Memory: mem, Disk: disk}, PricePerHour: sz.PricePerHour,
 			Arch: config.MachineArch(sz.Arch), InstanceTypes: sz.InstanceTypes}
 		sizes = append(sizes, s)
 	}

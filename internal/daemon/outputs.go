@@ -51,7 +51,7 @@ type outputsState struct {
 	Mounted     bool     `json:"mounted,omitempty"`
 }
 
-// EnsureOutputs makes the build directories ([cache.build] paths) of the
+// EnsureOutputs makes the build directories (slot-scope cache paths) of the
 // repository at root appear at their local paths as the output overlay
 // (internal/outputfs): it starts the daemon if needed, mounts the overlay
 // unless mounted (whatever [outputs] mode says) and returns its status.
@@ -231,10 +231,10 @@ func (m *outputsMgr) mount(root string, repo *config.Repo) ([]string, error) {
 	r := m.repoLocked(root)
 	build := r.state.Build
 	if repo != nil {
-		build = repo.Cache.Build.Paths
+		build = repo.SlotPaths()
 	}
 	if len(build) == 0 {
-		return nil, errors.New("no build directories ([cache.build] paths) configured")
+		return nil, errors.New("no build directories (slot-scope cache paths) configured")
 	}
 	if len(r.mounts) == 0 {
 		for _, b := range build {

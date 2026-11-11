@@ -22,6 +22,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/traumventures/cloudsourced/internal/blobcache"
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/daemon"
 	"github.com/traumventures/cloudsourced/internal/labels"
@@ -170,6 +171,17 @@ func run(cmd string, args []string) error {
 		return s.Run(ctx)
 	case "supervisor":
 		return supervisorCmd(args)
+	case "gocacheprog":
+		// GOCACHEPROG helper of global [cache.<name>] tool = "go" caches
+		// (set by the worker): gocacheprog DIR [ENDPOINT].
+		if len(args) < 1 {
+			return errors.New("usage: cloudsourced gocacheprog DIR [ENDPOINT]")
+		}
+		g := &blobcache.GoCacheProg{Dir: args[0]}
+		if len(args) > 1 {
+			g.Endpoint = args[1]
+		}
+		return g.Serve(context.Background(), os.Stdin, os.Stdout)
 	case "sandbox-init":
 		err := sandbox.Init()
 		fmt.Fprintln(os.Stderr, err)
