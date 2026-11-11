@@ -15,6 +15,7 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/traumventures/offshore/internal/labels"
+	"github.com/traumventures/offshore/internal/proto"
 	"github.com/traumventures/offshore/internal/provider"
 )
 
@@ -292,7 +293,14 @@ func machines(s Snapshot, h *History, v View, st Styles) string {
 		spark := st.Spark.Render(Sparkline(vals, ok, m.CPU, 1))
 		memS := fmt.Sprintf("mem %s %s/%s", bar(float64(mem), float64(m.Memory), 8, st), human(mem), human(m.Memory))
 		tail := fmt.Sprintf("%-13s %-7s $%.2f/h", psi, sess, m.PricePerHour)
-		line := head + " " + cpu + " " + spark + " " + memS + "  " + tail
+		vm := ""
+		if m.Status != nil && m.Status.VM != nil {
+			vm = "  " + vmSummary(*m.Status.VM, st)
+		}
+		line := head + " " + cpu + " " + spark + " " + memS + "  " + tail + vm
+		if lipgloss.Width(line) > inner {
+			line = head + " " + cpu + " " + memS + "  " + tail + vm
+		}
 		if lipgloss.Width(line) > inner {
 			line = head + " " + cpu + " " + memS + "  " + tail
 		}
@@ -303,6 +311,20 @@ func machines(s Snapshot, h *History, v View, st Styles) string {
 	}
 	title := st.Title.Render(fmt.Sprintf("Machines (%d)", len(ms)))
 	return st.Panel.Width(inner).Render(title+"\n"+strings.Join(lines, "\n")) + "\n"
+}
+
+// vmSummary renders a machine's cache file system: resident of capacity,
+// dirty, working set, fault rate and a thrashing marker.
+func vmSummary(vm proto.VMStats, st Styles) string {
+	res := human(vm.ResidentBytes)
+	if vm.Capacity > 0 {
+		res += "/" + human(vm.Capacity)
+	}
+	out := fmt.Sprintf("cache %s dirty %s ws %s %.1f flt/s", res, human(vm.DirtyBytes), human(vm.WorkingSetBytes), vm.FaultRate)
+	if vm.Thrashing {
+		out += " " + st.Warn.Render("THRASH")
+	}
+	return out
 }
 
 type col struct {
