@@ -121,6 +121,9 @@ func MountUserOverlay(mnt, upper string, lower Source, opt UserOverlayOptions) (
 	fopts.MountOptions = fuse.MountOptions{
 		AllowOther: opt.AllowOther, FsName: opt.FsName, Name: opt.Name, MaxWrite: 1 << 20,
 		MaxReadAhead: opt.MaxReadAhead,
+		// mount(2) where permitted (root in a machine container without
+		// fusermount), fusermount otherwise.
+		DirectMount: true,
 		// O_TRUNC arrives with open: truncating a lower file (cargo
 		// rewriting an output) needs no fetch.
 		ExtraCapabilities: fuse.CAP_ATOMIC_O_TRUNC,
