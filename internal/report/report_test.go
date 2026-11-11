@@ -179,3 +179,28 @@ func TestMachineSamplesAndContention(t *testing.T) {
 		t.Fatalf("stall %v", r.CPUStallShare)
 	}
 }
+
+func TestMachineSamplesCacheFileSystem(t *testing.T) {
+	t0 := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	capa := &scheduler.Resources{CPU: 8, Memory: 16 << 30}
+	sample := func(min int, vm *scheduler.VM) events.Event {
+		return events.Event{Time: t0.Add(time.Duration(min) * time.Minute), Type: events.MachineSample, Machine: "m", Provider: "aws", Size: "x8",
+			Capacity: capa, Used: &scheduler.Resources{CPU: 1}, VM: vm}
+	}
+	evs := []events.Event{
+		sample(1, &scheduler.VM{Capacity: 20 << 30, Resident: 10 << 30, Dirty: 1 << 30, WorkingSet: 12 << 30, FaultRate: 2}),
+		sample(2, &scheduler.VM{Capacity: 20 << 30, Resident: 20 << 30, Dirty: 3 << 30, WorkingSet: 30 << 30, FaultRate: 40, Thrashing: true}),
+		sample(3, nil),
+	}
+	r := Compute(evs, t0, t0.Add(time.Hour))
+	s := r.Samples[0]
+	if s.Samples != 3 || s.VMSamples != 2 || s.ResidentMean != 15<<30 || s.CapacityMean != 20<<30 || s.DirtyP95 != 3<<30 ||
+		s.WorkingSetP95 != 30<<30 || s.FaultRateMean != 21 || s.ThrashingShare != 0.5 {
+		t.Fatalf("%+v", s)
+	}
+	var b strings.Builder
+	r.Write(&b)
+	if !strings.Contains(b.String(), "cache file system") || !strings.Contains(b.String(), "15.0G / 20.0G") || !strings.Contains(b.String(), "50%") {
+		t.Fatalf("report:\n%s", b.String())
+	}
+}

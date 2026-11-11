@@ -150,3 +150,22 @@ func TestSparklineAndSeries(t *testing.T) {
 		t.Fatalf("low values keep a baseline: %q", sp)
 	}
 }
+
+func TestMachineCacheColumns(t *testing.T) {
+	s := fakeSnapshot(100, now)
+	s.Machines[0].Status.VM = &proto.VMStats{Capacity: 50 * gib, ResidentBytes: 40 * gib, DirtyBytes: gib / 2,
+		WorkingSetBytes: 60 * gib, FaultRate: 12.5, Thrashing: true}
+	v := DefaultView()
+	v.Width = 260
+	out := Frame(s, NewHistory(0), v, nil, PlainStyles())
+	for _, want := range []string{"cache 40.0G/50.0G", "dirty 512M", "ws 60.0G", "12.5 flt/s", "THRASH"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
+	}
+	// Narrow frames drop the cache columns before the rest.
+	v.Width = 120
+	if out := Frame(s, NewHistory(0), v, nil, PlainStyles()); strings.Contains(out, "THRASH") || !strings.Contains(out, "m-aws-1") {
+		t.Errorf("narrow frame:\n%s", out)
+	}
+}
