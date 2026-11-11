@@ -205,6 +205,11 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	slotAfter := int64(-1)
 	s.slots.update(slot, func(m *slotMeta) { m.Caches = slotCaches(req) })
 	defer func() {
+		// Capture the session before the next one can change the slot
+		// (committed in the background by slotReleased).
+		if err := s.snapshotSlot(context.Background(), slot, req.RepoID); err != nil && !errors.Is(err, errNoSnapshots) {
+			s.log.Warn("build slot session snapshot", "slot", slot, "err", err)
+		}
 		s.slots.releaseSized(slot, slotAfter)
 		go s.slotReleased(slot, req.RepoID)
 		go s.enforceBudgets(slot)

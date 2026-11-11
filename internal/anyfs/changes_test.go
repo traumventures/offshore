@@ -150,3 +150,30 @@ func TestScanChangesKernelOverlay(t *testing.T) {
 	defer Unmount(merged)
 	testChanges(t, merged, ChangeOptions{Upper: upper, UpperFormat: UpperKernel})
 }
+
+// A captured plan reads the files as they were at the capture, whatever
+// changes after it.
+func TestChangeSetCapture(t *testing.T) {
+	d := t.TempDir()
+	changeFixture(t, d)
+	prev, _, err := Scan(d, ScanOptions{})
+	must(t, err)
+	time.Sleep(20 * time.Millisecond)
+	since := time.Now().UnixNano()
+	time.Sleep(20 * time.Millisecond)
+	must(t, os.WriteFile(filepath.Join(d, "a/x"), []byte("session 1"), 0o644))
+	cs, err := PlanChanges(d, ChangeOptions{ScanOptions: ScanOptions{Prev: prev, Since: since}})
+	must(t, err)
+	if len(cs.Read) != 1 || cs.Read[0] != "a/x" {
+		t.Fatalf("read %v", cs.Read)
+	}
+	snap := t.TempDir()
+	must(t, cs.Capture(snap, func(rel string) string { return filepath.Join(d, rel) }))
+	must(t, os.WriteFile(filepath.Join(d, "a/x"), []byte("session 2 writes on"), 0o644))
+	tr, st, err := cs.Tree(snap, ScanOptions{})
+	must(t, err)
+	n, _ := tr.Get("a/x")
+	if n.Digest != string(KeyOf([]byte("session 1"))) || st.Hashed != 1 || tr.Len() != prev.Len() {
+		t.Fatalf("captured tree: %+v hashed %d", n, st.Hashed)
+	}
+}

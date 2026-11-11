@@ -19,6 +19,12 @@ import (
 // whose repository "repo" uses the directory store storeDir.
 func fsWorker(t *testing.T, mode fsMode, storeDir string, opt cacheFSOptions) (*Worker, *store.Grant) {
 	t.Helper()
+	return fsWorkerAt(t, mode, t.TempDir(), storeDir, opt)
+}
+
+// fsWorkerAt is fsWorker over an existing cache directory (a restart).
+func fsWorkerAt(t *testing.T, mode fsMode, cache, storeDir string, opt cacheFSOptions) (*Worker, *store.Grant) {
+	t.Helper()
 	if mode != fsPlain {
 		if _, err := os.Stat("/dev/fuse"); err != nil {
 			t.Skip("no FUSE")
@@ -27,7 +33,6 @@ func fsWorker(t *testing.T, mode fsMode, storeDir string, opt cacheFSOptions) (*
 	if mode == fsKernel && os.Geteuid() != 0 {
 		t.Skip("kernel overlay needs root")
 	}
-	cache := t.TempDir()
 	sl, err := newSlots(filepath.Join(cache, "build"))
 	if err != nil {
 		t.Fatal(err)

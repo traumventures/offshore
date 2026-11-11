@@ -41,19 +41,135 @@ type ChangeOptions struct {
 // rename, deletion or creation changes the ctime of the directories
 // involved, a write that of the file; whiteouts and opaque or redirected
 // directories (a renamed lower directory) cause a rescan of their
-// subtree. Without an upper directory, a watermark or Prev, dir is
-// scanned whole (Scan with the watermark).
+// subtree; metadata-only copy-ups (metacopy) keep their content. Without
+// an upper directory, a watermark or Prev, dir is scanned whole (with the
+// watermark).
 func ScanChanges(dir string, opt ChangeOptions) (*Tree, ScanStats, error) {
+	cs, err := PlanChanges(dir, opt)
+	if err != nil {
+		return nil, ScanStats{}, err
+	}
+	return cs.Tree(dir, opt.ScanOptions)
+}
+
+// ChangeSet is a planned scan: the tree's nodes with the files that must
+// be read (changed content) still without digest. Planning only stats;
+// the reading can happen later from a snapshot of those files (Capture),
+// e.g. while the next session already changes the directory.
+type ChangeSet struct {
+	Nodes []Node    `json:"nodes"`
+	Read  []string  `json:"read"`
+	Stats ScanStats `json:"stats"`
+}
+
+// PlanChanges stats what changed in dir (see ScanChanges) and returns the
+// plan; files are not read.
+func PlanChanges(dir string, opt ChangeOptions) (*ChangeSet, error) {
+	var ns []scanned
+	var st ScanStats
 	if opt.Upper == "" || opt.Since <= 0 || opt.Prev == nil {
-		return Scan(dir, opt.ScanOptions)
+		var err error
+		if ns, err = walk(dir, "", opt.Skip, &st); err != nil {
+			return nil, err
+		}
+	} else {
+		c := &changeScan{dir: dir, opt: opt, nodes: map[string]*scanned{}, added: map[string]bool{}, kids: map[string]map[string]bool{},
+			rescanned: map[string]bool{}, metaOnly: map[string]bool{}}
+		for _, n := range opt.Prev.Nodes() {
+			c.nodes[n.Path] = &scanned{Node: n}
+		}
+		if err := c.run(); err != nil {
+			return nil, err
+		}
+		st = c.st
+		ns = make([]scanned, 0, len(c.nodes))
+		for p, n := range c.nodes {
+			if !c.added[p] {
+				n.ctime = -1 // unchanged: kept as is
+			}
+			ns = append(ns, *n)
+		}
 	}
-	c := &changeScan{dir: dir, opt: opt, nodes: map[string]*scanned{}, added: map[string]bool{}, kids: map[string]map[string]bool{}, rescanned: map[string]bool{}}
-	for _, n := range opt.Prev.Nodes() {
-		c.nodes[n.Path] = &scanned{Node: n}
+	var changed []*scanned
+	for i := range ns {
+		if ns[i].ctime != -1 {
+			changed = append(changed, &ns[i])
+		}
 	}
+	read := reuseNodes(changed, opt.ScanOptions, &st)
+	cs := &ChangeSet{Nodes: make([]Node, len(ns)), Stats: st}
+	for i := range ns {
+		cs.Nodes[i] = ns[i].Node
+	}
+	for _, n := range read {
+		cs.Read = append(cs.Read, n.Path)
+	}
+	sort.Strings(cs.Read)
+	return cs, nil
+}
+
+// Capture copies (reflink where possible) the files to read into snap,
+// each from source(path) (e.g. the overlay's upper file, which shares
+// the snapshot's file system, else the merged view); files gone meanwhile
+// are left out of the plan.
+func (cs *ChangeSet) Capture(snap string, source func(rel string) string) error {
+	var kept []string
+	gone := map[string]bool{}
+	for _, p := range cs.Read {
+		src := source(p)
+		dst := filepath.Join(snap, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		if err := cloneFile(src, dst); err != nil {
+			if os.IsNotExist(err) {
+				gone[p] = true
+				continue
+			}
+			return err
+		}
+		kept = append(kept, p)
+	}
+	cs.Read = kept
+	if len(gone) > 0 {
+		out := cs.Nodes[:0]
+		for _, n := range cs.Nodes {
+			if !gone[n.Path] {
+				out = append(out, n)
+			}
+		}
+		cs.Nodes = out
+	}
+	return nil
+}
+
+// Tree reads the plan's changed files below dir (the scanned directory or
+// a snapshot made by Capture; pages go to opt.Sink) and returns the tree.
+func (cs *ChangeSet) Tree(dir string, opt ScanOptions) (*Tree, ScanStats, error) {
+	st := cs.Stats
+	idx := make(map[string]int, len(cs.Nodes))
+	ns := make([]scanned, len(cs.Nodes))
+	for i, n := range cs.Nodes {
+		ns[i] = scanned{Node: n}
+		idx[n.Path] = i
+	}
+	var read []*Node
+	for _, p := range cs.Read {
+		if i, ok := idx[p]; ok && ns[i].Kind == File {
+			read = append(read, &ns[i].Node)
+		}
+	}
+	if err := readFiles(dir, read, opt, &st); err != nil {
+		return nil, st, err
+	}
+	return buildTree(ns, &st), st, nil
+}
+
+// run applies the changes found in the upper directory.
+func (c *changeScan) run() error {
 	ops, err := c.upperOps()
 	if err != nil {
-		return nil, c.st, err
+		return err
 	}
 	for _, o := range ops {
 		if c.underRescan(o.path) {
@@ -69,23 +185,15 @@ func ScanChanges(dir string, opt ChangeOptions) (*Tree, ScanStats, error) {
 			err = c.entry(o.path)
 		}
 		if err != nil {
-			return nil, c.st, err
+			return err
 		}
 	}
-	var changed []*scanned
-	all := make([]scanned, 0, len(c.nodes))
-	for p, n := range c.nodes {
-		if c.added[p] {
-			changed = append(changed, n)
+	for p := range c.metaOnly {
+		if n := c.nodes[p]; n != nil && c.added[p] {
+			n.meta = true
 		}
 	}
-	if err := hashNodes(dir, changed, opt.ScanOptions, &c.st); err != nil {
-		return nil, c.st, err
-	}
-	for _, n := range c.nodes {
-		all = append(all, *n)
-	}
-	return buildTree(all, &c.st), c.st, nil
+	return nil
 }
 
 type opKind int
@@ -109,6 +217,7 @@ type changeScan struct {
 	added     map[string]bool            // nodes set by this scan (files are hashed unless reusable)
 	kids      map[string]map[string]bool // dir -> added children Prev lacks
 	rescanned map[string]bool
+	metaOnly  map[string]bool // metadata-only copy-ups
 }
 
 // set records a node found by this scan.
@@ -195,6 +304,9 @@ func (c *changeScan) upperOps() ([]changeOp, error) {
 			}
 			ops = append(ops, changeOp{rel, opDir})
 			return nil
+		}
+		if c.opt.UpperFormat == UpperKernel && d.Type().IsRegular() && overlayXattr(p, "metacopy") && !overlayXattr(p, "redirect") {
+			c.metaOnly[rel] = true
 		}
 		ops = append(ops, changeOp{rel, opEntry})
 		return nil

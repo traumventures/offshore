@@ -71,6 +71,13 @@ func (s *Worker) commitSlot(ctx context.Context, ref slotRef) (commitResult, err
 	if !s.slots.acquire(ref.Path) {
 		return commitResult{}, errSlotBusy
 	}
+	lk := s.cfs.snapLock(ref.Path)
+	lk.Lock()
+	defer lk.Unlock()
+	if _, err := s.commitPendingLocked(ctx, ref.Path, ref.Repo); err != nil {
+		s.slots.releaseMaint(ref.Path, ref.Meta.Bytes)
+		return commitResult{}, err
+	}
 	m, err := readMeta(ref.Path)
 	if err != nil {
 		s.slots.releaseMaint(ref.Path, ref.Meta.Bytes)
@@ -240,16 +247,43 @@ func (s *Worker) changedRepos() []string {
 // sessionEnded commits a slot right away when its session grew the
 // upper beyond the dirty threshold (otherwise the idle commit of
 // maintainSlots takes it).
+//
+// Overlay slots commit the snapshot of the session (captured before the
+// release) first; the head is then flushed right away when the session
+// grew the upper beyond the dirty threshold.
 func (s *Worker) slotReleased(slot, repo string) {
-	if s.cfs.opt.DirtyBytes <= 0 || s.cfs.mode == fsPlain {
+	if s.cfs.mode == fsPlain {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	before, err := readMeta(slot)
+	if err != nil {
+		return
+	}
+	res, err := s.commitPending(ctx, slot, repo)
+	if err != nil {
+		s.log.Warn("build slot snapshot commit", "slot", slot, "err", err)
+		return
+	}
+	if s.cfs.opt.DirtyBytes <= 0 {
+		return
+	}
+	if res.repo != nil {
+		if res.upper-before.UpperBytes > s.cfs.opt.DirtyBytes && s.connectStore(repo, nil) == nil && res.chain.Top() != nil {
+			if res.tree == nil {
+				res.tree = res.chain.Tree()
+			}
+			if _, err := s.cfs.flush(ctx, res); err != nil {
+				s.log.Warn("build slot writeback", "repo", repo, "err", err)
+			}
+		}
 		return
 	}
 	m, err := readMeta(slot)
 	if err != nil || treeSize(filepath.Join(slot, "upper"))-m.UpperBytes <= s.cfs.opt.DirtyBytes {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
 	s.maintainSlot(ctx, slotRef{Repo: repo, Path: slot, Meta: m}, "dirty")
 }
 

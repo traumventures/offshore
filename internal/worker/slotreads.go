@@ -298,6 +298,15 @@ func (t *readTracker) takePending() []string {
 	return out
 }
 
+// requeue puts reads taken by a plan that was not committed back.
+func (t *readTracker) requeue(paths []string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, p := range paths {
+		t.pending[p] = true
+	}
+}
+
 func (t *readTracker) close() {
 	if t.watch != nil {
 		t.watch.Close()

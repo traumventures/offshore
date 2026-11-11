@@ -389,6 +389,18 @@ than 12 h (the store expires objects after 24 h; a chain's age is the age
 of its oldest data, the slot TTL). With reflinks, committed upper files are
 cloned into the file cache.
 
+**Every session is committed.** When a session on an overlay slot ends,
+before the slot is released, its changes are planned (stats only) and the
+changed files captured into `slot/snaps/<ns>/` by reflink (FICLONE,
+metadata only; a copy without reflinks, skipped above 256 MiB in favour
+of the idle commit); the plan is written last. The slot is released at
+once and the snapshot committed in the background (hashing, pages, layer,
+head; the captured files move into the file cache) while the next session
+may already run, so a busy slot's writeback flushes the previous session.
+A commit from the live slot commits pending snapshots first; on start the
+worker commits complete snapshots and drops incomplete ones before
+serving: a crash loses at most the session that was running.
+
 **Concurrent sessions** of a repository get another overlay over the same
 committed head (no copy). A **rebase** (fresh upper over the new head; the
 committed upper files move into the file cache) runs on idle slots whose
