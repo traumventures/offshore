@@ -122,11 +122,12 @@ func TestSimExportRoundTrip(t *testing.T) {
 		t.Fatalf("trace %+v", tr)
 	}
 	a, b := tr.Jobs[0], tr.Jobs[1]
-	// a arrived 10:03 (explicit arrival); b has none: end - wall = 10:12.
+	// a arrived 10:03 (explicit arrival); b has none: end - wall - the
+	// 1s queue wait of its task_placed = 10:11:59.
 	if a.Repo != "r1" || !near(a.At, 180) || !near(a.Duration, 2400) || !near(a.CPU, 1) || a.Memory != sim.Bytes(4*gi) || a.PeakMemory != sim.Bytes(2*gi) {
 		t.Fatalf("job a %+v", a)
 	}
-	if b.Repo != "r2" || !near(b.At, 720) || b.Env != "e1" || !near(b.Duration, 1800) || !near(b.CPU, 4) {
+	if b.Repo != "r2" || !near(b.At, 719) || b.Env != "e1" || !near(b.Duration, 1800) || !near(b.CPU, 4) {
 		t.Fatalf("job b %+v", b)
 	}
 	path := filepath.Join(t.TempDir(), "trace.json")

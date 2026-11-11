@@ -2,35 +2,32 @@ package scheduler
 
 import (
 	"math"
-	"os"
-	"strconv"
 	"time"
 )
 
 // timeValue is what an hour of turnaround is worth in money for env's
-// decisions: the price of env's most expensive size times (1-r)/r
+// decisions: the price of env's cheapest size times (1-r)/r
 // (r = cost_optimization). At r = 0.5 an hour of waiting weighs as much
-// as an hour of the largest machine; r = 0 values only time (+Inf), r = 1
-// only money (0). ok is false when no size has a price.
+// as an hour of the cheapest machine, at 0.2 four times as much; r = 0
+// values only time (+Inf), r = 1 only money (0). ok is false when no size
+// has a price. (The cost model normalised money and time against the
+// cheapest and fastest option of each decision: then a few cents more for
+// a start weighed like minutes of waiting.)
 func (p Default) timeValue(f Pool, env string) (float64, bool) {
-	pmax := 0.0
+	pmin := 0.0
 	for _, s := range f.ArchSizes(env) {
-		if pr := sizePrice(s); pr > 0 && (pmax == 0 || pr < pmax) {
-			pmax = pr
+		if pr := sizePrice(s); pr > 0 && (pmin == 0 || pr < pmin) {
+			pmin = pr
 		}
 	}
-	if pmax <= 0 {
+	if pmin <= 0 {
 		return 0, false
 	}
 	r := p.costOptimization()
 	if r <= 0 {
 		return math.Inf(1), true
 	}
-	k := 1.0
-	if v, err := strconv.ParseFloat(os.Getenv("OFFSHORE_K"), 64); err == nil && v > 0 {
-		k = v
-	}
-	return k * pmax * (1 - r) / r, true
+	return pmin * (1 - r) / r, true
 }
 
 // choose returns the index of the best option (-1 for none). The option

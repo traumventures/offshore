@@ -75,7 +75,7 @@ max_lifetime   = "24h"     # destroy machines (and their caches) after this
 queue_timeout  = "2m"      # a request waiting longer for capacity fails
 
 [scheduler]                # see scheduling.md
-policy            = "default"   # cost model
+policy            = "default"   # option policy (costmodel, binpack, classic for comparison)
 cost_optimization = 0.5         # 1 = cheapest, 0 = fastest result
 estimator         = "history"
 

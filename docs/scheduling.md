@@ -11,7 +11,7 @@ providers compete.
 
 ```toml
 [scheduler]
-policy              = "default"   # default (cost model) | binpack | classic
+policy              = "default"   # default (option policy) | costmodel | binpack | classic
 cost_optimization   = 0.5         # 1 = cheapest, 0 = fastest result
 disk_price_per_gb_month = 0.08    # prices disk resizes
 disk_budget    = "90%"            # cache disk machines fill before pruning ("150G": bytes)
@@ -47,13 +47,13 @@ max_machines = 4                                 # per provider, below pool.max_
 
 | key | default | |
 |---|---|---|
-| `policy` | `"default"` | `default` (cost model); `binpack` and `classic` are earlier policies kept for comparison |
-| `cost_optimization` | 0.5 | 0..1 trade-off of the cost model: 1 = cheapest, 0 = fastest result |
+| `policy` | `"default"` | `default` (option policy); `costmodel`, `binpack` and `classic` are earlier policies kept for comparison |
+| `cost_optimization` | 0.5 | 0..1, the single trade-off knob: an hour of turnaround is worth (1-r)/r hours of the cheapest size; 1 = cheapest, 0 = fastest result |
 | `[[egress]]` | free within a provider, 0.09/GB at 50 MB/s across | `from` (provider or `storage`), `to` (provider), `price_per_gb`, `bandwidth` |
 | `disk_price_per_gb_month` | 0.08 | price of extra disk, for resize decisions |
 | `source_cache` | `"12.5%"` | source contents a worker fetched from the laptop are kept as a cache, reclaimed least recently used beyond this share of the disk budget or size (`"20G"`); open files never |
 | `disk_budget` | `"90%"` | how much of a machine's cache file system build slots and machine caches may fill before the worker prunes: a percentage or a size (`"150G"`); sizes override it with their own `disk_budget`. The worker reports the budget in bytes and the scheduler plans prune/resize against it |
-| `estimator` | `"history"` | `history` learns CPU and peak memory per repository/tool/subcommand from cgroup usage; `static` uses `[resources]` |
+| `estimator` | `"history"` | `history` learns CPU (average busy cores, capped by the configured value) and memory (p90 of the peak plus 25 %; before 3 runs the configured value raised to the largest observed peak plus 25 %) per repository/tool/subcommand from cgroup usage; `static` uses `[resources]` |
 | `cpu_overcommit` | 2 | reserved CPU may exceed physical cores by this factor (>= 1) |
 | `memory_overcommit` | 1 | > 1 needs `swap = true` or `soft_limit` |
 | `soft_limit` | 0 (off) | sets `memory.high` to request x factor |
@@ -68,18 +68,73 @@ Memory is never overcommitted beyond `memory_overcommit`; CPU is. Lifetimes
 (`idle_stop`, `max_lifetime`), `min_machines`, `max_machines` and
 `queue_timeout` are in `[pool]` ([configuration.md](configuration.md#pool-configuration)).
 
-## Default policy: cost model
+## Default policy: option policy
 
-`[scheduler] policy = "default"` decides with a cost model
-(`internal/scheduler/model.go`, `modelpolicy.go`). It scores every candidate
-of a decision (run now on a machine, wait for a busy or starting machine,
-start or create a machine, prune or grow a full disk, restore a slot
-snapshot) by money and time to result and minimises
+`[scheduler] policy = "default"` (`internal/scheduler/options.go`, on the
+candidate machinery of `model.go` and `modelpolicy.go`) enumerates every
+way to serve a request explicitly: run now on a machine (warm slot,
+restore, move, cold; each after prune or resize), wait for a busy or
+starting machine (pessimistic release ETA, see below), start a stopped
+machine, create a size on a provider. Each option has an expected time to
+result and an expected cost, and the option policy minimises
+
+    cost + timeValue * time,   timeValue = price of the cheapest size * (1 - r) / r
+
+(r = `cost_optimization`): at 0.5 an hour of turnaround weighs as much as
+an hour of the cheapest machine, at 0.2 (production) four times as much,
+at 0 only time counts and at 1 only money. Two hard invariants hold for
+every r below 1:
+
+- **Physical fit**: a request never runs on, waits for, or is planned on
+  a machine whose physical cores or memory are smaller than the request
+  itself while some size or machine of the environment fits it
+  physically (overcommit packs several sessions onto a machine; it is no
+  reason to run a 5-core build on a 4-core machine). Only when nothing
+  fits physically does overcommit admit it.
+- **Hedge bound**: no request waits for capacity longer than the fastest
+  way to get a machine that fits it (start a stopped machine of its
+  environment, create an allowed size on a provider that is up and not
+  create-blocked) plus a margin of 30s / (1 - r): 30s at r = 0, 1m at
+  0.5, 2.5m at 0.8, unbounded at 1. Waits beyond it are dropped from
+  `Place` and from the scale-out timeline, so `Plan` starts or creates
+  the machine; the request then takes whatever frees first (a start does
+  not commit it). The bound does not apply when the pool or every
+  provider is at its machine limit.
+
+Release ETAs of running sessions are pessimistic (the 80th percentile of
+the key's run times; sessions running longer than expected need as long
+again), start/boot latencies are learned per provider. Scale-out is a
+batch decision: the queue (oldest 16 tasks) is laid out on a timeline of
+the existing, starting and candidate machines (earliest completion per
+task), every stopped machine of the environment competes with every
+allowed size, and a new machine is charged its latency, its runs and its
+idle tail until `idle_stop`. Consolidation is that of the cost model
+below (forecast, flap guard scaled by r).
+
+The difference to the cost model (`policy = "costmodel"`) is the
+scoring: it normalised money and time against the cheapest and fastest
+option of each decision, so in small decisions a few cents (3x the cost
+of waiting for a share of a busy machine) outweighed minutes of waiting:
+in production a build waited 148 s for a warm slot on a busy 4-core x4
+while a stopped 8-core x8 of the same environment starts in 16 s, and
+then ran with 5 requested cores on the 4-core machine
+(`TestRegressionWaitForSmallWarmMachine`); later a warm stopped x8 was
+passed over for a cold create of a cheaper OCI size
+(`TestStartWarmStoppedOverCheapCreate`). Evaluation: see *Option policy
+evaluation* below.
+
+## Cost model (shared candidates; `policy = "costmodel"`)
+
+The cost model scores every candidate of a decision (run now on a
+machine, wait for a busy or starting machine, start or create a machine,
+prune or grow a full disk, restore a slot snapshot) by money and time to
+result and minimises
 
     r * cost / min_cost + (1 - r) * time / min_time      (r = cost_optimization)
 
 normalised against the cheapest and the fastest candidate of the same
-decision. `cost` is what the pool pays: the machine time a placement
+decision. The option policy uses the same candidates, costs and times
+with its absolute score and invariants. `cost` is what the pool pays: the machine time a placement
 occupies (full price where it extends a machine's uptime, its share where
 the machine is paid anyway), started and created machines, the egress of a
 snapshot restore and extra disk. `time` is queue wait + start or boot
@@ -460,6 +515,110 @@ without thrashing), restores and CPU contention. At r=1 the
 policy now sees thrashing at its real (lower) cost and accepts more of it
 on cheap sizes; elsewhere fewer builds thrash because predictions on
 fitting machines no longer carry the old thrash time.
+
+## Option policy evaluation (Nov 2026)
+
+`internal/scheduler/sim/eval_test.go` replays a fixed evaluation set and
+prints a markdown table:
+
+```sh
+OFFSHORE_EVAL=default,costmodel,binpack OFFSHORE_EVAL_R=0,0.2,0.5,0.8,1 \
+  go test ./internal/scheduler/sim -run TestEvalTable -v     # OFFSHORE_EVAL_CASE=burst filters
+OFFSHORE_EVAL_ONE=burst/prod OFFSHORE_EVAL=default OFFSHORE_EVAL_R=0.5 \
+  go test ./internal/scheduler/sim -run TestEvalOne -v       # full report of one run
+```
+
+Traces: the sample weeks (`team-week`, `small-week`), production exports
+(`prod-flap`: evening of 2026-11-10; `prod-nov10`: the old control plane's
+316 sessions of 2026-11-10/11; `prod-nov11`: today's 16 sessions with the
+waiting regression; `sim export` now joins remote `task_end` events with
+their `task_placed` for repository, environment and arrival) and the
+adversarial `sim.Scenarios`: `burst` (12 agents every 20 min, idle in
+between, so machines are stopped when the next burst comes), `mixed`
+(25-40 min 8-core workspace builds among a stream of short checks),
+`multienv` (4 environments), `stopped` (sparse builds, a warm stopped
+machine per repository, often two at once), `outage` (`burst` with
+provider aws out of capacity for an hour) and `disk` (40-80G slots, 25-50G
+working sets on local disks, resizes). Pools (`sim.EvalPools`): `c7a`
+(testdata/pool.toml, static estimator), `tiers` (c7a with local disks,
+history) and `prod` (AWS x4/x8/x16 + OCI e5-8/e5-16, max 8 machines and 4
+per provider, idle_stop 1m, history estimator, boot aws 100s / oci 330s,
+start 16s / 60s), queue_timeout 10m. Metrics (`sim.Report`): cost, idle
+machine-hours (running without a session), turnaround p50/p95 (wait +
+run), wait p95, cold builds (neither warm nor restored), flaps, **late**
+(waited longer than the fastest start of a stopped machine of the
+environment, else the fastest create, at its arrival, + 30s: the SLA of
+the hedge bound) and **regret** (hindsight: turnaround minus the best
+own-machine alternative at arrival).
+
+Decision-level findings on the cost model (main as of dad5e0c, including
+the start-instead-of-wait fix): its normalised score lets small absolute
+price differences dominate (late counts grow from 455 at r=0 to 1651 at
+0.5 and 4209 at 1 over the set), the three stopped machines it considered
+were picked by rendezvous hash rather than price or warmth, new machines
+were not charged their idle tail, and single requests ran on machines
+with fewer cores than they asked for. Ablations of the option policy
+(geomean over the set): the absolute score with the cheapest size as the
+time reference beat the most expensive size (0.97 vs 1.02 cost, 0.91 vs
+0.90 p95 against the pre-fix cost model) and scaled references of
+0.5-5x; the physical-fit invariant costs about 1 % and saves 4 % of p95.
+
+Summary over all 21 cases (geomean ratios against the cost model at the
+same r):
+
+| policy | geomean cost vs costmodel | geomean turn p95 vs costmodel | wait p95 (median) | late (sum) | idle h (sum) | cold (mean) | failed |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| costmodel r=0.0 | 1 | 1 | 60s | 455 | 431 | 15.3% | 10 |
+| costmodel r=0.2 | 1 | 1 | 71s | 851 | 465 | 16.7% | 7 |
+| costmodel r=0.5 | 1 | 1 | 100s | 1651 | 494 | 15.9% | 11 |
+| costmodel r=0.8 | 1 | 1 | 143s | 2466 | 434 | 17.9% | 7 |
+| costmodel r=1.0 | 1 | 1 | 284s | 4209 | 372 | 18.7% | 18 |
+| binpack | 1 | 1 | 60s | 355 | 482 | 18.8% | 10 |
+| default r=0.0 | 0.993 | 1.027 | 60s | 360 | 471 | 15.7% | 6 |
+| default r=0.2 | 0.955 | 0.945 | 60s | 486 | 496 | 17.0% | 8 |
+| default r=0.5 | 0.939 | 0.939 | 60s | 957 | 468 | 17.2% | 10 |
+| default r=0.8 | 0.916 | 0.932 | 119s | 2152 | 369 | 17.2% | 10 |
+| default r=1.0 | 0.868 | 1.005 | 284s | 4405 | 261 | 17.1% | 11 |
+
+At the default and the production setting the option policy is cheaper
+and faster than the cost model (r=0.5: -6 % cost, -6 % p95, 42 % fewer
+late requests; r=0.2: -5 %, -6 %, -43 %); at r=1 it is 13 % cheaper.
+Binpack remains the cheapest point on several traces of the production
+pool (it overcommits single requests and consolidates on the present
+reservation) at a higher p95; the option policy matches or beats 84 of the
+126 cost model and binpack points of the set within 2 % in both cost and
+p95. Per case (cost / turnaround p95 / late):
+
+| case | costmodel r=0.2 | default r=0.2 | costmodel r=0.5 | default r=0.5 | binpack |
+|---|---|---|---|---|---|
+| team-week/c7a | $75.14 / 9m13s / 164 | $67.61 / 10m20s / 133 | $74.51 / 9m27s / 455 | $66.47 / 10m28s / 220 | $60.03 / 13m36s / 12 |
+| team-week/prod | $33.00 / 12m22s / 324 | $35.61 / 9m52s / 95 | $30.60 / 16m25s / 537 | $30.50 / 14m5s / 331 | $30.33 / 13m1s / 225 |
+| small-week/c7a | $23.25 / 6m33s / 36 | $23.48 / 7m0s / 30 | $22.66 / 6m52s / 90 | $22.88 / 7m0s / 45 | $17.92 / 9m42s / 3 |
+| small-week/prod | $11.63 / 6m19s / 39 | $11.24 / 6m24s / 43 | $10.98 / 6m29s / 86 | $10.62 / 6m10s / 53 | $8.41 / 7m14s / 10 |
+| prod-flap/c7a | $1.76 / 3m9s / 0 | $1.66 / 3m9s / 0 | $1.66 / 3m9s / 1 | $1.66 / 3m9s / 0 | $1.27 / 3m9s / 1 |
+| prod-flap/prod | $0.99 / 4m37s / 4 | $0.75 / 3m51s / 4 | $0.63 / 4m45s / 6 | $0.40 / 3m54s / 8 | $0.32 / 4m2s / 2 |
+| prod-nov10/c7a | $9.91 / 3m45s / 1 | $9.76 / 3m45s / 0 | $9.71 / 3m45s / 2 | $9.68 / 3m45s / 0 | $8.63 / 3m38s / 2 |
+| prod-nov10/prod | $3.91 / 3m54s / 28 | $3.64 / 3m53s / 42 | $2.18 / 4m4s / 54 | $1.82 / 3m51s / 60 | $1.59 / 3m51s / 2 |
+| prod-nov11/c7a | $0.76 / 6m45s / 0 | $0.72 / 6m45s / 0 | $0.72 / 6m45s / 0 | $0.72 / 6m45s / 0 | $0.69 / 5m57s / 0 |
+| prod-nov11/prod | $0.36 / 11m14s / 7 | $0.53 / 11m25s / 6 | $0.29 / 13m51s / 7 | $0.48 / 10m49s / 6 | $0.23 / 12m11s / 3 |
+| burst/c7a | $7.96 / 4m57s / 6 | $4.98 / 5m20s / 0 | $4.98 / 4m48s / 18 | $4.98 / 5m20s / 0 | $4.20 / 6m52s / 0 |
+| burst/prod | $1.06 / 6m57s / 39 | $1.05 / 6m33s / 24 | $1.13 / 6m35s / 48 | $1.06 / 7m5s / 50 | $0.56 / 8m56s / 12 |
+| mixed/c7a | $5.52 / 2m6s / 2 | $5.70 / 2m7s / 1 | $5.59 / 2m18s / 4 | $5.61 / 2m15s / 1 | $5.24 / 2m31s / 0 |
+| mixed/prod | $4.08 / 6m20s / 48 | $4.37 / 3m14s / 2 | $5.75 / 6m39s / 97 | $2.79 / 3m44s / 12 | $2.14 / 4m43s / 8 |
+| multienv/c7a | $17.89 / 13m32s / 19 | $17.08 / 14m13s / 15 | $17.42 / 14m17s / 71 | $16.78 / 14m17s / 30 | $15.53 / 16m36s / 0 |
+| multienv/prod | $8.65 / 22m51s / 71 | $11.03 / 18m18s / 65 | $8.28 / 23m20s / 95 | $8.79 / 23m31s / 89 | $9.33 / 25m29s / 62 |
+| stopped/c7a | $2.32 / 7m39s / 0 | $2.32 / 7m39s / 0 | $2.28 / 7m39s / 3 | $2.32 / 7m39s / 0 | $1.91 / 7m39s / 0 |
+| stopped/prod | $1.09 / 11m18s / 8 | $1.01 / 8m19s / 0 | $1.07 / 11m18s / 9 | $1.02 / 8m19s / 1 | $0.72 / 8m29s / 1 |
+| outage/c7a | $8.22 / 4m46s / 7 | $4.98 / 5m8s / 0 | $4.98 / 4m48s / 12 | $4.98 / 5m8s / 0 | $4.20 / 6m52s / 0 |
+| outage/prod | $1.06 / 6m57s / 39 | $1.05 / 6m33s / 24 | $1.13 / 6m35s / 47 | $1.06 / 7m5s / 50 | $0.56 / 8m56s / 12 |
+| disk/tiers | $4.88 / 12m57s / 9 | $4.64 / 14m34s / 2 | $5.03 / 13m17s / 9 | $4.18 / 11m21s / 1 | $4.28 / 17m19s / 0 |
+
+`TestRegressionWaitForSmallWarmMachine`, `TestStartWarmStoppedOverCheapCreate`,
+`TestPhysicalFit`, `TestHedgeBound` and `TestTimeValue` pin the invariants
+and the production regressions; `TestCheapestBeatsBinpack` now allows r=1
+up to 10 % above binpack (the price of the physical-fit invariant on the
+static c7a traces), and `TestThrashingPicksBiggerSize` expects the bigger
+size up to r = 0.3 (8 minutes of thrashing against twice the price).
 
 ## Calibrating the simulator from real runs
 

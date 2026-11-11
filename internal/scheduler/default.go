@@ -11,10 +11,16 @@ import (
 
 // Policy variants of Default.
 const (
-	// VariantDefault decides with the cost model (see model.go): placement,
-	// waiting for a warm slot, slot handling, scale-out and consolidation
-	// trade money against time to result by Config.CostOptimization. "" selects it too.
+	// VariantDefault is the option policy (see options.go): every way to
+	// serve a task (run now, wait for a machine, start, create) is scored
+	// by cost + value of time x time to result, waits are bounded by the
+	// time a new machine takes, and tasks only run on machines physically
+	// large enough for them. "" selects it too.
 	VariantDefault = "default"
+	// VariantCostModel is the cost model before the option policy: the
+	// same candidates scored relative to the cheapest and fastest of each
+	// decision. Kept for comparison in the simulator.
+	VariantCostModel = "costmodel"
 	// VariantBinpack is the policy before the cost model: warm cache
 	// first, best-fit packing, sizes by cost per unit of queued demand and
 	// consolidation by the present reservation. Kept for comparison in the
@@ -24,8 +30,6 @@ const (
 	// placement, cheapest fitting size for the aggregate demand and no
 	// consolidation. Kept for comparison in the simulator.
 	VariantClassic = "classic"
-	// VariantNext is the option policy under evaluation (see options.go).
-	VariantNext = "next"
 )
 
 // Config tunes the default policy.
@@ -110,11 +114,11 @@ func (p Default) classic() bool { return p.Cfg.Variant == VariantClassic }
 
 // model reports whether the cost model decides (default variant).
 func (p Default) model() bool {
-	return p.Cfg.Variant == VariantDefault || p.Cfg.Variant == "" || p.next()
+	return p.next() || p.Cfg.Variant == VariantCostModel
 }
 
 // next reports whether the option policy decides (see options.go).
-func (p Default) next() bool { return p.Cfg.Variant == VariantNext }
+func (p Default) next() bool { return p.Cfg.Variant == VariantDefault || p.Cfg.Variant == "" }
 
 // Admissible capacity of a machine under overcommit.
 func (p Default) admissible(m Machine) Resources {
