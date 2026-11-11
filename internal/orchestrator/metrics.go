@@ -6,6 +6,7 @@ import (
 
 	"sort"
 
+	"github.com/traumventures/offshore/internal/events"
 	"github.com/traumventures/offshore/internal/metrics"
 	"github.com/traumventures/offshore/internal/provider"
 	"github.com/traumventures/offshore/internal/scheduler"
@@ -34,6 +35,7 @@ func newOrchMetrics(o *Orchestrator) *orchMetrics {
 		reconcile:  r.Histogram("offshore_reconcile_duration_seconds", "Duration of maintenance passes.", []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300}, "result"),
 	}
 	r.Collect(o.collect)
+	r.Collect(o.collectEvents)
 	return m
 }
 
@@ -141,4 +143,20 @@ func (o *Orchestrator) RefreshIfStale(ctx context.Context, maxAge time.Duration)
 		return nil
 	}
 	return o.Refresh(ctx)
+}
+
+// collectEvents reports the health of the analysis event log: events
+// dropped by failed writes (disk full, size cap) and unparsable lines
+// skipped by readers.
+func (o *Orchestrator) collectEvents() []metrics.Family {
+	var dropped int64
+	if o.obs != nil {
+		dropped = o.obs.log.Dropped()
+	}
+	return []metrics.Family{
+		{Name: "offshore_events_dropped_total", Help: "Analysis events dropped (write failure, disk full, size cap).", Type: metrics.Counter,
+			Samples: []metrics.Sample{{Value: float64(dropped)}}},
+		{Name: "offshore_events_skipped_lines_total", Help: "Unparsable event log lines skipped by readers.", Type: metrics.Counter,
+			Samples: []metrics.Sample{{Value: float64(events.SkippedLines())}}},
+	}
 }

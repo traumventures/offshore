@@ -258,20 +258,107 @@ func (c *cgroups) remove(dir string) {
 	}
 }
 
-// oomKilled reports whether the memory limit killed a process.
-func (c *cgroups) oomKilled(dir string) bool {
+// memEvents are the counters of a cgroup's memory.events (hierarchical:
+// they include nested cgroups). OOMKill counts processes of the cgroup
+// killed by any OOM killer (its own limit or the machine's).
+type memEvents struct {
+	OOM          int64 // the memory limit was reached and reclaim failed
+	OOMKill      int64
+	OOMGroupKill int64
+	Max          int64 // usage hit memory.max
+	High         int64 // usage exceeded memory.high (throttled)
+}
+
+// memoryEvents reads memory.events of a session cgroup.
+func (c *cgroups) memoryEvents(dir string) memEvents {
 	if dir == "" {
-		return false
+		return memEvents{}
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "memory.events"))
 	if err != nil {
-		return false
+		return memEvents{}
 	}
-	for _, line := range strings.Split(string(b), "\n") {
+	return parseMemoryEvents(string(b))
+}
+
+func parseMemoryEvents(s string) memEvents {
+	var ev memEvents
+	for _, line := range strings.Split(s, "\n") {
 		f := strings.Fields(line)
-		if len(f) == 2 && f[0] == "oom_kill" && f[1] != "0" {
-			return true
+		if len(f) != 2 {
+			continue
+		}
+		n, _ := strconv.ParseInt(f[1], 10, 64)
+		switch f[0] {
+		case "oom":
+			ev.OOM = n
+		case "oom_kill":
+			ev.OOMKill = n
+		case "oom_group_kill":
+			ev.OOMGroupKill = n
+		case "max":
+			ev.Max = n
+		case "high":
+			ev.High = n
 		}
 	}
-	return false
+	return ev
+}
+
+// vmstatPath is the kernel's VM counters (a var for tests).
+var vmstatPath = "/proc/vmstat"
+
+// machineOOMKills returns the kernel's count of OOM kills on the machine
+// (/proc/vmstat oom_kill; -1 when unknown).
+func machineOOMKills() int64 {
+	b, err := os.ReadFile(vmstatPath)
+	if err != nil {
+		return -1
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(line); len(f) == 2 && f[0] == "oom_kill" {
+			n, _ := strconv.ParseInt(f[1], 10, 64)
+			return n
+		}
+	}
+	return -1
+}
+
+// Killers of a session (scheduler.Usage.Killer).
+const (
+	killerCgroupOOM      = "cgroup_oom"        // OOM killer in the session cgroup (its limit or the machine's)
+	killerMachineOOM     = "machine_oom"       // kernel OOM kill on the machine during the session, session SIGKILLed
+	killerClient         = "client_disconnect" // offshore killed it: the client went away
+	killerClientSignal   = "client_signal"     // the client forwarded the signal (Ctrl-C)
+	killerWorkerShutdown = "worker_shutdown"   // offshore killed it: the worker stopped
+	killerSignal         = "signal"            // another signal from outside offshore
+	killerUnknownSIGKILL = "sigkill_unknown"   // SIGKILL by something else (earlyoom, systemd-oomd, a user)
+)
+
+// exitCause classifies how a session ended: whether it was killed for
+// memory and by whom. signal is the terminating signal of the command or,
+// for exit codes 129..192 of a wrapper (a shell reports 137 for a child
+// SIGKILLed), the signal it reports; offshoreKill is why offshore killed
+// the session ("" when it did not); oomDelta the machine's OOM kills
+// during the session (-1 unknown).
+func exitCause(code, signal int, ev memEvents, oomDelta int64, offshoreKill string, lastClientSignal int) (sig int, oom bool, killer string) {
+	sig = signal
+	if sig == 0 && code > 128 && code <= 128+64 {
+		sig = code - 128
+	}
+	switch {
+	case ev.OOMKill > 0 || ev.OOMGroupKill > 0:
+		return sig, true, killerCgroupOOM
+	case sig == 0:
+		return 0, false, ""
+	case offshoreKill != "":
+		return sig, false, offshoreKill
+	case lastClientSignal != 0 && lastClientSignal == sig:
+		return sig, false, killerClientSignal
+	case sig == int(syscall.SIGKILL) && oomDelta > 0:
+		return sig, true, killerMachineOOM
+	case sig == int(syscall.SIGKILL):
+		return sig, false, killerUnknownSIGKILL
+	}
+	return sig, false, killerSignal
 }

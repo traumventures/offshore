@@ -431,8 +431,20 @@ type Usage struct {
 	CPUSeconds float64       `json:"cpu_seconds"`
 	Wall       time.Duration `json:"wall"`
 	OOM        bool          `json:"oom"`
-	Warm       bool          `json:"warm"` // build cache was reused
-	ExitCode   int           `json:"exit_code"`
+	// Signal terminated the command (or, for a wrapper exiting 129..192,
+	// the signal it reports); Killer is who ended it: cgroup_oom,
+	// machine_oom, client_disconnect, client_signal, worker_shutdown,
+	// signal, sigkill_unknown ("" = it exited on its own).
+	Signal int    `json:"signal,omitempty"`
+	Killer string `json:"killer,omitempty"`
+	// OOMKills are the processes of the session killed by an OOM killer;
+	// MemoryMaxEvents and MemoryHighEvents how often its usage hit
+	// memory.max and exceeded memory.high (cgroup memory.events).
+	OOMKills         int64 `json:"oom_kills,omitempty"`
+	MemoryMaxEvents  int64 `json:"memory_max_events,omitempty"`
+	MemoryHighEvents int64 `json:"memory_high_events,omitempty"`
+	Warm             bool  `json:"warm"` // build cache was reused
+	ExitCode         int   `json:"exit_code"`
 	// CPUStall and MemoryStall are the seconds at least one task of the
 	// session waited for CPU or memory (cgroup PSI "some total"): how much
 	// contention (overcommit, neighbours) slowed it down. Recorded in the

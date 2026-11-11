@@ -393,6 +393,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 	o.loadVolumes()
 	o.metrics = newOrchMetrics(o)
 	o.obs = newObserver(stateDir, cfg.EventRetention)
+	o.obs.log.SetWarn(func(msg string, err error) { log.Warn(msg, "err", err) })
 	o.loadUptime()
 	o.loadRecent()
 	return o, nil
@@ -411,6 +412,9 @@ func (o *Orchestrator) SetConfig(cfg Config) {
 	}
 	o.cfg = cfg
 	o.localDisksOnce = sync.Once{} // sizes are new: resolve their disks again
+	for name := range o.provs { // a configuration change may fix credentials or the account
+		o.resetProviderLocked(name, "configuration reloaded")
+	}
 }
 
 // Config returns the pool configuration in effect.
@@ -1304,9 +1308,7 @@ func (o *Orchestrator) createMachine(ctx context.Context, id, envHash, image str
 		return
 	}
 	var delay time.Duration
-	if errors.Is(err, provider.ErrCapacity) {
-		o.providerFailedLocked(size.Provider, err)
-	} else {
+	if !o.providerFailedLocked(size.Provider, err) {
 		delay = o.createFailedLocked(envHash, size.Provider, err)
 	}
 	// The machine_create event opened a machine record: close it when no
@@ -1315,7 +1317,7 @@ func (o *Orchestrator) createMachine(ctx context.Context, id, envHash, image str
 	if _, exists := o.machines[id]; !exists {
 		ev := o.machineEventLocked(events.MachineDestroy, id)
 		ev.Env, ev.Provider, ev.Size = envHash, size.Provider, size.Name
-		ev.Reason, ev.Error = "create_failed", err.Error()
+		ev.Reason, ev.Error, ev.ErrorClass = "create_failed", err.Error(), string(provider.Classify(err))
 		o.obs.log.Append(ev)
 	}
 	o.mu.Unlock()

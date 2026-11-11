@@ -14,11 +14,14 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/traumventures/offshore/internal/scheduler"
@@ -79,8 +82,10 @@ const (
 	Writeback = "writeback"
 	Reclaim   = "reclaim"
 	Thrash    = "thrash"
-	// ProviderDown: a provider reported no capacity or quota; it gets no
-	// new machines for Seconds (cooldown with backoff).
+	// ProviderDown: a create or start failed with a provider error of
+	// ErrorClass. Reason "cooldown" (capacity, quota): no new machines for
+	// Seconds (backoff); "disabled" (account_limit, auth): none until the
+	// configuration changes or `offshore provider reset`.
 	ProviderDown = "provider_down"
 )
 
@@ -118,6 +123,9 @@ type Event struct {
 	// LatencyMs is the provider call duration of a machine action.
 	LatencyMs int64  `json:"latency_ms,omitempty"`
 	Error     string `json:"error,omitempty"`
+	// ErrorClass classifies a provider error (ProviderDown, a failed
+	// create): capacity, quota, account_limit, auth, transient, other.
+	ErrorClass string `json:"error_class,omitempty"`
 
 	// MachineSample fields.
 	Reserved *scheduler.Resources `json:"reserved,omitempty"` // sum of session reservations
@@ -168,18 +176,27 @@ const MaxFileSize = 256 << 20
 const prefix, suffix = "events-", ".jsonl"
 
 // Log appends events to daily files. A nil *Log discards events.
+//
+// Every event is one complete line written with a single write(2) on an
+// O_APPEND file. A failed or short write (ENOSPC, EIO) is undone by
+// truncating the file back to its size before the write, so readers never
+// see a partial line; the event is counted in Dropped and the first
+// failure is logged (warn).
 type Log struct {
 	dir       string
 	retention time.Duration
 	now       func() time.Time
 
 	taps []func(Event) // see Tap
+	// warn reports the first dropped event (nil: log.Printf).
+	warn func(msg string, err error)
 
 	mu      sync.Mutex
 	day     string
 	f       *os.File
 	size    int64
 	dropped int64
+	warned  bool
 }
 
 // Open returns a log writing to dir. retention <= 0 uses DefaultRetention.
@@ -195,6 +212,14 @@ func Open(dir string, retention time.Duration) *Log {
 
 // SetNow replaces the clock (tests).
 func (l *Log) SetNow(now func() time.Time) { l.now = now }
+
+// SetWarn sets how the first dropped event is reported (before concurrent
+// use).
+func (l *Log) SetWarn(fn func(msg string, err error)) {
+	if l != nil {
+		l.warn = fn
+	}
+}
 
 // SetRetention changes the retention (configuration reload).
 func (l *Log) SetRetention(d time.Duration) {
@@ -223,9 +248,27 @@ func (l *Log) Dir() string { return l.dir }
 
 // Dropped returns how many events were dropped (write errors, size cap).
 func (l *Log) Dropped() int64 {
+	if l == nil {
+		return 0
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.dropped
+}
+
+// dropLocked counts a dropped event and reports the first one.
+func (l *Log) dropLocked(why string, err error) {
+	l.dropped++
+	if l.warned {
+		return
+	}
+	l.warned = true
+	msg := "event log: dropping events (" + why + "); counted in offshore_events_dropped_total"
+	if l.warn != nil {
+		l.warn(msg, err)
+	} else {
+		log.Printf("%s: %v", msg, err)
+	}
 }
 
 // Append writes ev; Time defaults to now. Errors drop the event: the log
@@ -258,12 +301,12 @@ func (l *Log) Append(ev Event) {
 		l.day = day
 		l.prune(now)
 		if err := os.MkdirAll(l.dir, 0o700); err != nil {
-			l.dropped++
+			l.dropLocked("create directory", err)
 			return
 		}
 		f, err := os.OpenFile(filepath.Join(l.dir, prefix+day+suffix), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
-			l.dropped++
+			l.dropLocked("open file", err)
 			return
 		}
 		fi, _ := f.Stat()
@@ -273,14 +316,43 @@ func (l *Log) Append(ev Event) {
 		}
 	}
 	if l.size+int64(len(b)) > MaxFileSize {
-		l.dropped++
+		l.dropLocked("daily file size cap", fmt.Errorf("%d bytes", MaxFileSize))
 		return
 	}
-	n, err := l.f.Write(b)
-	l.size += int64(n)
-	if err != nil {
-		l.dropped++
+	if err := writeLine(l.f, b, l.size); err != nil {
+		l.dropLocked("write failed", err)
+		// The file may have a different size now (another writer): resync.
+		if fi, serr := l.f.Stat(); serr == nil {
+			l.size = fi.Size()
+		}
+		return
 	}
+	l.size += int64(len(b))
+}
+
+// lineWriter is the part of *os.File writeLine uses (tests fake it).
+type lineWriter interface {
+	Write([]byte) (int, error)
+	Truncate(size int64) error
+}
+
+// writeLine writes b (one complete line) with a single write and undoes a
+// short or failed write by truncating to before (the size before the
+// write), so the file never holds a partial line.
+func writeLine(f lineWriter, b []byte, before int64) error {
+	n, err := f.Write(b)
+	if err == nil && n == len(b) {
+		return nil
+	}
+	if err == nil {
+		err = io.ErrShortWrite
+	}
+	if n > 0 {
+		if terr := f.Truncate(before); terr != nil {
+			return fmt.Errorf("%w (truncating the partial line: %v)", err, terr)
+		}
+	}
+	return err
 }
 
 // Close closes the current file.
@@ -332,9 +404,26 @@ func files(dir string) []dayFile {
 }
 
 // Read returns the events of dir with since <= Time < until (zero bounds
-// are open), in file order. Malformed lines are skipped.
+// are open), in file order. Unparsable lines are skipped and counted (see
+// SkippedLines).
 func Read(dir string, since, until time.Time) ([]Event, error) {
+	evs, _, err := ReadCounted(dir, since, until)
+	return evs, err
+}
+
+// skippedLines counts unparsable lines skipped by all readers of this
+// process (offshore_events_skipped_lines_total).
+var skippedLines atomic.Int64
+
+// SkippedLines returns how many unparsable lines readers skipped.
+func SkippedLines() int64 { return skippedLines.Load() }
+
+// ReadCounted is Read that also returns the number of unparsable lines it
+// skipped.
+func ReadCounted(dir string, since, until time.Time) ([]Event, int, error) {
 	var out []Event
+	skipped := 0
+	defer func() { skippedLines.Add(int64(skipped)) }()
 	for _, f := range files(dir) {
 		if !since.IsZero() && f.day.Add(24*time.Hour).Before(since) {
 			continue
@@ -344,13 +433,18 @@ func Read(dir string, since, until time.Time) ([]Event, error) {
 		}
 		fh, err := os.Open(f.path)
 		if err != nil {
-			return out, err
+			return out, skipped, err
 		}
 		sc := bufio.NewScanner(fh)
 		sc.Buffer(make([]byte, 64<<10), 4<<20)
 		for sc.Scan() {
+			line := sc.Bytes()
+			if len(strings.TrimSpace(string(line))) == 0 {
+				continue
+			}
 			var ev Event
-			if json.Unmarshal(sc.Bytes(), &ev) != nil {
+			if json.Unmarshal(line, &ev) != nil {
+				skipped++
 				continue
 			}
 			if (!since.IsZero() && ev.Time.Before(since)) || (!until.IsZero() && !ev.Time.Before(until)) {
@@ -361,11 +455,11 @@ func Read(dir string, since, until time.Time) ([]Event, error) {
 		err = sc.Err()
 		fh.Close()
 		if err != nil {
-			return out, fmt.Errorf("%s: %w", f.path, err)
+			return out, skipped, fmt.Errorf("%s: %w", f.path, err)
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
-	return out, nil
+	return out, skipped, nil
 }
 
 // ParseSince parses "7d", "36h", "30m" or an RFC 3339 time into the start
