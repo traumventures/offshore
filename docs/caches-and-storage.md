@@ -341,8 +341,15 @@ with the provider documentation cited in `internal/medium/defaults.go`:
 Override values per provider and medium with
 `[providers.NAME.profile.MEDIUM]` (see
 [configuration](configuration.md#providers)); measured values override
-both through `medium.SetMeasured` (a hook; no measurement source is wired
-yet).
+both through `medium.SetMeasured`: workers count the transfers of their
+cache file system per medium (page-ins as reads, writebacks and page-outs
+as writes; request size and time) and report the cumulative counters in
+their status (`tiers`). The orchestrator turns the deltas per machine into
+exponentially decayed sums per provider instance and medium (time
+constant one hour), fits time = latency + bytes / throughput over the
+requests and, after 16 requests, uses the result as the measured
+throughput and latency (profile `source = "measured"`) of the sizes the
+scheduler sees and of `medium.Resolve`.
 
 ## Disks
 

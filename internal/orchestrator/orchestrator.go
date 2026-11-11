@@ -295,6 +295,9 @@ type Orchestrator struct {
 	removed    []*Machine                // destroyed machines (cost history)
 	services   map[string][]provider.Service
 	changed    chan struct{}
+	// meter measures medium profiles from the workers' tier counters
+	// (installed with medium.SetMeasured).
+	meter *medium.Meter
 
 	// OnMachineDown is called when a machine stops or disappears, so that
 	// connections to it can be dropped.
@@ -366,7 +369,9 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		ProbeFunc: Probe, Clock: clk,
 		health: map[string]provHealth{}, leases: map[string]leaseInfo{}, snapshots: map[string][]scheduler.Snapshot{},
 		volumes: map[string]*VolumeState{}, startBlocked: map[string]time.Time{}, forecast: scheduler.NewForecast(),
+		meter: medium.NewMeter(),
 	}
+	medium.SetMeasured(o.meter.Profile)
 	o.loadSnapshots()
 	o.loadVolumes()
 	o.metrics = newOrchMetrics(o)
@@ -605,6 +610,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		m.StatusAt = time.Now()
 		o.statusSnapshotsLocked(m)
 		o.statusVolumeLocked(m)
+		o.meter.Update(r.id, m.Provider, m.Status.Tiers)
 		o.sampleLocked(r.id, m)
 	}
 	// The data is as old as the listing, not as the end of the probes:
@@ -676,6 +682,7 @@ func (o *Orchestrator) Sample(ctx context.Context) {
 		m.Status, m.StatusAt = &st, time.Now()
 		o.statusSnapshotsLocked(m)
 		o.statusVolumeLocked(m)
+		o.meter.Update(r.id, m.Provider, m.Status.Tiers)
 		o.sampleLocked(r.id, m)
 	}
 }
@@ -749,9 +756,33 @@ func Probe(ctx context.Context, addr, fingerprint, token string) (proto.Status, 
 	return st, err
 }
 
+// measuredSizes returns the configured sizes with measured medium
+// profiles (from the workers' tier counters) merged into their stacks.
+func (o *Orchestrator) measuredSizes() []scheduler.Size {
+	sizes := o.cfg.Sizes
+	copied := false
+	for i, s := range sizes {
+		hot, okH := o.meter.Profile(s.Provider, s.Stack.Medium())
+		st, okS := o.meter.Profile(s.Provider, medium.Store)
+		if !okH && !okS {
+			continue
+		}
+		if !copied {
+			sizes, copied = append([]scheduler.Size(nil), sizes...), true
+		}
+		if okH {
+			sizes[i].Stack.Hot = sizes[i].Stack.Hot.Merge(hot, "measured")
+		}
+		if okS {
+			sizes[i].Stack.Store = sizes[i].Stack.Store.Merge(st, "measured")
+		}
+	}
+	return sizes
+}
+
 // poolLocked builds the scheduler's view of the pool.
 func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
-	f := scheduler.Pool{Now: now, Sizes: o.cfg.Sizes, Recent: map[string]time.Time{}, EnvArch: map[string]string{}}
+	f := scheduler.Pool{Now: now, Sizes: o.measuredSizes(), Recent: map[string]time.Time{}, EnvArch: map[string]string{}}
 	for env, t := range o.recentEnvs {
 		f.Recent[env] = t
 	}
@@ -1438,6 +1469,7 @@ func (o *Orchestrator) removeLocked(id string) {
 		return
 	}
 	delete(o.machines, id)
+	o.meter.Forget(id)
 	now := o.now()
 	m.State = provider.Failed
 	m.observe(now)

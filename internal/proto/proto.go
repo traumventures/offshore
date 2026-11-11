@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/metrics"
 	"github.com/traumventures/offshore/internal/scheduler"
 	"github.com/traumventures/offshore/internal/store"
@@ -350,6 +351,10 @@ type Status struct {
 	// Snapshots are build slot snapshots the server saved on its own (e.g.
 	// on drain or stop), so the orchestrator knows where they are.
 	Snapshots []SnapshotInfo `json:"snapshots,omitempty"`
+	// Tiers are the cumulative transfer counters of the cache file
+	// system's media (page-ins, writebacks), from which the orchestrator
+	// measures medium profiles.
+	Tiers []medium.Counters `json:"tiers,omitempty"`
 	// Metrics is the server's metrics snapshot; the orchestrator republishes
 	// it with machine labels (no extra port or scope on the machine).
 	Metrics []metrics.Family `json:"metrics,omitempty"`
