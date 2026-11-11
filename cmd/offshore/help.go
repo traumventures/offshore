@@ -36,6 +36,13 @@ Show machines, running sessions and the estimated cost since midnight.
 
 Live view of machines, sessions, queue and cost.
 `,
+	"provider": `usage: offshore provider [list] | reset <name>
+
+  list         provider health: ok, cooldown (capacity/quota) or DISABLED
+               (account limit or auth error) with the error
+  reset NAME   re-enable a disabled provider after fixing its account or
+               credentials (a pool configuration reload also does)
+`,
 	"prewarm": `usage: offshore prewarm [--wait] [--force] [--quiet]
 
 Start the remote environment of this repository in the background

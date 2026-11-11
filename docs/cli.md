@@ -93,6 +93,7 @@ See [operations.md](operations.md#prewarm).
 | `offshore status [--json]` | machines, sessions (with labels), cost today |
 | `offshore why [N\|last\|list] [--json]` | explain a recent run (N = 1 is the most recent): local or remote and why, adapter and phases, placement, timings, usage, cache counters, labels |
 | `offshore top [--once] [--width N] [--window 10m] [--interval 2s]` | live view: graphs, machines, sessions, queue, cost; `--once` prints one plain frame |
+| `offshore provider [list]` / `offshore provider reset NAME` | provider health (ok, cooldown, DISABLED by an account limit or auth error); re-enable a disabled provider |
 | `offshore report [--since 7d] [--until T] [--by agent,worktree,branch,repo,user] [--json]` | cost, utilisation, queue wait, caches, estimator accuracy and per-label groups from the event log; times are durations (`7d`, `36h`), dates or RFC 3339 |
 | `offshore metrics` | daemon, pool and machine metrics (Prometheus text) |
 

@@ -205,7 +205,14 @@ var (
 	mu       sync.Mutex
 	active   Options
 	provider *sdktrace.TracerProvider
+	setupLog *slog.Logger
 )
+
+func exportLog() *slog.Logger {
+	mu.Lock()
+	defer mu.Unlock()
+	return setupLog
+}
 
 func init() {
 	// Propagation works even when this process does not export, so that
@@ -219,7 +226,7 @@ func init() {
 func Setup(o Options, log *slog.Logger) func(context.Context) error {
 	mu.Lock()
 	defer mu.Unlock()
-	active = o
+	active, setupLog = o, log
 	if !o.Enabled() {
 		return func(context.Context) error { return nil }
 	}

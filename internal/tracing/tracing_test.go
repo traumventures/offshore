@@ -240,3 +240,12 @@ func TestForwardToMachines(t *testing.T) {
 		t.Fatalf("secret headers %v", sec)
 	}
 }
+
+func TestEncodeGauges(t *testing.T) {
+	at := time.Unix(1, 0)
+	d := EncodeGauges("svc", []Gauge{{Name: "a", Value: 1, Time: at}, {Name: "b", Value: 2, Time: at}, {Name: "a", Value: 3, Time: at}})
+	ms := d.ResourceMetrics[0].ScopeMetrics[0].Metrics
+	if len(ms) != 2 || len(ms[0].Gauge.DataPoints) != 2 || ms[0].Gauge.DataPoints[1].AsDouble != 3 {
+		t.Fatalf("%+v", ms)
+	}
+}

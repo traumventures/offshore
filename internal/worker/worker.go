@@ -591,7 +591,7 @@ func (s *Worker) statusOnly() proto.Status {
 		st.Sessions = append(st.Sessions, proto.Session{
 			ID: se.id, Repo: se.req.Repo, Argv: se.req.Argv, Started: se.started.Unix(),
 			CPU: r.CPU, Memory: r.Memory, Lease: se.req.Lease, Labels: labels.Clean(se.req.Labels),
-			UsedMemory: cur, CPUSeconds: cpuSec,
+			UsedMemory: cur, CPUSeconds: cpuSec, Samples: se.recentSamples(),
 		})
 	}
 	st.Measured.CPU = s.cpuBusyLocked()

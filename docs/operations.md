@@ -347,6 +347,22 @@ with `reason: create_failed`): `capacity` and `quota` cool the provider down (2 
 reloaded or `offshore provider reset NAME`; `transient` and `other` use the per-environment create
 backoff. `offshore status` and `offshore doctor` show disabled and cooling providers.
 
+### Per-session time series
+
+The worker samples each session cgroup every 5 s (busy cores, `memory.current`, `io.stat` read/write
+bytes, PSI some avg10 of cpu/memory/io, `memory.high` events) and reports the last minute in its
+status (`proto.Session.samples`). The orchestrator logs every new sample once as `session_sample`
+(`task`, `machine`, `provider`, `repo`, `key`, `labels`, `sample {time, cpu, memory, io_read_bytes,
+io_write_bytes, psi_cpu, psi_memory, psi_io, memory_high}`), retained like all events, keeps the last
+hour per session in memory (10 min after it ended) and, with `[telemetry]` OTLP configured, exports
+the gauges `offshore.session.cpu|memory|io.read|io.write|pressure.cpu|pressure.memory|pressure.io`
+(attributes `offshore.lease`, `offshore.machine`, `offshore.repo_id`, `offshore.usage_key`) to
+`…/v1/metrics`. Read them with `POST /v1/sessions/samples {"lease": "...", "since": "..."}` (control
+plane, API key), the daemon op `session-samples` (`lease`, `since`) or
+`Orchestrator.SessionSamples(lease, since)`; older sessions fall back to the event log (last day).
+Provider health: `POST /v1/providers`, `POST /v1/providers/reset {"name": "oci"}`, daemon ops
+`providers` and `provider-reset`, `offshore provider`, `offshore status --json` (`providers`).
+
 ### Robust raw data
 
 Each event is one line written with a single `write(2)` on an `O_APPEND` file; a short or failed write

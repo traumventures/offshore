@@ -43,7 +43,8 @@ func newDaemonMetrics(d *Daemon) *daemonMetrics {
 
 var knownOps = map[string]bool{"ping": true, "prepare": true, "release": true, "record": true, "sync": true, "status": true,
 	"reconcile": true, "down": true, "shutdown": true, "metrics": true, "events": true,
-	"outputs-mount": true, "outputs-ensure": true, "outputs-unmount": true, "outputs-status": true, "outputs-hint": true, "outputs-have": true}
+	"outputs-mount": true, "outputs-ensure": true, "outputs-unmount": true, "outputs-status": true, "outputs-hint": true, "outputs-have": true,
+	"queue": true, "providers": true, "provider-reset": true, "session-samples": true}
 
 func (m *daemonMetrics) request(op string, start time.Time, err error) {
 	if !knownOps[op] {

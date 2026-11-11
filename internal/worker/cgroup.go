@@ -3,6 +3,7 @@ package worker
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/traumventures/offshore/internal/events"
 	"github.com/traumventures/offshore/internal/scheduler"
 )
 
@@ -49,7 +51,7 @@ func setupCgroups(log *slog.Logger) *cgroups {
 	ctrls, _ := os.ReadFile(filepath.Join(cgroupRoot, "cgroup.controllers"))
 	var enable []string
 	for _, c := range strings.Fields(string(ctrls)) {
-		if c == "cpu" || c == "memory" || c == "pids" {
+		if c == "cpu" || c == "memory" || c == "pids" || c == "io" {
 			enable = append(enable, "+"+c)
 		}
 	}
@@ -361,4 +363,110 @@ func exitCause(code, signal int, ev memEvents, oomDelta int64, offshoreKill stri
 		return sig, false, killerUnknownSIGKILL
 	}
 	return sig, false, killerSignal
+}
+
+// sessionSampleInterval is how often running sessions are sampled.
+const sessionSampleInterval = 5 * time.Second
+
+// maxSessionSamples bounds the samples a session keeps for the status
+// stream (the orchestrator picks up the new ones every probe).
+const maxSessionSamples = 12
+
+// sampler measures one session cgroup over time.
+type sampler struct {
+	dir     string
+	lastCPU float64
+	lastAt  time.Time
+}
+
+// sample reads the cgroup: busy cores since the previous sample, memory,
+// cumulative IO bytes, PSI some avg10 and memory.high events.
+func (sm *sampler) sample(now time.Time) events.Sample {
+	s := events.Sample{Time: now.UTC().Truncate(time.Millisecond)}
+	if sm.dir == "" {
+		return s
+	}
+	s.Memory = readInt(filepath.Join(sm.dir, "memory.current"))
+	cpu := cpuStatSeconds(filepath.Join(sm.dir, "cpu.stat"))
+	if !sm.lastAt.IsZero() && cpu >= sm.lastCPU {
+		if d := now.Sub(sm.lastAt).Seconds(); d > 0 {
+			s.CPU = math.Round((cpu-sm.lastCPU)/d*100) / 100
+		}
+	}
+	sm.lastCPU, sm.lastAt = cpu, now
+	s.IORead, s.IOWrite = ioStat(filepath.Join(sm.dir, "io.stat"))
+	s.PSICPU = psiAvg10(filepath.Join(sm.dir, "cpu.pressure"))
+	s.PSIMemory = psiAvg10(filepath.Join(sm.dir, "memory.pressure"))
+	s.PSIIO = psiAvg10(filepath.Join(sm.dir, "io.pressure"))
+	if b, err := os.ReadFile(filepath.Join(sm.dir, "memory.events")); err == nil {
+		s.MemoryHigh = parseMemoryEvents(string(b)).High
+	}
+	return s
+}
+
+func readInt(file string) int64 {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	return n
+}
+
+func cpuStatSeconds(file string) float64 {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(line); len(f) == 2 && f[0] == "usage_usec" {
+			us, _ := strconv.ParseFloat(f[1], 64)
+			return us / 1e6
+		}
+	}
+	return 0
+}
+
+// ioStat sums rbytes and wbytes over the devices of an io.stat file.
+func ioStat(file string) (read, write int64) {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return 0, 0
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		for _, kv := range strings.Fields(line) {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok {
+				continue
+			}
+			n, _ := strconv.ParseInt(v, 10, 64)
+			switch k {
+			case "rbytes":
+				read += n
+			case "wbytes":
+				write += n
+			}
+		}
+	}
+	return read, write
+}
+
+// psiAvg10 reads PSI "some avg10" of a pressure file as a fraction.
+func psiAvg10(file string) float64 {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(line, "some ") {
+			continue
+		}
+		for _, kv := range strings.Fields(line)[1:] {
+			if v, ok := strings.CutPrefix(kv, "avg10="); ok {
+				f, _ := strconv.ParseFloat(v, 64)
+				return f / 100
+			}
+		}
+	}
+	return 0
 }
