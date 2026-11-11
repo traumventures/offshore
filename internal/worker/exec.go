@@ -187,7 +187,8 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		}
 	}
 	cancel()
-	span.AddEvent("barrier passed", trace.WithAttributes(attribute.Int64("offshore.barrier_ms", time.Since(begin).Milliseconds())))
+	barrier := time.Since(begin)
+	span.AddEvent("barrier passed", trace.WithAttributes(attribute.Int64("offshore.barrier_ms", barrier.Milliseconds())))
 	if _, ok := req.Roots[req.Repo]; !ok {
 		return prepErr(fmt.Errorf("repository root %s is not attached", req.Repo))
 	}
@@ -244,6 +245,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	if d, err := time.ParseDuration(req.SlotTTL); err == nil && d > 0 && d < ttl {
 		ttl = d
 	}
+	slotBegin := time.Now()
 	slot, _, err := s.slots.lease(req.RepoID, ttl)
 	if err != nil {
 		return prepErr(fmt.Errorf("build slot: %w", err))
@@ -252,6 +254,10 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	if err != nil {
 		s.slots.release(slot)
 		return prepErr(fmt.Errorf("build slot: %w", err))
+	}
+	slotWait := time.Since(slotBegin)
+	if slotWait > 10*time.Second {
+		s.log.Info("build slot wait", "slot", slot, "seconds", slotWait.Seconds())
 	}
 	data := filepath.Join(slot, "data")
 	var restored bool
@@ -327,6 +333,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 
 	var ptmx *os.File
 	var stdin io.WriteCloser
+	units := &unitScanner{}
 	outDone := make(chan struct{})
 	if req.TTY != nil {
 		ptmx, err = pty.StartWithSize(cmd, &pty.Winsize{Rows: req.TTY.Rows, Cols: req.TTY.Cols})
@@ -340,6 +347,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 			for {
 				n, err := ptmx.Read(buf)
 				if n > 0 {
+					units.Write(buf[:n])
 					pc.Write(proto.TStdout, buf[:n])
 				}
 				if err != nil {
@@ -350,7 +358,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	} else {
 		cmd.SysProcAttr.Setpgid = true
 		cmd.Stdout = frameWriter{pc, proto.TStdout}
-		cmd.Stderr = frameWriter{pc, proto.TStderr}
+		cmd.Stderr = teeWriter{frameWriter{pc, proto.TStderr}, units}
 		stdin, err = cmd.StdinPipe()
 		if err != nil {
 			return prepErr(err)
@@ -364,7 +372,8 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	_, pspan := tracing.Start(ctx, "worker.process")
 	span.SetAttributes(attribute.String("offshore.session", se.id), attribute.String("offshore.slot", filepath.Base(slot)), attribute.Bool("offshore.warm", warm))
 	s.log.Info("session started", "session", se.id, "argv", req.Argv, "cwd", req.Cwd, "slot", slot)
-	pc.Send(proto.TStarted, proto.Started{Session: se.id, Machine: s.cfg.MachineID, Slot: filepath.Base(slot), WaitMs: time.Since(begin).Milliseconds()})
+	pc.Send(proto.TStarted, proto.Started{Session: se.id, Machine: s.cfg.MachineID, Slot: filepath.Base(slot),
+		WaitMs: time.Since(begin).Milliseconds(), BarrierMs: barrier.Milliseconds(), SlotMs: slotWait.Milliseconds()})
 
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()
@@ -439,6 +448,7 @@ loop:
 	exit.Usage.PeakMemory, exit.Usage.CPUSeconds = s.cg.usage(cgDir)
 	exit.Usage.CPUStall, exit.Usage.MemoryStall = s.cg.stall(cgDir)
 	exit.Usage.Warm = warm
+	exit.Usage.Units, exit.Usage.UnitsSample, exit.Usage.DirtyReasons = units.result()
 	reads, readBytes, tracked := s.cfs.sessionEnded(slot, req.RepoID)
 	if !tracked {
 		reads = nil // the read index falls back to atime

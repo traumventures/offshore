@@ -162,7 +162,8 @@ func printRun(w io.Writer, r events.Run) {
 			v    int64
 		}{
 			{"environment image", t.Env}, {"local sync", t.Sync}, {"queue / machine start", t.Queue},
-			{"attach roots", t.Attach}, {"connect", t.Connect}, {"worker barrier", t.Barrier},
+			{"attach roots", t.Attach}, {"connect", t.Connect}, {"manifest barrier", t.Barrier},
+			{"build slot", t.Slot}, {"worker prepare", t.Prepare},
 			{"run", t.Run}, {"write back", t.Writeback}, {"outputs", t.Outputs}, {"total", t.Total},
 		} {
 			fmt.Fprintf(tw, "    %s\t%s\n", p.name, ms(p.v))
@@ -177,6 +178,29 @@ func printRun(w io.Writer, r events.Run) {
 			line += ", OOM killed"
 		}
 		fmt.Fprintf(w, "  usage      %s\n", line)
+		if u.Units > 0 || u.Warm {
+			units := fmt.Sprintf("%d built", u.Units)
+			if len(u.UnitsSample) > 0 {
+				units += " (" + strings.Join(u.UnitsSample, ", ")
+				if u.Units > len(u.UnitsSample) {
+					units += ", ..."
+				}
+				units += ")"
+			}
+			fmt.Fprintf(w, "  units      %s\n", units)
+		}
+		if len(u.DirtyReasons) > 0 {
+			keys := make([]string, 0, len(u.DirtyReasons))
+			for k := range u.DirtyReasons {
+				keys = append(keys, k)
+			}
+			sort.Slice(keys, func(i, j int) bool { return u.DirtyReasons[keys[i]] > u.DirtyReasons[keys[j]] })
+			var parts []string
+			for _, k := range keys {
+				parts = append(parts, fmt.Sprintf("%s %d", k, u.DirtyReasons[k]))
+			}
+			fmt.Fprintf(w, "  dirty      %s\n", strings.Join(parts, ", "))
+		}
 	}
 	if len(r.Cache) > 0 {
 		keys := make([]string, 0, len(r.Cache))

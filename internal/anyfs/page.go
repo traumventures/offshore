@@ -2,9 +2,11 @@ package anyfs
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"io"
+	"os"
 
 	"github.com/zeebo/blake3"
 
@@ -71,12 +73,41 @@ const SmallFile = 1 << 20
 // lower tier).
 type PageSink func(k Key, b []byte) error
 
+// Range is where a large file's page lies in a local file: a tier on the
+// same file system can store the page as a clone of the range (reflink,
+// metadata only) instead of writing its bytes a second time.
+type Range struct {
+	File *os.File
+	Off  int64
+	// Ctime is the file's ctime (ns) before its content was read: a
+	// clone is only kept if the file still has it (0: never cloned).
+	Ctime int64
+}
+
+// RangeSink receives pages with their range (File nil: none).
+type RangeSink func(k Key, b []byte, r Range) error
+
+// RangePutter is implemented by tiers that can store a page as a clone of
+// a file range (falling back to writing b).
+type RangePutter interface {
+	PutRange(ctx context.Context, k Key, b []byte, r Range, s State) error
+}
+
+// PutPage stores a page in t, as a clone of r where t supports it.
+func PutPage(ctx context.Context, t Tier, k Key, b []byte, r Range, s State) error {
+	if rp, ok := t.(RangePutter); ok && r.File != nil {
+		return rp.PutRange(ctx, k, b, r, s)
+	}
+	return t.Put(ctx, k, b, s)
+}
+
 // Packer turns file contents into pages: small files are packed into
 // pages of about PageSize with content defined boundaries (an inserted
 // or removed file only changes the page around it), large files are
 // split into PageSize pieces.
 type Packer struct {
 	sink    PageSink
+	ranges  RangeSink // pages of large files with their range (nil: sink)
 	pack    bytes.Buffer
 	pending []*Node
 	pages   int64
@@ -89,10 +120,24 @@ func NewPacker(sink PageSink) *Packer { return &Packer{sink: sink} }
 // Pages returns the number of pages emitted and their bytes.
 func (p *Packer) Pages() (int64, int64) { return p.pages, p.bytes }
 
+// WithRanges makes the packer emit the pages of large files read by
+// AddLargeFile to rs, with their range in the file.
+func (p *Packer) WithRanges(rs RangeSink) *Packer {
+	p.ranges = rs
+	return p
+}
+
 func (p *Packer) emit(b []byte) (Key, error) {
+	return p.emitAt(b, Range{})
+}
+
+func (p *Packer) emitAt(b []byte, r Range) (Key, error) {
 	k := KeyOf(b)
 	p.pages++
 	p.bytes += int64(len(b))
+	if p.ranges != nil && r.File != nil {
+		return k, p.ranges(k, b, r)
+	}
 	return k, p.sink(k, b)
 }
 
@@ -145,6 +190,13 @@ func (p *Packer) addAlone(n *Node, b []byte) error {
 // AddLarge splits the content read from r into pages and sets n.Pages,
 // n.Size and n.Digest.
 func (p *Packer) AddLarge(n *Node, r io.Reader) error {
+	return p.AddLargeFile(n, nil, 0, r)
+}
+
+// AddLargeFile is AddLarge for content read from r at the start of f
+// (r may limit the rate of reading f), whose ctime before reading was
+// ctime: with WithRanges, the pages carry their range in f.
+func (p *Packer) AddLargeFile(n *Node, f *os.File, ctime int64, r io.Reader) error {
 	h := blake3.New()
 	buf := make([]byte, PageSize)
 	var refs []PageRef
@@ -154,7 +206,7 @@ func (p *Packer) AddLarge(n *Node, r io.Reader) error {
 		if k > 0 {
 			b := append([]byte(nil), buf[:k]...)
 			h.Write(b)
-			key, perr := p.emit(b)
+			key, perr := p.emitAt(b, Range{File: f, Off: total, Ctime: ctime})
 			if perr != nil {
 				return perr
 			}

@@ -615,8 +615,15 @@ volumes whose machine disappeared are released like destroyed ones, and
 unmanaged cache volumes whose machine is gone and that carry no expiry are
 deleted.
 
-Machines use gp3 root volumes (`disk_gb`, default 100; 3000 IOPS and
-125 MB/s baseline). Instance types with local NVMe (`c6id`, `m6id`,
+Machines use gp3 root volumes (`disk_gb`, default 100) provisioned with
+6000 IOPS and 500 MiB/s (`disk_iops`, `disk_throughput`; the gp3 baseline
+of 3000 IOPS and 125 MB/s made concurrent app sessions I/O bound at
+0.15-0.4 cores, Nov 2026); OCI boot volumes use `disk_vpus` (default 20).
+Pages of files hashed during a session (and large files read by a commit)
+are reflinks of the slot's files on xfs with reflink (`FICLONERANGE`,
+`anyfs.Local.PutRange`, counted as `cloned_bytes`): build outputs are not
+written a second time; a source changed after it was read (ctime) or a
+file system without reflinks gets a written copy. Instance types with local NVMe (`c6id`, `m6id`,
 `c7gd`) are faster for target directories but lose their content on stop,
 so their warm state only survives through committed layers in the store. To compare on a real
 machine:

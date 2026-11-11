@@ -229,14 +229,20 @@ func (l *Link) fault(ctx context.Context, k Key) ([]byte, error) {
 // state argument is the caller's: every page put into a write-back link
 // is dirty relative to its lower tier).
 func (l *Link) Put(ctx context.Context, k Key, b []byte, s State) error {
+	return l.PutRange(ctx, k, b, Range{}, s)
+}
+
+// PutRange implements RangePutter: the upper tier stores the page as a
+// clone of r where it supports it.
+func (l *Link) PutRange(ctx context.Context, k Key, b []byte, r Range, s State) error {
 	if l.pol.Write == WriteThrough {
 		if err := l.lower.Put(ctx, k, b, s); err != nil {
 			return err
 		}
 		l.count(int64(len(b)), true)
-		return l.upper.Put(ctx, k, b, Clean)
+		return PutPage(ctx, l.upper, k, b, r, Clean)
 	}
-	if err := l.upper.Put(ctx, k, b, Dirty); err != nil {
+	if err := PutPage(ctx, l.upper, k, b, r, Dirty); err != nil {
 		return err
 	}
 	l.mu.Lock()
@@ -530,7 +536,13 @@ func (l *Link) Stream(ctx context.Context) *Stream {
 // Put puts a page into the link (dirty) and writes it back in the
 // background.
 func (s *Stream) Put(k Key, b []byte) error {
-	if err := s.l.Put(s.ctx, k, b, Dirty); err != nil {
+	return s.PutRange(k, b, Range{})
+}
+
+// PutRange is Put with the page's range in a local file (a clone in the
+// upper tier where supported).
+func (s *Stream) PutRange(k Key, b []byte, r Range) error {
+	if err := s.l.PutRange(s.ctx, k, b, r, Dirty); err != nil {
 		return err
 	}
 	select {

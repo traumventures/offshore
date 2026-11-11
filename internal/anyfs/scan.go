@@ -33,8 +33,12 @@ type ScanOptions struct {
 	Skip func(rel string, d fs.DirEntry) bool
 	// FileSink, if set, returns the sink of the pages of one large file
 	// (files of their own pages; e.g. streamed to the store by the
-	// file's access class); small files packed together go to Sink.
-	FileSink func(rel string) PageSink
+	// file's access class; nil: the default), with their range in the
+	// file; small files packed together go to Sink.
+	FileSink func(rel string) RangeSink
+	// RangeSink, if set, is the default sink of large files' pages with
+	// their range (a tier can clone it instead of writing the bytes).
+	RangeSink RangeSink
 	// Workers bounds the files read concurrently (0: DefaultReadWorkers).
 	// Small files are still packed in path order, so pages do not depend
 	// on it; the sink must accept concurrent puts.
@@ -344,11 +348,12 @@ func readFiles(dir string, nodes []*Node, opt ScanOptions, st *ScanStats) error 
 				}
 				var lp *Packer
 				if pk != nil {
-					sink := opt.Sink
+					lp = NewPacker(opt.Sink).WithRanges(opt.RangeSink)
 					if opt.FileSink != nil {
-						sink = opt.FileSink(j.n.Path)
+						if fs := opt.FileSink(j.n.Path); fs != nil {
+							lp.WithRanges(fs)
+						}
 					}
-					lp = NewPacker(sink)
 				}
 				j.err = readNode(j.n, path, lp, false)
 				if lp != nil {
@@ -418,7 +423,11 @@ func readNode(n *Node, path string, pk *Packer, alone bool) error {
 	}
 	defer f.Close()
 	if pk != nil {
-		return pk.AddLarge(n, f)
+		var ctime int64
+		if fi, err := f.Stat(); err == nil {
+			ctime = ctimeOf(fi)
+		}
+		return pk.AddLargeFile(n, f, ctime, f)
 	}
 	h := blake3.New()
 	sz, err := io.Copy(h, f)

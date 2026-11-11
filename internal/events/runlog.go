@@ -73,7 +73,9 @@ type Timings struct {
 	Queue     int64 `json:"queue_ms"`     // waiting for capacity (incl. machine start)
 	Attach    int64 `json:"attach_ms"`    // projecting roots onto the machine
 	Connect   int64 `json:"connect_ms"`   // proxy connection to the machine
-	Barrier   int64 `json:"barrier_ms"`   // server side preparation until start
+	Barrier   int64 `json:"barrier_ms"`   // manifest barrier on the worker (roots reach the synced version)
+	Slot      int64 `json:"slot_ms"`      // build slot lease and preparation (waits for the latest slot)
+	Prepare   int64 `json:"prepare_ms"`   // rest of the worker's preparation until start
 	Run       int64 `json:"run_ms"`       // the process itself
 	Writeback int64 `json:"writeback_ms"` // source changes copied back
 	Outputs   int64 `json:"outputs_ms"`   // output transfer
