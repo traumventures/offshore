@@ -65,10 +65,11 @@ Numbers and the bugs found on the way are in [PLAN.md](PLAN.md) section 0
   identity cache dev/ino/size/mtime/ctime, ephemeral classes skipped, pages
   written back by class during the session), the commit reads the rest with
   parallel workers and streams early-class pages to the store while
-  reading. Not yet measured live on gp3 (synthetic baseline on a
-  125 MB/s-throttled disk: 4 GB fresh slot = 44 s commit + 34 s flush);
-  open: reflink page files (FICLONERANGE) instead of a second write, live
-  numbers for app.
+  reading. Synthetic 4 GB fresh slot on a 125 MB/s-throttled disk: head
+  78 s -> 1.8 s after the session, but the session itself took 228 s
+  instead of 113 s (hashing, page files and writeback share the disk).
+  Open: reflink page files (FICLONERANGE) instead of a second write,
+  default hash rate limit per medium, live numbers for app on gp3.
 * **Restore on slow root disks**: on gp3 roots (125 MB/s) the cost model
   prefers cold builds for big slots; learned cold times underestimate cold
   builds on fresh machines (empty compiler cache in the store). Planned:
