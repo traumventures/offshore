@@ -334,11 +334,19 @@ func sessionDetail(s Snapshot, h *History, v View, rates map[string]float64, st 
 		if row != nil {
 			topC, topM = row.ResCPU, float64(row.ResMem)
 		}
+		resC, resM := topC, topM
+		// A session may burst above its reservation; never clip the peak.
+		for _, p := range sp {
+			if p.T.After(s.Time.Add(-v.Window)) {
+				topC = max(topC, p.BusyCPU)
+				topM = max(topM, float64(p.UsedMem))
+			}
+		}
 		gs := []graphSpec{
-			{fmt.Sprintf("CPU %.1f cores", last.BusyCPU), topC, func(n int) ([]float64, []bool) {
+			{fmt.Sprintf("CPU %.1f cores (reserved %.1f)", last.BusyCPU, resC), topC, func(n int) ([]float64, []bool) {
 				return Series(sp, at, func(p SPoint) float64 { return p.BusyCPU }, s.Time, v.Window, n)
 			}},
-			{fmt.Sprintf("Memory %s", human(last.UsedMem)), topM, func(n int) ([]float64, []bool) {
+			{fmt.Sprintf("Memory %s (reserved %s)", human(last.UsedMem), human(int64(resM))), topM, func(n int) ([]float64, []bool) {
 				return Series(sp, at, func(p SPoint) float64 { return float64(p.UsedMem) }, s.Time, v.Window, n)
 			}},
 		}

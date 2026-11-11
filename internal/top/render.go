@@ -402,14 +402,13 @@ func graphs(s Snapshot, h *History, v View, st Styles, rows int) string {
 		last = h.Pool[n-1]
 	}
 	at := func(p Point) time.Time { return p.T }
-	maxOf := func(f func(Point) float64) float64 {
-		m := 0.0
-		for _, p := range h.Pool {
-			if p.T.After(s.Time.Add(-v.Window)) {
-				m = math.Max(m, f(p))
-			}
+	// Each sample is drawn as a share of the capacity active at that
+	// moment: a machine that was removed must not keep the axis high.
+	ratio := func(x, c float64) float64 {
+		if c <= 0 {
+			return 0
 		}
-		return m
+		return x / c
 	}
 	type g struct {
 		title string
@@ -417,10 +416,10 @@ func graphs(s Snapshot, h *History, v View, st Styles, rows int) string {
 		top   float64
 	}
 	gs := []g{
-		{fmt.Sprintf("CPU busy %.1f / %.0f cores (reserved %.1f)", last.BusyCPU, last.CapCPU, last.ReservedCPU), func(p Point) float64 { return p.BusyCPU },
-			maxOf(func(p Point) float64 { return p.CapCPU })},
-		{fmt.Sprintf("Memory %s / %s", human(last.UsedMem), human(last.CapMem)), func(p Point) float64 { return float64(p.UsedMem) },
-			maxOf(func(p Point) float64 { return float64(p.CapMem) })},
+		{fmt.Sprintf("CPU busy %.1f / %.0f cores (reserved %.1f)", last.BusyCPU, last.CapCPU, last.ReservedCPU),
+			func(p Point) float64 { return ratio(p.BusyCPU, p.CapCPU) }, 1},
+		{fmt.Sprintf("Memory %s / %s", human(last.UsedMem), human(last.CapMem)),
+			func(p Point) float64 { return ratio(float64(p.UsedMem), float64(p.CapMem)) }, 1},
 	}
 	var panels []string
 	for i, x := range gs {
@@ -546,7 +545,7 @@ func machinesPanel(s Snapshot, ms []orchestrator.Machine, v View, st Styles, n i
 	for i := off; i < len(rows) && i < off+limit; i++ {
 		line := fit(renderRow(machineCols, ws, rows[i], st), inner)
 		if i == sel && v.Focus == FocusMachines && v.Height > 0 {
-			line = st.Selected.Render(pad(line, inner))
+			line = st.Selected.Render(pad(ansi.Strip(line), inner))
 		}
 		lines = append(lines, line)
 	}
@@ -681,7 +680,7 @@ func sessionsPanel(rows []SRow, v View, st Styles, n int) string {
 		}
 		line = fit(line, inner)
 		if i == sel && v.Focus == FocusSessions && v.Height > 0 {
-			line = st.Selected.Render(pad(line, inner))
+			line = st.Selected.Render(pad(ansi.Strip(line), inner))
 		}
 		lines = append(lines, line)
 	}
