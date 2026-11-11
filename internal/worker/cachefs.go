@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/traumventures/offshore/internal/access"
 	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/blobcache"
 	"github.com/traumventures/offshore/internal/proto"
@@ -124,6 +125,8 @@ type repoFS struct {
 	storeNm string
 	expires int64
 	link    *anyfs.Link
+
+	access *access.Model // access classes of the repository's files
 }
 
 // slotMount is a mounted slot.
@@ -133,6 +136,8 @@ type slotMount struct {
 	src   *anyfs.TreeSource
 	lower *anyfs.LowerFS
 	user  *anyfs.UserOverlay
+	// cancel stops the class prefetch (nil: none).
+	cancel context.CancelFunc
 }
 
 func newCacheFS(dir string, opt cacheFSOptions) (*cacheFS, error) {
@@ -229,7 +234,7 @@ func (c *cacheFS) repo(id string) (*repoFS, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &repoFS{id: id, c: c, local: local, layers: layers}
+	r := &repoFS{id: id, c: c, local: local, layers: layers, access: loadAccess(base)}
 	r.tier = repoTier{r}
 	c.repos[id] = r
 	return r, nil
@@ -418,6 +423,9 @@ func (c *cacheFS) mount(ctx context.Context, slot, repo, base string) error {
 		}
 		go src.PrefetchSmall(context.Background(), prefetchSmall, 16)
 	}
+	if dirEmpty(upper) {
+		c.prefetchClasses(sm) // fresh over a head: warm what the build reads
+	}
 	c.mu.Lock()
 	c.mounts[slot] = sm
 	c.mu.Unlock()
@@ -436,6 +444,9 @@ func (c *cacheFS) unmount(slot string) {
 	delete(c.mounts, slot)
 	c.mu.Unlock()
 	data := filepath.Join(slot, "data")
+	if sm != nil && sm.cancel != nil {
+		sm.cancel()
+	}
 	if sm != nil && sm.user != nil {
 		sm.user.Unmount()
 	} else if anyfs.IsMountpoint(data) {
@@ -523,6 +534,7 @@ func (c *cacheFS) commit(ctx context.Context, slot, repo string, m slotMeta, liv
 		return res, nil
 	}
 	now := c.opt.Now()
+	c.observe(r, base, tree, now)
 	l := anyfs.Commit(ch, base, tree, now, nil)
 	if len(ch) == 0 && m.Created > 0 {
 		l.Created = m.Created
@@ -740,6 +752,7 @@ func (c *cacheFS) reclaim(ctx context.Context, want int64) int64 {
 	if want <= 0 {
 		return 0
 	}
+	c.coldByClass()
 	fs := c.files.Stats().ResidentBytes
 	freed := c.files.Reclaim(max(0, fs-want))
 	c.mu.Lock()

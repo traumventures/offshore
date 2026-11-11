@@ -122,6 +122,17 @@ write-once; node: `node_modules` immutable, bundler caches churn). A
 pattern's own statistics override the prior once it was seen in 3
 sessions; unseen files fall back to their directory's statistics.
 
+On workers the slot file system feeds every commit into the repository's
+model (`<cache>/anyfs/repos/<repo>/access.json`; reads are not tracked
+yet, so read counts stay out of the classification). Two policies act
+today: reclaim drops materialized files of ephemeral, then churn files
+before the least recently used rest, and a slot mounted fresh over a
+committed head prefetches its immutable and write-once files (larger than
+the small files prefetched anyway, up to 2 GiB or a quarter of the
+capacity). Placement, per-class writeback delays and cross-slot dedupe
+are part of the policy table but not applied yet: a commit is a full
+snapshot of the slot.
+
 ## Object store (`[storage]`)
 
 Internally a provider has four parts: **Compute** (machines), **Registry**

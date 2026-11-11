@@ -292,7 +292,13 @@ func TestScanPacksAndFilesAssemble(t *testing.T) {
 	if files.Stats().ResidentBytes != int64(len(small)+len(big)) {
 		t.Fatalf("files %+v", files.Stats())
 	}
-	if freed := files.Reclaim(0); freed != int64(len(small)+len(big)) {
+	// Cold content goes first, ahead of recency (b.rlib was used last).
+	nb, _ := tr.Get("deps/b.rlib")
+	files.Cold([]*Node{nb})
+	if freed := files.Reclaim(int64(len(small))); freed != int64(len(big)) {
+		t.Fatalf("cold reclaim freed %d", freed)
+	}
+	if freed := files.Reclaim(0); freed != int64(len(small)) {
 		t.Fatalf("reclaim freed %d", freed)
 	}
 }

@@ -457,6 +457,20 @@ func (f *Files) Drop(digest string) {
 	}
 }
 
+// Cold marks the materialized content of nodes as least recently used,
+// in order (the last node becomes the coldest), so that Reclaim drops it
+// first: the caller's reclaim order (e.g. by access class) ahead of plain
+// recency. Nodes without resident content are ignored.
+func (f *Files) Cold(nodes []*Node) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, n := range nodes {
+		if m := f.files[digestOf(n)]; m != nil {
+			f.lru.MoveToFront(m.elem)
+		}
+	}
+}
+
 // Digests returns the digests of the resident files.
 func (f *Files) Digests() []string {
 	f.mu.Lock()
