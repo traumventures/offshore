@@ -88,15 +88,21 @@ func (d *Detection) Render() string {
 		}
 	}
 	if len(d.BuildCache) > 0 {
-		w("\n[cache.build]\n")
-		w("paths = %s        # stays on the machine (24 h), never synchronised\n", list(d.BuildCache, 0))
+		w("\n[cache.target]\n")
+		w("scope = \"slot\"                 # stays on the machine (24 h), never synchronised\n")
+		w("paths = %s\n", list(d.BuildCache, 0))
+		if d.Rust {
+			w("prune = \"rust\"\n")
+		}
 	}
 	if len(d.DepsCache) > 0 {
 		w("\n[cache.deps]\n")
+		w("scope = \"machine\"              # shared by the sessions of a machine\n")
 		w("paths = %s\n", list(d.DepsCache, 0))
 	}
 	if d.Rust {
-		w("\n[cache.compiler]               # shared compiler cache across machines\n")
+		w("\n[cache.sccache]               # shared compiler cache across machines\n")
+		w("scope = \"global\"\n")
 		w("tool = \"sccache\"\n")
 		w("\n[tool.cargo]\n")
 		w("# subcommands that only touch the local checkout or your account run locally\n")

@@ -137,7 +137,7 @@ type Exec struct {
 	Grant scheduler.Grant `json:"grant"`
 	// MemoryOvercommit bounds the sum of memory reservations on the
 	// machine (server side safety net for the scheduler).
-	MemoryOvercommit float64  `json:"memory_overcommit"`
+	MemoryOvercommit float64 `json:"memory_overcommit"`
 	// Caches are the repository's [cache.<name>] tables.
 	Caches  []Cache  `json:"caches,omitempty"`
 	SlotTTL string   `json:"slot_ttl"` // effective slot TTL, e.g. "24h"

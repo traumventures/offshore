@@ -3,6 +3,7 @@ package initcfg
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -68,9 +69,7 @@ func TestAppMatchesReference(t *testing.T) {
 	check("toolchain", got.Environment.Toolchains.Rust, ref.Environment.Toolchains.Rust)
 	check("apt", sorted(got.Environment.Packages.Apt), sorted(ref.Environment.Packages.Apt))
 	check("cpu", got.Resources.CPU, ref.Resources.CPU)
-	check("build cache", got.Cache.Build.Paths, ref.Cache.Build.Paths)
-	check("deps cache", got.Cache.Deps.Paths, ref.Cache.Deps.Paths)
-	check("compiler cache", got.Cache.Compiler.Tool, ref.Cache.Compiler.Tool)
+	check("caches", got.Caches, ref.Caches)
 	check("secrets", got.Secrets, ref.Secrets)
 	check("cargo local", got.Tools["cargo"].Local, ref.Tools["cargo"].Local)
 	check("git fetch env", got.Environment.Env["CARGO_NET_GIT_FETCH_WITH_CLI"], "true")
@@ -115,7 +114,7 @@ func equal(a, b any) bool {
 		}
 		return true
 	}
-	return a == b
+	return reflect.DeepEqual(a, b)
 }
 
 // norm makes shell scripts comparable: whitespace and line continuations
@@ -139,8 +138,8 @@ func TestDockerfileFallback(t *testing.T) {
 	if !slices.Equal(sorted(repo.Environment.Packages.Apt), []string{"libpq-dev", "protobuf-compiler"}) {
 		t.Errorf("apt %v", repo.Environment.Packages.Apt)
 	}
-	if repo.Cache.Build.Paths[0] != "target" || len(repo.Secrets) != 0 {
-		t.Errorf("cache %v secrets %v", repo.Cache.Build.Paths, repo.Secrets)
+	if repo.SlotPaths()[0] != "target" || len(repo.Secrets) != 0 {
+		t.Errorf("cache %v secrets %v", repo.SlotPaths(), repo.Secrets)
 	}
 }
 

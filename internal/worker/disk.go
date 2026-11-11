@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+
+	"github.com/traumventures/cloudsourced/internal/proto"
 )
 
 // treeSize returns the bytes allocated by the files below dir (hard links
@@ -66,4 +68,26 @@ func fsUsage(dir string) (total, used int64, ok bool) {
 	total = int64(st.Blocks) * st.Bsize
 	used = total - int64(st.Bfree)*st.Bsize
 	return total, used, true
+}
+
+// measureMachineCaches records the size of the machine cache directory.
+func (s *Worker) measureMachineCaches() {
+	if s.cfg.DepsDir != "" {
+		s.machineCacheBytes.Store(treeSize(s.cfg.DepsDir))
+	}
+}
+
+// diskStatus reports the cache disk: filesystem totals, slot bytes (from
+// the slot metadata) and the machine caches (measured by the periodic gc).
+func (s *Worker) diskStatus() *proto.DiskStatus {
+	total, used, ok := fsUsage(s.cfg.CacheDir)
+	if !ok {
+		return nil
+	}
+	d := &proto.DiskStatus{Total: total, Used: used, MachineCaches: s.machineCacheBytes.Load(), SlotBytes: map[string]int64{}}
+	for _, r := range s.slots.list() {
+		d.Slots += r.Meta.Bytes
+		d.SlotBytes[r.Repo] += r.Meta.Bytes
+	}
+	return d
 }

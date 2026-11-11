@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -168,6 +169,10 @@ type Worker struct {
 	inflight map[string]*fetchCall
 
 	metrics *serverMetrics
+
+	// machineCacheBytes is the size of the machine caches, measured by
+	// the periodic gc.
+	machineCacheBytes atomic.Int64
 }
 
 type fetchCall struct {
@@ -216,6 +221,7 @@ func (s *Worker) Run(ctx context.Context) error {
 	if n := s.slots.gc(s.cfg.BuildTTL); n > 0 {
 		s.log.Info("removed expired build slots", "count", n)
 	}
+	go s.measureMachineCaches()
 	ln, err := transport.Listen(s.cfg.Listen, &s.cfg.Identity)
 	if err != nil {
 		return err
@@ -292,6 +298,7 @@ func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
 		}
 		if time.Since(lastGC) > 5*time.Minute {
 			s.slots.gc(s.cfg.BuildTTL)
+			go s.measureMachineCaches()
 			lastGC = time.Now()
 		}
 		if s.cfg.ExpiresAt.IsZero() || s.cfg.now().Before(s.cfg.ExpiresAt) {
@@ -494,6 +501,7 @@ func (s *Worker) statusOnly() proto.Status {
 		st.Mounts = append(st.Mounts, r)
 	}
 	st.WarmRepos = s.slots.warmRepos(s.cfg.BuildTTL)
+	st.Disk = s.diskStatus()
 	return st
 }
 

@@ -89,7 +89,7 @@ func TestCompilerCacheAndLinkerTools(t *testing.T) {
 	if strings.Contains(p0.Dockerfile, "sccache") || strings.Contains(p0.Dockerfile, "mold") || len(p0.tools) != 0 {
 		t.Fatalf("tools installed without configuration:\n%s", p0.Dockerfile)
 	}
-	p1, err := Resolve(repo(t, base+"linker = \"mold\"\n[cache.compiler]\ntool = \"sccache\"\n", nil))
+	p1, err := Resolve(repo(t, base+"linker = \"mold\"\n[cache.sc]\ntool = \"sccache\"\n", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,8 +110,8 @@ func TestCompilerCacheAndLinkerTools(t *testing.T) {
 	if p1.tools["tools/sccache"].SHA256 != toolReleases["sccache"]["x86_64"].SHA256 {
 		t.Fatal("pinned sccache release not used")
 	}
-	// The compiler cache TTL and incremental setting do not change the image.
-	p2, _ := Resolve(repo(t, base+"linker = \"mold\"\n[cache.compiler]\ntool = \"sccache\"\nttl = \"1h\"\nincremental = false\n", nil))
+	// The compiler cache TTL does not change the image.
+	p2, _ := Resolve(repo(t, base+"linker = \"mold\"\n[cache.sc]\ntool = \"sccache\"\nttl = \"1h\"\n", nil))
 	if p2.Hash != p1.Hash {
 		t.Fatal("session-only compiler cache settings changed the environment hash")
 	}
@@ -119,7 +119,11 @@ func TestCompilerCacheAndLinkerTools(t *testing.T) {
 	if !strings.Contains(p3.Dockerfile, "--no-install-recommends lld") || !strings.Contains(p3.Dockerfile, "-fuse-ld=lld") || len(p3.tools) != 0 {
 		t.Fatalf("lld not installed:\n%s", p3.Dockerfile)
 	}
-	pa, _ := Resolve(repo(t, base+"[resources]\narch = \"aarch64\"\n[cache.compiler]\ntool = \"sccache\"\n", nil))
+	pc, _ := Resolve(repo(t, base+"[cache.cc]\ntool = \"ccache\"\n", nil))
+	if !strings.Contains(pc.Dockerfile, "--no-install-recommends ccache") {
+		t.Fatalf("ccache not installed:\n%s", pc.Dockerfile)
+	}
+	pa, _ := Resolve(repo(t, base+"[resources]\narch = \"aarch64\"\n[cache.sc]\ntool = \"sccache\"\n", nil))
 	if !strings.Contains(pa.tools["tools/sccache"].URL, "aarch64-unknown-linux-musl") {
 		t.Fatalf("wrong arch: %s", pa.tools["tools/sccache"].URL)
 	}
