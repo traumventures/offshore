@@ -150,7 +150,8 @@ func (o *Orchestrator) slotTargetLocked(id string) (SlotTarget, *Machine, bool) 
 }
 
 // prepareSlot performs a placement's slot action on the machine before
-// the session starts (prune, disk resize, snapshot restore). Failures are
+// the session starts (prune, disk resize, snapshot restore, a restore
+// with its disk resize in one step). Failures are
 // logged; the session then runs on whatever slot is there (cold).
 func (o *Orchestrator) prepareSlot(ctx context.Context, machineID string, a scheduler.SlotAction) {
 	if a.Kind == scheduler.SlotNone {
@@ -171,31 +172,41 @@ func (o *Orchestrator) prepareSlot(ctx context.Context, machineID string, a sche
 	}
 	start := time.Now()
 	ev := o.machineEvent(events.SlotAction, machineID)
-	ev.Repo, ev.Reason, ev.Bytes = a.Repo, a.Kind.String(), a.Bytes
-	var err error
-	switch a.Kind {
-	case scheduler.SlotPrune:
+	ev.Repo, ev.Reason, ev.Bytes = a.Repo, a.Steps(), a.Bytes
+	prune := func(bytes int64) (int64, error) {
 		if slots == nil {
-			err = errors.New("no slot operations configured")
-			break
+			return 0, errors.New("no slot operations configured")
 		}
-		var freed int64
-		freed, err = slots.PruneSlot(ctx, t, a.Repo, a.Bytes)
-		ev.Bytes = freed
-	case scheduler.SlotResize:
+		return slots.PruneSlot(ctx, t, a.Repo, bytes)
+	}
+	resize := func(bytes int64) error {
 		o.mu.Lock()
 		vol := o.volumeOfLocked(machineID)
 		o.mu.Unlock()
 		if vol != nil {
-			err = o.resizeVolume(ctx, machineID, a.Bytes)
-			break
+			return o.resizeVolume(ctx, machineID, bytes)
 		}
 		r, ok := p.(provider.DiskResizer)
 		if !ok {
-			err = errors.New("provider cannot resize disks")
-			break
+			return errors.New("provider cannot resize disks")
 		}
-		err = r.ResizeDisk(ctx, machineID, a.Bytes)
+		return r.ResizeDisk(ctx, machineID, bytes)
+	}
+	var err error
+	// A restore or move grows the disk in the same step; a failure there
+	// is logged and the restore proceeds (it may thrash).
+	if a.Grow > 0 {
+		if rerr := resize(a.Grow); rerr != nil {
+			o.log.Warn("disk resize before restore failed", "machine", machineID, "repo", a.Repo, "err", rerr)
+		}
+	}
+	switch a.Kind {
+	case scheduler.SlotPrune:
+		var freed int64
+		freed, err = prune(a.Bytes)
+		ev.Bytes = freed
+	case scheduler.SlotResize:
+		err = resize(a.Bytes)
 	case scheduler.SlotRestore:
 		if slots == nil {
 			err = errors.New("no slot operations configured")

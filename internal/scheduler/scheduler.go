@@ -265,6 +265,10 @@ type Pool struct {
 	// a new machine of a volume size in their zone gets their warm slots
 	// for the attach time.
 	Volumes []Volume
+	// Refetch is the calibrated refetch factor of thrashing builds per
+	// provider ("" = all providers): refaulted bytes per byte of working
+	// set beyond the local capacity (see RefetchOf; nil: DefaultRefetch).
+	Refetch map[string]float64
 }
 
 // SizesFor returns the sizes that can be created for env now: those of
@@ -337,6 +341,19 @@ type SlotAction struct {
 	Bytes    int64
 	Snapshot Snapshot
 	From     string // SlotMove: the machine holding the warm slot
+	// Grow is the disk size a SlotRestore or SlotMove grows the disk to in
+	// the same step (0: no resize): a restore that needs room or whose
+	// working set does not fit the local tier.
+	Grow int64
+}
+
+// Steps names the action with its preparation, e.g. "resize+restore".
+func (a SlotAction) Steps() string {
+	s := a.Kind.String()
+	if a.Grow > 0 {
+		s = "resize+" + s
+	}
+	return s
 }
 
 // Placement is the decision for one task.

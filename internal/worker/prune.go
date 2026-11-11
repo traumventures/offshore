@@ -396,7 +396,8 @@ func (s *Worker) enforceBudgets(slot string) {
 }
 
 // enforceDiskBudget frees disk while it is above the machine budget:
-// reclaim of resident slot data (refetched on use) first, then the policy
+// reclaim of resident slot data (refetched on use) first, then of
+// faulted-in source contents (refetched from the laptop), then the policy
 // prune of the least recently used slots, then cold slots.
 func (s *Worker) enforceDiskBudget() {
 	budget := s.diskBudget()
@@ -407,7 +408,7 @@ func (s *Worker) enforceDiskBudget() {
 		_, used, _ := fsUsage(s.cfg.CacheDir)
 		return used - budget
 	}
-	if over() <= 0 || s.reclaimSlots(over) <= 0 {
+	if over() <= 0 || s.reclaimSlots(over) <= 0 || s.reclaimSources(over) <= 0 {
 		return
 	}
 	refs := s.slots.list()
@@ -432,6 +433,21 @@ func (s *Worker) enforceDiskBudget() {
 			}
 		}
 	}
+}
+
+// reclaimSources drops faulted-in source contents that are not open
+// (they are fetched from the laptop again on use) and returns the bytes
+// still over.
+func (s *Worker) reclaimSources(over func() int64) int64 {
+	o := over()
+	if o <= 0 || s.srcFiles == nil {
+		return o
+	}
+	res := s.srcFiles.Stats().ResidentBytes
+	if n := s.srcFiles.Reclaim(max(0, res-o)); n > 0 {
+		s.log.Info("reclaimed source contents for the disk budget", "freed", n)
+	}
+	return over()
 }
 
 // pruneRepo shrinks the slots of a repository to target bytes in total

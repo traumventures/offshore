@@ -18,6 +18,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/traumventures/offshore/internal/events"
 	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/scheduler"
 )
@@ -54,6 +55,12 @@ type Options struct {
 	MinBilling time.Duration
 	// Resize lets the policy grow machine disks (provider.DiskResizer).
 	Resize bool
+	// Refetch is the true refetch factor of the simulated cache file
+	// systems: a thrashing build refaults Refetch times its working set
+	// beyond the local capacity (0 = scheduler.DefaultRefetch). The policy
+	// does not know it: it sees the factor calibrated from the simulated
+	// thrash/page_in/reclaim events (events.Refetch).
+	Refetch float64
 	// Bandwidth is the restore throughput from a provider's own store,
 	// CrossBandwidth from another provider's (bytes/s; defaults like the
 	// cost model); CrossEgress the price per GB across providers.
@@ -170,7 +177,10 @@ type Report struct {
 	// local capacity; ThrashTime is the build time it added. PageInBytes
 	// are the bytes faulted in before builds proceeded (lazy restores and
 	// refaults).
-	Thrashed    int           `json:"thrashed"`
+	Thrashed int `json:"thrashed"`
+	// Refetch is the calibrated refetch factor at the end (0: no
+	// thrashing observed).
+	Refetch     float64       `json:"refetch,omitempty"`
 	ThrashTime  time.Duration `json:"thrash_time"`
 	PageInBytes int64         `json:"page_in_bytes"`
 }
@@ -198,6 +208,9 @@ type run struct {
 	speed    float64
 	seq      int
 	start    time.Time
+	// ws, capacity and refault describe a thrashing build (refault > 0):
+	// its cache events are reported when it ends.
+	ws, capacity, refault int64
 }
 
 type machine struct {
@@ -249,6 +262,7 @@ type sim struct {
 	est      map[string]estimate // per repository until the next observation
 	snaps    map[string][]scheduler.Snapshot
 	calm     map[string]time.Time // env -> last consolidation drain or stop
+	cal      *events.Refetch      // refetch calibration from cache events
 	vols     []*volume            // detached cache volumes
 	volIDs   int
 	now      time.Time
@@ -267,7 +281,7 @@ type sim struct {
 func Run(trace Trace, o Options) Report {
 	o.defaults()
 	s := &sim{o: o, now: trace.Start, recent: map[string]time.Time{}, fc: scheduler.NewForecast(),
-		snaps: map[string][]scheduler.Snapshot{}, calm: map[string]time.Time{}}
+		snaps: map[string][]scheduler.Snapshot{}, calm: map[string]time.Time{}, cal: events.NewRefetch()}
 	s.start = trace.Start
 	s.r = Report{Name: o.Name, Jobs: len(trace.Jobs), Actions: map[string]int{}, Created: map[string]int{}}
 	jobs := make([]*job, len(trace.Jobs))
@@ -319,6 +333,7 @@ func Run(trace Trace, o Options) Report {
 					continue
 				}
 				r.j.done = true
+				s.cacheEvents(m, r)
 				r.j.runFor = s.now.Sub(r.start)
 				s.r.Completed++
 				waits = append(waits, r.j.wait)
@@ -398,6 +413,7 @@ func Run(trace Trace, o Options) Report {
 	if s.r.Completed > 0 {
 		s.r.WarmRate = float64(s.r.WarmHits) / float64(s.r.Completed+s.r.OOMs)
 	}
+	s.r.Refetch = s.cal.Factors()[""]
 	return s.r
 }
 
@@ -512,7 +528,8 @@ func (s *sim) task(j *job) scheduler.Task {
 
 // pool is the policy's view, built like the orchestrator's poolLocked.
 func (s *sim) pool() scheduler.Pool {
-	f := scheduler.Pool{Now: s.now, Sizes: s.o.Sizes, Recent: map[string]time.Time{}, Providers: map[string]scheduler.ProviderState{}}
+	f := scheduler.Pool{Now: s.now, Sizes: s.o.Sizes, Recent: map[string]time.Time{}, Providers: map[string]scheduler.ProviderState{},
+		Refetch: s.cal.Factors()}
 	for env, t := range s.recent {
 		f.Recent[env] = t
 	}
@@ -700,6 +717,56 @@ func (s *sim) dequeue(j *job) {
 	s.queue = slices.DeleteFunc(s.queue, func(o *job) bool { return o == j })
 }
 
+// cacheEvents feeds the refetch calibration with what m's cache file
+// system reports for the finished build r: when it thrashed, a thrash
+// event, its reclaims and refaults, then its task_end (one episode per
+// build, as in the sim's thrash model).
+func (s *sim) cacheEvents(m *machine, r *run) {
+	if r.refault > 0 {
+		vm := scheduler.VM{Capacity: r.capacity, WorkingSet: r.ws, Thrashing: true}
+		s.cal.Observe(events.Event{Type: events.Thrash, Machine: m.id, Provider: m.prov, VM: &vm, Bytes: r.ws})
+		s.cal.Observe(events.Event{Type: events.Reclaim, Machine: m.id, Provider: m.prov, Bytes: r.refault})
+		s.cal.Observe(events.Event{Type: events.PageIn, Machine: m.id, Provider: m.prov, Bytes: r.refault})
+	}
+	s.cal.Observe(events.Event{Type: events.TaskEnd, Machine: m.id, Provider: m.prov})
+}
+
+// prune frees bytes on m for repo (other slots, largest first, then a
+// third of repo's own) and returns the seconds it takes.
+func (s *sim) prune(m *machine, repo string, bytes int64) float64 {
+	s.r.Prunes++
+	freed := int64(0)
+	for freed < bytes {
+		victim, vb := "", int64(0)
+		for r, b := range m.slots {
+			if r != repo && b > vb {
+				victim, vb = r, b
+			}
+		}
+		if victim == "" {
+			if b := m.slots[repo]; b > 0 {
+				m.slots[repo] = b * 2 / 3
+			}
+			break
+		}
+		delete(m.slots, victim)
+		delete(m.warm, victim)
+		freed += vb
+	}
+	return scheduler.DefaultPrune.Seconds()
+}
+
+// resize grows m's disk to target (capped by its volume's maximum) and
+// returns the seconds it takes.
+func (s *sim) resize(m *machine, target int64) float64 {
+	s.r.Resizes++
+	if m.volume != "" && m.size.Volume.Max > 0 {
+		target = min(target, m.size.Volume.Max)
+	}
+	m.disk, m.resized = max(m.disk, target), s.now
+	return scheduler.DefaultResize.Seconds()
+}
+
 // expected is the run time the policy expects for a placement.
 func expected(pl scheduler.Placement, t scheduler.Task, m *machine) time.Duration {
 	if pl.Expected > 0 {
@@ -719,34 +786,15 @@ func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.D
 	restored := false
 	switch slot.Kind {
 	case scheduler.SlotPrune:
-		s.r.Prunes++
-		prep = scheduler.DefaultPrune.Seconds()
-		freed := int64(0)
-		for freed < slot.Bytes {
-			victim, vb := "", int64(0)
-			for repo, b := range m.slots {
-				if repo != j.Repo && b > vb {
-					victim, vb = repo, b
-				}
-			}
-			if victim == "" {
-				if b := m.slots[j.Repo]; b > 0 {
-					m.slots[j.Repo] = b * 2 / 3
-				}
-				break
-			}
-			delete(m.slots, victim)
-			delete(m.warm, victim)
-			freed += vb
-		}
+		prep = s.prune(m, j.Repo, slot.Bytes)
 	case scheduler.SlotResize:
-		s.r.Resizes++
-		prep = scheduler.DefaultResize.Seconds()
-		target := slot.Bytes
-		if m.volume != "" && m.size.Volume.Max > 0 {
-			target = min(target, m.size.Volume.Max)
-		}
-		m.disk, m.resized = max(m.disk, target), s.now
+		prep = s.resize(m, slot.Bytes)
+	}
+	// A restore or move may grow the disk in the same step.
+	if slot.Grow > 0 {
+		prep += s.resize(m, slot.Grow)
+	}
+	switch slot.Kind {
 	case scheduler.SlotRestore:
 		s.r.Restores++
 		bw := s.o.Bandwidth
@@ -756,7 +804,7 @@ func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.D
 			s.r.EgressCost += egress
 			s.r.Cost += egress
 		}
-		prep = scheduler.LazyRestore(m.size.Stack, slot.Snapshot.Bytes, int64(j.WorkingSet), bw).Seconds()
+		prep += scheduler.LazyRestore(m.size.Stack, slot.Snapshot.Bytes, int64(j.WorkingSet), bw).Seconds()
 		s.r.PageInBytes += min(slot.Snapshot.Bytes, max(int64(j.WorkingSet), 0)) // 0: not modelled
 		m.slots[j.Repo] = slot.Snapshot.Bytes
 		restored = true
@@ -771,7 +819,7 @@ func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.D
 			s.r.EgressCost += egress
 			s.r.Cost += egress
 		}
-		prep = float64(slot.Bytes)/float64(s.o.Bandwidth) + scheduler.LazyRestore(m.size.Stack, slot.Bytes, int64(j.WorkingSet), bw).Seconds()
+		prep += float64(slot.Bytes)/float64(s.o.Bandwidth) + scheduler.LazyRestore(m.size.Stack, slot.Bytes, int64(j.WorkingSet), bw).Seconds()
 		s.r.PageInBytes += min(slot.Bytes, max(int64(j.WorkingSet), 0))
 		m.slots[j.Repo] = slot.Bytes
 		restored = true
@@ -786,16 +834,18 @@ func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.D
 	// The working set beyond the local capacity faults in again during
 	// the build (the cache file system reports thrashing).
 	m.ws, m.thrash = int64(j.WorkingSet), false
-	if pen := scheduler.ThrashTime(m.size.Stack, m.capacity(), int64(j.WorkingSet)); pen > 0 {
+	refault := int64(0)
+	if pen := scheduler.ThrashTime(m.size.Stack, m.capacity(), m.ws, s.o.Refetch); pen > 0 {
 		work += pen.Seconds()
 		m.thrash = true
 		s.r.Thrashed++
 		s.r.ThrashTime += pen
-		s.r.PageInBytes += scheduler.ThrashPasses * (int64(j.WorkingSet) - m.capacity())
+		refault = scheduler.RefetchBytes(m.capacity(), m.ws, s.o.Refetch)
+		s.r.PageInBytes += refault
 	}
 	s.seq++
 	m.runs = append(m.runs, &run{j: j, reserve: reserve, work: work, seq: s.seq, start: s.now, expected: exp, warm: warm,
-		restored: restored, before: m.slots[j.Repo]})
+		restored: restored, before: m.slots[j.Repo], ws: m.ws, capacity: m.capacity(), refault: refault})
 	m.idle = time.Time{}
 	if !s.o.Swap {
 		s.oom(m)

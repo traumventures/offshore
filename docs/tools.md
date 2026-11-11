@@ -22,10 +22,16 @@ A run goes through these steps:
 * **Projection.** `lookup`/`getattr`/`readdir` on the machine are answered
   from the manifest without a network round trip; kernel caches are kept for
   an hour and invalidated precisely when deltas arrive. Content is fetched
-  once per hash into a content addressed store.
+  once per hash into a content addressed store (a cache: reclaimed least
+  recently used beyond an eighth of the disk budget and under disk
+  pressure, never while open). Clean files are opened with FUSE
+  passthrough when the worker runs as root on Linux >= 6.9: reads and
+  mmaps go straight to the cached file, the daemon sees only the open.
 * **Writes** to sources (e.g. `Cargo.lock`, `cargo fmt`) go to an overlay
   and are written back after the run, unless the local file changed
-  meanwhile.
+  meanwhile. A write open waits up to 2 s for passthrough readers of the
+  same file to close (the kernel binds the inode to the clean content) and
+  fails with `ETXTBSY` otherwise; written paths stay out of passthrough.
 * **Outputs**: `[tool.X] eager` globs are copied back after every run;
   `offshore fetch <glob>...` copies others from the latest remote build
   (zstd compressed); the [output overlay](#output-overlay) shows the whole

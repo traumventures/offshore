@@ -45,6 +45,9 @@ func simCmd(args []string) error {
 	costOpt := fs.String("cost-optimization", "", "comma separated cost_optimization values for the default policy (default: the pool's)")
 	sweep := fs.Bool("sweep", false, "sweep cost_optimization 0..1 in steps of 0.1 and print the cost/time frontier")
 	resize := fs.Bool("resize", false, "machines can grow their disks (slot handling)")
+	refetch := fs.Float64("refetch", 0, "true refetch factor of the simulated cache file systems: refaulted bytes per byte of working set beyond the local disk (0 = the scheduler default); the policy calibrates it from the simulated events")
+	wsFlag := fs.String("working-set", "", "working set of jobs that have none (e.g. 30G; stresses the tier stacks on a trace without cache data)")
+	slotFlag := fs.String("slot-bytes", "", "slot size after a cold build of jobs that have none (e.g. 20G; growth per warm build 5%)")
 	estimator := fs.String("estimator", "", "static | history (default: pool.estimator)")
 	boot := fs.String("boot", "60s", "create latency until a machine is ready: DUR or provider=DUR,...")
 	start := fs.String("start", "20s", "start latency of a stopped machine: DUR or provider=DUR,...")
@@ -99,6 +102,17 @@ func simCmd(args []string) error {
 	if err != nil {
 		return fmt.Errorf("-start: %w", err)
 	}
+	var ws, slot int64
+	if *wsFlag != "" {
+		if ws, err = config.ParseBytes(*wsFlag); err != nil {
+			return fmt.Errorf("-working-set: %w", err)
+		}
+	}
+	if *slotFlag != "" {
+		if slot, err = config.ParseBytes(*slotFlag); err != nil {
+			return fmt.Errorf("-slot-bytes: %w", err)
+		}
+	}
 	est := u.Pool.Estimator
 	if *estimator != "" {
 		est = *estimator
@@ -145,6 +159,15 @@ func simCmd(args []string) error {
 		if err != nil {
 			return err
 		}
+		for i := range tr.Jobs {
+			j := &tr.Jobs[i]
+			if j.WorkingSet == 0 {
+				j.WorkingSet = sim.Bytes(ws)
+			}
+			if j.SlotBytes == 0 && slot > 0 {
+				j.SlotBytes, j.SlotGrowth = sim.Bytes(slot), sim.Bytes(slot/20)
+			}
+		}
 		runs := make([]sim.Report, len(variants))
 		var wg sync.WaitGroup
 		for i, v := range variants {
@@ -170,7 +193,7 @@ func simCmd(args []string) error {
 				runs[i] = sim.Run(tr, sim.Options{
 					Name: label, Policy: scheduler.Default{Cfg: pc}, Sizes: oc.Sizes, Estimator: e,
 					Boot: bootLat, Start: startLat, MaxLifetime: oc.MaxLifetime, ColdPenalty: *cold,
-					Swap: oc.Swap, QueueTimeout: *timeout, Resize: *resize,
+					Swap: oc.Swap, QueueTimeout: *timeout, Resize: *resize, Refetch: *refetch,
 				})
 			}()
 		}
@@ -212,7 +235,7 @@ func printReports(w *os.File, rs []sim.Report) {
 func printFrontier(w *os.File, path string, ratios []float64, rs []sim.Report) {
 	fmt.Fprintf(w, "%s: cost_optimization sweep (1 = cheapest, 0 = fastest result)\n", path)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "cost_optimization\tcost $\tvolumes $\tmachine-h\tturn p50\tturn p95\twait p95\twarm\trestores\tattaches\tresizes\tthrashed\tflaps\tsizes\tpareto\t")
+	fmt.Fprintln(tw, "cost_optimization\tcost $\tvolumes $\tmachine-h\tturn p50\tturn p95\twait p95\twarm\trestores\tattaches\tresizes\tthrashed\trefetch\tflaps\tsizes\tpareto\t")
 	for i, r := range rs {
 		pareto := "*"
 		for j, o := range rs {
@@ -220,11 +243,20 @@ func printFrontier(w *os.File, path string, ratios []float64, rs []sim.Report) {
 				pareto = ""
 			}
 		}
-		fmt.Fprintf(tw, "%.1f\t%.2f\t%.2f\t%.1f\t%s\t%s\t%s\t%.0f%%\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t\n", ratios[i], r.Cost, r.VolumeCost, r.MachineHours,
+		fmt.Fprintf(tw, "%.1f\t%.2f\t%.2f\t%.1f\t%s\t%s\t%s\t%.0f%%\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t\n", ratios[i], r.Cost, r.VolumeCost, r.MachineHours,
 			r.TurnP50.Round(time.Second), r.TurnP95.Round(time.Second), r.WaitP95.Round(time.Second), 100*r.WarmRate, r.Restores, r.VolumeAttaches,
-			r.Resizes, r.Thrashed, r.Flaps, createdSizes(r.Created), pareto)
+			r.Resizes, r.Thrashed, refetchOf(r.Refetch), r.Flaps, createdSizes(r.Created), pareto)
 	}
 	tw.Flush()
+}
+
+// refetchOf formats a calibrated refetch factor ("-" when no build
+// thrashed).
+func refetchOf(f float64) string {
+	if f <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f", f)
 }
 
 // gbytes formats bytes as GB with one decimal ("-" for none).
