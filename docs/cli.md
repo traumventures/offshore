@@ -2,7 +2,10 @@
 
 `offshore` dispatches on its name: invoked as anything other than
 `offshore` (a shim such as `~/.offshore/bin/cargo`) it is the proxy
-for that tool. `offshore help` prints the summary below.
+for that tool. `offshore help` prints the summary below; `offshore help
+<command>` and `offshore <command> --help` (or `-h`) print the usage of one
+command (flags included where it has any). `offshore run --help` is offshore's
+help; `offshore run cargo --help` is cargo's.
 
 ## Running tools
 

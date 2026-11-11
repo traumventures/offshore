@@ -19,7 +19,7 @@ import (
 
 // topCmd runs `offshore top`.
 func topCmd(args []string) error {
-	fs := flag.NewFlagSet("top", flag.ContinueOnError)
+	fs := newFlagSet("top")
 	once := fs.Bool("once", false, "print one plain text frame and exit (for agents and scripts)")
 	interval := fs.Duration("interval", 2*time.Second, "refresh interval")
 	width := fs.Int("width", 0, "frame width for --once (default: terminal width or 140)")

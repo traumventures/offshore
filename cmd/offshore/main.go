@@ -82,12 +82,18 @@ Usage:
                                            accuracy and per-label groups from the event log
   offshore controlplane info|client-config|health
   offshore version
+  offshore help [command]              this list, or the help of one command
+                                           (every command also accepts -h/--help)
+
+Operator:
+  offshore debug token|probe|clock     machine tokens, machine status probe, test clock
 
 Internal:
   offshore worker                      machine worker (started by providers)
   offshore supervisor [--spec F] [--state D]
                                            supervisor on VM machines (systemd, root)
   offshore sandbox-init                session namespace init
+  offshore gocacheprog DIR [ENDPOINT]  GOCACHEPROG helper of tool = "go" caches (set by the worker)
 
 Environment:
   OFFSHORE_DISABLE=1          always run locally
@@ -124,6 +130,9 @@ func main() {
 	}
 	if err := run(os.Args[1], os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "offshore:", err)
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
 		var ec exitCode
 		if errors.As(err, &ec) {
 			os.Exit(int(ec))
@@ -141,6 +150,10 @@ func (e exitCode) Error() string { return fmt.Sprintf("exit code %d", int(e)) }
 func logger() *slog.Logger { return logs.FromEnv() }
 
 func run(cmd string, args []string) error {
+	if h, ok := helpRequest(cmd, args); ok {
+		fmt.Print(h)
+		return nil
+	}
 	switch cmd {
 	case "run":
 		if len(args) > 0 && args[0] == "--" {
@@ -247,8 +260,10 @@ func run(cmd string, args []string) error {
 		fmt.Println("offshore", version)
 		return nil
 	case "help", "-h", "--help":
-		fmt.Print(usage)
-		return nil
+		if cmd == "help" && len(args) > 0 {
+			return printHelp(os.Stdout, args[0])
+		}
+		return printHelp(os.Stdout, "")
 	}
 	return fmt.Errorf("unknown command %q (see offshore help)", cmd)
 }
@@ -671,7 +686,7 @@ func supervisorCmd(args []string) error {
 	if len(args) > 0 && args[0] == "static" {
 		return staticHostCmd(args[1:])
 	}
-	fs := flag.NewFlagSet("supervisor", flag.ContinueOnError)
+	fs := newFlagSet("supervisor")
 	specPath := fs.String("spec", supervisor.SpecPath, "public machine spec")
 	stateDir := fs.String("state", supervisor.StateDir, "root-only supervisor state")
 	if err := fs.Parse(args); err != nil {
