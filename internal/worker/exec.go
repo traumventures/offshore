@@ -197,7 +197,8 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		}
 		defer os.RemoveAll(sccacheDir(se.id))
 	}
-	var binds []sandbox.Bind
+	// Toolchain first: dependency caches ($CARGO_HOME/registry) nest in it.
+	binds := s.relocation(req).binds
 	for _, b := range req.Build {
 		b = filepath.Clean(b)
 		binds = append(binds, sandbox.Bind{Src: filepath.Join(data, b), Dst: filepath.Join(req.Repo, b)})
@@ -407,6 +408,16 @@ func (s *Worker) sessionEnv(req proto.Exec, id string) []string {
 		set("CLOUDSOURCED_JOBS", strconv.Itoa(j))
 		if _, ok := req.Env["CARGO_BUILD_JOBS"]; !ok {
 			set("CARGO_BUILD_JOBS", strconv.Itoa(j))
+		}
+	}
+	for _, kv := range s.relocation(req).env {
+		set(kv[0], kv[1])
+	}
+	if l := req.Linker; l != "" && req.Toolchain != nil && validLinker(l) {
+		if dir, err := linkerShim(l); err != nil {
+			s.log.Warn("linker shim", "err", err)
+		} else {
+			set("PATH", dir+":"+m["PATH"])
 		}
 	}
 	for _, kv := range s.compilerCacheEnv(req, id, func(k string) bool { _, ok := m[k]; return ok }) {

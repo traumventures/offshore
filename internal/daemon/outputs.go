@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,8 +25,17 @@ import (
 
 // OutputsCASDir is the local content cache of remote outputs. The proxy
 // stores eager outputs of mounted build directories here instead of
-// writing them into the (read-only) mount.
+// writing them into the mount.
 func OutputsCASDir() string { return filepath.Join(StateDir(), "outputs", "cas") }
+
+// OutputsUpperDir is the upper (local, writable) layer of the output
+// overlay mounted at mountpoint. It lives in the client state, never in
+// the repository, survives daemon restarts and is removed by
+// "cloudsourced outputs unmount".
+func OutputsUpperDir(mountpoint string) string {
+	h := sha256.Sum256([]byte(filepath.Clean(mountpoint)))
+	return filepath.Join(StateDir(), "outputs", "upper", hex.EncodeToString(h[:8]))
+}
 
 func outputsStatePath() string { return filepath.Join(StateDir(), "outputs", "state.json") }
 
@@ -38,6 +49,29 @@ type outputsState struct {
 	Token       string   `json:"token,omitempty"`
 	Build       []string `json:"build,omitempty"`
 	Mounted     bool     `json:"mounted,omitempty"`
+}
+
+// EnsureOutputs makes the build directories ([cache.build] paths) of the
+// repository at root appear at their local paths as the output overlay
+// (internal/outputfs): it starts the daemon if needed, mounts the overlay
+// unless mounted (whatever [outputs] mode says) and returns its status.
+//
+// The overlay is up to date with the latest remote build as soon as that
+// build's run returned: the proxy's release call starts the new generation
+// before it exits. Local cargo then finds unchanged units fresh (see
+// README "Output overlay"), e.g. to run tests locally from remote-built
+// binaries without fetching them.
+func EnsureOutputs(ctx context.Context, root string) (OutputsStatus, error) {
+	var st OutputsStatus
+	if err := EnsureDaemon(ctx); err != nil {
+		return st, err
+	}
+	raw, err := Call(ctx, Request{Op: "outputs-ensure", Root: root}, nil)
+	if err != nil {
+		return st, err
+	}
+	err = json.Unmarshal(raw, &st)
+	return st, err
 }
 
 // outputsRepo is the output view of one repository.
@@ -59,6 +93,7 @@ type OutputsStatus struct {
 	Root        string   `json:"root"`
 	Machine     string   `json:"machine,omitempty"`
 	Mountpoints []string `json:"mountpoints,omitempty"`
+	Uppers      []string `json:"uppers,omitempty"` // upper layers of the mountpoints
 	Generation  uint64   `json:"generation"`
 	CachedDirs  int      `json:"cached_dirs"`
 	KnownFiles  int      `json:"known_files"`
@@ -203,7 +238,8 @@ func (m *outputsMgr) mount(root string, repo *config.Repo) ([]string, error) {
 	}
 	if len(r.mounts) == 0 {
 		for _, b := range build {
-			fs, err := outputfs.Mount(r.tree, root, b, m.d.log)
+			mp := filepath.Join(root, filepath.FromSlash(b))
+			fs, err := outputfs.Mount(r.tree, root, b, OutputsUpperDir(mp), m.d.log)
 			if err != nil {
 				for _, f := range r.mounts {
 					f.Unmount()
@@ -212,7 +248,7 @@ func (m *outputsMgr) mount(root string, repo *config.Repo) ([]string, error) {
 				return nil, err
 			}
 			r.mounts = append(r.mounts, fs)
-			m.d.log.Info("outputs mounted", "path", fs.Mountpoint(), "machine", r.state.Machine)
+			m.d.log.Info("outputs mounted", "path", fs.Mountpoint(), "upper", fs.Upper(), "machine", r.state.Machine)
 		}
 	}
 	r.state.Build, r.state.Mounted = build, true
@@ -225,7 +261,8 @@ func (m *outputsMgr) mount(root string, repo *config.Repo) ([]string, error) {
 }
 
 // unmount removes the mounts of root. keep leaves them marked for remount
-// (daemon shutdown).
+// with their upper layers (daemon shutdown); otherwise the upper layers
+// (local writes into the mount) are deleted.
 func (m *outputsMgr) unmount(root string, keep bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -237,12 +274,22 @@ func (m *outputsMgr) unmount(root string, keep bool) error {
 	for _, f := range r.mounts {
 		if err := f.Unmount(); err != nil {
 			errs = append(errs, fmt.Errorf("unmount %s: %w", f.Mountpoint(), err))
-		} else {
-			m.d.log.Info("outputs unmounted", "path", f.Mountpoint())
+			continue
 		}
+		m.d.log.Info("outputs unmounted", "path", f.Mountpoint())
 	}
 	r.mounts = nil
 	if !keep {
+		// Also upper layers of mounts lost by a crashed daemon.
+		for _, b := range r.state.Build {
+			mp := filepath.Join(root, filepath.FromSlash(b))
+			if outputfs.IsMounted(mp) {
+				continue
+			}
+			if err := os.RemoveAll(OutputsUpperDir(mp)); err != nil {
+				errs = append(errs, err)
+			}
+		}
 		r.state.Mounted = false
 		m.saveLocked()
 	}
@@ -266,17 +313,28 @@ func (m *outputsMgr) unmountAll() {
 	m.mu.Unlock()
 }
 
+func statusLocked(root string, r *outputsRepo) OutputsStatus {
+	s := OutputsStatus{Root: root, Machine: r.state.Machine, Generation: r.tree.Generation()}
+	s.CachedDirs, s.KnownFiles = r.tree.Stats()
+	for _, f := range r.mounts {
+		s.Mountpoints = append(s.Mountpoints, f.Mountpoint())
+		s.Uppers = append(s.Uppers, f.Upper())
+	}
+	return s
+}
+
+func (m *outputsMgr) statusOf(root string) OutputsStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return statusLocked(root, m.repoLocked(root))
+}
+
 func (m *outputsMgr) status() []OutputsStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []OutputsStatus
 	for root, r := range m.repos {
-		s := OutputsStatus{Root: root, Machine: r.state.Machine, Generation: r.tree.Generation()}
-		s.CachedDirs, s.KnownFiles = r.tree.Stats()
-		for _, f := range r.mounts {
-			s.Mountpoints = append(s.Mountpoints, f.Mountpoint())
-		}
-		out = append(out, s)
+		out = append(out, statusLocked(root, r))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Root < out[j].Root })
 	return out

@@ -148,6 +148,10 @@ type Exec struct {
 	CompilerCache *CompilerCache `json:"compiler_cache,omitempty"`
 	// Linker is the repository's environment.linker ("", "mold", "lld").
 	Linker string `json:"linker,omitempty"`
+	// Toolchain relocates the image's Rust toolchain to the client's
+	// paths ([outputs] mode = "fuse"), so that locally running cargo
+	// considers the remote build directory fresh; nil keeps the image's.
+	Toolchain *Toolchain `json:"toolchain,omitempty"`
 	// TraceParent is the W3C trace context of the tool run (optional);
 	// the server's session span continues it.
 	TraceParent string `json:"traceparent,omitempty"`
@@ -163,6 +167,14 @@ type CompilerCache struct {
 	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
 	// Incremental false sets CARGO_INCREMENTAL=0; nil keeps cargo's default.
 	Incremental *bool `json:"incremental,omitempty"`
+}
+
+// Toolchain holds the client's toolchain locations. Cargo hashes the
+// absolute paths of registry sources ($CARGO_HOME/registry/src/...) and the
+// configured linker into its fingerprints.
+type Toolchain struct {
+	CargoHome  string `json:"cargo_home"`  // absolute
+	RustupHome string `json:"rustup_home"` // absolute
 }
 
 // Started confirms the remote process runs.

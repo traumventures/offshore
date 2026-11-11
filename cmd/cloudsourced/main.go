@@ -56,7 +56,8 @@ Usage:
   cloudsourced fetch <glob>...             copy outputs from the latest remote build
   cloudsourced outputs mount|unmount|status
                                            mount the remote build directories (target/)
-                                           read-only at their local path (output FUSE)
+                                           at their local path as a writable overlay:
+                                           local cargo finds remote builds fresh
   cloudsourced down                        destroy all machines and caches
   cloudsourced reconcile                   reload the pool configuration, apply the policy now
   cloudsourced daemon run|stop|status      manage the local daemon

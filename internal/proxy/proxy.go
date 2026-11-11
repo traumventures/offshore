@@ -23,7 +23,6 @@ import (
 	"github.com/traumventures/cloudsourced/internal/daemon"
 	"github.com/traumventures/cloudsourced/internal/events"
 	"github.com/traumventures/cloudsourced/internal/labels"
-	"github.com/traumventures/cloudsourced/internal/outputfs"
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/tracing"
 	"github.com/traumventures/cloudsourced/internal/transport"
@@ -65,9 +64,6 @@ func mainRun(tr *runTrace, tool string, args []string) int {
 	local := func(why string) int {
 		rec.Why = why
 		recordLocal(rec)
-		if tool == "cargo" && anyMountBelow(rootDir) {
-			warn("build outputs of this repository are mounted read-only (output FUSE); a local build cannot write there (cloudsourced outputs unmount)")
-		}
 		return execLocal(tool, args)
 	}
 	if os.Getenv("CLOUDSOURCED_DISABLE") != "" {
@@ -120,16 +116,6 @@ func mainRun(tr *runTrace, tool string, args []string) int {
 func recordLocal(rec *events.Run) {
 	rec.Timings.Total = events.Ms(time.Since(rec.Time))
 	events.Append(daemon.StateDir(), *rec)
-}
-
-// anyMountBelow reports whether an output mount exists inside root.
-func anyMountBelow(root string) bool {
-	for _, m := range outputfs.Mounts() {
-		if strings.HasPrefix(m, root+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 func warn(format string, a ...any) {
@@ -421,6 +407,14 @@ func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, 
 		Build: repo.Cache.Build.Paths, BuildTTL: prep.BuildTTL, Deps: repo.Cache.Deps.Paths,
 		Eager: profile.Eager, Lease: prep.Lease,
 		Linker: repo.Environment.Linker, TraceParent: tracing.Inject(ctx), Labels: rec.Labels,
+	}
+	if repo.Outputs.Mode == config.OutputsFuse {
+		// The remote build directory appears locally (output overlay):
+		// align what cargo fingerprints so local cargo finds it fresh.
+		req.Toolchain = clientToolchain()
+		for k, v := range cargoHomeRustflags(req.Toolchain.CargoHome, env) {
+			env[k] = v
+		}
 	}
 	if cc := repo.Cache.Compiler; cc.Tool != "" {
 		req.CompilerCache = &proto.CompilerCache{
