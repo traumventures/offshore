@@ -195,6 +195,14 @@ volume lives in one availability zone and attaches only to instances
 there; a machine created with a volume is placed in its zone (the zone's
 default subnet, or the configured `subnet` if it is in that zone).
 
+Where the cache lives is chosen per size: `medium = "local"` (default)
+uses the gp3 root disk, or the instance store of NVMe instance types
+(`m6id`, `c6id`, `c7gd`, `i4i`; `disk` then comes from
+`ec2:DescribeInstanceTypes`, the supervisor formats it on every boot);
+`medium = "volume"` gives each machine a cache volume
+(`[providers.aws.volume]`: `iops`, `throughput`, `min`, `max`, `step`,
+`keep_detached`, `ttl`). Volumes are off by default.
+
 ## Costs
 
 * **Instances**: billed per second while running (at least 60 s per start).

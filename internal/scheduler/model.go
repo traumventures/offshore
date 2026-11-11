@@ -4,6 +4,8 @@ import (
 	"math"
 	"sort"
 	"time"
+
+	"github.com/traumventures/offshore/internal/medium"
 )
 
 // The cost model scores every candidate of a decision (assign to a
@@ -125,14 +127,60 @@ func (p Default) pick(opts []option) int {
 	return best
 }
 
-// priceOf returns the hourly price of a machine from its size.
+// priceOf returns the hourly price of a machine: its size's, plus the
+// storage of its cache volume.
 func priceOf(f Pool, m Machine) float64 {
+	price := 0.0
+	if s, ok := sizeOf(f, m); ok {
+		price = s.PricePerHour
+	}
+	if m.Medium == medium.Volume {
+		price += storagePrice(m.Stack, m.DiskTotal)
+	}
+	return price
+}
+
+// sizeOf returns the size of a machine.
+func sizeOf(f Pool, m Machine) (Size, bool) {
 	for _, s := range f.Sizes {
 		if s.Provider == m.Provider && s.Name == m.Size {
-			return s.PricePerHour
+			return s, true
 		}
 	}
-	return 0
+	return Size{}, false
+}
+
+// sizePrice is the hourly price of a new machine of s, including the
+// storage of a fresh cache volume.
+func sizePrice(s Size) float64 {
+	if s.Medium != medium.Volume {
+		return s.PricePerHour
+	}
+	return s.PricePerHour + storagePrice(s.Stack, max(s.Volume.Min, s.Capacity.Disk))
+}
+
+// storagePrice is the hourly price of bytes on the stack's hot medium.
+func storagePrice(st medium.Stack, bytes int64) float64 {
+	return float64(max(bytes, 0)) / 1e9 * st.Hot.PricePerGBHour()
+}
+
+// Mobility: what it takes to use a warm build slot on another machine
+// depends on where the slot lives (its medium's reach):
+//
+//   - on a machine's local disk (reach machine): a snapshot to the store
+//     and a restore, bounded by the store's and the hot medium's
+//     throughput (SlotRestore, SlotMove);
+//   - on a detached volume (reach zone): a new machine of a volume size in
+//     the volume's zone attaches it, the profile's attach time
+//     (Action.Volume, see scaleOutModel);
+//   - on a volume in another zone or provider: like local, via the store;
+//   - in the store (snapshots, global caches): restore from anywhere.
+
+// restoreTime is the time to fill bytes from a store with bandwidth bw
+// into m's hot medium.
+func restoreTime(m Machine, bytes, bw int64) time.Duration {
+	d := time.Duration(float64(bytes) / float64(bw) * float64(time.Second))
+	return max(d, m.Stack.Hot.TransferTime(bytes))
 }
 
 func hours(d time.Duration) float64 { return d.Hours() }
@@ -288,15 +336,19 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) (r
 		c.reason += ", prune slots"
 		consider(c)
 	}
-	if m.CanResize {
+	// A disk resized recently cannot grow again (EBS: once per 6 h).
+	if m.CanResize && !f.Now.Before(m.ResizableAt) {
 		grow := max(missing*2, 10<<30) // grow generously: resizes are slow
+		if s, ok := sizeOf(f, m); ok && s.Volume.Step > grow {
+			grow = s.Volume.Step
+		}
 		c := rc
 		c.run += DefaultResize
 		left := m.ExpiresAt.Sub(f.Now)
 		if m.ExpiresAt.IsZero() || left <= 0 {
 			left = 24 * time.Hour
 		}
-		c.cost += float64(grow) / 1e9 * p.diskPrice() * hours(left)
+		c.cost += float64(grow) / 1e9 * p.diskPriceOf(m) * hours(left)
 		c.slot = SlotAction{Kind: SlotResize, Repo: t.RepoID, Bytes: m.DiskTotal + grow}
 		c.reason += ", resize disk"
 		consider(c)
@@ -309,6 +361,15 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) (r
 		return cs[i], true
 	}
 	return runChoice{}, false
+}
+
+// diskPriceOf is the price per GB-hour of m's hot medium (the configured
+// disk price when its profile has none).
+func (p Default) diskPriceOf(m Machine) float64 {
+	if pr := m.Stack.Hot.PricePerGBHour(); pr > 0 {
+		return pr
+	}
+	return p.diskPrice()
 }
 
 func (p Default) diskPrice() float64 {
@@ -337,7 +398,7 @@ func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 		price, bw := p.egress(f, s.Store, m.Provider)
 		restore := t.Profile.Restore
 		if restore <= 0 || s.Store != storeOf(f, m.Provider) {
-			restore = time.Duration(float64(s.Bytes) / float64(bw) * float64(time.Second))
+			restore = restoreTime(m, s.Bytes, bw)
 		}
 		rc := runChoice{run: restore + scale(t.Profile.WarmRun()), cost: float64(s.Bytes) / 1e9 * price,
 			slot: SlotAction{Kind: SlotRestore, Repo: t.RepoID, Snapshot: s}, reason: "restore snapshot from " + s.Store}
@@ -348,7 +409,7 @@ func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 		st := storeOf(f, src.Provider)
 		_, upBW := p.egress(f, st, src.Provider)
 		price, downBW := p.egress(f, st, m.Provider)
-		move := time.Duration(float64(b)/float64(upBW)*float64(time.Second)) + time.Duration(float64(b)/float64(downBW)*float64(time.Second))
+		move := max(time.Duration(float64(b)/float64(upBW)*float64(time.Second)), src.Stack.Hot.TransferTime(b)) + restoreTime(m, b, downBW)
 		rc := runChoice{run: move + scale(t.Profile.WarmRun()), cost: float64(b) / 1e9 * price,
 			slot: SlotAction{Kind: SlotMove, Repo: t.RepoID, Bytes: b, From: src.ID,
 				Snapshot: Snapshot{Repo: t.RepoID, Provider: src.Provider, Store: st, Bytes: b, At: f.Now}},
