@@ -183,6 +183,8 @@ type Worker struct {
 	grants     grantCache   // latest store grants per repository
 	cfs        *cacheFS     // build slot file system (anyfs)
 	maintMu    sync.Mutex   // one slot maintenance pass at a time
+	headMu     sync.Mutex
+	headTimers map[string]*time.Timer // repo -> armed head flush deadline
 	// tiers counts the cache file system's transfers per medium
 	// (anyfs.RecordTransfers), reported in the status.
 	tiers medium.Recorder
@@ -318,6 +320,7 @@ func (s *Worker) Run(parent context.Context) error {
 		// stopping, so this is incremental or nothing.
 		s.writebackChanged(time.Duration(machine.StopTimeout-10)*time.Second, "stop")
 	}
+	s.stopHeadFlushes()
 	s.cfs.unmountAll()
 	return nil
 }

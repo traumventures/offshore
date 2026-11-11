@@ -84,6 +84,52 @@ func TestLocalDirtyNeverReclaimedAndJournal(t *testing.T) {
 	}
 }
 
+// Page hints survive a reopen (a worker restart); hints of pages gone
+// meanwhile are dropped from the journal, a torn last line is ignored.
+func TestLocalHintsPersist(t *testing.T) {
+	dir := t.TempDir()
+	l := openLocal(t, dir, 0)
+	b1, k1 := page(100)
+	b2, k2 := page(100)
+	b3, k3 := page(100)
+	l.Put(ctx, k1, b1, Dirty)
+	l.Put(ctx, k2, b2, Dirty)
+	l.Put(ctx, k3, b3, Clean)
+	churn := PageHint{Expire: 10 * time.Minute, LocalOnly: true}
+	eph := PageHint{NoWriteback: true, LocalOnly: true}
+	l.Hint(k1, PageHint{Expire: -1})
+	l.Hint(k1, churn) // the last hint wins
+	l.Hint(k2, eph)
+	l.Hint(k3, PageHint{Expire: -1})
+	l.Remove(k3)
+	l.Close()
+	f, _ := os.OpenFile(filepath.Join(dir, "hints.journal"), os.O_APPEND|os.O_WRONLY, 0)
+	f.WriteString(string(k2)[:10])
+	f.Close()
+	l2 := openLocal(t, dir, 0)
+	if h, ok := l2.PageHint(k1); !ok || h != churn {
+		t.Fatalf("k1 hint %+v", h)
+	}
+	if h, _ := l2.PageHint(k2); h != eph {
+		t.Fatalf("k2 hint %+v", h)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "hints.journal"))
+	if bytes.Contains(b, []byte(k3)) || bytes.Count(b, []byte("\n")) != 2 {
+		t.Fatalf("journal not compacted: %q", b)
+	}
+	// The link of a restarted worker applies them: k1 (churn) and k2
+	// (ephemeral) stay dirty past the default expiry.
+	lower := openLocal(t, t.TempDir(), 0)
+	lk := NewLink(l2, lower, Policy{DirtyExpire: time.Nanosecond}, nil)
+	time.Sleep(time.Millisecond)
+	if err := lk.writeback(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if lower.Has(ctx, k1) || lower.Has(ctx, k2) {
+		t.Fatal("restarted link ignored the persisted hints")
+	}
+}
+
 func TestLocalThrashDetection(t *testing.T) {
 	var mu sync.Mutex
 	var evs []Event
