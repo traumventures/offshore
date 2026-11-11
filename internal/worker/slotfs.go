@@ -82,7 +82,7 @@ func (s *Worker) commitSlot(ctx context.Context, ref slotRef) (commitResult, err
 			if top := res.chain.Top(); top != nil {
 				x.Head = top.ID
 			}
-			x.Committed, x.UpperBytes = now, res.upper
+			x.Committed, x.UpperBytes, x.Scanned = now, res.upper, res.scanned
 			if res.changed {
 				x.Bytes = res.tree.Bytes()
 			}

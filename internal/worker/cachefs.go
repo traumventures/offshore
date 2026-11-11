@@ -495,6 +495,7 @@ type commitResult struct {
 	refresh bool // compacted: rewrite old pages in the store
 	scan    anyfs.ScanStats
 	upper   int64 // upper bytes at the commit
+	scanned int64 // watermark of the commit (unix ns)
 }
 
 // commit scans a slot (the caller holds it) and commits its changes on
@@ -520,8 +521,23 @@ func (c *cacheFS) commit(ctx context.Context, slot, repo string, m slotMeta, liv
 		return res, err
 	}
 	base := ch.Tree()
-	tree, st, err := anyfs.Scan(filepath.Join(slot, "data"), anyfs.ScanOptions{Prev: base,
-		Sink: func(k anyfs.Key, b []byte) error { return r.tier.Put(ctx, k, b, anyfs.Dirty) }})
+	opt := anyfs.ChangeOptions{ScanOptions: anyfs.ScanOptions{Prev: base, Since: m.Scanned,
+		Sink: func(k anyfs.Key, b []byte) error { return r.tier.Put(ctx, k, b, anyfs.Dirty) }}}
+	if c.mode != fsPlain {
+		opt.Upper = filepath.Join(slot, "upper")
+		if opt.Since == 0 && head == m.Base {
+			opt.Since = 1 // the upper holds every change since the mount over the head
+		}
+		c.mu.Lock()
+		if sm := c.mounts[slot]; sm != nil && sm.user != nil {
+			opt.UpperFormat = anyfs.UpperUser
+		}
+		c.mu.Unlock()
+	}
+	// Changes from now on have a newer ctime (a second of slack for
+	// coarse file system timestamps).
+	res.scanned = time.Now().Add(-time.Second).UnixNano()
+	tree, st, err := anyfs.ScanChanges(filepath.Join(slot, "data"), opt)
 	if err != nil {
 		return res, fmt.Errorf("scan build slot: %w", err)
 	}

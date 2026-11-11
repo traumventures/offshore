@@ -325,9 +325,16 @@ are prefetched at mount. Without CAP_SYS_ADMIN the userspace overlay serves
 the same union (logged at start); without `/dev/fuse` slots are plain
 directories (commits scan them, a new slot over a chain is extracted).
 
-**Commit = writeback.** The merged view is scanned against the slot's head
-tree (unchanged files reuse their pages, changed files become dirty pages)
-and committed as a layer (changed nodes + whiteouts) on top of the chain;
+**Commit = writeback.** A commit reads only what changed since the last
+one (`anyfs.ScanChanges`): the entries of the overlay's upper directory
+whose ctime is newer than the head's watermark (`scanned_ns` in the slot
+metadata) are stat'ed in the merged view, their directories listed
+(deletions, renames), whiteouts and opaque or redirected directories
+rescanned; everything else is taken from the head tree unread. Plain
+directory slots are walked whole but only files with a newer ctime are
+read. In a test slot of 213 entries a second commit stats 5 entries and
+hashes the 2 changed files (plain: stats 213, hashes 2). Changed files
+become dirty pages and are committed as a layer (changed nodes + whiteouts) on top of the chain;
 the layer's pages are flushed to the store, the layer objects and then the
 head (`heads/slot`) written. Commits run when a slot has been idle for
 `[writeback] dirty_expire` (default 30 s), right after a session that grew
