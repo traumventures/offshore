@@ -862,7 +862,8 @@ func (o *Orchestrator) measuredSizes() []scheduler.Size {
 
 // poolLocked builds the scheduler's view of the pool.
 func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
-	f := scheduler.Pool{Now: now, Sizes: o.measuredSizes(), Recent: map[string]time.Time{}, EnvArch: map[string]string{}}
+	f := scheduler.Pool{Now: now, Sizes: o.measuredSizes(), Recent: map[string]time.Time{}, EnvArch: map[string]string{},
+		Refetch: o.obs.refetch.Factors()}
 	for env, t := range o.recentEnvs {
 		f.Recent[env] = t
 	}

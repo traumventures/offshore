@@ -311,57 +311,97 @@ func slotsToPrune(m Machine, t Task, missing int64) int {
 	return n
 }
 
-// prepare adds the slot handling a run needs on m when the disk is too
-// full (prune or resize), choosing by score. ok is false when neither can
-// make room.
-func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) (runChoice, bool) {
-	if m.DiskTotal <= 0 || need <= 0 {
-		return rc, true
+// prepare returns the ways to run rc on m with the disk handling it needs:
+// as is (when the slot fits), after pruning other slots, or after growing
+// the disk to one of several targets (room for the slot, the working set
+// in the local tier, twice that). Each way carries the thrash penalty of
+// the local capacity it leaves, so the caller scores slot handling,
+// restore and thrashing jointly. A restore or move keeps its kind and
+// grows the disk in the same step (SlotAction.Grow); it never prunes:
+// evicting another warm slot for a restored one ping-pongs between
+// repositories (sim: 3x the thrashing, 5x the restores on team-week).
+// The result is empty when nothing makes room.
+func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) []runChoice {
+	_, ws, capacity := thrashOf(f, m, t)
+	refetch := f.RefetchOf(m.Provider)
+	missing := int64(0)
+	if m.DiskTotal > 0 && need > 0 {
+		limit := m.DiskBudget
+		if limit <= 0 {
+			limit = int64(diskFull * float64(m.DiskTotal))
+		}
+		missing = need - (limit - m.DiskUsed)
 	}
-	limit := m.DiskBudget
-	if limit <= 0 {
-		limit = int64(diskFull * float64(m.DiskTotal))
+	var out []runChoice
+	// finish adds the thrash penalty of capacity cap.
+	finish := func(c runChoice, cap int64) {
+		if pen := ThrashTime(m.Stack, cap, ws, refetch); pen > 0 {
+			c.run += pen
+			c.reason += ", thrashing"
+		}
+		out = append(out, c)
 	}
-	free := limit - m.DiskUsed
-	if need <= free {
-		return rc, true
-	}
-	missing := need - free
-	var cs []runChoice
-	consider := func(c runChoice) { cs = append(cs, c) }
-	if prunable(m, t) >= missing {
+	joint := rc.slot.Kind == SlotRestore || rc.slot.Kind == SlotMove
+	if missing <= 0 {
+		finish(rc, capacity)
+	} else if !joint && prunable(m, t) >= missing {
 		c := rc
 		// Pruning other repositories' slots makes their next builds cold.
 		c.run += DefaultPrune + time.Duration(slotsToPrune(m, t, missing))*time.Duration(float64(DefaultRun)*DefaultColdPenalty)
 		c.slot = SlotAction{Kind: SlotPrune, Repo: t.RepoID, Bytes: missing}
 		c.reason += ", prune slots"
-		consider(c)
+		finish(c, capacity)
 	}
 	// A disk resized recently cannot grow again (EBS: once per 6 h).
-	if m.CanResize && !f.Now.Before(m.ResizableAt) {
-		grow := max(missing*2, 10<<30) // grow generously: resizes are slow
-		if s, ok := sizeOf(f, m); ok && s.Volume.Step > grow {
-			grow = s.Volume.Step
+	if !m.CanResize || f.Now.Before(m.ResizableAt) {
+		return out
+	}
+	s, hasSize := sizeOf(f, m)
+	var grows []int64
+	if missing > 0 {
+		grows = append(grows, max(missing*2, 10<<30)) // grow generously: resizes are slow
+	}
+	if ws > capacity && capacity > 0 && growsCapacity(m) {
+		g := max(ws+ws/4-capacity, 10<<30)
+		grows = append(grows, g, 2*g)
+	}
+	left := m.ExpiresAt.Sub(f.Now)
+	if m.ExpiresAt.IsZero() || left <= 0 {
+		left = 24 * time.Hour
+	}
+	seen := map[int64]bool{}
+	for _, g := range grows {
+		if hasSize && s.Volume.Step > g {
+			g = s.Volume.Step
 		}
+		target := m.DiskTotal + g
+		if hasSize && s.Volume.Max > 0 && target > s.Volume.Max {
+			target = s.Volume.Max
+		}
+		g = target - m.DiskTotal
+		if g <= 0 || g < missing || seen[target] {
+			continue
+		}
+		seen[target] = true
 		c := rc
 		c.run += DefaultResize
-		left := m.ExpiresAt.Sub(f.Now)
-		if m.ExpiresAt.IsZero() || left <= 0 {
-			left = 24 * time.Hour
+		c.cost += float64(g) / 1e9 * p.diskPriceOf(m) * hours(left)
+		if joint {
+			c.slot.Grow = target
+		} else {
+			c.slot = SlotAction{Kind: SlotResize, Repo: t.RepoID, Bytes: target}
 		}
-		c.cost += float64(grow) / 1e9 * p.diskPriceOf(m) * hours(left)
-		c.slot = SlotAction{Kind: SlotResize, Repo: t.RepoID, Bytes: m.DiskTotal + grow}
 		c.reason += ", resize disk"
-		consider(c)
+		cap := capacity
+		if growsCapacity(m) && cap > 0 {
+			cap += g
+		}
+		if ws > capacity && ws <= cap {
+			c.reason += " for working set"
+		}
+		finish(c, cap)
 	}
-	var opts []option
-	for _, c := range cs {
-		opts = append(opts, option{cost: c.cost + priceOf(f, m)*hours(c.run), time: c.run})
-	}
-	if i := p.pick(opts); i >= 0 {
-		return cs[i], true
-	}
-	return runChoice{}, false
+	return out
 }
 
 // diskPriceOf is the price per GB-hour of m's hot medium (the configured
@@ -380,36 +420,14 @@ func (p Default) diskPrice() float64 {
 	return DefaultDiskPrice
 }
 
-// runChoices returns the ways t can run on m (warm, restore, cold), each
-// with the slot preparation it needs. Machines without room are skipped.
+// runChoices returns the ways t can run on m (warm, restore, move, cold),
+// each with the disk handling it needs (see prepare). Machines without
+// room are skipped.
 func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 	slow := slowdown(m, t)
 	scale := func(d time.Duration) time.Duration { return time.Duration(float64(d) * slow) }
-	pen, wsNeed, capacity := thrashOf(m, t)
 	var out []runChoice
-	add := func(rc runChoice, need int64) {
-		rc, ok := p.prepare(f, m, t, rc, need)
-		if !ok {
-			return
-		}
-		pen := pen
-		if rc.slot.Kind == SlotResize && pen > 0 {
-			pen = ThrashTime(m.Stack, capacity+max(rc.slot.Bytes-m.DiskTotal, 0), wsNeed)
-		}
-		if pen <= 0 {
-			out = append(out, rc)
-			return
-		}
-		// The working set does not fit the local tier: the build thrashes,
-		// unless the disk grows first (when no other slot action runs).
-		th := rc
-		th.run += pen
-		th.reason += ", thrashing"
-		out = append(out, th)
-		if rs, ok := p.thrashResize(f, m, t, rc, wsNeed, capacity); ok {
-			out = append(out, rs)
-		}
-	}
+	add := func(rc runChoice, need int64) { out = append(out, p.prepare(f, m, t, rc, need)...) }
 	if m.Warm(t.RepoID) {
 		add(runChoice{run: scale(t.Profile.WarmRun()), reason: "warm slot"}, slotNeed(m, t, 0))
 		return out
@@ -438,36 +456,6 @@ func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 	}
 	add(runChoice{run: scale(t.Profile.ColdRun(m.Provider)), reason: "cold"}, slotNeed(m, t, 0))
 	return out
-}
-
-// thrashResize is rc after growing m's disk so that a working set of ws
-// fits its local tier (capacity bytes now). ok is false when the disk
-// cannot grow now or rc already prepares the slot otherwise.
-func (p Default) thrashResize(f Pool, m Machine, t Task, rc runChoice, ws, capacity int64) (runChoice, bool) {
-	if !m.CanResize || f.Now.Before(m.ResizableAt) || (rc.slot.Kind != SlotNone && rc.slot.Kind != SlotResize) {
-		return rc, false
-	}
-	grow := max(ws+ws/4-capacity, 10<<30)
-	if s, ok := sizeOf(f, m); ok && s.Volume.Step > grow {
-		grow = s.Volume.Step
-	}
-	target := m.DiskTotal + grow
-	if rc.slot.Kind == SlotResize {
-		target = max(target, rc.slot.Bytes)
-	} else {
-		rc.run += DefaultResize
-	}
-	left := m.ExpiresAt.Sub(f.Now)
-	if m.ExpiresAt.IsZero() || left <= 0 {
-		left = 24 * time.Hour
-	}
-	rc.cost += float64(target-max(m.DiskTotal, rc.slot.Bytes)) / 1e9 * p.diskPriceOf(m) * hours(left)
-	if rc.slot.Kind != SlotResize {
-		rc.reason += ", resize disk"
-	}
-	rc.reason += " for working set"
-	rc.slot = SlotAction{Kind: SlotResize, Repo: t.RepoID, Bytes: target}
-	return rc, true
 }
 
 // saveTime is the time to save a slot of bytes on src to its store with

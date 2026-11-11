@@ -16,17 +16,34 @@ import (
 //     is Profile.FaultTime(working set), bounded by the store bandwidth.
 //   - thrashing: when the working set of the builds on a machine exceeds
 //     its local capacity (the top tier), reclaimed pages fault back in
-//     during the build: ThrashPasses refaults of the excess from the
-//     tier below. A machine reporting VM.Thrashing (or a working set
+//     during the build: the refetch factor times the excess is faulted
+//     in again from the tier below. The factor is calibrated from the
+//     cache file systems' page_in/reclaim/thrash events per provider
+//     (Pool.Refetch, see events.Refetch); DefaultRefetch without data.
+//     A machine reporting VM.Thrashing (or a working set
 //     larger than its capacity) gets this penalty for every placement,
 //     and the cost model weighs a disk resize or a size with more local
 //     capacity against it.
 //   - where the slot persists (its volume, else the top tier): storage
 //     price, attach time and resize cooldown.
 
-// ThrashPasses is how often the part of a working set beyond the local
-// capacity is expected to fault in again during one build.
-const ThrashPasses = 2
+// DefaultRefetch is how often the part of a working set beyond the local
+// capacity is expected to fault in again during one build when no
+// calibration is known (refaulted bytes per byte of excess).
+const DefaultRefetch = 2.0
+
+// RefetchOf is the refetch factor for machines of provider prov: the
+// calibrated one of the provider, else of all providers (key ""), else
+// DefaultRefetch.
+func (f Pool) RefetchOf(prov string) float64 {
+	if r := f.Refetch[prov]; r > 0 {
+		return r
+	}
+	if r := f.Refetch[""]; r > 0 {
+		return r
+	}
+	return DefaultRefetch
+}
 
 // levelOf returns the profile of medium med in a stack (ok false: none).
 func levelOf(p medium.Stack, med string) (medium.Profile, bool) {
@@ -94,11 +111,15 @@ func LazyRestore(stack medium.Stack, bytes, ws, bw int64) time.Duration {
 }
 
 // ThrashTime is the extra build time when a working set of ws bytes runs
-// on a stack with local capacity capacity: ThrashPasses refaults of the
-// excess from the tier below the top (0 when it fits or is unknown).
-func ThrashTime(stack medium.Stack, capacity, ws int64) time.Duration {
+// on a stack with local capacity capacity: refetch (<= 0: DefaultRefetch)
+// times the excess faulted in again from the tier below the top (0 when
+// it fits or is unknown).
+func ThrashTime(stack medium.Stack, capacity, ws int64, refetch float64) time.Duration {
 	if capacity <= 0 || ws <= capacity {
 		return 0
+	}
+	if refetch <= 0 {
+		refetch = DefaultRefetch
 	}
 	excess := ws - capacity
 	below := stack
@@ -109,7 +130,19 @@ func ThrashTime(stack medium.Stack, capacity, ws int64) time.Duration {
 	if d <= 0 {
 		d = time.Duration(float64(excess) / float64(DefaultBandwidth) * float64(time.Second))
 	}
-	return ThrashPasses * d
+	return time.Duration(refetch * float64(d))
+}
+
+// RefetchBytes is what a build with working set ws refaults on a local
+// tier of capacity bytes (0 when it fits).
+func RefetchBytes(capacity, ws int64, refetch float64) int64 {
+	if capacity <= 0 || ws <= capacity {
+		return 0
+	}
+	if refetch <= 0 {
+		refetch = DefaultRefetch
+	}
+	return int64(refetch * float64(ws-capacity))
 }
 
 // localCapacity is the bytes m's top tier may hold: reported by its
@@ -147,8 +180,15 @@ func demand(m Machine, t Task, capacity int64) int64 {
 
 // thrashOf is the thrash penalty of running t on m, the local capacity it
 // would need to avoid it and the capacity m has.
-func thrashOf(m Machine, t Task) (pen time.Duration, need, capacity int64) {
+func thrashOf(f Pool, m Machine, t Task) (pen time.Duration, need, capacity int64) {
 	capacity = localCapacity(m)
 	ws := demand(m, t, capacity)
-	return ThrashTime(m.Stack, capacity, ws), ws, capacity
+	return ThrashTime(m.Stack, capacity, ws, f.RefetchOf(m.Provider)), ws, capacity
+}
+
+// growsCapacity reports whether growing m's disk grows its local tier:
+// the slot persists on the top tier (a single hot medium over the store),
+// not on a volume below a fixed local disk.
+func growsCapacity(m Machine) bool {
+	return len(m.Stack.Levels) <= 2
 }

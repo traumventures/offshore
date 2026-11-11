@@ -26,13 +26,13 @@ func wsTask(ws int64) Task {
 
 func TestThrashTime(t *testing.T) {
 	st := StackOf(20*gib, medium.Default("aws-ec2", medium.Local), medium.Default("aws-ec2", medium.Store))
-	if d := ThrashTime(st, 20*gib, 20*gib); d != 0 {
+	if d := ThrashTime(st, 20*gib, 20*gib, 0); d != 0 {
 		t.Fatalf("fits: %v", d)
 	}
-	if d := ThrashTime(st, 0, 100*gib); d != 0 {
+	if d := ThrashTime(st, 0, 100*gib, 0); d != 0 {
 		t.Fatalf("unknown capacity: %v", d)
 	}
-	small, large := ThrashTime(st, 20*gib, 25*gib), ThrashTime(st, 20*gib, 40*gib)
+	small, large := ThrashTime(st, 20*gib, 25*gib, 0), ThrashTime(st, 20*gib, 40*gib, 0)
 	if small <= 0 || large <= small {
 		t.Fatalf("thrash grows with the excess: %v %v", small, large)
 	}
@@ -136,5 +136,90 @@ func TestWithTop(t *testing.T) {
 	}
 	if SlotMedium(StackOf(0, medium.Default("aws-ec2", medium.Local), medium.Default("aws-ec2", medium.Volume), medium.Default("aws-ec2", medium.Store))).Medium != medium.Volume {
 		t.Fatal("slots persist on the volume")
+	}
+}
+
+func TestRefetchOf(t *testing.T) {
+	if r := (Pool{}).RefetchOf("aws"); r != DefaultRefetch {
+		t.Fatalf("no calibration: %v", r)
+	}
+	f := Pool{Refetch: map[string]float64{"aws": 5, "": 3}}
+	if f.RefetchOf("aws") != 5 || f.RefetchOf("oci") != 3 {
+		t.Fatalf("per provider, then global: %v %v", f.RefetchOf("aws"), f.RefetchOf("oci"))
+	}
+	st := localSizes()[0].Stack
+	if a, b := ThrashTime(st, 20*gib, 40*gib, 4), ThrashTime(st, 20*gib, 40*gib, 2); a != 2*b {
+		t.Fatalf("thrash time scales with the factor: %v vs %v", a, b)
+	}
+	if RefetchBytes(20*gib, 40*gib, 0) != 40*gib || RefetchBytes(20*gib, 10*gib, 3) != 0 {
+		t.Fatal("refetch bytes")
+	}
+}
+
+// Cost-optimised accepts thrashing at the default factor, but a calibrated
+// factor of 10 makes thrashing cost more machine time than the resize.
+func TestCalibratedRefetchFlipsResize(t *testing.T) {
+	m := machine("m", res(8, 16), Resources{})
+	m.Provider, m.Size, m.Stack, m.DiskTotal, m.CanResize = "aws", "small", localSizes()[0].Stack, 20*gib, true
+	m.ExpiresAt = now.Add(6 * time.Hour)
+	f := Pool{Now: now, Sizes: localSizes(), Machines: []Machine{m}}
+	pol := Default{Cfg: Config{CostOptimization: 1, CPUOvercommit: 1, MemoryOvercommit: 1}}
+	if pl := pol.Place(f, wsTask(40*gib)); pl.Slot.Kind != SlotNone || !strings.Contains(pl.Reason, "thrashing") {
+		t.Fatalf("default factor: want to thrash, got %+v", pl)
+	}
+	f.Refetch = map[string]float64{"aws": 10}
+	if pl := pol.Place(f, wsTask(40*gib)); pl.Slot.Kind != SlotResize || strings.Contains(pl.Reason, "thrashing") {
+		t.Fatalf("calibrated factor 10: want a resize, got %+v", pl)
+	}
+}
+
+// A restore whose working set does not fit the local tier grows the disk
+// in the same step (one placement, the restore kept) instead of
+// restoring and thrashing or growing and running cold.
+func TestRestoreAndResizeJointly(t *testing.T) {
+	m := machine("m", res(8, 16), Resources{})
+	m.Provider, m.Size, m.Stack, m.DiskTotal, m.CanResize = "aws", "small", localSizes()[0].Stack, 20*gib, true
+	m.ExpiresAt, m.IdleSince = now.Add(6*time.Hour), now.Add(-time.Minute)
+	tk := wsTask(40 * gib)
+	tk.RepoID = "r"
+	tk.Profile.Cold = time.Hour // a cold build costs more than any restore
+	snap := Snapshot{Repo: "r", Provider: "aws", Store: "aws", Bytes: 15 * gib, At: now.Add(-time.Hour)}
+	f := Pool{Now: now, Sizes: localSizes(), Machines: []Machine{m}, Snapshots: map[string][]Snapshot{"r": {snap}}}
+	pl := Default{Cfg: Config{CostOptimization: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1}}.Place(f, tk)
+	if pl.Kind != Assign || pl.Slot.Kind != SlotRestore || pl.Slot.Grow < 50*gib || strings.Contains(pl.Reason, "thrashing") ||
+		pl.Slot.Steps() != "resize+restore" {
+		t.Fatalf("want restore with a resize for the working set, got %+v (%s)", pl, pl.Slot.Steps())
+	}
+	// A full disk: the restore keeps its kind and grows the disk in the
+	// same step (before, the resize replaced the restore and the build ran
+	// cold); it never prunes another repository's warm slot.
+	m.SlotBytes, m.DiskUsed = map[string]int64{"other": 12 * gib}, 14*gib
+	tk.Profile.WorkingSet = 5 * gib
+	f.Machines = []Machine{m}
+	for _, r := range []float64{0, 0.5, 1} {
+		pl := Default{Cfg: Config{CostOptimization: r, CPUOvercommit: 1, MemoryOvercommit: 1}}.Place(f, tk)
+		if pl.Kind != Assign || pl.Slot.Kind != SlotRestore || pl.Slot.Grow < 20*gib+15*gib-14*gib {
+			t.Fatalf("r=%v: want the restore with the disk grown, got %+v", r, pl)
+		}
+	}
+	// Without a resize the restore does not fit: cold.
+	m.CanResize = false
+	f.Machines = []Machine{m}
+	if pl := (Default{Cfg: Config{CostOptimization: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1}}).Place(f, tk); pl.Kind != Assign || pl.Slot.Kind == SlotRestore {
+		t.Fatalf("want a cold build, got %+v", pl)
+	}
+}
+
+// Growing a volume below a fixed local disk does not grow the local tier:
+// no resize is offered against thrashing.
+func TestNoResizeForWorkingSetBelowFixedLocalTier(t *testing.T) {
+	m := machine("m", res(8, 16), Resources{})
+	m.Provider, m.Size, m.DiskTotal, m.CanResize = "aws", "v", 100*gib, true
+	m.Stack = StackOf(20*gib, medium.Default("aws-ec2", medium.LocalNVMe), medium.Default("aws-ec2", medium.Volume), medium.Default("aws-ec2", medium.Store))
+	f := Pool{Now: now, Machines: []Machine{m}}
+	for _, rc := range (Default{}).runChoices(f, m, wsTask(40*gib)) {
+		if rc.slot.Kind == SlotResize {
+			t.Fatalf("resize offered: %+v", rc)
+		}
 	}
 }
