@@ -273,9 +273,34 @@ type Status struct {
 	// by the orchestrator).
 	DrainReason string   `json:"drain_reason,omitempty"`
 	WarmRepos   []string `json:"warm_repos,omitempty"` // repo IDs with unexpired build slots
+	// Disk is the machine disk usage (nil: not measured).
+	Disk *DiskStatus `json:"disk,omitempty"`
+	// Snapshots are build slot snapshots the server saved on its own (e.g.
+	// on drain or stop), so the orchestrator knows where they are.
+	Snapshots []SnapshotInfo `json:"snapshots,omitempty"`
 	// Metrics is the server's metrics snapshot; the orchestrator republishes
 	// it with machine labels (no extra port or scope on the machine).
 	Metrics []metrics.Family `json:"metrics,omitempty"`
+}
+
+// DiskStatus is a machine's disk usage in bytes.
+type DiskStatus struct {
+	Total         int64 `json:"total"`
+	Used          int64 `json:"used"`
+	Slots         int64 `json:"slots"`          // all build slots
+	MachineCaches int64 `json:"machine_caches"` // machine scope caches
+	// SlotBytes is the size of each repository's build slot (repo id ->
+	// bytes).
+	SlotBytes map[string]int64 `json:"slot_bytes,omitempty"`
+}
+
+// SnapshotInfo describes a saved build slot snapshot.
+type SnapshotInfo struct {
+	Repo     string `json:"repo"`
+	Store    string `json:"store"`
+	Provider string `json:"provider"`
+	Bytes    int64  `json:"bytes"`
+	At       int64  `json:"at"` // unix seconds
 }
 
 // Session is a running remote process.

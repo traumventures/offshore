@@ -11,35 +11,41 @@ import (
 	"time"
 )
 
-// Resources is an amount of CPU (cores) and memory (bytes).
+// Resources is an amount of CPU (cores), memory (bytes) and disk (bytes).
+// Disk is not reserved per session: build slots persist on a machine's
+// disk, so it is planned by the cost model (slot sizes, growth), not
+// packed. Fits checks disk only when o asks for some.
 type Resources struct {
 	CPU    float64 `json:"cpu"`
 	Memory int64   `json:"memory"`
+	Disk   int64   `json:"disk,omitempty"`
 }
 
 // Add returns r + o.
 func (r Resources) Add(o Resources) Resources {
-	return Resources{CPU: r.CPU + o.CPU, Memory: r.Memory + o.Memory}
+	return Resources{CPU: r.CPU + o.CPU, Memory: r.Memory + o.Memory, Disk: r.Disk + o.Disk}
 }
 
 // Sub returns r - o.
 func (r Resources) Sub(o Resources) Resources {
-	return Resources{CPU: r.CPU - o.CPU, Memory: r.Memory - o.Memory}
+	return Resources{CPU: r.CPU - o.CPU, Memory: r.Memory - o.Memory, Disk: r.Disk - o.Disk}
 }
 
 // Fits reports whether o fits into r.
-func (r Resources) Fits(o Resources) bool { return o.CPU <= r.CPU && o.Memory <= r.Memory }
+func (r Resources) Fits(o Resources) bool {
+	return o.CPU <= r.CPU && o.Memory <= r.Memory && (o.Disk <= 0 || o.Disk <= r.Disk)
+}
 
-// Scale multiplies CPU and memory by separate factors.
+// Scale multiplies CPU and memory by separate factors (disk unchanged).
 func (r Resources) Scale(cpu, mem float64) Resources {
-	return Resources{CPU: r.CPU * cpu, Memory: int64(float64(r.Memory) * mem)}
+	return Resources{CPU: r.CPU * cpu, Memory: int64(float64(r.Memory) * mem), Disk: r.Disk}
 }
 
 // Size is a machine type a backend can create.
 type Size struct {
 	Provider     string    `json:"provider"` // provider instance that creates it
 	Name         string    `json:"name"`
-	Capacity     Resources `json:"capacity"`
+	Capacity     Resources `json:"capacity"`       // Disk: the machine disk (0 = unknown)
 	PricePerHour float64   `json:"price_per_hour"` // 0 when unknown
 	// Arch is the machine architecture ("amd64", "arm64"; empty: amd64).
 	// Machines are only created for environments of their architecture.
@@ -97,7 +103,12 @@ type Machine struct {
 	Used      Resources // measured usage (best effort)
 	Pressure  Pressure
 	Sessions  int
-	WarmRepos []string  // repositories with an unexpired build cache
+	WarmRepos []string // repositories with an unexpired build cache
+	// DiskTotal and DiskUsed are the machine disk (0 = unknown); SlotBytes
+	// the size of each repository's build slot (repo id -> bytes).
+	DiskTotal int64
+	DiskUsed  int64
+	SlotBytes map[string]int64
 	IdleSince time.Time // zero while sessions run
 	CreatedAt time.Time
 	ExpiresAt time.Time
@@ -221,6 +232,24 @@ type Usage struct {
 	// Cache holds counters of cache integrations (e.g. "sccache_hits");
 	// recorded in the event log, not learned from.
 	Cache map[string]int64 `json:"cache,omitempty"`
+	// SlotBytesBefore and SlotBytesAfter are the size of the session's
+	// build slot at its start and end (0 = unknown); the estimator learns
+	// slot growth per key from them.
+	SlotBytesBefore int64 `json:"slot_bytes_before,omitempty"`
+	SlotBytesAfter  int64 `json:"slot_bytes_after,omitempty"`
+	// Restored is set when the slot was restored from a snapshot before the
+	// session ran; RestoreSeconds is how long the restore took.
+	Restored       bool    `json:"restored,omitempty"`
+	RestoreSeconds float64 `json:"restore_seconds,omitempty"`
+}
+
+// Snapshot is a saved build slot of a repository in an object store.
+type Snapshot struct {
+	Repo     string    `json:"repo"`
+	Provider string    `json:"provider"` // provider whose machine saved it
+	Store    string    `json:"store"`    // store name (provider name or "storage")
+	Bytes    int64     `json:"bytes"`
+	At       time.Time `json:"at"`
 }
 
 // Estimator predicts the resource need of tasks from past runs.

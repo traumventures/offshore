@@ -46,6 +46,15 @@ const (
 	// SampleInterval): reservations, measured usage
 	// (busy cores, session memory), pressure and session count.
 	MachineSample = "machine_sample"
+
+	// SnapshotSave and SnapshotRestore: a build slot was saved to or
+	// restored from an object store (Repo, Slot, Bytes, Chunks, NewChunks,
+	// Seconds, Store, Provider, Machine).
+	SnapshotSave    = "snapshot_save"
+	SnapshotRestore = "snapshot_restore"
+	// SlotAction: the scheduler handled a full or growing build slot
+	// (Reason: resize, prune, move, cold; Repo, Machine, Bytes).
+	SlotAction = "slot_action"
 )
 
 // SampleInterval is how often a running machine is sampled.
@@ -88,6 +97,15 @@ type Event struct {
 	Used     *scheduler.Resources `json:"used,omitempty"`     // busy cores, memory of sessions
 	Pressure *scheduler.Pressure  `json:"pressure,omitempty"` // PSI some avg10, 0..1
 	Sessions int                  `json:"sessions,omitempty"`
+	Disk     *Disk                `json:"disk,omitempty"` // machine disk usage
+
+	// Snapshot fields (SnapshotSave, SnapshotRestore, SlotAction).
+	Slot      string  `json:"slot,omitempty"`
+	Store     string  `json:"store,omitempty"`
+	Bytes     int64   `json:"bytes,omitempty"`
+	Chunks    int64   `json:"chunks,omitempty"`
+	NewChunks int64   `json:"new_chunks,omitempty"`
+	Seconds   float64 `json:"seconds,omitempty"`
 
 	// Labels describe who ran a task (worktree, repo, branch, user, agent
 	// and free labels; see internal/labels). Set on task events.
@@ -95,6 +113,14 @@ type Event struct {
 
 	// TraceID correlates the event with a distributed trace.
 	TraceID string `json:"trace_id,omitempty"`
+}
+
+// Disk is a machine's disk usage in bytes.
+type Disk struct {
+	Total         int64 `json:"total"`
+	Used          int64 `json:"used"`
+	Slots         int64 `json:"slots"`
+	MachineCaches int64 `json:"machine_caches"`
 }
 
 // DefaultRetention is how long daily files are kept.
