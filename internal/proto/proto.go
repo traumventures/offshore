@@ -10,6 +10,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/traumventures/offshore/internal/events"
 	"github.com/traumventures/offshore/internal/manifest"
 	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/metrics"
@@ -457,6 +458,9 @@ type Session struct {
 	// it consumed so far (busy cores = delta / wall delta).
 	UsedMemory int64   `json:"used_memory,omitempty"`
 	CPUSeconds float64 `json:"cpu_seconds,omitempty"`
+	// Samples are the session's last cgroup samples (every 5 s, the last
+	// minute); the orchestrator logs the new ones as session_sample.
+	Samples []events.Sample `json:"samples,omitempty"`
 }
 
 // Fetch requests output files from the most recent build slot of a repo.

@@ -224,3 +224,35 @@ func TestDecisionEvents(t *testing.T) {
 		t.Fatalf("predicted %+v", p)
 	}
 }
+
+// Session samples from the worker status are logged once each as
+// session_sample and kept for SessionSamples.
+func TestSessionSamples(t *testing.T) {
+	o := newTestOrch(t, newFake(), nil)
+	t0 := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+	smp := func(i int) events.Sample {
+		return events.Sample{Time: t0.Add(time.Duration(i) * 5 * time.Second), CPU: float64(i), Memory: int64(i) << 20}
+	}
+	m := &Machine{Provider: "fake", Status: &proto.Status{Ready: true, Sessions: []proto.Session{{Lease: "l1", Repo: "r", Samples: []events.Sample{smp(0), smp(1)}}}}}
+	o.mu.Lock()
+	o.sessionSamplesLocked("m1", m)
+	m.Status.Sessions[0].Samples = []events.Sample{smp(1), smp(2)} // overlapping report
+	o.sessionSamplesLocked("m1", m)
+	o.mu.Unlock()
+	got := byType(readEvents(t, o), events.SessionSample)
+	if len(got) != 3 || got[2].Sample.CPU != 2 || got[0].Task != "l1" || got[0].Machine != "m1" {
+		t.Fatalf("session_sample %+v", got)
+	}
+	if s := o.SessionSamples("l1", time.Time{}); len(s) != 3 {
+		t.Fatalf("in memory %d", len(s))
+	}
+	if s := o.SessionSamples("l1", t0.Add(5*time.Second)); len(s) != 1 {
+		t.Fatalf("since %d", len(s))
+	}
+	o.obs.mu.Lock()
+	delete(o.obs.series, "l1")
+	o.obs.mu.Unlock()
+	if s := o.SessionSamples("l1", time.Time{}); len(s) != 3 {
+		t.Fatalf("from the log %d", len(s))
+	}
+}

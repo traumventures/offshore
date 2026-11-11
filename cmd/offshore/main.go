@@ -215,6 +215,8 @@ func run(cmd string, args []string) error {
 		return status(args)
 	case "top":
 		return topCmd(args)
+	case "provider":
+		return providerCmd(args)
 	case "prewarm":
 		return prewarmCmd(args)
 	case "hooks":
@@ -320,8 +322,9 @@ func daemonCmd(args []string) error {
 
 // statusJSON is the output of `offshore status --json`.
 type statusJSON struct {
-	Machines []orchestrator.Machine  `json:"machines"` // includes machines removed today (Removed set)
-	Cost     orchestrator.CostReport `json:"cost"`
+	Machines  []orchestrator.Machine        `json:"machines"` // includes machines removed today (Removed set)
+	Cost      orchestrator.CostReport       `json:"cost"`
+	Providers []orchestrator.ProviderHealth `json:"providers,omitempty"`
 }
 
 func status(args []string) error {
@@ -348,13 +351,17 @@ func status(args []string) error {
 	}
 	now := time.Now()
 	cost := orchestrator.Costs(all, orchestrator.StartOfDay(now), now)
+	provs, _ := fetchProviders(ctx)
 	if asJSON {
 		if all == nil {
 			all = []orchestrator.Machine{}
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(statusJSON{Machines: all, Cost: cost})
+		return enc.Encode(statusJSON{Machines: all, Cost: cost, Providers: provs})
+	}
+	for _, w := range providerWarnings(provs, now) {
+		fmt.Fprintln(os.Stderr, "offshore: "+w)
 	}
 	var ms []orchestrator.Machine
 	for _, m := range all {

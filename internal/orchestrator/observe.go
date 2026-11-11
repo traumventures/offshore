@@ -27,6 +27,8 @@ type observer struct {
 
 	mu    sync.Mutex
 	tasks map[string]taskInfo // lease id -> placement
+	// series are the recent samples of running sessions (lease id).
+	series map[string]*sessionSeries
 }
 
 // taskInfo is a placed task, kept until it finishes (or for a day).
@@ -35,7 +37,7 @@ type taskInfo struct {
 }
 
 func newObserver(stateDir string, retention time.Duration) *observer {
-	o := &observer{log: events.Open(stateDir, retention), tasks: map[string]taskInfo{}, refetch: events.NewRefetch()}
+	o := &observer{log: events.Open(stateDir, retention), tasks: map[string]taskInfo{}, series: map[string]*sessionSeries{}, refetch: events.NewRefetch()}
 	// Calibrate from the last day of events, then from every new one.
 	now := time.Now()
 	if evs, err := events.Read(stateDir, now.Add(-refetchHistory), now); err == nil {

@@ -25,6 +25,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/traumventures/offshore/internal/auth"
 	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/events"
 	"github.com/traumventures/offshore/internal/manifest"
 	"github.com/traumventures/offshore/internal/proto"
 	"github.com/traumventures/offshore/internal/sandbox"
@@ -47,6 +48,43 @@ type session struct {
 	// not); clientSignal the last signal the client forwarded.
 	killedBy     atomic.Value
 	clientSignal atomic.Int32
+
+	smu     sync.Mutex
+	samples []events.Sample // the last maxSessionSamples cgroup samples
+}
+
+// addSample keeps s among the session's last samples.
+func (se *session) addSample(s events.Sample) {
+	se.smu.Lock()
+	se.samples = append(se.samples, s)
+	if n := len(se.samples); n > maxSessionSamples {
+		se.samples = append(se.samples[:0:0], se.samples[n-maxSessionSamples:]...)
+	}
+	se.smu.Unlock()
+}
+
+// recentSamples returns a copy of the session's last samples.
+func (se *session) recentSamples() []events.Sample {
+	se.smu.Lock()
+	defer se.smu.Unlock()
+	return append([]events.Sample(nil), se.samples...)
+}
+
+// sample measures the session's cgroup every sessionSampleInterval until
+// done is closed.
+func (se *session) sample(done <-chan struct{}) {
+	sm := &sampler{dir: se.cgroup}
+	sm.sample(time.Now()) // CPU base
+	t := time.NewTicker(sessionSampleInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case now := <-t.C:
+			se.addSample(sm.sample(now))
+		}
+	}
 }
 
 // killFor kills the session and records why (unless already recorded).
@@ -255,6 +293,9 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	se.cgroup = cgDir
 	defer s.cg.remove(cgDir)
 	oomBefore := machineOOMKills()
+	if cgDir != "" {
+		go se.sample(se.done)
+	}
 
 	cmd, err := sandbox.Command(s.self, sandbox.Spec{Argv: req.Argv, Env: env, Cwd: req.Cwd, Binds: binds, Cgroup: cgDir})
 	if err != nil {

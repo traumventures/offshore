@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestParseMemoryEvents(t *testing.T) {
@@ -58,5 +59,31 @@ func TestMachineOOMKills(t *testing.T) {
 	vmstatPath = p + ".missing"
 	if n := machineOOMKills(); n != -1 {
 		t.Fatal(n)
+	}
+}
+
+func TestSamplerReadsCgroup(t *testing.T) {
+	dir := t.TempDir()
+	w := func(f, s string) { os.WriteFile(filepath.Join(dir, f), []byte(s), 0o644) }
+	w("memory.current", "1048576\n")
+	w("cpu.stat", "usage_usec 1000000\nuser_usec 1\n")
+	w("io.stat", "8:0 rbytes=100 wbytes=200 rios=1\n8:16 rbytes=1 wbytes=2\n")
+	w("cpu.pressure", "some avg10=12.50 avg60=0 avg300=0 total=1\nfull avg10=0 avg60=0 avg300=0 total=0\n")
+	w("memory.pressure", "some avg10=0.00 avg60=0 avg300=0 total=0\n")
+	w("memory.events", "high 3\nmax 0\noom 0\noom_kill 0\n")
+	sm := &sampler{dir: dir}
+	t0 := time.Unix(1_800_000_000, 0)
+	sm.sample(t0)
+	w("cpu.stat", "usage_usec 11000000\n")
+	s := sm.sample(t0.Add(5 * time.Second))
+	if s.CPU != 2 || s.Memory != 1<<20 || s.IORead != 101 || s.IOWrite != 202 || s.PSICPU != 0.125 || s.MemoryHigh != 3 {
+		t.Fatalf("%+v", s)
+	}
+	se := &session{}
+	for i := 0; i < maxSessionSamples+3; i++ {
+		se.addSample(s)
+	}
+	if len(se.recentSamples()) != maxSessionSamples {
+		t.Fatal(len(se.recentSamples()))
 	}
 }
