@@ -242,19 +242,32 @@ every resize; tiny terminals keep one row each, tables scroll):
   file system (`Status.VM`), CACHE (resident/capacity), DIRTY, WS (working
   set) and FAULTS (per second, `THRASH`); optional columns are dropped
   first on narrow terminals. The panel title shows `$X/h now · $Y today`.
-  Default order: busy, idle (shortest idle first), starting, draining,
-  stopped, failed, then age;
-* Storage: per build slot (repository on a machine) the slot size, the
-  newest store head of the repository with its commit age, how far the
-  machine's last commit lags behind it, and the store; the title sums the
-  store bytes per repository and the page-in/writeback rate of the window;
+  Default order: busy, idle (shortest idle first), booting, draining,
+  stopped, failed, then age. A machine that is up at the provider but whose
+  worker does not answer yet or is still setting up shows `booting` with
+  the time since its start and no capacity bars; a worker that stopped
+  admitting sessions shows `draining (disk full)`;
+* Storage: the disk of each running machine broken down by the worker
+  (`Status.Disk.Items`): a header row (used/total, budget), then build
+  slots (worktree and branch of their last session, `*` while leased) next
+  to their repository's local page tier, materialized files, source
+  contents, machine caches and global caches by name, and the rest of the
+  file system (images, system); columns KIND, NAME, SIZE, RESIDENT,
+  STORED (the repository head in the store), DIRTY, LAST USED, COMMITTED
+  and LAG (how far the store head is behind the slot's last commit). The
+  title sums the store bytes per repository and the page-in/writeback
+  rates. Enter opens a storage detail: all fields, the committed head by
+  access class (immutable, write-once, churn, ephemeral) and its largest
+  directories (measured every 5 minutes), the working set and the
+  repository's commits, restores, writebacks, page-ins, prunes and
+  reclaims seen by top;
 * Sessions: running sessions, then queued requests, then recently
   finished sessions (exit code, duration, average cores, peak memory) in
   one table: MACHINE, SESSION, STATE, USER@HOST, WORKTREE, BRANCH, ELAPSED,
   CPU and MEM (bar plus used/reserved), COMMAND.
 
-Keys: ↑/↓ PgUp/PgDn select, Tab switches between the session and machine
-tables, Enter opens a detail view (Esc/q back, ↑/↓ the next row), `r`
+Keys: ↑/↓ PgUp/PgDn select, Tab cycles through the session, machine and
+storage tables, Enter opens a detail view (Esc/q back, ↑/↓ the next row), `r`
 reverses, `+`/`-` zoom the graph window (1m..3h), `q` quits. Sessions sort
 by `e c m w n u` (elapsed, CPU, memory, worktree, machine, user@host),
 machines by `s c m d p a n` (state, CPU, memory, disk, price, age, name);
