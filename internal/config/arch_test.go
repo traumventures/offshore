@@ -90,7 +90,7 @@ func TestOCIShapes(t *testing.T) {
 	u, err := loadUserFrom(t, `
 [providers.oci]
 type = "oci"
-compartment = "cloudsourced"
+compartment = "offshore"
 
 [[providers.oci.size]]
 name = "a1-4"

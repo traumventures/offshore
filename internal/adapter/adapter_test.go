@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/platform"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/platform"
 )
 
 var linux = &platform.Platform{OS: "linux", Arch: "amd64", Libc: platform.Glibc}
@@ -96,8 +96,8 @@ func TestClassifyCargo(t *testing.T) {
 	if p := classify("cargo", "nextest run", config.Tool{Split: &none}, nil); p.Split() {
 		t.Error("split = [] still splits")
 	}
-	if p := classify("cargo", "test --lib", config.Tool{}, map[string]string{"CLOUDSOURCED_SPLIT": "0"}); p.Split() {
-		t.Error("CLOUDSOURCED_SPLIT=0 still splits")
+	if p := classify("cargo", "test --lib", config.Tool{}, map[string]string{"OFFSHORE_SPLIT": "0"}); p.Split() {
+		t.Error("OFFSHORE_SPLIT=0 still splits")
 	}
 	// Another OS: the tests run remotely with a reason.
 	mac := &platform.Platform{OS: "darwin", Arch: "arm64"}

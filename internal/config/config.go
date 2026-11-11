@@ -1,5 +1,5 @@
-// Package config parses the repository configuration (.cloudsourced.toml) and
-// the user configuration (~/.config/cloudsourced/config.toml).
+// Package config parses the repository configuration (.offshore.toml) and
+// the user configuration (~/.config/offshore/config.toml).
 package config
 
 import (
@@ -16,10 +16,10 @@ import (
 )
 
 // RepoFileName is the name of the repository configuration file.
-const RepoFileName = ".cloudsourced.toml"
+const RepoFileName = ".offshore.toml"
 
 // LocalFileName is an optional, not checked in, per-machine override.
-const LocalFileName = ".cloudsourced.local.toml"
+const LocalFileName = ".offshore.local.toml"
 
 // SchemaVersion is the supported configuration schema version.
 const SchemaVersion = 1
@@ -80,7 +80,7 @@ const (
 // LinkerDriver is the path of the C compiler driver wrapper that the
 // environment image installs for a linker (cc -fuse-ld=<linker>). Sessions
 // use it as cargo's target linker.
-func LinkerDriver(linker string) string { return "/usr/local/bin/cloudsourced-cc-" + linker }
+func LinkerDriver(linker string) string { return "/usr/local/bin/offshore-cc-" + linker }
 
 // Packages lists system packages installed into the environment image.
 type Packages struct {
@@ -214,8 +214,8 @@ const (
 	OutputsFuse  = "fuse"
 )
 
-// Prewarm configures `cloudsourced prewarm` (also run by the git
-// post-checkout hook of `cloudsourced hooks install`).
+// Prewarm configures `offshore prewarm` (also run by the git
+// post-checkout hook of `offshore hooks install`).
 type Prewarm struct {
 	// Run is an optional warm-up command run remotely after the machine
 	// is leased and the sources are synced, e.g. ["cargo", "check",

@@ -10,12 +10,12 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/traumventures/cloudsourced/internal/cas"
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/daemon"
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/outputfs"
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/cas"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/daemon"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/outputfs"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 // safeJoin joins root and a relative slash path, refusing escapes.
@@ -107,7 +107,7 @@ func install(src, dst string, mode os.FileMode, mtime time.Time) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	tmp := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".cloudsourced-tmp")
+	tmp := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".offshore-tmp")
 	in, err := os.Open(src)
 	if err != nil {
 		return err

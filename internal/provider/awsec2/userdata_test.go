@@ -8,23 +8,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/supervisor"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/supervisor"
 )
 
 func TestUserDataHasNoSecrets(t *testing.T) {
 	spec := provider.MachineSpec{
 		ID: "abc", Image: "env:1", ExpiresAt: time.Unix(2000, 0), IdleStop: 2 * time.Minute,
-		Env:       map[string]string{"CLOUDSOURCED_MACHINE_ID": "abc"},
-		SecretEnv: map[string]string{"CLOUDSOURCED_TOKEN": "s3cr3t-token", "CLOUDSOURCED_KEY": "-----BEGIN PRIVATE KEY-----"},
+		Env:       map[string]string{"OFFSHORE_MACHINE_ID": "abc"},
+		SecretEnv: map[string]string{"OFFSHORE_TOKEN": "s3cr3t-token", "OFFSHORE_KEY": "-----BEGIN PRIVATE KEY-----"},
 		Services:  []provider.Service{{Name: "db", Image: "postgres"}},
 	}
-	in := &infra{bucket: "bkt", repo: "123.dkr.ecr.eu-central-1.amazonaws.com/cloudsourced"}
-	ud, err := userData(spec, "eu-central-1", "cloudsourced", in, "bin/cs", in.repo+":1")
+	in := &infra{bucket: "bkt", repo: "123.dkr.ecr.eu-central-1.amazonaws.com/offshore"}
+	ud, err := userData(spec, "eu-central-1", "offshore", in, "bin/cs", in.repo+":1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`echo (\S+) \| base64 -d > /etc/cloudsourced/machine.json`).FindStringSubmatch(ud)
+	m := regexp.MustCompile(`echo (\S+) \| base64 -d > /etc/offshore/machine.json`).FindStringSubmatch(ud)
 	if m == nil {
 		t.Fatalf("no spec in user data:\n%s", ud)
 	}
@@ -40,11 +40,11 @@ func TestUserDataHasNoSecrets(t *testing.T) {
 	if err := json.Unmarshal(raw, &hs); err != nil {
 		t.Fatal(err)
 	}
-	if hs.Params[paramSecret] != "/cloudsourced/cloudsourced/machines/abc" || hs.Layout.Image != in.repo+":1" ||
+	if hs.Params[paramSecret] != "/offshore/offshore/machines/abc" || hs.Layout.Image != in.repo+":1" ||
 		hs.IdleStop != 120 || hs.ExpiresAt != 2000 || len(hs.Layout.SecretKeys) != 2 || hs.Layout.StatusDir == "" {
 		t.Fatalf("spec %+v", hs)
 	}
-	if !strings.Contains(ud, "systemctl enable --now cloudsourced-supervisor.service") {
+	if !strings.Contains(ud, "systemctl enable --now offshore-supervisor.service") {
 		t.Fatal("agent unit not started")
 	}
 }

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/transport"
 )
 
 func testMaster(t *testing.T) Master {

@@ -18,12 +18,12 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/zeebo/blake3"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
-	"github.com/traumventures/cloudsourced/internal/platform"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/sandbox"
-	"github.com/traumventures/cloudsourced/internal/snapshot"
-	"github.com/traumventures/cloudsourced/internal/store"
+	"github.com/traumventures/offshore/internal/blobcache"
+	"github.com/traumventures/offshore/internal/platform"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/sandbox"
+	"github.com/traumventures/offshore/internal/snapshot"
+	"github.com/traumventures/offshore/internal/store"
 )
 
 // Machine caches with a digest (e.g. node_modules per lockfile).
@@ -55,7 +55,7 @@ func (s *Worker) digestStore() string { return filepath.Join(s.cfg.DepsDir, "dig
 // cacheDigest computes the digest of a cache in a repository checkout.
 func cacheDigest(repo string, c proto.Cache, plat string) (string, error) {
 	h := blake3.New()
-	fmt.Fprintf(h, "cloudsourced-digest-v1\x00%s\x00%s\x00%s\x00%s\x00", plat, c.Name, c.Install, strings.Join(c.Paths, "\x00"))
+	fmt.Fprintf(h, "offshore-digest-v1\x00%s\x00%s\x00%s\x00%s\x00", plat, c.Name, c.Install, strings.Join(c.Paths, "\x00"))
 	var files []string
 	for _, pat := range c.Digest {
 		m, err := doublestar.Glob(os.DirFS(repo), filepath.ToSlash(filepath.Clean(pat)), doublestar.WithFilesOnly())
@@ -177,13 +177,13 @@ func (s *Worker) ensureDigest(req proto.Exec, c proto.Cache, env []string, store
 			f := snapshot.NewFiller(m, filepath.Join(tmp, "content"), subStore{envStore, digestScope}, filepath.Join(tmp, "chunks"))
 			if err := f.Skeleton(); err == nil && f.FillAll(context.Background(), 16) == nil {
 				restored = true
-				fmt.Fprintf(out, "cloudsourced: cache %s: restored from the store\n", c.Name)
+				fmt.Fprintf(out, "offshore: cache %s: restored from the store\n", c.Name)
 			}
 			f.Close()
 		}
 	}
 	if !restored {
-		fmt.Fprintf(out, "cloudsourced: cache %s: installing (%s)\n", c.Name, c.Install)
+		fmt.Fprintf(out, "offshore: cache %s: installing (%s)\n", c.Name, c.Install)
 		if err := s.runInstall(req, c.Install, env, binds, out); err != nil {
 			return fmt.Errorf("install %q: %w", c.Install, err)
 		}
@@ -210,7 +210,7 @@ func (s *Worker) ensureDigest(req proto.Exec, c proto.Cache, env []string, store
 			}
 		}()
 	}
-	fmt.Fprintf(out, "cloudsourced: cache %s: installed in %s (%d MB)\n", c.Name, time.Since(begin).Round(100*time.Millisecond), meta.Bytes>>20)
+	fmt.Fprintf(out, "offshore: cache %s: installed in %s (%d MB)\n", c.Name, time.Since(begin).Round(100*time.Millisecond), meta.Bytes>>20)
 	return nil
 }
 

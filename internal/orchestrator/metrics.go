@@ -6,9 +6,9 @@ import (
 
 	"sort"
 
-	"github.com/traumventures/cloudsourced/internal/metrics"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/metrics"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // orchMetrics are the orchestrator's own metrics; pool state (machines,
@@ -27,11 +27,11 @@ func newOrchMetrics(o *Orchestrator) *orchMetrics {
 	r := metrics.NewRegistry()
 	m := &orchMetrics{
 		reg:        r,
-		acquire:    r.Histogram("cloudsourced_acquire_wait_seconds", "Time from a capacity request to its lease (or failure).", metrics.DurationBuckets, "result"),
-		placements: r.Counter("cloudsourced_placements_total", "Placement decisions by kind (assign, queue, reject, timeout).", "kind"),
-		actions:    r.Counter("cloudsourced_pool_actions_total", "Pool actions decided by policy and invariants (create, start, stop, destroy, drain, undrain).", "action"),
-		provErrs:   r.Counter("cloudsourced_provider_errors_total", "Failed provider API calls.", "provider", "op"),
-		reconcile:  r.Histogram("cloudsourced_reconcile_duration_seconds", "Duration of maintenance passes.", []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300}, "result"),
+		acquire:    r.Histogram("offshore_acquire_wait_seconds", "Time from a capacity request to its lease (or failure).", metrics.DurationBuckets, "result"),
+		placements: r.Counter("offshore_placements_total", "Placement decisions by kind (assign, queue, reject, timeout).", "kind"),
+		actions:    r.Counter("offshore_pool_actions_total", "Pool actions decided by policy and invariants (create, start, stop, destroy, drain, undrain).", "action"),
+		provErrs:   r.Counter("offshore_provider_errors_total", "Failed provider API calls.", "provider", "op"),
+		reconcile:  r.Histogram("offshore_reconcile_duration_seconds", "Duration of maintenance passes.", []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300}, "result"),
 	}
 	r.Collect(o.collect)
 	return m
@@ -124,10 +124,10 @@ func (o *Orchestrator) collect() []metrics.Family {
 	}
 	sort.Slice(cs, func(i, j int) bool { return cs[i].Labels[0].Value < cs[j].Labels[0].Value })
 	out := []metrics.Family{
-		metrics.GaugeFamily("cloudsourced_machines", "Machines by provider, size and state (creating, provisioning, running, draining, stopped, ...).", ms...),
-		metrics.GaugeFamily("cloudsourced_queue_length", "Sessions waiting for capacity.", metrics.Sample{Value: float64(len(o.queue))}),
-		metrics.GaugeFamily("cloudsourced_cost_per_hour", "Hourly price of machines that are up, by provider (pool size prices).", cs...),
-		metrics.GaugeFamily("cloudsourced_environments_recent", "Environments used in the last 24 hours (warm pool candidates).", metrics.Sample{Value: float64(len(o.recentEnvs))}),
+		metrics.GaugeFamily("offshore_machines", "Machines by provider, size and state (creating, provisioning, running, draining, stopped, ...).", ms...),
+		metrics.GaugeFamily("offshore_queue_length", "Sessions waiting for capacity.", metrics.Sample{Value: float64(len(o.queue))}),
+		metrics.GaugeFamily("offshore_cost_per_hour", "Hourly price of machines that are up, by provider (pool size prices).", cs...),
+		metrics.GaugeFamily("offshore_environments_recent", "Environments used in the last 24 hours (warm pool candidates).", metrics.Sample{Value: float64(len(o.recentEnvs))}),
 	}
 	return metrics.Merge(append([][]metrics.Family{out}, machineFams...)...)
 }

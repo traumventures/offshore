@@ -18,13 +18,13 @@ import (
 
 	gofs "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/proto"
 	"golang.org/x/sys/unix"
 )
 
 // FSType is the file system type of output mounts in /proc/self/mountinfo.
-const FSType = "fuse.cloudsourced-outputs"
+const FSType = "fuse.offshore-outputs"
 
 // Marker names in the upper directory. Names starting with WhiteoutPrefix
 // are never visible in the mount and cannot be created through it.
@@ -109,8 +109,8 @@ func Mount(tree *Tree, repo, build, upper string, log *slog.Logger) (*FS, error)
 		EntryTimeout: &entry, AttrTimeout: &attr, NegativeTimeout: &neg,
 		UID: f.uid, GID: f.gid,
 		MountOptions: fuse.MountOptions{
-			FsName:       "cloudsourced",
-			Name:         "cloudsourced-outputs",
+			FsName:       "offshore",
+			Name:         "offshore-outputs",
 			MaxReadAhead: 1 << 20,
 			// O_TRUNC arrives with open: truncating a remote file
 			// (cargo rewriting an output) needs no download.

@@ -20,7 +20,7 @@ events_retention_days = 7
 [pool]
 id = "f"
 `), 0o600)
-	t.Setenv("CLOUDSOURCED_POOL_CONFIG", path)
+	t.Setenv("OFFSHORE_POOL_CONFIG", path)
 	c, err := LoadClientFrom(path)
 	if err != nil {
 		t.Fatal(err)

@@ -14,14 +14,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/daemon"
-	"github.com/traumventures/cloudsourced/internal/envbuild"
-	"github.com/traumventures/cloudsourced/internal/orchestrator"
-	"github.com/traumventures/cloudsourced/internal/pool"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/daemon"
+	"github.com/traumventures/offshore/internal/envbuild"
+	"github.com/traumventures/offshore/internal/orchestrator"
+	"github.com/traumventures/offshore/internal/pool"
 )
 
-// Check states of `cloudsourced doctor`.
+// Check states of `offshore doctor`.
 const (
 	checkOK   = "ok"
 	checkWarn = "warn"
@@ -29,7 +29,7 @@ const (
 	checkSkip = "skip"
 )
 
-// check is one result of `cloudsourced doctor`.
+// check is one result of `offshore doctor`.
 type check struct {
 	Name   string `json:"name"`
 	Status string `json:"status"`
@@ -47,7 +47,7 @@ func doctorCmd(args []string, stdout io.Writer) error {
 	asJSON := false
 	for _, a := range args {
 		if a != "--json" {
-			return errors.New("usage: cloudsourced doctor [--json]")
+			return errors.New("usage: offshore doctor [--json]")
 		}
 		asJSON = true
 	}
@@ -125,7 +125,7 @@ func runDoctor() []check {
 	var repo *config.Repo
 	if ferr != nil {
 		checks = append(checks, check{Name: "repo config", Status: checkSkip, Detail: "no " + config.RepoFileName + " here or above",
-			Hint: "cloudsourced init prints one for this repository"})
+			Hint: "offshore init prints one for this repository"})
 	} else {
 		repo, err = config.LoadRepo(root)
 		if err != nil {
@@ -167,13 +167,13 @@ func sameFile(a, b string) bool {
 
 func checkBinary(self, path string) check {
 	c := check{Name: "binary"}
-	found := lookPathIn("cloudsourced", path)
+	found := lookPathIn("offshore", path)
 	switch {
 	case found == "":
-		c.Status, c.Detail = checkWarn, "cloudsourced is not in PATH (running "+self+")"
+		c.Status, c.Detail = checkWarn, "offshore is not in PATH (running "+self+")"
 		c.Hint = "put its directory into PATH so scripts and editors find it"
 	case !sameFile(found, self):
-		c.Status, c.Detail = checkWarn, "PATH resolves cloudsourced to "+found+", not to this binary "+self
+		c.Status, c.Detail = checkWarn, "PATH resolves offshore to "+found+", not to this binary "+self
 		c.Hint = "remove the stale copy or reorder PATH"
 	default:
 		c.Status, c.Detail = checkOK, found+" ("+version+")"
@@ -194,8 +194,8 @@ func checkShims(dir, path, self string) check {
 	}
 	sort.Strings(tools)
 	if len(tools) == 0 {
-		c.Status, c.Detail = checkWarn, "no shims in "+dir+": tools run locally unless called as `cloudsourced run`"
-		c.Hint = "cloudsourced shim install"
+		c.Status, c.Detail = checkWarn, "no shims in "+dir+": tools run locally unless called as `offshore run`"
+		c.Hint = "offshore shim install"
 		return c
 	}
 	var bad []string
@@ -284,7 +284,7 @@ func checkControlPlane(ctx context.Context, c *config.Client, now func() time.Ti
 		c := check{Name: "control plane", Status: checkFail, Detail: o.URL + " unreachable: " + err.Error()}
 		if strings.Contains(err.Error(), "fingerprint mismatch") {
 			c.Detail = o.URL + ": the certificate does not match control_plane.fingerprint"
-			c.Hint = "the control plane was recreated or this is not it: compare with `cloudsourced controlplane info` on the server"
+			c.Hint = "the control plane was recreated or this is not it: compare with `offshore controlplane info` on the server"
 		} else {
 			c.Hint = "is the control plane running and the URL reachable from here (VPN, firewall)?"
 		}
@@ -303,7 +303,7 @@ func checkControlPlane(ctx context.Context, c *config.Client, now func() time.Ti
 		k := check{Name: "api key", Status: checkFail, Detail: err.Error()}
 		if strings.Contains(err.Error(), "401") {
 			k.Detail = "the control plane rejects the API key (" + o.APIKey + ")"
-			k.Hint = "get the current key with `cloudsourced controlplane info --show-key` on the server"
+			k.Hint = "get the current key with `offshore controlplane info --show-key` on the server"
 		}
 		return append(out, k), nil
 	}
@@ -338,7 +338,7 @@ func checkClock(server, local time.Time) check {
 func checkDaemon(pingErr error) check {
 	if pingErr != nil {
 		return check{Name: "daemon", Status: checkWarn, Detail: "not running (socket " + daemon.SocketPath() + ")",
-			Hint: "it starts with the first remote run; `cloudsourced daemon start` starts it now, log: " + daemon.LogPath()}
+			Hint: "it starts with the first remote run; `offshore daemon start` starts it now, log: " + daemon.LogPath()}
 	}
 	return check{Name: "daemon", Status: checkOK, Detail: "running (log " + daemon.LogPath() + ")"}
 }
@@ -482,7 +482,7 @@ func checkEnvImage(ctx context.Context, repo *config.Repo, remote *pool.Remote, 
 	}
 	c.Status, c.Detail = checkOK, plan.Tag+": "+describeEnvState(st)
 	if b := st.Prebuild; b != nil && b.Error != "" && !b.Running {
-		c.Status, c.Hint = checkWarn, "last background build failed: "+b.Error+" (cloudsourced env build --wait shows the output)"
+		c.Status, c.Hint = checkWarn, "last background build failed: "+b.Error+" (offshore env build --wait shows the output)"
 	}
 	return c
 }
@@ -507,7 +507,7 @@ func checkFuse(dev string, lookPath func(string) (string, error), needed bool) c
 		return c
 	}
 	c.Detail = strings.Join(missing, "; ")
-	c.Hint = "install fuse3 (apt install fuse3) for `cloudsourced outputs mount`"
+	c.Hint = "install fuse3 (apt install fuse3) for `offshore outputs mount`"
 	if needed {
 		c.Status = checkFail
 		c.Hint += `; this repository uses [outputs] mode = "fuse"`

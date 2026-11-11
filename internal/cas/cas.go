@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/traumventures/cloudsourced/internal/manifest"
+	"github.com/traumventures/offshore/internal/manifest"
 )
 
 // Store keeps blobs below Dir.

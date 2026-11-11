@@ -11,7 +11,7 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/core"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // Machine architectures (the size naming, GOARCH).
@@ -75,7 +75,7 @@ func shapeConfig(shape string, cpu float64, memory int64) *core.LaunchInstanceSh
 // serverBinaries returns the server binary per architecture, as on
 // aws-ec2: binary_amd64 / binary_arm64 name them explicitly; binary is the
 // binary of the orchestrator's architecture (default: the orchestrator's
-// own executable on linux); otherwise cloudsourced-linux-<arch> next to it.
+// own executable on linux); otherwise offshore-linux-<arch> next to it.
 func serverBinaries(opts map[string]any, self, goos, goarch string) map[string]string {
 	out := map[string]string{}
 	base := provider.String(opts, "binary", "")
@@ -93,7 +93,7 @@ func serverBinaries(opts map[string]any, self, goos, goarch string) map[string]s
 		if v := provider.String(opts, "binary_"+a, ""); v != "" {
 			out[a] = v
 		} else if _, ok := out[a]; !ok {
-			out[a] = filepath.Join(dir, "cloudsourced-linux-"+a)
+			out[a] = filepath.Join(dir, "offshore-linux-"+a)
 		}
 	}
 	return out

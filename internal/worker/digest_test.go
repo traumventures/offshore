@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/sandbox"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/sandbox"
 )
 
 func TestDigestCacheInstallOnceAndLink(t *testing.T) {

@@ -3,7 +3,7 @@ package provider
 import (
 	"context"
 
-	"github.com/traumventures/cloudsourced/internal/store"
+	"github.com/traumventures/offshore/internal/store"
 )
 
 // A provider has four parts. Compute (machines) is the Provider interface

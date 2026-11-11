@@ -3,7 +3,7 @@ package orchestrator
 import (
 	"context"
 
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // SlotTarget addresses a worker for build slot operations.

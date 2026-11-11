@@ -41,12 +41,12 @@ check "no build-phase artifacts in the output" sh -c "! echo \"\$1\" | grep -q -
 out="$(E2E_TEST_FAIL=1 run cargo test 2>&1)"; code=$?
 check "failing local test gives cargo's exit code" eq "$code" 101
 check "cargo's rerun hint" contains "$out" "error: test failed, to rerun pass \`--bin hello\`"
-out="$(CLOUDSOURCED_SPLIT=0 run cargo test -- --nocapture 2>&1)"
-check "CLOUDSOURCED_SPLIT=0 runs the tests remotely" contains "$out" "test ran=remote"
+out="$(OFFSHORE_SPLIT=0 run cargo test -- --nocapture 2>&1)"
+check "OFFSHORE_SPLIT=0 runs the tests remotely" contains "$out" "test ran=remote"
 
 step "shims (transparent proxy through PATH)"
 cs shim install cargo >/dev/null
-out="$(cd "$PROJ" && PATH="$CLOUDSOURCED_SHIM_DIR:$PATH" cargo run -q 2>&1)"
+out="$(cd "$PROJ" && PATH="$OFFSHORE_SHIM_DIR:$PATH" cargo run -q 2>&1)"
 check "cargo via shim runs remotely" contains "$out" "ran=remote"
 
 step "editor integration (rust-analyzer flycheck through the proxy)"
@@ -62,7 +62,7 @@ check "fetch copies outputs from the latest build" test -f "$PROJ/target/debug/h
 step "output overlay (remote target/ mounted writable, content on demand)"
 out="$(cd "$PROJ" && cs outputs mount 2>&1)"
 check "outputs mounted at the local build directory" contains "$out" "mounted $PROJ/target"
-check "mount is the output overlay" contains "$(grep " $PROJ/target " /proc/self/mountinfo)" "fuse.cloudsourced-outputs"
+check "mount is the output overlay" contains "$(grep " $PROJ/target " /proc/self/mountinfo)" "fuse.offshore-outputs"
 remote_ls="$(run sh -c 'ls target/debug/deps | sort')"
 check "remote directory listing visible locally" eq "$(ls "$PROJ/target/debug/deps" | sort)" "$remote_ls"
 bin="$(cd "$PROJ" && ls target/debug/deps/hello-* | grep -v '\.d$' | head -1)"
@@ -129,7 +129,7 @@ step "compiler cache (sccache) and linker (mold)"
 check "sessions use sccache as rustc wrapper" eq "$(run sh -c 'echo $RUSTC_WRAPPER')" "sccache"
 check "binary linked with mold" contains "$(run sh -c 'readelf -p .comment target/debug/hello')" "mold"
 run cargo clean -q -p itoa >/dev/null 2>&1
-out="$(CLOUDSOURCED_VERBOSE=1 run cargo build 2>&1)"
+out="$(OFFSHORE_VERBOSE=1 run cargo build 2>&1)"
 check "cleaned dependency recompiled" contains "$out" "Compiling itoa"
 check "recompiled dependency served from the compiler cache" test "$(sccache_hits "$out")" -ge 1
 check "why shows the run's sccache counters" contains "$(cs why)" "sccache_hits="
@@ -138,6 +138,6 @@ check "compiler cache entries on the shared dependency volume" test "$(docker_ e
 
 step "operations: compiler cache and output metrics"
 # Machine metrics are those of the last probe: wait for one after the run.
-check "metrics: sccache hits republished from the machine" poll 30 metric_ge cloudsourced_worker_compiler_cache_total 'counter="sccache_hits"' 1
-check "metrics: output bytes transferred" poll 30 metric_ge cloudsourced_worker_transfer_bytes_total 'direction="output"' 1
+check "metrics: sccache hits republished from the machine" poll 30 metric_ge offshore_worker_compiler_cache_total 'counter="sccache_hits"' 1
+check "metrics: output bytes transferred" poll 30 metric_ge offshore_worker_transfer_bytes_total 'direction="output"' 1
 cs outputs unmount >/dev/null 2>&1 || true

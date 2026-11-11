@@ -8,7 +8,7 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/core"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // launchPlan lists the shapes to try for a machine, in order, as on
@@ -61,7 +61,7 @@ func launch(ctx context.Context, run launchFunc, base core.LaunchInstanceDetails
 		}
 		failed = append(failed, fmt.Sprintf("%s: %s", s, apiError(err)))
 	}
-	return core.Instance{}, "", failed, fmt.Errorf("oci: no capacity for size %s (%s)", spec.Size, strings.Join(failed, "; "))
+	return core.Instance{}, "", failed, fmt.Errorf("oci: %w for size %s (%s)", provider.ErrCapacity, spec.Size, strings.Join(failed, "; "))
 }
 
 func apiError(err error) string {

@@ -1,7 +1,7 @@
 package worker
 
 import (
-	"github.com/traumventures/cloudsourced/internal/clock"
+	"github.com/traumventures/offshore/internal/clock"
 	"os"
 	"path/filepath"
 	"testing"

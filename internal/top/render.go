@@ -14,8 +14,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
-	"github.com/traumventures/cloudsourced/internal/labels"
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/labels"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // SortKey selects the session table order.
@@ -204,7 +204,7 @@ func header(s Snapshot, v View, st Styles) string {
 	if !s.QueueKnown {
 		q = "?"
 	}
-	left := st.Title.Render("cloudsourced top") + "  " + s.Time.Local().Format("15:04:05")
+	left := st.Title.Render("offshore top") + "  " + s.Time.Local().Format("15:04:05")
 	right := fmt.Sprintf("machines %d (%d up)  sessions %d  queue %s  $%.2f/h now  $%.2f today  window %s",
 		up, run, sessions, q, s.Cost.PerHour, s.Cost.Total, short(v.Window))
 	gap := v.Width - lipgloss.Width(left) - lipgloss.Width(right)

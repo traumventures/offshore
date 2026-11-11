@@ -5,7 +5,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // The architecture of a request selects the size of new machines, and

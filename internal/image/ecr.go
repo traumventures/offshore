@@ -32,7 +32,7 @@ type ECR struct {
 func (*ECR) Local() bool { return false }
 
 // RemoteTag maps an image tag to its reference in repo on platform:
-// cloudsourced-env:abc on linux/amd64 becomes repo:abc-amd64. The platform
+// offshore-env:abc on linux/amd64 becomes repo:abc-amd64. The platform
 // is always part of the remote tag, independent of the builder's platform.
 func RemoteTag(repo, tag string, p Platform) string {
 	_, t, ok := strings.Cut(tag, ":")

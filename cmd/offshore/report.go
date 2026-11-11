@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/daemon"
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/report"
+	"github.com/traumventures/offshore/internal/daemon"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/report"
 )
 
 // flushTelemetry runs a tracing shutdown function with a deadline.

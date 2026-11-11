@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/sandbox"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/sandbox"
 )
 
 // Toolchain relocation (proto.Exec.Toolchain, [outputs] mode = "fuse").
@@ -124,7 +124,7 @@ func linkerShim(linker string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("linker %s: %w", linker, err)
 	}
-	dir := filepath.Join(os.TempDir(), "cloudsourced-linker-"+linker)
+	dir := filepath.Join(os.TempDir(), "offshore-linker-"+linker)
 	script := fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *\" -c \"*|*\" -E \"*|*\" -S \"*) exec %s \"$@\";; esac\nexec %s \"$@\" -fuse-ld=%s\n", real, real, linker)
 	cc := filepath.Join(dir, "cc")
 	if b, err := os.ReadFile(cc); err == nil && string(b) == script {

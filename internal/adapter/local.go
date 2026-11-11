@@ -56,7 +56,7 @@ func runChild(cmd *exec.Cmd) int {
 		}
 		return ee.ExitCode()
 	}
-	fmt.Fprintf(os.Stderr, "cloudsourced: %v\n", err)
+	fmt.Fprintf(os.Stderr, "offshore: %v\n", err)
 	return 126
 }
 

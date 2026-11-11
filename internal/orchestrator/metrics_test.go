@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/metrics"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/metrics"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 func TestMetricsAggregateMachines(t *testing.T) {
@@ -22,8 +22,8 @@ func TestMetricsAggregateMachines(t *testing.T) {
 	}
 	// The machine's server reports its own metrics in the status stream.
 	srv := metrics.NewRegistry()
-	srv.Gauge("cloudsourced_worker_sessions_running", "Sessions running now.").Set(1)
-	srv.Counter("cloudsourced_worker_session_exits_total", "Exits.", "code").Inc("0")
+	srv.Gauge("offshore_worker_sessions_running", "Sessions running now.").Set(1)
+	srv.Counter("offshore_worker_session_exits_total", "Exits.", "code").Inc("0")
 	f.mu.Lock()
 	f.status[l.MachineID].Metrics = srv.Gather()
 	f.mu.Unlock()
@@ -38,18 +38,18 @@ func TestMetricsAggregateMachines(t *testing.T) {
 	metrics.WriteText(&b, o.Metrics().Gather())
 	text := b.String()
 	for _, want := range []string{
-		`cloudsourced_machines{provider="fake",size="m4",state="running"} 1`,
-		`cloudsourced_queue_length 0`,
-		`cloudsourced_cost_per_hour{provider="fake"} 0.5`,
-		`cloudsourced_placements_total{kind="assign"} 1`,
-		`cloudsourced_placements_total{kind="queue"} 1`,
-		`cloudsourced_placements_total{kind="reject"} 1`,
-		`cloudsourced_pool_actions_total{action="create"} 1`,
-		`cloudsourced_acquire_wait_seconds_count{result="assigned"} 1`,
-		`cloudsourced_acquire_wait_seconds_count{result="rejected"} 1`,
-		`cloudsourced_worker_sessions_running{machine="` + l.MachineID + `",provider="fake",size="m4"} 1`,
-		`cloudsourced_worker_session_exits_total{machine="` + l.MachineID + `",provider="fake",size="m4",code="0"} 1`,
-		"# TYPE cloudsourced_worker_session_exits_total counter",
+		`offshore_machines{provider="fake",size="m4",state="running"} 1`,
+		`offshore_queue_length 0`,
+		`offshore_cost_per_hour{provider="fake"} 0.5`,
+		`offshore_placements_total{kind="assign"} 1`,
+		`offshore_placements_total{kind="queue"} 1`,
+		`offshore_placements_total{kind="reject"} 1`,
+		`offshore_pool_actions_total{action="create"} 1`,
+		`offshore_acquire_wait_seconds_count{result="assigned"} 1`,
+		`offshore_acquire_wait_seconds_count{result="rejected"} 1`,
+		`offshore_worker_sessions_running{machine="` + l.MachineID + `",provider="fake",size="m4"} 1`,
+		`offshore_worker_session_exits_total{machine="` + l.MachineID + `",provider="fake",size="m4",code="0"} 1`,
+		"# TYPE offshore_worker_session_exits_total counter",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in\n%s", want, text)
@@ -60,7 +60,7 @@ func TestMetricsAggregateMachines(t *testing.T) {
 	}
 	b.Reset()
 	metrics.WriteText(&b, o.Metrics().Gather())
-	if !strings.Contains(b.String(), `cloudsourced_reconcile_duration_seconds_count{result="ok"} 1`) {
+	if !strings.Contains(b.String(), `offshore_reconcile_duration_seconds_count{result="ok"} 1`) {
 		t.Errorf("reconcile not counted:\n%s", b.String())
 	}
 }
@@ -75,7 +75,7 @@ func TestMetricsProviderErrors(t *testing.T) {
 	}
 	var b bytes.Buffer
 	metrics.WriteText(&b, o.Metrics().Gather())
-	if !strings.Contains(b.String(), `cloudsourced_provider_errors_total{provider="fake",op="create"} 1`) {
+	if !strings.Contains(b.String(), `offshore_provider_errors_total{provider="fake",op="create"} 1`) {
 		t.Fatal(b.String())
 	}
 }

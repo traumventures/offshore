@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // Images are built for the architecture of the size a machine is created
@@ -30,6 +30,7 @@ type fixedEstimator struct{ r scheduler.Resources }
 
 func (f fixedEstimator) Estimate(string, scheduler.Resources) scheduler.Resources { return f.r }
 func (fixedEstimator) Observe(string, scheduler.Usage)                            {}
+func (fixedEstimator) Profile(string) scheduler.Profile                           { return scheduler.Profile{} }
 
 // A learned need above every size is capped at the largest admissible
 // size instead of making the key unschedulable.

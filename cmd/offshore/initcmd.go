@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/initcfg"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/initcfg"
 )
 
 // initCmd prints (or with --write writes) a repository configuration
@@ -25,7 +25,7 @@ func initCmd(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: cloudsourced init [--write [--force]] [DIR]")
+		return errors.New("usage: offshore init [--write [--force]] [DIR]")
 	}
 	root := fs.Arg(0)
 	if root == "" {
@@ -50,7 +50,7 @@ func initCmd(args []string, stdout io.Writer) error {
 	if _, err := config.LoadRepo(d.Root); err != nil {
 		return fmt.Errorf("wrote %s, but it does not validate: %w", path, err)
 	}
-	fmt.Fprintf(stdout, "wrote %s; review it, then run `cloudsourced doctor`\n", path)
+	fmt.Fprintf(stdout, "wrote %s; review it, then run `offshore doctor`\n", path)
 	return nil
 }
 

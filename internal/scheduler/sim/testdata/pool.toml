@@ -1,4 +1,4 @@
-# Pool configuration for the sample simulations (cloudsourced sim -config).
+# Pool configuration for the sample simulations (offshore sim -config).
 # Sizes and on-demand prices of AWS c7a instances (us-east-1).
 [pool]
 id = "sim"

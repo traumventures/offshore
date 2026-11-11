@@ -20,8 +20,8 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/tracing"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/tracing"
 )
 
 // Identity is a server certificate with its key in PEM form.

@@ -19,10 +19,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/image"
-	"github.com/traumventures/cloudsourced/internal/machine"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/store"
+	"github.com/traumventures/offshore/internal/image"
+	"github.com/traumventures/offshore/internal/machine"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/store"
 )
 
 var serverPort = machine.ServerPortSpec()
@@ -54,7 +54,7 @@ func init() {
 type Docker struct {
 	Command []string // docker CLI invocation
 	Host    string   // address of published ports
-	Binary  string   // static cloudsourced binary mounted into machines
+	Binary  string   // static offshore binary mounted into machines
 
 	builderOnce sync.Once
 	builder     *image.DockerBuilder

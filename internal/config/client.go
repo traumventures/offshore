@@ -12,7 +12,7 @@ import (
 
 // The configuration is split in three:
 //
-//   - the client configuration (~/.config/cloudsourced/config.toml): where
+//   - the client configuration (~/.config/offshore/config.toml): where
 //     the orchestrator runs ([control_plane]; absent = embedded), the user identity (user) and
 //     local behaviour. Read by the CLI and the local daemon.
 //   - the pool configuration ([pool], [providers.*]): machine sizes,
@@ -20,7 +20,7 @@ import (
 //     only: the control plane (its own file) or, in embedded mode, the
 //     daemon. By default it is the client file, so a single file serves a
 //     single-host setup.
-//   - the repository configuration (.cloudsourced.toml, see Repo): per
+//   - the repository configuration (.offshore.toml, see Repo): per
 //     repository settings that travel with each request.
 
 // rawFile is the TOML schema shared by client and pool files, so that one
@@ -66,7 +66,7 @@ type ControlPlane struct {
 	// "https://10.0.0.5:7443".
 	URL string `toml:"url"`
 	// Fingerprint pins a self-signed control plane certificate (hex SHA-256,
-	// printed by "cloudsourced controlplane"). Empty: verify against system CAs.
+	// printed by "offshore controlplane"). Empty: verify against system CAs.
 	Fingerprint string `toml:"fingerprint"`
 	// APIKey is a reference (env:VAR, file:PATH, cmd:COMMAND) to the API key.
 	APIKey string `toml:"api_key"`
@@ -79,14 +79,14 @@ type ControlPlane struct {
 
 // ClientConfigPath returns the path of the client configuration file.
 func ClientConfigPath() string {
-	if p := os.Getenv("CLOUDSOURCED_CONFIG"); p != "" {
+	if p := os.Getenv("OFFSHORE_CONFIG"); p != "" {
 		return p
 	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		dir = filepath.Join(os.Getenv("HOME"), ".config")
 	}
-	return filepath.Join(dir, "cloudsourced", "config.toml")
+	return filepath.Join(dir, "offshore", "config.toml")
 }
 
 // Embedded reports whether the orchestrator runs in the local daemon.
@@ -127,14 +127,14 @@ func LoadClientFrom(path string) (*Client, error) {
 		o.Mode = "embedded"
 	}
 	if o.Mode == "remote" && o.APIKey == "" {
-		o.APIKey = "env:CLOUDSOURCED_API_KEY"
+		o.APIKey = "env:OFFSHORE_API_KEY"
 	}
 	if len(c.PoolSections) > 0 {
 		switch fp := PoolConfigPath(); {
 		case o.Mode == "remote":
 			c.Warnings = append(c.Warnings, fmt.Sprintf("%s: %s have no effect in remote mode (the control plane's pool configuration applies)", path, strings.Join(c.PoolSections, ", ")))
 		case fp != path:
-			c.Warnings = append(c.Warnings, fmt.Sprintf("%s: %s have no effect, the pool configuration is %s (CLOUDSOURCED_POOL_CONFIG)", path, strings.Join(c.PoolSections, ", "), fp))
+			c.Warnings = append(c.Warnings, fmt.Sprintf("%s: %s have no effect, the pool configuration is %s (OFFSHORE_POOL_CONFIG)", path, strings.Join(c.PoolSections, ", "), fp))
 		}
 	}
 	if err := c.Validate(); err != nil {

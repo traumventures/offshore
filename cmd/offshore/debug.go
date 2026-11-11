@@ -10,25 +10,25 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/auth"
-	"github.com/traumventures/cloudsourced/internal/clock"
-	"github.com/traumventures/cloudsourced/internal/orchestrator"
+	"github.com/traumventures/offshore/internal/auth"
+	"github.com/traumventures/offshore/internal/clock"
+	"github.com/traumventures/offshore/internal/orchestrator"
 )
 
 // debugCmd holds operator tools around machine authentication:
 //
-//	cloudsourced debug token --state-dir DIR --scope probe|session|admin --machine ID [--lease ID] [--ttl 5m]
-//	cloudsourced debug probe ADDR FINGERPRINT TOKEN
-//	cloudsourced debug clock [advance DURATION]
+//	offshore debug token --state-dir DIR --scope probe|session|admin --machine ID [--lease ID] [--ttl 5m]
+//	offshore debug probe ADDR FINGERPRINT TOKEN
+//	offshore debug clock [advance DURATION]
 //
 // "token" signs with the pool master key of a state dir (or
-// $CLOUDSOURCED_MASTER_KEY); "probe" prints a machine's status. "clock"
-// shows or advances the test clock of $CLOUDSOURCED_TEST_CLOCK
+// $OFFSHORE_MASTER_KEY); "probe" prints a machine's status. "clock"
+// shows or advances the test clock of $OFFSHORE_TEST_CLOCK
 // (offset:FILE), which the orchestrator uses for idle stop and expiry:
 // tests move time instead of waiting for it.
 func debugCmd(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: cloudsourced debug token|probe|clock ...")
+		return errors.New("usage: offshore debug token|probe|clock ...")
 	}
 	switch args[0] {
 	case "clock":
@@ -51,7 +51,7 @@ func debugCmd(args []string) error {
 			}
 			off, err = clock.Advance(path, d)
 		default:
-			return errors.New("usage: cloudsourced debug clock [advance DURATION]")
+			return errors.New("usage: offshore debug clock [advance DURATION]")
 		}
 		if err != nil {
 			return err
@@ -69,7 +69,7 @@ func debugCmd(args []string) error {
 			return err
 		}
 		if *dir == "" && os.Getenv(auth.EnvMasterKey) == "" && os.Getenv(auth.EnvMasterKeyFile) == "" {
-			return errors.New("--state-dir or $CLOUDSOURCED_MASTER_KEY is required")
+			return errors.New("--state-dir or $OFFSHORE_MASTER_KEY is required")
 		}
 		if *dir != "" {
 			// Never create a key here: a token from a new key is useless.
@@ -85,7 +85,7 @@ func debugCmd(args []string) error {
 		return nil
 	case "probe":
 		if len(args) != 4 {
-			return errors.New("usage: cloudsourced debug probe ADDR FINGERPRINT TOKEN")
+			return errors.New("usage: offshore debug probe ADDR FINGERPRINT TOKEN")
 		}
 		// A diagnostic command: wait longer than the orchestrator would.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

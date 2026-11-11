@@ -20,8 +20,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
-	"github.com/traumventures/cloudsourced/internal/metrics"
-	"github.com/traumventures/cloudsourced/internal/orchestrator"
+	"github.com/traumventures/offshore/internal/metrics"
+	"github.com/traumventures/offshore/internal/orchestrator"
 )
 
 // maxEnvUpload bounds an uploaded environment build context.
@@ -87,7 +87,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if code == 0 {
 		code = http.StatusOK
 	}
-	span.SetAttributes(attribute.Int("http.response.status_code", code), attribute.Bool("cloudsourced.failed", failed))
+	span.SetAttributes(attribute.Int("http.response.status_code", code), attribute.Bool("offshore.failed", failed))
 	if failed || code >= 400 {
 		span.SetStatus(codes.Error, strconv.Itoa(code))
 	}
@@ -97,8 +97,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = "error"
 	}
 	reg := s.pool.Registry()
-	reg.Counter("cloudsourced_http_requests_total", "Control plane API requests by path and result (HTTP status, or error for failed calls).", "path", "result").Inc(path, result)
-	reg.Histogram("cloudsourced_http_request_duration_seconds", "Control plane API request duration (acquire includes queueing).", metrics.DurationBuckets, "path").Observe(time.Since(start).Seconds(), path)
+	reg.Counter("offshore_http_requests_total", "Control plane API requests by path and result (HTTP status, or error for failed calls).", "path", "result").Inc(path, result)
+	reg.Histogram("offshore_http_request_duration_seconds", "Control plane API request duration (acquire includes queueing).", metrics.DurationBuckets, "path").Observe(time.Since(start).Seconds(), path)
 	if path != pathMetrics {
 		log.Info("request", "method", r.Method, "path", r.URL.Path, "code", code, "failed", failed, "duration", time.Since(start).Round(time.Millisecond))
 	}
@@ -242,7 +242,7 @@ func (s *Server) env(ctx context.Context, r *http.Request, progress io.Writer) (
 		return nil, fmt.Errorf("invalid environment %q %q", hash, tag)
 	}
 	if r.URL.Query().Get("state") == "1" {
-		// Read-only (cloudsourced doctor): no registration, no build.
+		// Read-only (offshore doctor): no registration, no build.
 		return s.pool.EnvState(ctx, hash, tag)
 	}
 	file := filepath.Join(s.envDir(), hash+".tar.gz")

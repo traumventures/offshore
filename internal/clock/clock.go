@@ -3,12 +3,12 @@
 // sleeping.
 //
 // Real is the default everywhere. FromEnv returns a test clock only when
-// CLOUDSOURCED_TEST_CLOCK is set:
+// OFFSHORE_TEST_CLOCK is set:
 //
-//	CLOUDSOURCED_TEST_CLOCK=offset:/path/to/file
+//	OFFSHORE_TEST_CLOCK=offset:/path/to/file
 //
 // is real time plus the duration stored in the file (e.g. "25h"; missing
-// or empty means 0). `cloudsourced debug clock advance` adds to it, so the
+// or empty means 0). `offshore debug clock advance` adds to it, so the
 // processes sharing the file (daemon, control plane) see the same jump.
 // Timers and tickers always run at real speed.
 package clock
@@ -54,9 +54,9 @@ func (t realTicker) Stop()               { t.t.Stop() }
 func Since(c Clock, t time.Time) time.Duration { return c.Now().Sub(t) }
 
 // EnvVar selects a test clock (see the package documentation).
-const EnvVar = "CLOUDSOURCED_TEST_CLOCK"
+const EnvVar = "OFFSHORE_TEST_CLOCK"
 
-// FromEnv returns the clock selected by CLOUDSOURCED_TEST_CLOCK, Real when
+// FromEnv returns the clock selected by OFFSHORE_TEST_CLOCK, Real when
 // it is unset. An invalid value is an error: a test that asks for a test
 // clock must not silently run on real time.
 func FromEnv() (Clock, error) {
@@ -79,7 +79,7 @@ func Must() Clock {
 	return c
 }
 
-// OffsetFile returns the offset file of CLOUDSOURCED_TEST_CLOCK ("" if no
+// OffsetFile returns the offset file of OFFSHORE_TEST_CLOCK ("" if no
 // offset clock is configured).
 func OffsetFile() string {
 	path, _ := strings.CutPrefix(os.Getenv(EnvVar), "offset:")

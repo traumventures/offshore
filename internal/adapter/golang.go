@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 // Go runs go builds and tests remotely. `go test` is split: one
@@ -30,7 +30,7 @@ func (Go) Detect(root string) bool {
 }
 
 // goOut is the slot-scope directory that carries go test binaries back.
-const goOut = ".cloudsourced-build"
+const goOut = ".offshore-build"
 
 // DefaultCaches: the go build cache as global result cache, the module
 // cache per machine, and a slot directory for test binaries.
@@ -109,7 +109,7 @@ func runGoTest(ctx context.Context, rt Runtime, g goTestCmd) (int, error) {
 	}
 	h := fnv.New64a()
 	h.Write([]byte(rt.Cwd()))
-	rel := filepath.Join(filepath.Clean(dirs[0]), "cloudsourced", fmt.Sprintf("gotest-%016x", h.Sum64()))
+	rel := filepath.Join(filepath.Clean(dirs[0]), "offshore", fmt.Sprintf("gotest-%016x", h.Sum64()))
 	out := filepath.Join(rt.Root(), rel)
 	code, err := rt.Remote(ctx, []string{"sh", "-c", g.buildScript(out)}, RemoteOptions{
 		NoTTY: true,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test of cloudsourced with the local-docker backend.
+# End-to-end test of offshore with the local-docker backend.
 #
 # Everything is real: environment image build, machine provisioning as
 # Docker containers, FUSE projection, sessions, write back, outputs,
@@ -8,9 +8,9 @@
 # local ports, so it does not touch an existing setup or another part.
 #
 # Requirements: docker (set E2E_DOCKER="sudo -n docker" if your user is not
-# in the docker group), /dev/fuse, a static build at bin/cloudsourced.
+# in the docker group), /dev/fuse, a static build at bin/offshore.
 #
-#   E2E_REMOTE=1    run against a shared control plane ("cloudsourced
+#   E2E_REMOTE=1    run against a shared control plane ("offshore
 #                   controlplane", self-signed TLS, API key) instead of the
 #                   orchestrator embedded in the daemon. Only the core part
 #                   runs (it covers what differs: control plane API,
@@ -37,13 +37,13 @@ else
 fi
 for p in $PARTS; do [ -f "$HERE/parts/$p.sh" ] || { echo "unknown part $p (have: $ALL)"; exit 2; }; done
 
-images() { $DOCKER images --format '{{.Repository}}:{{.Tag}}' 'cloudsourced-env' 2>/dev/null | sort; }
+images() { $DOCKER images --format '{{.Repository}}:{{.Tag}}' 'offshore-env' 2>/dev/null | sort; }
 before="$(images)"
 # Resolved once for all parts (a container start each otherwise).
 E2E_RUSTV="$($DOCKER run --rm rust:1-slim-bookworm rustc --version | awk '{print $2}')" || exit 2
 export E2E_RUSTV
 
-RES="$(mktemp -d /tmp/cloudsourced-e2e-run.XXXXXX)"
+RES="$(mktemp -d /tmp/offshore-e2e-run.XXXXXX)"
 start=$SECONDS
 mode=embedded; [ -n "${E2E_REMOTE:-}" ] && mode=remote
 echo "e2e ($mode): parts: $PARTS$([ -n "${E2E_PARALLEL:-}" ] && echo ' (parallel)')"

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/scheduler/sim"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/scheduler"
+	"github.com/traumventures/offshore/internal/scheduler/sim"
 )
 
 const gi = int64(1) << 30

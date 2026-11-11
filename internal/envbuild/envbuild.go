@@ -17,11 +17,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/image"
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/platform"
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/image"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/platform"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // generatorVersion changes whenever the generated Dockerfile changes shape.
@@ -63,7 +63,7 @@ func Resolve(r *config.Repo) (*Plan, error) {
 		}
 		add("dockerfile-context=" + h)
 		p.baseDir, p.baseFile = dir, file
-		p.baseTag = "cloudsourced-base:" + h[:16]
+		p.baseTag = "offshore-base:" + h[:16]
 		from = p.baseTag
 	}
 	if p.baseTag != "" {
@@ -97,8 +97,8 @@ func Resolve(r *config.Repo) (*Plan, error) {
 		add("rust-toolchain=" + h)
 		name := filepath.Base(src)
 		p.files["toolchain/"+name] = src
-		fmt.Fprintf(&df, "COPY toolchain/%s /opt/cloudsourced/toolchain/%s\n", name, name)
-		df.WriteString("RUN cd /opt/cloudsourced/toolchain && (rustup toolchain install || rustup show) && rustup show active-toolchain\n")
+		fmt.Fprintf(&df, "COPY toolchain/%s /opt/offshore/toolchain/%s\n", name, name)
+		df.WriteString("RUN cd /opt/offshore/toolchain && (rustup toolchain install || rustup show) && rustup show active-toolchain\n")
 	}
 	for i, step := range env.Setup {
 		dir := fmt.Sprintf("setup/%d", i)
@@ -121,9 +121,9 @@ func Resolve(r *config.Repo) (*Plan, error) {
 			p.files[dir+"/"+filepath.ToSlash(filepath.Clean(in))] = src
 		}
 		if len(step.Inputs) > 0 {
-			fmt.Fprintf(&df, "COPY %s/ /opt/cloudsourced/%s/\n", dir, dir)
+			fmt.Fprintf(&df, "COPY %s/ /opt/offshore/%s/\n", dir, dir)
 		}
-		fmt.Fprintf(&df, "RUN mkdir -p /opt/cloudsourced/%s && cd /opt/cloudsourced/%s && %s\n", dir, dir, step.Run)
+		fmt.Fprintf(&df, "RUN mkdir -p /opt/offshore/%s && cd /opt/offshore/%s && %s\n", dir, dir, step.Run)
 	}
 	keys := make([]string, 0, len(env.Env))
 	for k := range env.Env {
@@ -150,9 +150,9 @@ func Resolve(r *config.Repo) (*Plan, error) {
 		add("services=" + string(sj))
 	}
 	p.Hash = manifest.HashBytes([]byte(strings.Join(hashParts, "\n")))
-	fmt.Fprintf(&df, "LABEL cloudsourced.env-hash=%s\n", p.Hash)
+	fmt.Fprintf(&df, "LABEL offshore.env-hash=%s\n", p.Hash)
 	p.Dockerfile = df.String()
-	p.Tag = "cloudsourced-env:" + p.Hash[:16]
+	p.Tag = "offshore-env:" + p.Hash[:16]
 	return p, nil
 }
 
@@ -204,7 +204,7 @@ func (p *Plan) addTools(r *config.Repo, add func(string), out *strings.Builder) 
 // Context writes the build context to a temporary directory and returns the
 // image spec. The caller removes the directory.
 func (p *Plan) Context() (provider.ImageSpec, string, error) {
-	dir, err := os.MkdirTemp("", "cloudsourced-env-")
+	dir, err := os.MkdirTemp("", "offshore-env-")
 	if err != nil {
 		return provider.ImageSpec{}, "", err
 	}

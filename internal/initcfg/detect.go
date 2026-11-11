@@ -1,4 +1,4 @@
-// Package initcfg generates a repository configuration (.cloudsourced.toml)
+// Package initcfg generates a repository configuration (.offshore.toml)
 // from what a repository already declares: its Cargo workspace and Rust
 // toolchain file, the system packages, services and setup steps of its
 // GitHub Actions workflows (including local composite actions) or
@@ -19,7 +19,7 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
-	"github.com/traumventures/cloudsourced/internal/adapter"
+	"github.com/traumventures/offshore/internal/adapter"
 	"go.yaml.in/yaml/v3"
 )
 

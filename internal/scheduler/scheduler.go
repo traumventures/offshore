@@ -1,4 +1,4 @@
-// Package scheduler contains the scheduling decisions of cloudsourced as
+// Package scheduler contains the scheduling decisions of offshore as
 // pure functions over a pool snapshot: where a task runs (Place), how the
 // pool changes (Plan) and how much a task needs (Estimator).
 //
@@ -72,6 +72,9 @@ type Task struct {
 	Request Resources // estimated need, used for packing
 	Limit   Resources // hard ceiling for the session; 0 = machine capacity
 	Since   time.Time // when the task started waiting
+	// Profile is what the estimator knows about runs of Key (durations,
+	// slot growth); zero = unknown.
+	Profile Profile
 }
 
 // State of a machine as seen by the scheduler.
@@ -112,6 +115,60 @@ type Machine struct {
 	IdleSince time.Time // zero while sessions run
 	CreatedAt time.Time
 	ExpiresAt time.Time
+	// ReadyAt is when a starting machine is expected to accept sessions
+	// (zero: unknown, the provider's boot or start latency applies).
+	ReadyAt time.Time
+	// Releases are the expected ends of the running sessions.
+	Releases []Release
+	// StartBlocked: a start failed recently; do not start the machine
+	// before this time (backoff).
+	StartBlocked time.Time
+	// CanResize: the machine's disk can be grown (provider support).
+	CanResize bool
+}
+
+// Release is the expected end of a session and the reservation it frees.
+type Release struct {
+	At    time.Time
+	Res   Resources
+	Start time.Time // session start (zero: unknown)
+}
+
+// Expected returns when r is expected at now: sessions running longer than
+// expected are assumed to run as long again as they already did (at least
+// 30s more).
+func (r Release) Expected(now time.Time) time.Time {
+	if !r.At.Before(now) {
+		return r.At
+	}
+	ran := now.Sub(r.At)
+	if !r.Start.IsZero() {
+		ran = now.Sub(r.Start)
+	}
+	return now.Add(max(ran, 30*time.Second))
+}
+
+// ProviderState is what the scheduler knows about a provider instance.
+type ProviderState struct {
+	// Boot and Start are the latencies until a created or started machine
+	// accepts sessions (learned; 0 = defaults).
+	Boot  time.Duration
+	Start time.Duration
+	// Down: the provider reported no capacity or quota; no machines are
+	// created there before this time.
+	Down time.Time
+	// Store is the name of the provider's object store (snapshots, global
+	// caches); empty = the provider name.
+	Store string
+}
+
+// Demand is the recent demand of an environment (see Forecast).
+type Demand struct {
+	// Peak is the largest reservation (running plus queued) of the
+	// environment's sessions in the forecast window.
+	Peak Resources
+	// LastScaleUp is the last create, start or undrain for it.
+	LastScaleUp time.Time
 }
 
 // Warm reports whether the machine holds a build cache for repo.
@@ -134,10 +191,29 @@ type Pool struct {
 	// EnvArch is the machine architecture of each known environment
 	// ("amd64", "arm64"); environments without an entry are amd64.
 	EnvArch map[string]string
+	// Providers holds latencies, health and stores per provider instance.
+	Providers map[string]ProviderState
+	// Demand is the recent demand per environment (nil: unknown, then
+	// consolidation only looks at the present).
+	Demand map[string]Demand
+	// Snapshots are the saved build slots per repository.
+	Snapshots map[string][]Snapshot
 }
 
-// SizesFor returns the sizes whose architecture matches env's.
+// SizesFor returns the sizes that can be created for env now: those of
+// its architecture whose provider is not in a capacity cooldown.
 func (f Pool) SizesFor(env string) []Size {
+	var out []Size
+	for _, s := range f.ArchSizes(env) {
+		if !providerDown(f, s.Provider) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// ArchSizes returns the sizes whose architecture matches env's.
+func (f Pool) ArchSizes(env string) []Size {
 	arch := f.EnvArch[env]
 	if arch == "" {
 		arch = "amd64"
@@ -170,12 +246,38 @@ type Grant struct {
 	Jobs       int       `json:"jobs"`        // build parallelism hint (0 = tool default)
 }
 
+// SlotKind is how a build slot is prepared before a session runs.
+type SlotKind int
+
+const (
+	SlotNone    SlotKind = iota
+	SlotPrune            // prune slots on the machine to free SlotAction.Bytes
+	SlotResize           // grow the machine disk to SlotAction.Bytes
+	SlotRestore          // restore SlotAction.Snapshot into the slot (move)
+)
+
+func (k SlotKind) String() string {
+	return [...]string{"none", "prune", "resize", "restore"}[k]
+}
+
+// SlotAction prepares the build slot of a placed task.
+type SlotAction struct {
+	Kind     SlotKind
+	Repo     string
+	Bytes    int64
+	Snapshot Snapshot
+}
+
 // Placement is the decision for one task.
 type Placement struct {
 	Kind    PlacementKind
 	Machine string
 	Grant   Grant
 	Reason  string
+	// Slot is done on the machine before the session starts.
+	Slot SlotAction
+	// Expected is the expected run time (for release forecasts).
+	Expected time.Duration
 }
 
 // ActionKind is a pool change.
@@ -241,6 +343,8 @@ type Usage struct {
 	// session ran; RestoreSeconds is how long the restore took.
 	Restored       bool    `json:"restored,omitempty"`
 	RestoreSeconds float64 `json:"restore_seconds,omitempty"`
+	// Provider ran the session (cold durations are learned per provider).
+	Provider string `json:"provider,omitempty"`
 }
 
 // Snapshot is a saved build slot of a repository in an object store.
@@ -259,4 +363,7 @@ type Estimator interface {
 	Estimate(key string, fallback Resources) Resources
 	// Observe records a finished run.
 	Observe(key string, u Usage)
+	// Profile returns what is known about the runs of key (durations,
+	// slot sizes) for the cost model.
+	Profile(key string) Profile
 }

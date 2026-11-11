@@ -1,4 +1,4 @@
-// Package supervisor is "cloudsourced supervisor", the supervisor on VM machines. It runs
+// Package supervisor is "offshore supervisor", the supervisor on VM machines. It runs
 // as root (systemd), reads the machine's public spec written by the
 // provider's boot script, fetches the secret server environment once from
 // the provider's secret channel, creates the machine's containers
@@ -13,7 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/traumventures/cloudsourced/internal/clock"
+	"github.com/traumventures/offshore/internal/clock"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -22,13 +22,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/machine"
+	"github.com/traumventures/offshore/internal/machine"
 )
 
 // Default locations on the host.
 const (
-	SpecPath = "/etc/cloudsourced/machine.json"
-	StateDir = "/var/lib/cloudsourced"
+	SpecPath = "/etc/offshore/machine.json"
+	StateDir = "/var/lib/offshore"
 )
 
 // Spec is the public machine description on the host. It contains no

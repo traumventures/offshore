@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 // Bytes is a memory amount; JSON accepts a number of bytes or a string
@@ -51,6 +51,10 @@ type Job struct {
 	CPU        float64 `json:"cpu"`      // cores used (and requested)
 	Memory     Bytes   `json:"memory"`   // configured need (request)
 	PeakMemory Bytes   `json:"peak_memory"`
+	// SlotBytes is the size of the repository's build slot after a cold
+	// build, SlotGrowth what a warm build adds (0: disk not simulated).
+	SlotBytes  Bytes `json:"slot_bytes,omitempty"`
+	SlotGrowth Bytes `json:"slot_growth,omitempty"`
 }
 
 // Trace is a sequence of jobs.

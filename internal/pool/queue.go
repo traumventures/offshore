@@ -5,7 +5,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/traumventures/cloudsourced/internal/orchestrator"
+	"github.com/traumventures/offshore/internal/orchestrator"
 )
 
 // pathQueue returns the requests waiting for capacity (POST, API key).

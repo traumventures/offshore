@@ -6,12 +6,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 // Reloader applies changes of the pool configuration file to a Local
 // pool. Pool settings change only by explicit reload: Check (the file
-// changed since it was last read) or Reload (SIGHUP, cloudsourced reconcile).
+// changed since it was last read) or Reload (SIGHUP, offshore reconcile).
 // Requests never modify the pool configuration.
 type Reloader struct {
 	path string

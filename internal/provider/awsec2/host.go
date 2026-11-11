@@ -18,7 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
-	"github.com/traumventures/cloudsourced/internal/supervisor"
+	"github.com/traumventures/offshore/internal/supervisor"
 )
 
 // Spec parameters of the supervisor on EC2.
@@ -35,7 +35,7 @@ func init() {
 // secretParameter is the SSM parameter holding a machine's secret
 // environment until its supervisor has read it.
 func secretParameter(stack, machineID string) string {
-	return "/cloudsourced/" + stack + "/machines/" + machineID
+	return "/offshore/" + stack + "/machines/" + machineID
 }
 
 // host is the supervisor side of the provider. It uses the instance role,

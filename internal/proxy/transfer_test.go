@@ -8,12 +8,12 @@ import (
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 func TestReceiveBlobsZstd(t *testing.T) {
-	t.Setenv("CLOUDSOURCED_STATE_DIR", t.TempDir())
+	t.Setenv("OFFSHORE_STATE_DIR", t.TempDir())
 	data := []byte(strings.Repeat("ELF test binary ", 10000))
 	hash := manifest.HashBytes(data)
 	a, b := net.Pipe()

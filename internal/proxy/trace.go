@@ -10,15 +10,15 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/daemon"
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/logs"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/tracing"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/daemon"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/logs"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/tracing"
 )
 
-// runTrace is the root span of one tool run ("cloudsourced.run"). Its
+// runTrace is the root span of one tool run ("offshore.run"). Its
 // decision attributes are taken from the run record when it ends.
 type runTrace struct {
 	ctx   context.Context
@@ -42,10 +42,10 @@ func startTrace(tool string, args []string) *runTrace {
 	}
 	tracing.SetupFromConfig(tracing.ServiceProxy, tc, dir, logs.FromEnv())
 	sub, flags := tracing.Args(args)
-	tr.ctx, tr.span = tracing.Start(tr.ctx, "cloudsourced.run", trace.WithAttributes(
-		attribute.String("cloudsourced.tool", tool),
-		attribute.String("cloudsourced.subcommand", sub),
-		attribute.StringSlice("cloudsourced.flags", flags),
+	tr.ctx, tr.span = tracing.Start(tr.ctx, "offshore.run", trace.WithAttributes(
+		attribute.String("offshore.tool", tool),
+		attribute.String("offshore.subcommand", sub),
+		attribute.StringSlice("offshore.flags", flags),
 	))
 	active = tr
 	return tr
@@ -64,16 +64,16 @@ func (tr *runTrace) finish(code int) {
 			decision = "fallback"
 		}
 		tr.span.SetAttributes(
-			attribute.String("cloudsourced.decision", decision),
-			attribute.String("cloudsourced.reason", r.Why),
-			attribute.String("cloudsourced.repo_id", daemon.RepoID(tr.user, r.Repo)),
+			attribute.String("offshore.decision", decision),
+			attribute.String("offshore.reason", r.Why),
+			attribute.String("offshore.repo_id", daemon.RepoID(tr.user, r.Repo)),
 		)
 		if r.Machine != "" {
-			tr.span.SetAttributes(attribute.String("cloudsourced.machine", r.Machine), attribute.String("cloudsourced.lease", r.Lease),
-				attribute.String("cloudsourced.provider", r.Provider), attribute.String("cloudsourced.size", r.Size))
+			tr.span.SetAttributes(attribute.String("offshore.machine", r.Machine), attribute.String("offshore.lease", r.Lease),
+				attribute.String("offshore.provider", r.Provider), attribute.String("offshore.size", r.Size))
 		}
 	} else {
-		tr.span.SetAttributes(attribute.String("cloudsourced.decision", events.Local), attribute.String("cloudsourced.reason", "not in a repository"))
+		tr.span.SetAttributes(attribute.String("offshore.decision", events.Local), attribute.String("offshore.reason", "not in a repository"))
 	}
 	if code >= 0 {
 		tr.span.SetAttributes(attribute.Int("process.exit.code", code))
@@ -90,11 +90,11 @@ func execAttrs(span trace.Span, ex proto.Exit) {
 	u := ex.Usage
 	span.SetAttributes(
 		attribute.Int("process.exit.code", ex.Code),
-		attribute.Int64("cloudsourced.usage.peak_memory", u.PeakMemory),
-		attribute.Float64("cloudsourced.usage.cpu_seconds", u.CPUSeconds),
-		attribute.Float64("cloudsourced.usage.wall_seconds", u.Wall.Seconds()),
-		attribute.Bool("cloudsourced.usage.oom", u.OOM),
-		attribute.Bool("cloudsourced.usage.warm", u.Warm),
+		attribute.Int64("offshore.usage.peak_memory", u.PeakMemory),
+		attribute.Float64("offshore.usage.cpu_seconds", u.CPUSeconds),
+		attribute.Float64("offshore.usage.wall_seconds", u.Wall.Seconds()),
+		attribute.Bool("offshore.usage.oom", u.OOM),
+		attribute.Bool("offshore.usage.warm", u.Warm),
 	)
 	keys := make([]string, 0, len(ex.Cache))
 	for k := range ex.Cache {
@@ -102,6 +102,6 @@ func execAttrs(span trace.Span, ex proto.Exit) {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		span.SetAttributes(attribute.Int64("cloudsourced.cache."+k, ex.Cache[k]))
+		span.SetAttributes(attribute.Int64("offshore.cache."+k, ex.Cache[k]))
 	}
 }

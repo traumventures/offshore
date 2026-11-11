@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 func outputsServer(t *testing.T) (*Worker, string) {

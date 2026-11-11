@@ -3,7 +3,7 @@
 // Live smoke test of the oci provider against a real tenancy (~/.oci/config
 // profile DEFAULT); never part of the regular test run:
 //
-//	make build-linux   # or: CGO_ENABLED=0 GOOS=linux go build -o /tmp/cs-oci-smoke/cloudsourced-linux-amd64 ./cmd/cloudsourced
+//	make build-linux   # or: CGO_ENABLED=0 GOOS=linux go build -o /tmp/cs-oci-smoke/offshore-linux-amd64 ./cmd/offshore
 //	go test -tags ocismoke -run 'TestOCILimits|TestOCISmoke' -v ./internal/orchestrator
 //	go test -tags ocismoke -run TestOCICleanup -v ./internal/orchestrator
 //
@@ -32,10 +32,10 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/limits"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 
-	"github.com/traumventures/cloudsourced/internal/image"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	_ "github.com/traumventures/cloudsourced/internal/provider/oci"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/image"
+	"github.com/traumventures/offshore/internal/provider"
+	_ "github.com/traumventures/offshore/internal/provider/oci"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 func TestOCILimits(t *testing.T) {
@@ -94,8 +94,8 @@ func TestOCISmoke(t *testing.T) {
 		arch = "arm64"
 	}
 	p, err := provider.Open("oci", map[string]any{
-		"binary_amd64":   "/tmp/cs-oci-smoke/cloudsourced-linux-amd64",
-		"binary_arm64":   "/tmp/cs-oci-smoke/cloudsourced-linux-arm64",
+		"binary_amd64":   "/tmp/cs-oci-smoke/offshore-linux-amd64",
+		"binary_arm64":   "/tmp/cs-oci-smoke/offshore-linux-arm64",
 		"docker_command": []any{"sudo", "-n", "docker"},
 	})
 	if err != nil {
@@ -108,18 +108,18 @@ func TestOCISmoke(t *testing.T) {
 	if err := cli.Run(ctx, nil, io.Discard, "pull", "--platform", string(plat), src); err != nil {
 		t.Fatal(err)
 	}
-	if err := cli.Run(ctx, nil, io.Discard, "tag", src, "cloudsourced-env:smoke"); err != nil {
+	if err := cli.Run(ctx, nil, io.Discard, "tag", src, "offshore-env:smoke"); err != nil {
 		t.Fatal(err)
 	}
 	reg := ih.ImageRegistry()
-	ref, err := reg.Ref(ctx, "cloudsourced-env:smoke", plat)
+	ref, err := reg.Ref(ctx, "offshore-env:smoke", plat)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ok, err := reg.Has(ctx, ref); err != nil {
 		t.Fatal(err)
 	} else if !ok {
-		if ref, err = reg.Push(ctx, "cloudsourced-env:smoke", plat, os.Stderr); err != nil {
+		if ref, err = reg.Push(ctx, "offshore-env:smoke", plat, os.Stderr); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -168,7 +168,7 @@ func TestOCICleanup(t *testing.T) {
 	cfg := common.DefaultConfigProvider()
 	tenancy, _ := cfg.TenancyOCID()
 	ic, _ := identity.NewIdentityClientWithConfigurationProvider(cfg)
-	cr, err := ic.ListCompartments(ctx, identity.ListCompartmentsRequest{CompartmentId: &tenancy, Name: common.String("cloudsourced")})
+	cr, err := ic.ListCompartments(ctx, identity.ListCompartmentsRequest{CompartmentId: &tenancy, Name: common.String("offshore")})
 	if err != nil || len(cr.Items) == 0 {
 		t.Fatal(err)
 	}
@@ -194,24 +194,24 @@ func TestOCICleanup(t *testing.T) {
 	}
 	oc, _ := objectstorage.NewObjectStorageClientWithConfigurationProvider(cfg)
 	ns, _ := oc.GetNamespace(ctx, objectstorage.GetNamespaceRequest{})
-	lr, err := oc.ListObjects(ctx, objectstorage.ListObjectsRequest{NamespaceName: ns.Value, BucketName: common.String("cloudsourced")})
+	lr, err := oc.ListObjects(ctx, objectstorage.ListObjectsRequest{NamespaceName: ns.Value, BucketName: common.String("offshore")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, o := range lr.Objects {
 		t.Logf("object %s (deleting)", *o.Name)
-		if _, err := oc.DeleteObject(ctx, objectstorage.DeleteObjectRequest{NamespaceName: ns.Value, BucketName: common.String("cloudsourced"), ObjectName: o.Name}); err != nil {
+		if _, err := oc.DeleteObject(ctx, objectstorage.DeleteObjectRequest{NamespaceName: ns.Value, BucketName: common.String("offshore"), ObjectName: o.Name}); err != nil {
 			t.Error(err)
 		}
 	}
-	pr, err := oc.ListPreauthenticatedRequests(ctx, objectstorage.ListPreauthenticatedRequestsRequest{NamespaceName: ns.Value, BucketName: common.String("cloudsourced")})
+	pr, err := oc.ListPreauthenticatedRequests(ctx, objectstorage.ListPreauthenticatedRequestsRequest{NamespaceName: ns.Value, BucketName: common.String("offshore")})
 	if err == nil {
 		for _, p := range pr.Items {
 			t.Logf("PAR %s (deleting)", *p.Name)
-			oc.DeletePreauthenticatedRequest(ctx, objectstorage.DeletePreauthenticatedRequestRequest{NamespaceName: ns.Value, BucketName: common.String("cloudsourced"), ParId: p.Id})
+			oc.DeletePreauthenticatedRequest(ctx, objectstorage.DeletePreauthenticatedRequestRequest{NamespaceName: ns.Value, BucketName: common.String("offshore"), ParId: p.Id})
 		}
 	}
-	lp, err := oc.GetObjectLifecyclePolicy(ctx, objectstorage.GetObjectLifecyclePolicyRequest{NamespaceName: ns.Value, BucketName: common.String("cloudsourced")})
+	lp, err := oc.GetObjectLifecyclePolicy(ctx, objectstorage.GetObjectLifecyclePolicyRequest{NamespaceName: ns.Value, BucketName: common.String("offshore")})
 	t.Logf("lifecycle rules: %d (%v)", len(lp.Items), err)
 	ac, _ := artifacts.NewArtifactsClientWithConfigurationProvider(cfg)
 	im, err := ac.ListContainerImages(ctx, artifacts.ListContainerImagesRequest{CompartmentId: comp})

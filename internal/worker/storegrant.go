@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
-	"github.com/traumventures/cloudsourced/internal/store"
+	"github.com/traumventures/offshore/internal/blobcache"
+	"github.com/traumventures/offshore/internal/store"
 )
 
 // grantCache keeps the latest store grant per repository (sessions and

@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 // Build slot pruning.

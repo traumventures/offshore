@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
+	"github.com/traumventures/offshore/internal/blobcache"
 )
 
 // Store is an object store with expiring objects.

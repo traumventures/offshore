@@ -16,14 +16,14 @@ import (
 
 	"golang.org/x/crypto/acme/autocert"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/pool"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/pool"
 )
 
 func parseOK(t *testing.T, args ...string) *cpOptions {
 	t.Helper()
-	t.Setenv("CLOUDSOURCED_HOSTNAME", "")
-	t.Setenv("CLOUDSOURCED_LISTEN", "")
+	t.Setenv("OFFSHORE_HOSTNAME", "")
+	t.Setenv("OFFSHORE_LISTEN", "")
 	o, err := parseControlplaneFlags(append([]string{"--state-dir", t.TempDir()}, args...))
 	if err != nil {
 		t.Fatalf("parse %v: %v", args, err)
@@ -58,7 +58,7 @@ func TestControlplaneFlagDefaults(t *testing.T) {
 }
 
 func TestControlplaneHostnameFromEnv(t *testing.T) {
-	t.Setenv("CLOUDSOURCED_HOSTNAME", "cs.example.com")
+	t.Setenv("OFFSHORE_HOSTNAME", "cs.example.com")
 	o, err := parseControlplaneFlags([]string{"--state-dir", t.TempDir()})
 	if err != nil || !o.ACME || o.Listen != ":443" {
 		t.Fatalf("env hostname: %+v %v", o, err)
@@ -66,7 +66,7 @@ func TestControlplaneHostnameFromEnv(t *testing.T) {
 }
 
 func TestControlplaneFlagErrors(t *testing.T) {
-	t.Setenv("CLOUDSOURCED_HOSTNAME", "")
+	t.Setenv("OFFSHORE_HOSTNAME", "")
 	for _, args := range [][]string{
 		{"--acme"},
 		{"--acme", "--hostname", "203.0.113.7"},
@@ -212,8 +212,8 @@ func TestClientConfigBlock(t *testing.T) {
 	st := cpState{TLS: "self-signed", Fingerprint: "ab12", URLs: []string{"https://10.0.0.5:7443"}}
 	b, _ := json.Marshal(st)
 	os.WriteFile(filepath.Join(dir, cpStateFile), b, 0o644)
-	got, err := clientConfigBlock(dir, "", "", "env:CLOUDSOURCED_API_KEY", noProbe)
-	want := "[control_plane]\nurl = \"https://10.0.0.5:7443\"\nfingerprint = \"ab12\"\napi_key = \"env:CLOUDSOURCED_API_KEY\"\n"
+	got, err := clientConfigBlock(dir, "", "", "env:OFFSHORE_API_KEY", noProbe)
+	want := "[control_plane]\nurl = \"https://10.0.0.5:7443\"\nfingerprint = \"ab12\"\napi_key = \"env:OFFSHORE_API_KEY\"\n"
 	if err != nil || got != want {
 		t.Fatalf("self-signed block:\n%s\nwant:\n%s (%v)", got, want, err)
 	}
@@ -261,21 +261,21 @@ func TestOwnContainerID(t *testing.T) {
 func TestTranslateMount(t *testing.T) {
 	ms := []dockerMount{
 		{Source: "/var/run/docker.sock", Destination: "/var/run/docker.sock"},
-		{Source: "/var/lib/docker/volumes/cs-state/_data", Destination: "/var/lib/cloudsourced"},
-		{Source: "/srv/cs-bin", Destination: "/var/lib/cloudsourced/bin"},
+		{Source: "/var/lib/docker/volumes/cs-state/_data", Destination: "/var/lib/offshore"},
+		{Source: "/srv/cs-bin", Destination: "/var/lib/offshore/bin"},
 	}
 	for in, want := range map[string]string{
-		"/var/lib/cloudsourced/envs/x":           "/var/lib/docker/volumes/cs-state/_data/envs/x",
-		"/var/lib/cloudsourced/bin/cloudsourced": "/srv/cs-bin/cloudsourced",
+		"/var/lib/offshore/envs/x":       "/var/lib/docker/volumes/cs-state/_data/envs/x",
+		"/var/lib/offshore/bin/offshore": "/srv/cs-bin/offshore",
 	} {
 		if got, ok := translateMount(in, ms); !ok || got != want {
 			t.Errorf("%s: %q %v, want %q", in, got, ok, want)
 		}
 	}
-	if _, ok := translateMount("/usr/local/bin/cloudsourced", ms); ok {
+	if _, ok := translateMount("/usr/local/bin/offshore", ms); ok {
 		t.Error("unmounted path translated")
 	}
-	if _, ok := translateMount("/var/lib/cloudsourcedX/a", ms); ok {
+	if _, ok := translateMount("/var/lib/offshoreX/a", ms); ok {
 		t.Error("prefix without separator matched")
 	}
 }
@@ -286,11 +286,11 @@ func TestMachineBinary(t *testing.T) {
 		"fixed": {"type": "local-docker", "binary": "/opt/cs"},
 		"aws":   {"type": "aws-ec2"},
 	}}
-	setMachineBinary(u, "/host/state/bin/cloudsourced")
-	if u.Providers["local"]["binary"] != "/host/state/bin/cloudsourced" || u.Providers["fixed"]["binary"] != "/opt/cs" || u.Providers["aws"]["binary"] != nil {
+	setMachineBinary(u, "/host/state/bin/offshore")
+	if u.Providers["local"]["binary"] != "/host/state/bin/offshore" || u.Providers["fixed"]["binary"] != "/opt/cs" || u.Providers["aws"]["binary"] != nil {
 		t.Fatalf("providers %v", u.Providers)
 	}
-	t.Setenv("CLOUDSOURCED_IN_CONTAINER", "")
+	t.Setenv("OFFSHORE_IN_CONTAINER", "")
 	if b, _ := resolveMachineBinary("self", t.TempDir(), t.Logf); b != "" {
 		t.Errorf("self: %q", b)
 	}
@@ -299,11 +299,11 @@ func TestMachineBinary(t *testing.T) {
 	}
 	// In a container the binary is exported to the state directory; without
 	// a Docker daemon to ask, its path is used as is (same-path mount).
-	t.Setenv("CLOUDSOURCED_IN_CONTAINER", "1")
-	t.Setenv("CLOUDSOURCED_DOCKER", "false")
+	t.Setenv("OFFSHORE_IN_CONTAINER", "1")
+	t.Setenv("OFFSHORE_DOCKER", "false")
 	dir := t.TempDir()
 	b, err := resolveMachineBinary("", dir, t.Logf)
-	if err != nil || b != filepath.Join(dir, "bin", "cloudsourced") {
+	if err != nil || b != filepath.Join(dir, "bin", "offshore") {
 		t.Fatalf("container: %q %v", b, err)
 	}
 	if fi, err := os.Stat(b); err != nil || fi.Mode().Perm()&0o111 == 0 {
@@ -312,7 +312,7 @@ func TestMachineBinary(t *testing.T) {
 }
 
 func TestLoadAPIKeyNeverLogsSource(t *testing.T) {
-	t.Setenv("CLOUDSOURCED_API_KEY", "")
+	t.Setenv("OFFSHORE_API_KEY", "")
 	dir := t.TempDir()
 	key, src, gen, err := loadAPIKey("", dir)
 	if err != nil || !gen || src != filepath.Join(dir, "api-key") || strings.Contains(src, key) {
@@ -322,8 +322,8 @@ func TestLoadAPIKeyNeverLogsSource(t *testing.T) {
 	if key2 != key || gen2 {
 		t.Fatal("key not persistent")
 	}
-	t.Setenv("CLOUDSOURCED_API_KEY", "cs_0123456789abcdef")
-	if _, src, _, _ := loadAPIKey("", dir); src != "$CLOUDSOURCED_API_KEY" {
+	t.Setenv("OFFSHORE_API_KEY", "cs_0123456789abcdef")
+	if _, src, _, _ := loadAPIKey("", dir); src != "$OFFSHORE_API_KEY" {
 		t.Fatalf("source %q", src)
 	}
 }
@@ -333,10 +333,10 @@ func TestLoadAPIKeyNeverLogsSource(t *testing.T) {
 // shuts it down gracefully with SIGTERM.
 func TestControlplaneServe(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("CLOUDSOURCED_CONFIG", filepath.Join(dir, "none.toml"))
-	t.Setenv("CLOUDSOURCED_DOCKER", "true") // empty pool
-	t.Setenv("CLOUDSOURCED_API_KEY", "")
-	t.Setenv("CLOUDSOURCED_IN_CONTAINER", "")
+	t.Setenv("OFFSHORE_CONFIG", filepath.Join(dir, "none.toml"))
+	t.Setenv("OFFSHORE_DOCKER", "true") // empty pool
+	t.Setenv("OFFSHORE_API_KEY", "")
+	t.Setenv("OFFSHORE_IN_CONTAINER", "")
 	o := parseOK(t, "--listen", "127.0.0.1:0", "--hostname", "cs.example.com", "--acme=false")
 	o.StateDir = filepath.Join(dir, "state")
 	done := make(chan error, 1)

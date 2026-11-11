@@ -1,4 +1,4 @@
-// Package top implements `cloudsourced top`: a live view of the pool
+// Package top implements `offshore top`: a live view of the pool
 // (machines, sessions, queue, cost) in the style of zenith, with history
 // graphs built from status snapshots and machine_sample events kept in
 // memory. Render produces one frame; the interactive program (tui.go)
@@ -10,9 +10,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/orchestrator"
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/orchestrator"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // Snapshot is one poll of the pool.

@@ -12,17 +12,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/image"
-	"github.com/traumventures/cloudsourced/internal/orchestrator"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	_ "github.com/traumventures/cloudsourced/internal/provider/awsec2"
-	_ "github.com/traumventures/cloudsourced/internal/provider/localdocker"
-	_ "github.com/traumventures/cloudsourced/internal/provider/oci"
-	_ "github.com/traumventures/cloudsourced/internal/provider/static"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/store"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/image"
+	"github.com/traumventures/offshore/internal/orchestrator"
+	"github.com/traumventures/offshore/internal/provider"
+	_ "github.com/traumventures/offshore/internal/provider/awsec2"
+	_ "github.com/traumventures/offshore/internal/provider/localdocker"
+	_ "github.com/traumventures/offshore/internal/provider/oci"
+	_ "github.com/traumventures/offshore/internal/provider/static"
+	"github.com/traumventures/offshore/internal/scheduler"
+	"github.com/traumventures/offshore/internal/store"
 )
 
 // Local runs the orchestrator in this process over the configured providers.
@@ -53,7 +53,7 @@ var _ Pool = (*Local)(nil)
 func NewLocal(u *config.PoolConfig, stateDir string, log *slog.Logger) (*Local, error) {
 	provs := map[string]provider.Provider{}
 	for _, name := range u.ProviderNames() {
-		opts := map[string]any{"binary": os.Getenv("CLOUDSOURCED_SERVER_BINARY"), "owner": u.Pool.ID}
+		opts := map[string]any{"binary": os.Getenv("OFFSHORE_SERVER_BINARY"), "owner": u.Pool.ID}
 		for k, v := range u.Providers[name] {
 			opts[k] = v
 		}
@@ -76,6 +76,7 @@ func NewLocal(u *config.PoolConfig, stateDir string, log *slog.Logger) (*Local, 
 		envs: map[string]Env{}, waiters: map[string]map[*syncWriter]bool{},
 	}
 	orch.PrepareImage = l.prepareImage
+	orch.Profile = est.Profile
 	orch.Stores = &orchestrator.StoreSet{Pool: u.Pool.ID, Provs: provs}
 	if u.Storage.Configured() {
 		sc, err := StorageConfig(u)
@@ -146,9 +147,9 @@ func (l *Local) Known(hash string) bool {
 }
 
 // ReconcileIntervalEnv overrides the reconcile interval (e.g. 1s in tests).
-const ReconcileIntervalEnv = "CLOUDSOURCED_RECONCILE_INTERVAL"
+const ReconcileIntervalEnv = "OFFSHORE_RECONCILE_INTERVAL"
 
-// ReconcileInterval returns $CLOUDSOURCED_RECONCILE_INTERVAL, else def.
+// ReconcileInterval returns $OFFSHORE_RECONCILE_INTERVAL, else def.
 func ReconcileInterval(def time.Duration) time.Duration {
 	if d, err := time.ParseDuration(os.Getenv(ReconcileIntervalEnv)); err == nil && d > 0 {
 		return d
@@ -247,7 +248,7 @@ func (l *Local) prepareImage(ctx context.Context, provName string, _ provider.Pr
 	})
 	ref, err := l.ensureImage(ctx, provName, size, env, w)
 	if err != nil {
-		fmt.Fprintf(w, "cloudsourced: %v\n", err)
+		fmt.Fprintf(w, "offshore: %v\n", err)
 	}
 	return ref, err
 }
@@ -310,7 +311,7 @@ func (l *Local) ensureImage(ctx context.Context, name, size string, env Env, pro
 			l.logMu.Lock()
 			fmt.Fprintf(logf, "=== %s environment %s on %s (%s)\n", time.Now().Format(time.RFC3339), env.Tag, name, t.Platform)
 			l.logMu.Unlock()
-			fmt.Fprintf(progress, "cloudsourced: preparing environment image %s on %s (log: %s)\n", env.Tag, name, logPath)
+			fmt.Fprintf(progress, "offshore: preparing environment image %s on %s (log: %s)\n", env.Tag, name, logPath)
 		})
 		l.logMu.Lock()
 		defer l.logMu.Unlock()

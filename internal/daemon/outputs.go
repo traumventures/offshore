@@ -15,12 +15,12 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	"github.com/traumventures/cloudsourced/internal/cas"
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/outputfs"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/cas"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/outputfs"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/transport"
 )
 
 // OutputsCASDir is the local content cache of remote outputs. The proxy
@@ -31,7 +31,7 @@ func OutputsCASDir() string { return filepath.Join(StateDir(), "outputs", "cas")
 // OutputsUpperDir is the upper (local, writable) layer of the output
 // overlay mounted at mountpoint. It lives in the client state, never in
 // the repository, survives daemon restarts and is removed by
-// "cloudsourced outputs unmount".
+// "offshore outputs unmount".
 func OutputsUpperDir(mountpoint string) string {
 	h := sha256.Sum256([]byte(filepath.Clean(mountpoint)))
 	return filepath.Join(StateDir(), "outputs", "upper", hex.EncodeToString(h[:8]))

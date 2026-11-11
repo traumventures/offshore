@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/snapshot"
-	"github.com/traumventures/cloudsourced/internal/store"
+	"github.com/traumventures/offshore/internal/blobcache"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/snapshot"
+	"github.com/traumventures/offshore/internal/store"
 )
 
 // Build slot snapshots.

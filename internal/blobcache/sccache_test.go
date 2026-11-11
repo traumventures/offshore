@@ -29,12 +29,12 @@ const (
 )
 
 // sccacheBinary returns a sccache binary for the integration test.
-// CLOUDSOURCED_TEST_SCCACHE=download fetches the pinned release (checksum
+// OFFSHORE_TEST_SCCACHE=download fetches the pinned release (checksum
 // verified) into a temporary directory; any other value is a binary path.
 func sccacheBinary(t *testing.T) string {
-	v := os.Getenv("CLOUDSOURCED_TEST_SCCACHE")
+	v := os.Getenv("OFFSHORE_TEST_SCCACHE")
 	if v == "" {
-		t.Skip("set CLOUDSOURCED_TEST_SCCACHE=download (or a sccache path) to run")
+		t.Skip("set OFFSHORE_TEST_SCCACHE=download (or a sccache path) to run")
 	}
 	if v != "download" {
 		return v

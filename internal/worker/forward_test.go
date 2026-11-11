@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/auth"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/auth"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/transport"
 )
 
 // TestForward checks a forwarded connection end to end over QUIC: echo

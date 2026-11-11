@@ -29,8 +29,8 @@ func runConfig(t *testing.T, args ...string) string {
 
 func TestConfigCheckEmbeddedSingleFile(t *testing.T) {
 	p := writeCfg(t, "user = \"team\"\n[pool]\nid = \"team\"\n[providers.local]\ntype = \"local-docker\"\ncommand = [\"docker\"]\n")
-	t.Setenv("CLOUDSOURCED_CONFIG", p)
-	t.Setenv("CLOUDSOURCED_POOL_CONFIG", "")
+	t.Setenv("OFFSHORE_CONFIG", p)
+	t.Setenv("OFFSHORE_POOL_CONFIG", "")
 	out := runConfig(t, "check")
 	for _, want := range []string{
 		"client configuration ok: " + p,
@@ -46,7 +46,7 @@ func TestConfigCheckEmbeddedSingleFile(t *testing.T) {
 
 func TestConfigCheckRemote(t *testing.T) {
 	p := writeCfg(t, "[control_plane]\nurl = \"https://cs.example.com\"\n[pool]\nmax_machines = 3\n")
-	t.Setenv("CLOUDSOURCED_CONFIG", p)
+	t.Setenv("OFFSHORE_CONFIG", p)
 	out := runConfig(t, "check")
 	for _, want := range []string{
 		"orchestrator remote at https://cs.example.com",
@@ -81,8 +81,8 @@ region = "eu-central-1"
 secret_access_key = "AKIA-literal-secret"
 session_token = "env:AWS_SESSION_TOKEN"
 `)
-	t.Setenv("CLOUDSOURCED_CONFIG", p)
-	t.Setenv("CLOUDSOURCED_POOL_CONFIG", "")
+	t.Setenv("OFFSHORE_CONFIG", p)
+	t.Setenv("OFFSHORE_POOL_CONFIG", "")
 	out := runConfig(t, "show")
 	if strings.Contains(out, "AKIA-literal-secret") {
 		t.Fatalf("secret leaked:\n%s", out)

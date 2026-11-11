@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	"github.com/traumventures/cloudsourced/internal/auth"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/auth"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/transport"
 )
 
 func freeUDPPort(t *testing.T) string {
@@ -34,10 +34,10 @@ func setEnv(t *testing.T, m auth.Master, id string, expires time.Time, listen st
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CLOUDSOURCED_MACHINE_ID", id)
-	t.Setenv("CLOUDSOURCED_EXPIRES_AT", strconv.FormatInt(expires.Unix(), 10))
-	t.Setenv("CLOUDSOURCED_LISTEN", listen)
-	t.Setenv("CLOUDSOURCED_CACHE_DIR", t.TempDir())
+	t.Setenv("OFFSHORE_MACHINE_ID", id)
+	t.Setenv("OFFSHORE_EXPIRES_AT", strconv.FormatInt(expires.Unix(), 10))
+	t.Setenv("OFFSHORE_LISTEN", listen)
+	t.Setenv("OFFSHORE_CACHE_DIR", t.TempDir())
 	t.Setenv(auth.EnvSignerPub, m.SignerPublic())
 	t.Setenv(auth.EnvFingerprint, fp)
 	t.Setenv(auth.EnvTLSSeed, auth.EncodeKey(m.MachineSeed(id)))

@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/proto"
+	"github.com/traumventures/offshore/internal/blobcache"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 // Result caches (global [cache.<name>] tables: sccache, ccache, go).
@@ -73,7 +73,7 @@ func (s *Worker) startCompilerCache(ctx context.Context) {
 
 // sccacheDir is the private directory of a session's sccache server.
 func sccacheDir(session string) string {
-	return filepath.Join(os.TempDir(), "cloudsourced-sccache-"+session)
+	return filepath.Join(os.TempDir(), "offshore-sccache-"+session)
 }
 
 // compilerCacheEnv returns the session variables for the compiler cache
@@ -107,7 +107,7 @@ func (s *Worker) compilerCacheEnv(req proto.Exec, session string, has func(strin
 		}
 	}
 	if cc := req.GlobalCache(config.CacheToolGo); cc != nil && s.ccEndpoint != "" && s.self != "" && !has("GOCACHEPROG") {
-		// cloudsourced gocacheprog: outputs on the machine's disk, shared
+		// offshore gocacheprog: outputs on the machine's disk, shared
 		// through the endpoint.
 		out = append(out, [2]string{"GOCACHEPROG", fmt.Sprintf("%s gocacheprog %s %s", s.self, filepath.Join(s.cfg.CacheDir, "gocache"), s.ccEndpoint+ttlPrefix(cc))})
 	}

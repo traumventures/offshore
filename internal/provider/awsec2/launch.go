@@ -10,7 +10,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/smithy-go"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // launchPlan lists the instance types to try for a machine, in order.
@@ -62,7 +62,7 @@ func launch(ctx context.Context, run runFunc, base *ec2.RunInstancesInput, spec 
 		}
 		failed = append(failed, fmt.Sprintf("%s: %s", t, apiError(err)))
 	}
-	return nil, "", failed, fmt.Errorf("aws-ec2: no capacity for size %s (%s)", spec.Size, strings.Join(failed, "; "))
+	return nil, "", failed, fmt.Errorf("aws-ec2: %w for size %s (%s)", provider.ErrCapacity, spec.Size, strings.Join(failed, "; "))
 }
 
 func apiError(err error) string {

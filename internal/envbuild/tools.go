@@ -67,17 +67,17 @@ func releaseFor(name, arch string) (tool, error) {
 	return t, nil
 }
 
-// toolCacheDir holds downloaded archives. CLOUDSOURCED_TOOL_CACHE
+// toolCacheDir holds downloaded archives. OFFSHORE_TOOL_CACHE
 // overrides it (e.g. for offline use with pre-seeded archives).
 func toolCacheDir() (string, error) {
-	if d := os.Getenv("CLOUDSOURCED_TOOL_CACHE"); d != "" {
+	if d := os.Getenv("OFFSHORE_TOOL_CACHE"); d != "" {
 		return d, nil
 	}
 	d, err := os.UserCacheDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(d, "cloudsourced", "tools"), nil
+	return filepath.Join(d, "offshore", "tools"), nil
 }
 
 // archive returns the path of the verified archive, downloading it if

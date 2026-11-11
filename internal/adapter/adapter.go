@@ -15,8 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/platform"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/platform"
 )
 
 // PhaseName is the kind of work a phase does.
@@ -73,7 +73,7 @@ func (p Phase) String() string {
 type Plan struct {
 	Adapter string
 	Phases  []Phase
-	// Why explains the decision (recorded with the run, `cloudsourced why`).
+	// Why explains the decision (recorded with the run, `offshore why`).
 	Why string
 	// exec runs a split plan; nil runs the command as typed, locally or
 	// remotely as the phases say.
@@ -134,7 +134,7 @@ func (c Command) host() platform.Platform {
 	return platform.Local()
 }
 
-// Cache is a cache an adapter proposes for `cloudsourced init`
+// Cache is a cache an adapter proposes for `offshore init`
 // ([cache.<Name>]; fields as in the repository configuration).
 type Cache struct {
 	config.Cache
@@ -149,7 +149,7 @@ type Adapter interface {
 	Tools() []string
 	// Classify decides the phases of a command.
 	Classify(c Command) Plan
-	// DefaultCaches are the caches `cloudsourced init` proposes.
+	// DefaultCaches are the caches `offshore init` proposes.
 	DefaultCaches(root string) []Cache
 	// Detect reports whether the repository at root uses the ecosystem.
 	Detect(root string) bool
@@ -197,7 +197,7 @@ type Runtime interface {
 	// its exit code. Errors before the remote start make the proxy fall
 	// back to running the whole command locally.
 	Remote(ctx context.Context, argv []string, o RemoteOptions) (int, error)
-	// Warn prints one "cloudsourced: ..." line.
+	// Warn prints one "offshore: ..." line.
 	Warn(format string, a ...any)
 }
 
@@ -255,9 +255,9 @@ func subcommand(args []string) string {
 	return ""
 }
 
-// splitOff reports CLOUDSOURCED_SPLIT=0 (or off/false/no/never).
+// splitOff reports OFFSHORE_SPLIT=0 (or off/false/no/never).
 func splitOff(c Command) bool {
-	switch strings.ToLower(c.getenv("CLOUDSOURCED_SPLIT")) {
+	switch strings.ToLower(c.getenv("OFFSHORE_SPLIT")) {
 	case "0", "off", "false", "no", "never":
 		return true
 	}
@@ -277,7 +277,7 @@ func splitEnabled(c Command, sub string) bool {
 	return false
 }
 
-// RealBinary finds tool in PATH, skipping cloudsourced shims (links to
+// RealBinary finds tool in PATH, skipping offshore shims (links to
 // this executable).
 func RealBinary(tool string) (string, error) {
 	self, _ := os.Executable()

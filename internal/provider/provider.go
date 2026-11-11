@@ -4,27 +4,28 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/image"
+	"github.com/traumventures/offshore/internal/image"
 )
 
 // Label keys attached to every resource.
 const (
-	LabelPool      = "cloudsourced.pool"
-	LabelMachine   = "cloudsourced.machine"
-	LabelEnvHash   = "cloudsourced.env-hash"
-	LabelCreatedAt = "cloudsourced.created-at"
-	LabelExpiresAt = "cloudsourced.expires-at"
-	LabelKind      = "cloudsourced.kind"
-	LabelCPU       = "cloudsourced.cpu"
-	LabelMemory    = "cloudsourced.memory"
-	LabelFinger    = "cloudsourced.fingerprint"
-	LabelSize      = "cloudsourced.size"
-	LabelArch      = "cloudsourced.arch" // machine architecture (amd64, arm64)
+	LabelPool      = "offshore.pool"
+	LabelMachine   = "offshore.machine"
+	LabelEnvHash   = "offshore.env-hash"
+	LabelCreatedAt = "offshore.created-at"
+	LabelExpiresAt = "offshore.expires-at"
+	LabelKind      = "offshore.kind"
+	LabelCPU       = "offshore.cpu"
+	LabelMemory    = "offshore.memory"
+	LabelFinger    = "offshore.fingerprint"
+	LabelSize      = "offshore.size"
+	LabelArch      = "offshore.arch" // machine architecture (amd64, arm64)
 )
 
 // MachineSpec describes a machine to create. Providers treat the server
@@ -50,8 +51,8 @@ type MachineSpec struct {
 	DepsTTL       time.Duration // lifetime of shared dependency cache volumes
 	IdleStop      time.Duration // machine stops itself after this long idle and unobserved (0: never)
 	Services      []Service
-	Env           map[string]string // CLOUDSOURCED_* variables of the worker
-	SecretEnv     map[string]string // secret CLOUDSOURCED_* variables
+	Env           map[string]string // OFFSHORE_* variables of the worker
+	SecretEnv     map[string]string // secret OFFSHORE_* variables
 }
 
 // SortedKeys returns the keys of m in order.
@@ -149,6 +150,12 @@ type ImageHost interface {
 	// ImageBuilder builds images for this provider (its Docker CLI).
 	ImageBuilder() image.Builder
 }
+
+// ErrCapacity marks errors meaning the provider has no capacity or quota
+// for a machine right now (every instance type of a size failed with a
+// capacity, limit or quota error). The orchestrator downgrades such a
+// provider for a cooldown.
+var ErrCapacity = errors.New("no capacity")
 
 // Factory creates a provider.
 type Factory func(opts map[string]any) (Provider, error)

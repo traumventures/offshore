@@ -1,4 +1,4 @@
-module github.com/traumventures/cloudsourced
+module github.com/traumventures/offshore
 
 go 1.26.0
 

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
+	"github.com/traumventures/offshore/internal/blobcache"
 )
 
 func tree(t *testing.T) string {

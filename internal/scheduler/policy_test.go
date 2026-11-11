@@ -18,7 +18,7 @@ func busy(id string, cap, reserved Resources, sessions int) Machine {
 }
 
 func TestPlaceBestFit(t *testing.T) {
-	strict := Config{CPUOvercommit: 1, MemoryOvercommit: 1}
+	strict := Config{Variant: VariantBinpack, CPUOvercommit: 1, MemoryOvercommit: 1}
 	warm := busy("warm", res(8, 16), res(6, 12), 3)
 	warm.WarmRepos = []string{"r"}
 	tests := []struct {
@@ -32,7 +32,7 @@ func TestPlaceBestFit(t *testing.T) {
 		{"tightest fit wins", strict, []Machine{busy("empty", res(8, 16), Resources{}, 0), busy("half", res(8, 16), res(4, 8), 2), busy("full", res(8, 16), res(7, 15), 4)}, task(2, 4), "half", "best fit"},
 		{"smaller machine is the tighter fit", strict, []Machine{machine("big", res(16, 32), Resources{}), machine("small", res(4, 8), Resources{})}, task(2, 4), "small", "best fit"},
 		{"warm cache beats fit", strict, []Machine{busy("half", res(8, 16), res(4, 8), 2), warm}, task(2, 4), "warm", "warm cache"},
-		{"physical room beats overcommit", Config{CPUOvercommit: 2, MemoryOvercommit: 1}, []Machine{busy("over", res(4, 16), res(4, 8), 2), busy("room", res(8, 16), res(2, 4), 1)}, task(2, 4), "room", "best fit"},
+		{"physical room beats overcommit", Config{Variant: VariantBinpack, CPUOvercommit: 2, MemoryOvercommit: 1}, []Machine{busy("over", res(4, 16), res(4, 8), 2), busy("room", res(8, 16), res(2, 4), 1)}, task(2, 4), "room", "best fit"},
 		{"single candidate", strict, []Machine{busy("full", res(8, 16), res(8, 16), 4), busy("only", res(8, 16), res(2, 2), 1)}, task(2, 4), "only", "rendezvous"},
 	}
 	for _, tc := range tests {
@@ -53,7 +53,7 @@ func TestPlaceTieBreakRendezvous(t *testing.T) {
 			pref = m.ID
 		}
 	}
-	for _, v := range []string{VariantDefault, VariantClassic} {
+	for _, v := range []string{VariantDefault, VariantBinpack, VariantClassic} {
 		pl := Default{Cfg: Config{Variant: v}}.Place(Pool{Now: now, Machines: ms}, task(1, 1))
 		if pl.Machine != pref {
 			t.Fatalf("%s: equal machines must fall back to rendezvous %s, got %s", v, pref, pl.Machine)
@@ -103,7 +103,7 @@ func TestPlanSizing(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			pol := Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1, MaxMachines: tc.max}}
+			pol := Default{Cfg: Config{Variant: VariantBinpack, CPUOvercommit: 1, MemoryOvercommit: 1, MaxMachines: tc.max}}
 			got := creates(pol.Plan(Pool{Now: now, Sizes: tc.sizes, Queue: tc.queue}))
 			if len(got) != len(tc.want) {
 				t.Fatalf("got %v, want %v", got, tc.want)

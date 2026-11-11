@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/image"
+	"github.com/traumventures/offshore/internal/image"
 )
 
 // Prebuild pushes to every remote registry right away (EnsureEnv builds

@@ -11,10 +11,10 @@ import (
 	"io"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/orchestrator"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/orchestrator"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // Pool provides machine capacity. progress receives messages for the user.
@@ -83,6 +83,18 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 	}
 	if f.ConsolidateBelow != nil {
 		c.Policy.ConsolidateBelow = *f.ConsolidateBelow
+	}
+	if f.CostOptimization != nil {
+		c.Policy.CostOptimization = *f.CostOptimization
+	}
+	c.Policy.QueueTimeout = queue
+	c.Policy.DiskPricePerGBHour = f.DiskPricePerGBMonth / 730
+	for _, e := range f.Egress {
+		var bw int64
+		if e.Bandwidth != "" {
+			bw, _ = config.ParseBytes(e.Bandwidth)
+		}
+		c.Policy.Egress = append(c.Policy.Egress, scheduler.Egress{From: e.From, To: e.To, PricePerGB: e.PricePerGB, Bandwidth: bw})
 	}
 	for _, w := range f.WarmPool {
 		days, from, to, loc, err := w.Parse()

@@ -3,7 +3,7 @@ package adapter
 import (
 	"path/filepath"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 // Node handles bun, npm, pnpm and yarn. Installs run remotely: node_modules

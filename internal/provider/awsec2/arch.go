@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/offshore/internal/provider"
 )
 
 // Machine architectures (the size naming, GOARCH).
@@ -29,8 +29,8 @@ func archOf(a string) string {
 //   - binary_amd64 / binary_arm64 options name them explicitly;
 //   - binary (legacy) is the binary of the orchestrator's architecture,
 //     default: the orchestrator's own executable when it runs on linux;
-//   - otherwise cloudsourced-linux-<arch> next to that binary (make build
-//     puts bin/cloudsourced-linux-arm64 next to bin/cloudsourced).
+//   - otherwise offshore-linux-<arch> next to that binary (make build
+//     puts bin/offshore-linux-arm64 next to bin/offshore).
 func serverBinaries(opts map[string]any, self, goos, goarch string) map[string]string {
 	out := map[string]string{}
 	base := provider.String(opts, "binary", "")
@@ -48,7 +48,7 @@ func serverBinaries(opts map[string]any, self, goos, goarch string) map[string]s
 		if v := provider.String(opts, "binary_"+a, ""); v != "" {
 			out[a] = v
 		} else if _, ok := out[a]; !ok {
-			out[a] = filepath.Join(dir, "cloudsourced-linux-"+a)
+			out[a] = filepath.Join(dir, "offshore-linux-"+a)
 		}
 	}
 	return out

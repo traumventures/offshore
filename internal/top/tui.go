@@ -7,7 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/traumventures/cloudsourced/internal/events"
+	"github.com/traumventures/offshore/internal/events"
 )
 
 // Fetcher polls the pool.
@@ -181,9 +181,9 @@ func zoom(cur time.Duration, dir int) time.Duration {
 func (m *model) View() string {
 	if !m.have {
 		if m.err != nil {
-			return "cloudsourced top: " + m.err.Error() + "\n(retrying; q to quit)"
+			return "offshore top: " + m.err.Error() + "\n(retrying; q to quit)"
 		}
-		return "cloudsourced top: loading…"
+		return "offshore top: loading…"
 	}
 	f := Frame(m.snap, m.hist, m.view, m.cur, m.styles)
 	if m.err != nil {

@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/traumventures/cloudsourced/internal/labels"
+	"github.com/traumventures/offshore/internal/labels"
 	"strings"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/metrics"
-	"github.com/traumventures/cloudsourced/internal/pool"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/metrics"
+	"github.com/traumventures/offshore/internal/pool"
 )
 
 // daemonMetrics are the local daemon's own metrics.
@@ -25,17 +25,17 @@ func newDaemonMetrics(d *Daemon) *daemonMetrics {
 	r := metrics.NewRegistry()
 	m := &daemonMetrics{
 		reg:      r,
-		requests: r.Counter("cloudsourced_daemon_requests_total", "Daemon RPC requests by operation and result.", "op", "result"),
-		prepare:  r.Histogram("cloudsourced_daemon_prepare_seconds", "Time to prepare a remote run (environment, sync, placement, attach).", metrics.DurationBuckets, "result"),
-		runs:     r.Counter("cloudsourced_daemon_runs_total", "Proxied runs by tool and mode (remote, local, failed).", "tool", "mode"),
+		requests: r.Counter("offshore_daemon_requests_total", "Daemon RPC requests by operation and result.", "op", "result"),
+		prepare:  r.Histogram("offshore_daemon_prepare_seconds", "Time to prepare a remote run (environment, sync, placement, attach).", metrics.DurationBuckets, "result"),
+		runs:     r.Counter("offshore_daemon_runs_total", "Proxied runs by tool and mode (remote, local, failed).", "tool", "mode"),
 	}
 	r.Collect(func() []metrics.Family {
 		d.mu.Lock()
 		roots, conns := len(d.roots), len(d.conns)
 		d.mu.Unlock()
 		return []metrics.Family{
-			metrics.GaugeFamily("cloudsourced_daemon_roots", "Watched source roots.", metrics.Sample{Value: float64(roots)}),
-			metrics.GaugeFamily("cloudsourced_daemon_machine_connections", "Open connections to machines.", metrics.Sample{Value: float64(conns)}),
+			metrics.GaugeFamily("offshore_daemon_roots", "Watched source roots.", metrics.Sample{Value: float64(roots)}),
+			metrics.GaugeFamily("offshore_daemon_machine_connections", "Open connections to machines.", metrics.Sample{Value: float64(conns)}),
 		}
 	})
 	return m

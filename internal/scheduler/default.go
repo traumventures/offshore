@@ -6,15 +6,20 @@ import (
 	"sort"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/manifest"
+	"github.com/traumventures/offshore/internal/manifest"
 )
 
 // Policy variants of Default.
 const (
-	// VariantDefault packs tasks best fit (warm cache first), sizes new
-	// machines by cost per unit of queued demand and consolidates lightly
-	// loaded pools. "" and "binpack" select it too.
+	// VariantDefault decides with the cost model (see model.go): placement,
+	// waiting for a warm slot, slot handling, scale-out and consolidation
+	// trade money against time to result by Config.CostOptimization. "" selects it too.
 	VariantDefault = "default"
+	// VariantBinpack is the policy before the cost model: warm cache
+	// first, best-fit packing, sizes by cost per unit of queued demand and
+	// consolidation by the present reservation. Kept for comparison in the
+	// simulator.
+	VariantBinpack = "binpack"
 	// VariantClassic is the policy before scheduler tuning: rendezvous
 	// placement, cheapest fitting size for the aggregate demand and no
 	// consolidation. Kept for comparison in the simulator.
@@ -23,9 +28,24 @@ const (
 
 // Config tunes the default policy.
 type Config struct {
-	// Variant selects the placement/sizing strategy: "default" (also ""
-	// and "binpack") or "classic".
+	// Variant selects the placement/sizing strategy: "default" (also ""),
+	// "binpack" or "classic".
 	Variant string
+	// CostOptimization chooses the point on the cost/time curve: 1
+	// minimises cost, 0 time to result; 0.5 trades one hour of waiting for
+	// one machine hour of the cheapest size (default variant only).
+	CostOptimization float64
+	// QueueTimeout is how long a task may wait (0 = unbounded); the model
+	// does not let tasks wait for capacity that frees later than that.
+	QueueTimeout time.Duration
+	// Egress are transfer prices and bandwidths between stores and
+	// providers (snapshot restores); unlisted pairs use defaults.
+	Egress []Egress
+	// DiskPricePerGBHour prices extra disk of a resize (0 = default).
+	DiskPricePerGBHour float64
+	// ConsolidateHold: no consolidation within this time after the pool
+	// scaled an environment up (default 2m; default variant only).
+	ConsolidateHold time.Duration
 	// Overcommit factors: reservations may exceed physical capacity by this
 	// factor. CPU overcommit only slows tasks down. Memory overcommit relies
 	// on soft limits and swap; without swap it risks OOM kills.
@@ -78,10 +98,18 @@ func (p Default) cfg() Config {
 	if c.ConsolidateTarget <= 0 {
 		c.ConsolidateTarget = 0.75
 	}
+	if c.ConsolidateHold <= 0 {
+		c.ConsolidateHold = 2 * time.Minute
+	}
 	return c
 }
 
 func (p Default) classic() bool { return p.Cfg.Variant == VariantClassic }
+
+// model reports whether the cost model decides (default variant).
+func (p Default) model() bool {
+	return p.Cfg.Variant == VariantDefault || p.Cfg.Variant == ""
+}
 
 // Admissible capacity of a machine under overcommit.
 func (p Default) admissible(m Machine) Resources {
@@ -197,6 +225,9 @@ func (p Default) Grant(t Task) Grant {
 
 // Place implements Policy.
 func (p Default) Place(f Pool, t Task) Placement {
+	if p.model() {
+		return p.placeModel(f, t)
+	}
 	if !p.fitsAnySize(f, t) {
 		return Placement{Kind: Reject, Reason: "task larger than every machine size"}
 	}
@@ -222,7 +253,7 @@ func (p Default) Place(f Pool, t Task) Placement {
 }
 
 func (p Default) fitsAnySize(f Pool, t Task) bool {
-	for _, s := range f.SizesFor(t.EnvHash) {
+	for _, s := range f.ArchSizes(t.EnvHash) {
 		if p.sizeAdmissible(s).Fits(t.Request) {
 			return true
 		}
@@ -371,7 +402,7 @@ func (p Default) Plan(f Pool) []Action {
 		if m.State != Gone {
 			st.perProvider[m.Provider]++ // stopped machines keep their slot
 		}
-		if m.State == Stopped && p.usable(m, f.Now) {
+		if m.State == Stopped && p.usable(m, f.Now) && !f.Now.Before(m.StartBlocked) {
 			st.stopped[m.EnvHash] = append(st.stopped[m.EnvHash], m)
 		}
 	}
@@ -382,14 +413,20 @@ func (p Default) Plan(f Pool) []Action {
 		st.queued[t.EnvHash] = append(st.queued[t.EnvHash], t)
 	}
 	for _, env := range st.envs {
-		if p.classic() {
+		switch {
+		case p.classic():
 			p.scaleOutClassic(st, env)
-		} else {
+		case p.model():
+			p.scaleOutModel(st, env)
+		default:
 			p.scaleOut(st, env)
 		}
 	}
 	running := p.idleStop(st)
-	if !p.classic() {
+	switch {
+	case p.model():
+		p.consolidateModel(st, running)
+	case !p.classic():
 		p.consolidate(st, running)
 	}
 	p.warmPool(st, running)
@@ -623,17 +660,29 @@ func (p Default) idleStop(st *planState) map[string]int {
 		}
 	}
 	for _, m := range f.Machines {
-		if m.State != Running || m.Sessions > 0 || m.Reserved.Memory > 0 || len(st.queued[m.EnvHash]) > 0 {
+		// Queued tasks keep idle machines of their environment, unless the
+		// cost model let them wait for other machines (then the idle one
+		// was the worse choice for them and may stop).
+		if m.State != Running || m.Sessions > 0 || m.Reserved.Memory > 0 || (len(st.queued[m.EnvHash]) > 0 && !p.model()) {
 			continue
+		}
+		if slices.ContainsFunc(st.acts, func(a Action) bool { return a.Machine == m.ID }) {
+			continue // already stopped or undrained by this plan
 		}
 		// A machine drained by consolidation stops as soon as it is empty.
 		consolidated := !p.classic() && m.Draining && p.usable(m, f.Now)
 		if !consolidated && (m.IdleSince.IsZero() || f.Now.Sub(m.IdleSince) < c.IdleStop) {
 			continue
 		}
-		if p.usable(m, f.Now) && running[m.EnvHash] <= p.warmTarget(f, m.EnvHash) {
+		keep, why := running[m.EnvHash] <= p.warmTarget(f, m.EnvHash), "warm pool"
+		if !keep && consolidated && p.model() && !p.othersAbsorb(f, m) {
+			// The demand of the window needs it: undrain instead of
+			// stopping now and starting again in a minute.
+			keep, why = true, "demand forecast"
+		}
+		if p.usable(m, f.Now) && keep {
 			if consolidated {
-				st.acts = append(st.acts, Action{Kind: Undrain, Machine: m.ID, Reason: "warm pool"})
+				st.acts = append(st.acts, Action{Kind: Undrain, Machine: m.ID, Reason: why})
 			}
 			continue
 		}

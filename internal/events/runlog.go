@@ -1,5 +1,5 @@
 // Package runlog keeps a bounded history of proxied runs for
-// `cloudsourced why`: where a command ran and why, on which machine, how
+// `offshore why`: where a command ran and why, on which machine, how
 // long each phase took and what it consumed.
 package events
 
@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 // Keep is the number of runs retained.

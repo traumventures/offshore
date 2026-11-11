@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/snapshot"
-	"github.com/traumventures/cloudsourced/internal/store"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/snapshot"
+	"github.com/traumventures/offshore/internal/store"
 )
 
 func snapWorker(t *testing.T) (*Worker, *store.Grant) {

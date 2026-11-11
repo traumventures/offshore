@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/traumventures/cloudsourced/internal/metrics"
+	"github.com/traumventures/offshore/internal/metrics"
 )
 
 // serverMetrics are the worker's metrics. They travel in the
@@ -20,7 +20,7 @@ type serverMetrics struct {
 	rejected metrics.CounterVec
 }
 
-// Transfer directions of cloudsourced_worker_transfer_bytes_total.
+// Transfer directions of offshore_worker_transfer_bytes_total.
 const (
 	transferFetch     = "fetch"     // source blobs fetched from the client (FUSE)
 	transferWriteback = "writeback" // changed files sent back
@@ -31,12 +31,12 @@ func newServerMetrics(s *Worker) *serverMetrics {
 	r := metrics.NewRegistry()
 	m := &serverMetrics{
 		reg:      r,
-		exits:    r.Counter("cloudsourced_worker_session_exits_total", "Finished sessions by exit code (128+N for signal N).", "code"),
-		duration: r.Histogram("cloudsourced_worker_session_duration_seconds", "Wall time of finished sessions.", metrics.DurationBuckets),
-		oom:      r.Counter("cloudsourced_worker_oom_kills_total", "Sessions killed for exceeding their memory limit."),
-		cache:    r.Counter("cloudsourced_worker_compiler_cache_total", "Compiler cache counters summed over sessions (e.g. sccache_hits, sccache_misses).", "counter"),
-		bytes:    r.Counter("cloudsourced_worker_transfer_bytes_total", "Bytes transferred between machine and client daemon.", "direction"),
-		rejected: r.Counter("cloudsourced_worker_sessions_rejected_total", "Sessions refused before start.", "reason"),
+		exits:    r.Counter("offshore_worker_session_exits_total", "Finished sessions by exit code (128+N for signal N).", "code"),
+		duration: r.Histogram("offshore_worker_session_duration_seconds", "Wall time of finished sessions.", metrics.DurationBuckets),
+		oom:      r.Counter("offshore_worker_oom_kills_total", "Sessions killed for exceeding their memory limit."),
+		cache:    r.Counter("offshore_worker_compiler_cache_total", "Compiler cache counters summed over sessions (e.g. sccache_hits, sccache_misses).", "counter"),
+		bytes:    r.Counter("offshore_worker_transfer_bytes_total", "Bytes transferred between machine and client daemon.", "direction"),
+		rejected: r.Counter("offshore_worker_sessions_rejected_total", "Sessions refused before start.", "reason"),
 	}
 	for _, d := range []string{transferFetch, transferWriteback, transferOutput} {
 		m.bytes.Add(0, d)
@@ -53,17 +53,17 @@ func newServerMetrics(s *Worker) *serverMetrics {
 			draining = 1
 		}
 		return []metrics.Family{
-			metrics.GaugeFamily("cloudsourced_worker_sessions_running", "Sessions running now.", metrics.Sample{Value: float64(len(st.Sessions))}),
-			metrics.GaugeFamily("cloudsourced_worker_pressure", "PSI some avg10 of the machine (0..1).",
+			metrics.GaugeFamily("offshore_worker_sessions_running", "Sessions running now.", metrics.Sample{Value: float64(len(st.Sessions))}),
+			metrics.GaugeFamily("offshore_worker_pressure", "PSI some avg10 of the machine (0..1).",
 				metrics.Sample{Labels: metrics.L("resource", "cpu"), Value: st.Pressure.CPU},
 				metrics.Sample{Labels: metrics.L("resource", "memory"), Value: st.Pressure.Memory}),
-			metrics.GaugeFamily("cloudsourced_worker_reserved", "Resources reserved by running sessions (CPU cores, memory bytes).",
+			metrics.GaugeFamily("offshore_worker_reserved", "Resources reserved by running sessions (CPU cores, memory bytes).",
 				metrics.Sample{Labels: metrics.L("resource", "cpu"), Value: st.UsedCPU},
 				metrics.Sample{Labels: metrics.L("resource", "memory"), Value: float64(st.UsedMemory)}),
-			metrics.GaugeFamily("cloudsourced_worker_memory_used_bytes", "Measured memory of running sessions.", metrics.Sample{Value: float64(st.Measured.Memory)}),
-			metrics.GaugeFamily("cloudsourced_worker_ready", "1 when the machine is provisioned and accepts sessions.", metrics.Sample{Value: ready}),
-			metrics.GaugeFamily("cloudsourced_worker_draining", "1 while the machine drains before expiry.", metrics.Sample{Value: draining}),
-			metrics.GaugeFamily("cloudsourced_worker_warm_repos", "Repositories with unexpired build slots.", metrics.Sample{Value: float64(len(st.WarmRepos))}),
+			metrics.GaugeFamily("offshore_worker_memory_used_bytes", "Measured memory of running sessions.", metrics.Sample{Value: float64(st.Measured.Memory)}),
+			metrics.GaugeFamily("offshore_worker_ready", "1 when the machine is provisioned and accepts sessions.", metrics.Sample{Value: ready}),
+			metrics.GaugeFamily("offshore_worker_draining", "1 while the machine drains before expiry.", metrics.Sample{Value: draining}),
+			metrics.GaugeFamily("offshore_worker_warm_repos", "Repositories with unexpired build slots.", metrics.Sample{Value: float64(len(st.WarmRepos))}),
 		}
 	})
 	return m

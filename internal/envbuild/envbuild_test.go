@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/config"
+	"github.com/traumventures/offshore/internal/config"
 )
 
 func repo(t *testing.T, cfg string, files map[string]string) *config.Repo {
@@ -101,7 +101,7 @@ func TestCompilerCacheAndLinkerTools(t *testing.T) {
 		"COPY tools/mold /usr/local/bin/mold",
 		"ln -sf mold /usr/local/bin/ld.mold",
 		`exec cc "$@" -fuse-ld=mold`,
-		"/usr/local/bin/cloudsourced-cc-mold",
+		"/usr/local/bin/offshore-cc-mold",
 	} {
 		if !strings.Contains(p1.Dockerfile, want) {
 			t.Errorf("Dockerfile lacks %q:\n%s", want, p1.Dockerfile)
@@ -142,7 +142,7 @@ func TestToolDownloadVerifiesChecksum(t *testing.T) {
 	sum := sha256.Sum256(buf.Bytes())
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(buf.Bytes()) }))
 	defer srv.Close()
-	t.Setenv("CLOUDSOURCED_TOOL_CACHE", t.TempDir())
+	t.Setenv("OFFSHORE_TOOL_CACHE", t.TempDir())
 	good := tool{Name: "fake", Version: "1", URL: srv.URL + "/fake.tar.gz", SHA256: hex.EncodeToString(sum[:]), Member: "pkg/bin/fake"}
 	dst := filepath.Join(t.TempDir(), "fake")
 	if err := good.extract(dst); err != nil {

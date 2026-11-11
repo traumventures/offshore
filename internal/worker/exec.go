@@ -22,12 +22,12 @@ import (
 	"github.com/creack/pty"
 	"github.com/klauspost/compress/zstd"
 	"github.com/quic-go/quic-go"
-	"github.com/traumventures/cloudsourced/internal/auth"
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/sandbox"
-	"github.com/traumventures/cloudsourced/internal/tracing"
+	"github.com/traumventures/offshore/internal/auth"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/sandbox"
+	"github.com/traumventures/offshore/internal/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -128,7 +128,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		}
 	}
 	cancel()
-	span.AddEvent("barrier passed", trace.WithAttributes(attribute.Int64("cloudsourced.barrier_ms", time.Since(begin).Milliseconds())))
+	span.AddEvent("barrier passed", trace.WithAttributes(attribute.Int64("offshore.barrier_ms", time.Since(begin).Milliseconds())))
 	if _, ok := req.Roots[req.Repo]; !ok {
 		return prepErr(fmt.Errorf("repository root %s is not attached", req.Repo))
 	}
@@ -283,7 +283,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	}
 	se.pgid = cmd.Process.Pid
 	_, pspan := tracing.Start(ctx, "worker.process")
-	span.SetAttributes(attribute.String("cloudsourced.session", se.id), attribute.String("cloudsourced.slot", filepath.Base(slot)), attribute.Bool("cloudsourced.warm", warm))
+	span.SetAttributes(attribute.String("offshore.session", se.id), attribute.String("offshore.slot", filepath.Base(slot)), attribute.Bool("offshore.warm", warm))
 	s.log.Info("session started", "session", se.id, "argv", req.Argv, "cwd", req.Cwd, "slot", slot)
 	pc.Send(proto.TStarted, proto.Started{Session: se.id, Machine: s.cfg.MachineID, Slot: filepath.Base(slot), WaitMs: time.Since(begin).Milliseconds()})
 
@@ -365,7 +365,7 @@ loop:
 	exit.Usage.ExitCode = exit.Code
 	if s.cg.oomKilled(cgDir) {
 		exit.Usage.OOM = true
-		pc.Write(proto.TStderr, []byte(fmt.Sprintf("cloudsourced: session exceeded its memory limit (%d bytes); the next run reserves more\n", req.Grant.MemoryMax)))
+		pc.Write(proto.TStderr, []byte(fmt.Sprintf("offshore: session exceeded its memory limit (%d bytes); the next run reserves more\n", req.Grant.MemoryMax)))
 	}
 	s.log.Info("session finished", "session", se.id, "code", exit.Code, "duration", time.Since(se.started).Round(time.Millisecond))
 	s.metrics.sessionEnded(exit.Code, exit.Usage.Wall.Seconds(), exit.Usage.OOM, exit.Cache)
@@ -416,7 +416,7 @@ func (s *Worker) sessionEnv(req proto.Exec, id string) []string {
 		set("TERM", req.TTY.Term)
 	}
 	if j := req.Grant.Jobs; j > 0 {
-		set("CLOUDSOURCED_JOBS", strconv.Itoa(j))
+		set("OFFSHORE_JOBS", strconv.Itoa(j))
 		if _, ok := req.Env["CARGO_BUILD_JOBS"]; !ok {
 			set("CARGO_BUILD_JOBS", strconv.Itoa(j))
 		}
@@ -435,8 +435,8 @@ func (s *Worker) sessionEnv(req proto.Exec, id string) []string {
 		set(kv[0], kv[1])
 	}
 	set("PWD", req.Cwd)
-	set("CLOUDSOURCED_ACTIVE", "1")
-	set("CLOUDSOURCED_SESSION", id)
+	set("OFFSHORE_ACTIVE", "1")
+	set("OFFSHORE_SESSION", id)
 	out := make([]string, 0, len(order))
 	for _, k := range order {
 		out = append(out, k+"="+m[k])

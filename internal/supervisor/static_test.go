@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/traumventures/cloudsourced/internal/machine"
+	"github.com/traumventures/offshore/internal/machine"
 )
 
 func TestStaticHostApplyAndPlatform(t *testing.T) {

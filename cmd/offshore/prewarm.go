@@ -13,15 +13,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/daemon"
-	"github.com/traumventures/cloudsourced/internal/envbuild"
-	"github.com/traumventures/cloudsourced/internal/hooks"
-	"github.com/traumventures/cloudsourced/internal/labels"
-	"github.com/traumventures/cloudsourced/internal/manifest"
-	"github.com/traumventures/cloudsourced/internal/orchestrator"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/proxy"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/daemon"
+	"github.com/traumventures/offshore/internal/envbuild"
+	"github.com/traumventures/offshore/internal/hooks"
+	"github.com/traumventures/offshore/internal/labels"
+	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/orchestrator"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/proxy"
 )
 
 // prewarmFresh is how long a successful warm-up command counts as done
@@ -43,12 +43,12 @@ func prewarmBase(root string) string {
 
 func prewarmLog() string { return filepath.Join(daemon.StateDir(), "prewarm.log") }
 
-// prewarmCmd runs `cloudsourced prewarm [--wait] [--force] [--quiet]`.
+// prewarmCmd runs `offshore prewarm [--wait] [--force] [--quiet]`.
 func prewarmCmd(args []string) error {
 	fs := flag.NewFlagSet("prewarm", flag.ContinueOnError)
 	wait := fs.Bool("wait", false, "run in the foreground and wait until the environment is warm")
 	force := fs.Bool("force", false, "prewarm even if the environment looks warm")
-	quiet := fs.Bool("quiet", false, "print nothing (for git hooks); outside a cloudsourced repository do nothing")
+	quiet := fs.Bool("quiet", false, "print nothing (for git hooks); outside a offshore repository do nothing")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -57,11 +57,11 @@ func prewarmCmd(args []string) error {
 	}
 	say := func(format string, a ...any) {
 		if !*quiet {
-			fmt.Fprintf(os.Stderr, "cloudsourced: "+format+"\n", a...)
+			fmt.Fprintf(os.Stderr, "offshore: "+format+"\n", a...)
 		}
 	}
-	if os.Getenv("CLOUDSOURCED_DISABLE") != "" || os.Getenv("CLOUDSOURCED_ACTIVE") != "" {
-		say("prewarm skipped (CLOUDSOURCED_DISABLE or inside a remote session)")
+	if os.Getenv("OFFSHORE_DISABLE") != "" || os.Getenv("OFFSHORE_ACTIVE") != "" {
+		say("prewarm skipped (OFFSHORE_DISABLE or inside a remote session)")
 		return nil
 	}
 	cwd, err := os.Getwd()
@@ -123,7 +123,7 @@ func prewarmCmd(args []string) error {
 	if len(argv) == 0 {
 		argv = []string{"true"} // lease, start and sync only
 	}
-	os.Unsetenv("CLOUDSOURCED_PORTS") // never forward ports for a prewarm
+	os.Unsetenv("OFFSHORE_PORTS") // never forward ports for a prewarm
 	start := time.Now()
 	say("prewarming %s (%v)", root, argv)
 	code, err := proxy.Prewarm(ctx, repo, argv, os.Stderr)
@@ -212,10 +212,10 @@ func writeStamp(root string, st prewarmStamp) {
 	os.WriteFile(prewarmBase(root)+".json", b, 0o600)
 }
 
-// hooksCmd runs `cloudsourced hooks install|uninstall|status`.
+// hooksCmd runs `offshore hooks install|uninstall|status`.
 func hooksCmd(args []string) error {
 	if len(args) != 1 {
-		return errors.New("usage: cloudsourced hooks install|uninstall|status")
+		return errors.New("usage: offshore hooks install|uninstall|status")
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -255,7 +255,7 @@ func hooksCmd(args []string) error {
 			fmt.Printf("not installed (%s)\n", path)
 		}
 	default:
-		return errors.New("usage: cloudsourced hooks install|uninstall|status")
+		return errors.New("usage: offshore hooks install|uninstall|status")
 	}
 	return nil
 }

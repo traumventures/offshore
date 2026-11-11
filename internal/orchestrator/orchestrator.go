@@ -11,7 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/traumventures/cloudsourced/internal/clock"
+	"github.com/traumventures/offshore/internal/clock"
 	"io"
 	"log/slog"
 	"os"
@@ -21,23 +21,23 @@ import (
 	"sync"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/auth"
-	"github.com/traumventures/cloudsourced/internal/events"
-	"github.com/traumventures/cloudsourced/internal/labels"
-	"github.com/traumventures/cloudsourced/internal/logs"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/scheduler"
-	"github.com/traumventures/cloudsourced/internal/store"
-	"github.com/traumventures/cloudsourced/internal/tracing"
-	"github.com/traumventures/cloudsourced/internal/transport"
+	"github.com/traumventures/offshore/internal/auth"
+	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/labels"
+	"github.com/traumventures/offshore/internal/logs"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/scheduler"
+	"github.com/traumventures/offshore/internal/store"
+	"github.com/traumventures/offshore/internal/tracing"
+	"github.com/traumventures/offshore/internal/transport"
 )
 
 // Config is the pool configuration. Placement and scaling decisions are
 // made by Policy; the orchestrator only gathers state and executes them.
 // It holds pool settings only: repository settings travel in Request.
 type Config struct {
-	Owner        string           // pool id, the cloudsourced.pool label of all resources
+	Owner        string           // pool id, the offshore.pool label of all resources
 	Sizes        []scheduler.Size // machine types; the first is the default
 	MaxLifetime  time.Duration
 	QueueTimeout time.Duration
@@ -85,7 +85,7 @@ type Request struct {
 	Labels map[string]string `json:",omitempty"`
 }
 
-// QueuedTask is a request waiting for capacity (`cloudsourced top`).
+// QueuedTask is a request waiting for capacity (`offshore top`).
 type QueuedTask struct {
 	ID     string              `json:"id"`
 	Since  time.Time           `json:"since"`
@@ -150,7 +150,7 @@ type Lease struct {
 	// uses it as admission safety net.
 	MemoryOvercommit float64
 	// Provider, Size and PricePerHour describe the leased machine; Reason
-	// is the policy's placement reason (shown by `cloudsourced why`).
+	// is the policy's placement reason (shown by `offshore why`).
 	Provider     string
 	Size         string
 	PricePerHour float64
@@ -260,10 +260,11 @@ type pendingLease struct {
 
 // creation is a machine being created; it is capacity on its way.
 type creation struct {
-	prov string
-	env  string
-	size scheduler.Size
-	at   time.Time
+	prov    string
+	env     string
+	size    scheduler.Size
+	at      time.Time
+	started bool // start of a stopped machine (else create)
 }
 
 // Orchestrator manages one owner's pool.
@@ -300,7 +301,7 @@ type Orchestrator struct {
 	// Clock is the time of pool decisions: idle stop, lifetime expiry,
 	// pending lease and volume TTLs, warm pool windows, uptime. Waits,
 	// probe recency and latency metrics use real time. Set before use;
-	// New takes it from $CLOUDSOURCED_TEST_CLOCK (default: real time).
+	// New takes it from $OFFSHORE_TEST_CLOCK (default: real time).
 	Clock clock.Clock
 
 	// PrepareImage makes the environment image available on a provider
@@ -308,6 +309,16 @@ type Orchestrator struct {
 	// the reference the machine runs (nil, or an empty reference: the image
 	// is assumed present under the environment's tag).
 	PrepareImage func(ctx context.Context, provName string, prov provider.Provider, envHash, size string) (string, error)
+
+	// Profile returns what the estimator learned about a learning key
+	// (durations, slot sizes) for the cost model; nil = unknown.
+	Profile func(key string) scheduler.Profile
+
+	health       map[string]provHealth // provider instance -> health and latencies
+	leases       map[string]leaseInfo  // lease id -> expected session end
+	snapshots    map[string][]scheduler.Snapshot
+	startBlocked map[string]time.Time // machine -> no start before
+	forecast     *scheduler.Forecast
 
 	// Slots performs build slot operations on workers (prune, snapshot
 	// save and restore); nil disables slot moves and prunes.
@@ -346,7 +357,10 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		queued: map[string]repoParams{}, waiting: map[string]QueuedTask{}, envParams: map[string]repoParams{},
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
 		ProbeFunc: Probe, Clock: clk,
+		health: map[string]provHealth{}, leases: map[string]leaseInfo{}, snapshots: map[string][]scheduler.Snapshot{},
+		startBlocked: map[string]time.Time{}, forecast: scheduler.NewForecast(),
 	}
+	o.loadSnapshots()
 	o.metrics = newOrchMetrics(o)
 	o.obs = newObserver(stateDir, cfg.EventRetention)
 	o.loadRecent()
@@ -580,6 +594,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		}
 		m.Status = r.status
 		m.StatusAt = time.Now()
+		o.statusSnapshotsLocked(m)
 		o.sampleLocked(r.id, m)
 	}
 	// The data is as old as the listing, not as the end of the probes:
@@ -649,6 +664,7 @@ func (o *Orchestrator) Sample(ctx context.Context) {
 		}
 		st := r.st
 		m.Status, m.StatusAt = &st, time.Now()
+		o.statusSnapshotsLocked(m)
 		o.sampleLocked(r.id, m)
 	}
 }
@@ -803,6 +819,7 @@ func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
 		f.Queue = append(f.Queue, t)
 	}
 	sort.Slice(f.Queue, func(i, j int) bool { return f.Queue[i].Since.Before(f.Queue[j].Since) })
+	o.schedPoolLocked(&f)
 	return f
 }
 
@@ -842,6 +859,9 @@ func (o *Orchestrator) Acquire(ctx context.Context, req Request, log io.Writer) 
 func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) (Lease, error) {
 	now := o.now()
 	task := scheduler.Task{ID: newID(8), EnvHash: req.EnvHash, RepoID: req.RepoID, Key: req.Key, Request: req.Need, Limit: req.Limit, Since: now}
+	if o.Profile != nil && req.Key != "" {
+		task.Profile = o.Profile(req.Key)
+	}
 	o.mu.Lock()
 	o.recentEnvs[req.EnvHash] = now
 	o.images[req.EnvHash] = req.Image
@@ -881,9 +901,18 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 				Provider: m.Provider, Size: size, PricePerHour: o.priceLocked(m.Provider, size), Reason: pl.Reason,
 				BuildTTL: req.buildTTL(o.cfg.MaxLifetime),
 			}
-			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: o.now().Add(2 * time.Minute)}
+			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: o.now().Add(2*time.Minute + slotTimeout)}
+			exp := pl.Expected
+			if exp <= 0 {
+				exp = task.Profile.High(task.Profile.WarmRun())
+			}
+			o.leases[task.ID] = leaseInfo{start: o.now(), expected: exp}
 			env := m.EnvHash
 			o.mu.Unlock()
+			if pl.Slot.Kind != scheduler.SlotNone {
+				fmt.Fprintf(log, "offshore: preparing build slot on %s (%s)\n", m.ID, pl.Slot.Kind)
+				o.prepareSlot(ctx, m.ID, pl.Slot)
+			}
 			lease.Store = o.storeGrant(ctx, lease.Provider, req.RepoID, env)
 			return lease, nil
 		case scheduler.Reject:
@@ -903,8 +932,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			o.metrics.placements.Inc("queue")
 		}
 		o.queue[task.ID] = task
-		f = o.poolLocked(o.now())
-		acts := o.policy.Plan(f)
+		acts := o.planLocked()
 		o.markLocked(acts)
 		ch := o.changed
 		o.mu.Unlock()
@@ -917,13 +945,13 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 				msg = fmt.Sprintf("creating %s machine for environment %s", a.Size.Name, a.EnvHash[:min(12, len(a.EnvHash))])
 			}
 			if msg != "" && !announced[msg] {
-				fmt.Fprintf(log, "cloudsourced: %s\n", msg)
+				fmt.Fprintf(log, "offshore: %s\n", msg)
 				announced[msg] = true
 			}
 		}
 		o.execute(context.WithoutCancel(ctx), acts, false)
 		if len(acts) == 0 && !announced["wait"] {
-			fmt.Fprintf(log, "cloudsourced: waiting for machine capacity\n")
+			fmt.Fprintf(log, "offshore: waiting for machine capacity\n")
 			announced["wait"] = true
 		}
 		if time.Now().After(deadline) {
@@ -958,7 +986,7 @@ func (o *Orchestrator) markLocked(acts []scheduler.Action) {
 				m.listed = time.Now()
 				m.observe(o.now())
 				m.Status = nil
-				o.creating[a.Machine] = creation{prov: m.Provider, env: m.EnvHash, at: o.now()}
+				o.creating[a.Machine] = creation{prov: m.Provider, env: m.EnvHash, at: o.now(), started: true}
 			}
 		case scheduler.Stop, scheduler.Destroy:
 			if m, ok := o.machines[a.Machine]; ok {
@@ -1079,6 +1107,7 @@ func (o *Orchestrator) Unreachable(leaseID, machineID string) {
 func (o *Orchestrator) Release(leaseID string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	delete(o.leases, leaseID)
 	for _, m := range o.machines {
 		delete(m.pending, leaseID)
 	}
@@ -1092,7 +1121,16 @@ func (o *Orchestrator) createMachine(ctx context.Context, id, envHash, image str
 		o.notify()
 		o.mu.Unlock()
 	}()
-	if err := o.CreateMachine(ctx, id, envHash, image, size); err != nil {
+	start := time.Now()
+	err := o.CreateMachine(ctx, id, envHash, image, size)
+	o.mu.Lock()
+	if err != nil {
+		o.providerFailedLocked(size.Provider, err)
+	} else {
+		o.providerReadyLocked(size.Provider, time.Since(start), false)
+	}
+	o.mu.Unlock()
+	if err != nil {
 		o.log.Error("create machine", "id", id, "err", err)
 	}
 }
@@ -1140,14 +1178,14 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 		ExpiresAt: expires, Finger: ident.Fingerprint, DepsTTL: params.DepsTTL,
 		IdleStop: cfg.Policy.IdleStop, Services: services,
 		Env: map[string]string{
-			"CLOUDSOURCED_MACHINE_ID": id,
-			"CLOUDSOURCED_ENV_HASH":   envHash,
-			"CLOUDSOURCED_EXPIRES_AT": strconv.FormatInt(expires.Unix(), 10),
-			"CLOUDSOURCED_CPU":        strconv.FormatFloat(size.Capacity.CPU, 'f', -1, 64),
-			"CLOUDSOURCED_MEMORY":     strconv.FormatInt(size.Capacity.Memory, 10),
-			"CLOUDSOURCED_PROVISION":  string(provision),
-			auth.EnvSignerPub:         o.master.SignerPublic(),
-			auth.EnvFingerprint:       ident.Fingerprint,
+			"OFFSHORE_MACHINE_ID": id,
+			"OFFSHORE_ENV_HASH":   envHash,
+			"OFFSHORE_EXPIRES_AT": strconv.FormatInt(expires.Unix(), 10),
+			"OFFSHORE_CPU":        strconv.FormatFloat(size.Capacity.CPU, 'f', -1, 64),
+			"OFFSHORE_MEMORY":     strconv.FormatInt(size.Capacity.Memory, 10),
+			"OFFSHORE_PROVISION":  string(provision),
+			auth.EnvSignerPub:     o.master.SignerPublic(),
+			auth.EnvFingerprint:   ident.Fingerprint,
 		},
 		SecretEnv: map[string]string{
 			auth.EnvTLSSeed: auth.EncodeKey(seed),
@@ -1156,7 +1194,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	// The machine-wide build TTL is only an upper bound: every session
 	// sends its repository's TTL, which the server records per build slot.
 	if cfg.MaxLifetime > 0 {
-		spec.Env["CLOUDSOURCED_BUILD_TTL"] = cfg.MaxLifetime.String()
+		spec.Env["OFFSHORE_BUILD_TTL"] = cfg.MaxLifetime.String()
 	}
 	for k, v := range logs.Forward() { // machines log like the pool
 		spec.Env[k] = v
@@ -1212,6 +1250,12 @@ func (o *Orchestrator) startMachine(ctx context.Context, id string) {
 	if err != nil {
 		o.provErr(o.provName(p), "start", err)
 		o.log.Error("start machine", "id", id, "err", err)
+		o.mu.Lock()
+		// No start loop: back off before trying this machine again
+		// (e.g. still stopping, or no capacity for it).
+		o.startBlocked[id] = o.now().Add(startBackoff)
+		o.providerFailedLocked(o.provName(p), err)
+		o.mu.Unlock()
 		return
 	}
 	o.mu.Lock()
@@ -1224,7 +1268,12 @@ func (o *Orchestrator) startMachine(ctx context.Context, id string) {
 	o.mu.Unlock()
 	if err := o.waitReady(ctx, id); err != nil {
 		o.log.Error("machine did not become ready", "id", id, "err", err)
+		return
 	}
+	o.mu.Lock()
+	delete(o.startBlocked, id)
+	o.providerReadyLocked(o.provName(p), time.Since(startedAt), true)
+	o.mu.Unlock()
 }
 
 // pollIntervals returns the readiness poll interval of a provider and its
@@ -1409,7 +1458,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	o.execute(ctx, invariant, true)
 
 	o.mu.Lock()
-	acts := o.policy.Plan(o.poolLocked(o.now()))
+	acts := o.planLocked()
 	o.markLocked(acts)
 	o.mu.Unlock()
 	o.execute(context.WithoutCancel(ctx), acts, true)

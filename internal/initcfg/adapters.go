@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/traumventures/cloudsourced/internal/adapter"
+	"github.com/traumventures/offshore/internal/adapter"
 )
 
 // detectAdapters records the ecosystems of the repository and merges

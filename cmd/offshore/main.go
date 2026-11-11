@@ -1,5 +1,5 @@
-// Command cloudsourced runs build and test commands on cloud machines as if
-// they ran locally. Invoked through a symlink (e.g. ~/.cloudsourced/bin/cargo)
+// Command offshore runs build and test commands on cloud machines as if
+// they ran locally. Invoked through a symlink (e.g. ~/.offshore/bin/cargo)
 // it acts as a transparent proxy for that tool.
 package main
 
@@ -9,8 +9,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/traumventures/cloudsourced/internal/clock"
-	"github.com/traumventures/cloudsourced/internal/envbuild"
+	"github.com/traumventures/offshore/internal/clock"
+	"github.com/traumventures/offshore/internal/envbuild"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -22,86 +22,86 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
-	"github.com/traumventures/cloudsourced/internal/config"
-	"github.com/traumventures/cloudsourced/internal/daemon"
-	"github.com/traumventures/cloudsourced/internal/labels"
-	"github.com/traumventures/cloudsourced/internal/logs"
-	"github.com/traumventures/cloudsourced/internal/orchestrator"
-	"github.com/traumventures/cloudsourced/internal/proto"
-	"github.com/traumventures/cloudsourced/internal/provider"
-	"github.com/traumventures/cloudsourced/internal/proxy"
-	"github.com/traumventures/cloudsourced/internal/sandbox"
-	"github.com/traumventures/cloudsourced/internal/supervisor"
-	"github.com/traumventures/cloudsourced/internal/tracing"
-	"github.com/traumventures/cloudsourced/internal/transport"
-	"github.com/traumventures/cloudsourced/internal/worker"
+	"github.com/traumventures/offshore/internal/blobcache"
+	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/daemon"
+	"github.com/traumventures/offshore/internal/labels"
+	"github.com/traumventures/offshore/internal/logs"
+	"github.com/traumventures/offshore/internal/orchestrator"
+	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/proxy"
+	"github.com/traumventures/offshore/internal/sandbox"
+	"github.com/traumventures/offshore/internal/supervisor"
+	"github.com/traumventures/offshore/internal/tracing"
+	"github.com/traumventures/offshore/internal/transport"
+	"github.com/traumventures/offshore/internal/worker"
 )
 
 var version = "dev"
 
-const usage = `cloudsourced - run builds on cloud machines as if they ran locally
+const usage = `offshore - run builds on cloud machines as if they ran locally
 
 Usage:
-  cloudsourced run [--] <tool> [args...]   run a command through the proxy
-  cloudsourced shim install [tools...]     install proxies into ~/.cloudsourced/bin
-  cloudsourced shim status                 are the proxies first in PATH (exit 1 if not)
-  cloudsourced shim uninstall              remove proxies
-  cloudsourced status [--json]             show machines, sessions and cost today
-  cloudsourced why [N|last|list] [--json]  explain a recent run (placement, timings, labels)
-  cloudsourced top [--once] [--window 10m] live view: machines, sessions, queue, cost
-  cloudsourced prewarm [--wait] [--force]  start the remote environment of this repo in the
+  offshore run [--] <tool> [args...]   run a command through the proxy
+  offshore shim install [tools...]     install proxies into ~/.offshore/bin
+  offshore shim status                 are the proxies first in PATH (exit 1 if not)
+  offshore shim uninstall              remove proxies
+  offshore status [--json]             show machines, sessions and cost today
+  offshore why [N|last|list] [--json]  explain a recent run (placement, timings, labels)
+  offshore top [--once] [--window 10m] live view: machines, sessions, queue, cost
+  offshore prewarm [--wait] [--force]  start the remote environment of this repo in the
                                            background ([prewarm] run = [...] warms the build)
-  cloudsourced hooks install|uninstall|status
+  offshore hooks install|uninstall|status
                                            git post-checkout hook: prewarm on new worktrees
-  cloudsourced metrics                     daemon, pool and machine metrics (Prometheus text)
-  cloudsourced fetch <glob>...             copy outputs from the latest remote build
-  cloudsourced outputs mount|unmount|status
+  offshore metrics                     daemon, pool and machine metrics (Prometheus text)
+  offshore fetch <glob>...             copy outputs from the latest remote build
+  offshore outputs mount|unmount|status
                                            mount the remote build directories (target/)
                                            at their local path as a writable overlay:
                                            local cargo finds remote builds fresh
-  cloudsourced down                        destroy all machines and caches
-  cloudsourced reconcile                   reload the pool configuration, apply the policy now
-  cloudsourced daemon run|stop|status      manage the local daemon
-  cloudsourced env [hash|dockerfile]       show the environment image of this repo
-  cloudsourced env build [--wait]          build the environment image now (in the background)
-  cloudsourced env status [--json]         where the environment image exists, last prebuild
-  cloudsourced init [--write [--force]]    generate .cloudsourced.toml from Cargo, CI and Dockerfiles
-  cloudsourced doctor [--json]             check installation, configuration and connectivity
-  cloudsourced editor [--mode local|lsp-remote] [vscode|zed|neovim]
+  offshore down                        destroy all machines and caches
+  offshore reconcile                   reload the pool configuration, apply the policy now
+  offshore daemon run|stop|status      manage the local daemon
+  offshore env [hash|dockerfile]       show the environment image of this repo
+  offshore env build [--wait]          build the environment image now (in the background)
+  offshore env status [--json]         where the environment image exists, last prebuild
+  offshore init [--write [--force]]    generate .offshore.toml from Cargo, CI and Dockerfiles
+  offshore doctor [--json]             check installation, configuration and connectivity
+  offshore editor [--mode local|lsp-remote] [vscode|zed|neovim]
                                            rust-analyzer settings for remote checks
-  cloudsourced config check [--pool FILE] validate the configuration files of this mode
-  cloudsourced config show [--pool FILE]  print the effective configuration (secrets redacted)
-  cloudsourced controlplane [flags]        serve a shared control plane (see --help)
-  cloudsourced sim [flags] <trace>...      simulate the pool policy on a build trace
-  cloudsourced sim export [--since 7d] -o trace.json
+  offshore config check [--pool FILE] validate the configuration files of this mode
+  offshore config show [--pool FILE]  print the effective configuration (secrets redacted)
+  offshore controlplane [flags]        serve a shared control plane (see --help)
+  offshore sim [flags] <trace>...      simulate the pool policy on a build trace
+  offshore sim export [--since 7d] -o trace.json
                                            convert the event log into a simulator trace
-  cloudsourced report [--since 7d] [--by agent|worktree|branch|repo|user] [--json]
+  offshore report [--since 7d] [--by agent|worktree|branch|repo|user] [--json]
                                            cost, utilisation, queue wait, cache, estimator
                                            accuracy and per-label groups from the event log
-  cloudsourced controlplane info|client-config|health
-  cloudsourced version
+  offshore controlplane info|client-config|health
+  offshore version
 
 Internal:
-  cloudsourced worker                      machine worker (started by providers)
-  cloudsourced supervisor [--spec F] [--state D]
+  offshore worker                      machine worker (started by providers)
+  offshore supervisor [--spec F] [--state D]
                                            supervisor on VM machines (systemd, root)
-  cloudsourced sandbox-init                session namespace init
+  offshore sandbox-init                session namespace init
 
 Environment:
-  CLOUDSOURCED_DISABLE=1          always run locally
-  CLOUDSOURCED_REQUIRE_REMOTE=1   fail instead of falling back to local execution
-  CLOUDSOURCED_STDIN=always|never stdin forwarding policy
-  CLOUDSOURCED_AGENT=NAME         agent label of sessions (default: detected, see README)
-  CLOUDSOURCED_LABELS=k=v,k=v     extra session labels (status, top, why, report --by)
-  CLOUDSOURCED_VERBOSE=1          print the machine used for each run
-  CLOUDSOURCED_NO_RETRY=1         no second attempt when the machine is lost mid-run
-  CLOUDSOURCED_SPLIT=0            run cargo test / nextest entirely remotely (no local test run)
-  CLOUDSOURCED_PORTS=8080,3000:3001  forward local ports into the session
-  CLOUDSOURCED_CONFIG=FILE        client configuration (default ~/.config/cloudsourced/config.toml)
-  CLOUDSOURCED_POOL_CONFIG=FILE  pool configuration (default: the client configuration file)
-  CLOUDSOURCED_LOG_FORMAT=text|json  log format of daemon, control plane and machines
-  CLOUDSOURCED_LOG_LEVEL=debug|info|warn|error  log level (CLOUDSOURCED_DEBUG=1: debug)
+  OFFSHORE_DISABLE=1          always run locally
+  OFFSHORE_REQUIRE_REMOTE=1   fail instead of falling back to local execution
+  OFFSHORE_STDIN=always|never stdin forwarding policy
+  OFFSHORE_AGENT=NAME         agent label of sessions (default: detected, see README)
+  OFFSHORE_LABELS=k=v,k=v     extra session labels (status, top, why, report --by)
+  OFFSHORE_VERBOSE=1          print the machine used for each run
+  OFFSHORE_NO_RETRY=1         no second attempt when the machine is lost mid-run
+  OFFSHORE_SPLIT=0            run cargo test / nextest entirely remotely (no local test run)
+  OFFSHORE_PORTS=8080,3000:3001  forward local ports into the session
+  OFFSHORE_CONFIG=FILE        client configuration (default ~/.config/offshore/config.toml)
+  OFFSHORE_POOL_CONFIG=FILE  pool configuration (default: the client configuration file)
+  OFFSHORE_LOG_FORMAT=text|json  log format of daemon, control plane and machines
+  OFFSHORE_LOG_LEVEL=debug|info|warn|error  log level (OFFSHORE_DEBUG=1: debug)
   OTEL_TRACES_EXPORTER=otlp|console|none, OTEL_EXPORTER_OTLP_ENDPOINT=URL
                                   OpenTelemetry tracing (off by default; see [telemetry])
 `
@@ -114,7 +114,7 @@ func init() {
 
 func main() {
 	name := filepath.Base(os.Args[0])
-	if name != "cloudsourced" && !strings.HasPrefix(name, "cloudsourced.") && !strings.HasSuffix(name, ".test") {
+	if name != "offshore" && !strings.HasPrefix(name, "offshore.") && !strings.HasSuffix(name, ".test") {
 		os.Exit(proxy.Main(name, os.Args[1:]))
 	}
 	if len(os.Args) < 2 {
@@ -122,7 +122,7 @@ func main() {
 		os.Exit(2)
 	}
 	if err := run(os.Args[1], os.Args[2:]); err != nil {
-		fmt.Fprintln(os.Stderr, "cloudsourced:", err)
+		fmt.Fprintln(os.Stderr, "offshore:", err)
 		var ec exitCode
 		if errors.As(err, &ec) {
 			os.Exit(int(ec))
@@ -135,8 +135,8 @@ type exitCode int
 
 func (e exitCode) Error() string { return fmt.Sprintf("exit code %d", int(e)) }
 
-// logger logs to stderr in the format of CLOUDSOURCED_LOG_FORMAT and
-// CLOUDSOURCED_LOG_LEVEL (see internal/logs).
+// logger logs to stderr in the format of OFFSHORE_LOG_FORMAT and
+// OFFSHORE_LOG_LEVEL (see internal/logs).
 func logger() *slog.Logger { return logs.FromEnv() }
 
 func run(cmd string, args []string) error {
@@ -150,7 +150,7 @@ func run(cmd string, args []string) error {
 		}
 		os.Exit(proxy.Main(args[0], args[1:]))
 	case "worker":
-		log := logger() // before the CLOUDSOURCED_* variables are dropped
+		log := logger() // before the OFFSHORE_* variables are dropped
 		defer flushTelemetry(tracing.SetupFromConfig(tracing.ServiceWorker, config.Telemetry{}, "", log))
 		cfg, err := worker.ConfigFromEnv()
 		if err != nil {
@@ -158,7 +158,7 @@ func run(cmd string, args []string) error {
 		}
 		// The provider-supplied secrets must not leak into sessions.
 		for _, kv := range os.Environ() {
-			if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "CLOUDSOURCED_") {
+			if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "OFFSHORE_") {
 				os.Unsetenv(k)
 			}
 		}
@@ -175,7 +175,7 @@ func run(cmd string, args []string) error {
 		// GOCACHEPROG helper of global [cache.<name>] tool = "go" caches
 		// (set by the worker): gocacheprog DIR [ENDPOINT].
 		if len(args) < 1 {
-			return errors.New("usage: cloudsourced gocacheprog DIR [ENDPOINT]")
+			return errors.New("usage: offshore gocacheprog DIR [ENDPOINT]")
 		}
 		g := &blobcache.GoCacheProg{Dir: args[0]}
 		if len(args) > 1 {
@@ -243,13 +243,13 @@ func run(cmd string, args []string) error {
 	case "config":
 		return configCmd(args, os.Stdout)
 	case "version", "--version":
-		fmt.Println("cloudsourced", version)
+		fmt.Println("offshore", version)
 		return nil
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
 	}
-	return fmt.Errorf("unknown command %q (see cloudsourced help)", cmd)
+	return fmt.Errorf("unknown command %q (see offshore help)", cmd)
 }
 
 func daemonCmd(args []string) error {
@@ -299,10 +299,10 @@ func daemonCmd(args []string) error {
 		fmt.Printf("daemon running %s (socket %s, log %s)\n", raw, daemon.SocketPath(), daemon.LogPath())
 		return nil
 	}
-	return errors.New("usage: cloudsourced daemon run|start|stop|status")
+	return errors.New("usage: offshore daemon run|start|stop|status")
 }
 
-// statusJSON is the output of `cloudsourced status --json`.
+// statusJSON is the output of `offshore status --json`.
 type statusJSON struct {
 	Machines []orchestrator.Machine  `json:"machines"` // includes machines removed today (Removed set)
 	Cost     orchestrator.CostReport `json:"cost"`
@@ -315,7 +315,7 @@ func status(args []string) error {
 		case "--json":
 			asJSON = true
 		default:
-			return errors.New("usage: cloudsourced status [--json]")
+			return errors.New("usage: offshore status [--json]")
 		}
 	}
 	ctx := context.Background()
@@ -441,15 +441,15 @@ func human(b int64) string {
 
 // ShimDir is where proxy symlinks are installed.
 func ShimDir() string {
-	if d := os.Getenv("CLOUDSOURCED_SHIM_DIR"); d != "" {
+	if d := os.Getenv("OFFSHORE_SHIM_DIR"); d != "" {
 		return d
 	}
-	return filepath.Join(os.Getenv("HOME"), ".cloudsourced", "bin")
+	return filepath.Join(os.Getenv("HOME"), ".offshore", "bin")
 }
 
 func shimCmd(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: cloudsourced shim install [tools...] | status | uninstall | path")
+		return errors.New("usage: offshore shim install [tools...] | status | uninstall | path")
 	}
 	dir := ShimDir()
 	switch args[0] {
@@ -505,7 +505,7 @@ func shimCmd(args []string) error {
 		}
 		return nil
 	}
-	return errors.New("usage: cloudsourced shim install [tools...] | status | uninstall | path")
+	return errors.New("usage: offshore shim install [tools...] | status | uninstall | path")
 }
 
 func envCmd(args []string) error {
@@ -547,7 +547,7 @@ func envDaemonCmd(root, sub string, args []string) error {
 		case a == "--json" && sub == "status":
 			asJSON = true
 		default:
-			return errors.New("usage: cloudsourced env build [--wait] | env status [--json]")
+			return errors.New("usage: offshore env build [--wait] | env status [--json]")
 		}
 	}
 	ctx := context.Background()
@@ -565,7 +565,7 @@ func envDaemonCmd(root, sub string, args []string) error {
 		case wait:
 			fmt.Printf("environment image %s ready\n", b.Tag)
 		case b.Running:
-			fmt.Printf("building environment image %s in the background (cloudsourced env status)\n", b.Tag)
+			fmt.Printf("building environment image %s in the background (offshore env status)\n", b.Tag)
 		default:
 			fmt.Printf("environment image %s already built\n", b.Tag)
 		}
@@ -611,9 +611,9 @@ func describeEnvState(st *daemon.EnvStatus) string {
 	case len(p.Missing) == 0 && len(p.Ready) > 0:
 		return "image exists on " + strings.Join(p.Ready, ", ")
 	case !p.Known:
-		return "not known yet: the next run uploads the build context and builds the image (or run `cloudsourced env build`)"
+		return "not known yet: the next run uploads the build context and builds the image (or run `offshore env build`)"
 	default:
-		s := "will be built for " + strings.Join(p.Missing, ", ") + " when a machine needs it (or run `cloudsourced env build`)"
+		s := "will be built for " + strings.Join(p.Missing, ", ") + " when a machine needs it (or run `offshore env build`)"
 		if len(p.Ready) > 0 {
 			s += "; exists on " + strings.Join(p.Ready, ", ")
 		}
@@ -628,7 +628,7 @@ func describeEnvState(st *daemon.EnvStatus) string {
 // local repository (lazy outputs).
 func fetch(globs []string) error {
 	if len(globs) == 0 {
-		return errors.New("usage: cloudsourced fetch <glob>...")
+		return errors.New("usage: offshore fetch <glob>...")
 	}
 	ctx := context.Background()
 	root, err := config.FindRepo(".")
@@ -707,7 +707,7 @@ func supervisorCmd(args []string) error {
 // supervisor.StaticPayload from stdin, status prints StaticStatus).
 func staticHostCmd(args []string) error {
 	if len(args) != 1 {
-		return errors.New("usage: cloudsourced supervisor static apply|start|stop|destroy|status")
+		return errors.New("usage: offshore supervisor static apply|start|stop|destroy|status")
 	}
 	self, err := os.Executable()
 	if err != nil {

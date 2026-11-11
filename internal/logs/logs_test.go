@@ -37,12 +37,12 @@ func TestTextDefaultAndDebug(t *testing.T) {
 	if err != nil || o.JSON || o.Level != slog.LevelInfo {
 		t.Fatalf("%+v %v", o, err)
 	}
-	o, _ = Parse(env(map[string]string{"CLOUDSOURCED_DEBUG": "1"}))
+	o, _ = Parse(env(map[string]string{"OFFSHORE_DEBUG": "1"}))
 	if o.Level != slog.LevelDebug {
-		t.Fatal("CLOUDSOURCED_DEBUG should enable debug")
+		t.Fatal("OFFSHORE_DEBUG should enable debug")
 	}
 	// An explicit level wins over the legacy switch.
-	o, _ = Parse(env(map[string]string{"CLOUDSOURCED_DEBUG": "1", EnvLevel: "error"}))
+	o, _ = Parse(env(map[string]string{"OFFSHORE_DEBUG": "1", EnvLevel: "error"}))
 	if o.Level != slog.LevelError {
 		t.Fatal("level should win")
 	}
