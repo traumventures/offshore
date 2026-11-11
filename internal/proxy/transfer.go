@@ -274,7 +274,7 @@ func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry, compress 
 		}
 		if anyfs.Covering(mounts, dst) != "" {
 			if store == nil {
-				if store, err = cas.New(daemon.OutputsCASDir()); err != nil {
+				if store, err = cas.New(daemon.OutputsSpoolDir()); err != nil {
 					return err
 				}
 			}

@@ -155,6 +155,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, log *slog.Logger)
 			}
 			return s.pool.Estimate(ctx, req.Key, req.Fallback)
 		}
+	case pathOutputsStore:
+		h = func(ctx context.Context, r *http.Request, _ io.Writer) (any, error) {
+			var req outputsStoreReq
+			if err := decode(r, &req); err != nil {
+				return nil, err
+			}
+			return s.pool.OutputsStore(ctx, req.Repo)
+		}
 	case pathStatus:
 		h = func(ctx context.Context, _ *http.Request, _ io.Writer) (any, error) {
 			return s.pool.Status(ctx) // machines carry no secrets; only leases carry tokens

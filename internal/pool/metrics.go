@@ -112,7 +112,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter, r *http.Request) {
 // knownPath bounds the path label of HTTP metrics.
 func knownPath(p string) string {
 	switch p {
-	case pathEnv, pathAcquire, pathRelease, pathUnreachable, pathEstimate, pathStatus, pathReconcile, pathDown, pathHealth, pathMetrics, pathEvents, pathQueue:
+	case pathEnv, pathAcquire, pathRelease, pathUnreachable, pathEstimate, pathStatus, pathReconcile, pathDown, pathHealth, pathMetrics, pathEvents, pathQueue, pathOutputsStore:
 		return p
 	}
 	return "other"

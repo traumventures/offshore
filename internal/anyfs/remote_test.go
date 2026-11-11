@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/offshore/internal/cas"
 	"github.com/traumventures/offshore/internal/manifest"
 	"github.com/traumventures/offshore/internal/proto"
 )
@@ -106,11 +105,11 @@ func (f *fakeRemote) counts() (int, int) {
 
 func newTestTree(t *testing.T) *RemoteTree {
 	t.Helper()
-	store, err := cas.New(t.TempDir())
+	files, err := OpenFiles(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewRemoteTree(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewRemoteTree(files, openLocal(t, t.TempDir(), 0), slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func readContent(t *testing.T, tr *RemoteTree, rel string) (string, error) {
@@ -202,11 +201,9 @@ func TestRemoteTreeHintServesEagerOutputsWithoutMachine(t *testing.T) {
 	src.put("target/debug/app", "eager-binary", 5)
 	tr := newTestTree(t)
 	tr.Update(src)
-	h, err := tr.store.Ingest(strings.NewReader("eager-binary"))
-	if err != nil {
+	if _, err := tr.Ingest(context.Background(), "target/debug/app", 12, 5, strings.NewReader("eager-binary")); err != nil {
 		t.Fatal(err)
 	}
-	tr.Hint([]manifest.Entry{{Path: "target/debug/app", Kind: manifest.File, Size: 12, MtimeNs: 5, Hash: h}})
 	if got, err := readContent(t, tr, "target/debug/app"); err != nil || got != "eager-binary" {
 		t.Fatalf("got %q, %v", got, err)
 	}

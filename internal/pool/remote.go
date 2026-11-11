@@ -193,3 +193,9 @@ func (r *Remote) Reconcile(ctx context.Context) error {
 func (r *Remote) DestroyAll(ctx context.Context) error {
 	return r.callJSON(ctx, pathDown, nil, nil, nil)
 }
+
+func (r *Remote) OutputsStore(ctx context.Context, repo string) (orchestrator.OutputsStore, error) {
+	var out orchestrator.OutputsStore
+	err := r.callJSON(ctx, pathOutputsStore, outputsStoreReq{Repo: repo}, nil, &out)
+	return out, err
+}
