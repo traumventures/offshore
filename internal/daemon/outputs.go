@@ -13,21 +13,34 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/traumventures/offshore/internal/anyfs"
+	"github.com/traumventures/offshore/internal/blobcache"
 	"github.com/traumventures/offshore/internal/cas"
 	"github.com/traumventures/offshore/internal/config"
 	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/orchestrator"
 	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/store"
 	"github.com/traumventures/offshore/internal/transport"
 )
 
-// OutputsCASDir is the local content cache of remote outputs. The proxy
-// stores eager outputs of mounted build directories here instead of
-// writing them into the mount.
-func OutputsCASDir() string { return filepath.Join(StateDir(), "outputs", "cas") }
+// OutputsSpoolDir is where the proxy stores eager outputs of mounted
+// build directories (content addressed) instead of writing them into the
+// mount; the daemon moves them into the output cache ("outputs-hint").
+func OutputsSpoolDir() string { return filepath.Join(StateDir(), "outputs", "incoming") }
+
+// The output cache: contents of remote outputs as anyfs pages in a local
+// page tier and as materialized files, both reclaimed least recently
+// used beyond outputsCacheBytes (they fault in again from the local
+// pages, the machine or the store).
+func outputsPagesDir() string { return filepath.Join(StateDir(), "outputs", "pages") }
+func outputsFilesDir() string { return filepath.Join(StateDir(), "outputs", "files") }
+
+const outputsCacheBytes = 8 << 30
 
 // OutputsUpperDir is the upper (local, writable) layer of the output
 // overlay mounted at mountpoint. It lives in the client state, never in
@@ -95,6 +108,7 @@ func OutputsMounted(mp string) bool { return anyfs.IsMounted(OutputsFSType, mp) 
 type outputsRepo struct {
 	root   string
 	state  outputsState
+	repoID atomic.Value // string: state.RepoID, read by the store backing without locks
 	tree   *anyfs.RemoteTree
 	mounts []*anyfs.UserOverlay
 }
@@ -118,7 +132,9 @@ type OutputsStatus struct {
 
 type outputsMgr struct {
 	d     *Daemon
-	store *cas.Store
+	spool *cas.Store
+	files *anyfs.Files
+	local *anyfs.Local
 
 	mu     sync.Mutex
 	repos  map[string]*outputsRepo
@@ -126,18 +142,28 @@ type outputsMgr struct {
 }
 
 func newOutputsMgr(d *Daemon) (*outputsMgr, error) {
-	store, err := cas.New(OutputsCASDir())
+	spool, err := cas.New(OutputsSpoolDir())
 	if err != nil {
 		return nil, err
 	}
-	m := &outputsMgr{d: d, store: store, repos: map[string]*outputsRepo{}, leases: map[string]leaseRef{}}
+	files, err := anyfs.OpenFiles(outputsFilesDir(), nil)
+	if err != nil {
+		return nil, err
+	}
+	files.MarkAllBacked()
+	files.SetLimit(outputsCacheBytes)
+	local, err := anyfs.OpenLocal(anyfs.LocalOptions{Dir: outputsPagesDir(), Capacity: outputsCacheBytes})
+	if err != nil {
+		return nil, err
+	}
+	m := &outputsMgr{d: d, spool: spool, files: files, local: local, repos: map[string]*outputsRepo{}, leases: map[string]leaseRef{}}
 	var saved map[string]outputsState
 	if b, err := os.ReadFile(outputsStatePath()); err == nil {
 		json.Unmarshal(b, &saved)
 	}
 	for root, st := range saved {
 		r := m.repoLocked(root)
-		r.state = st
+		r.setState(st)
 		if st.Machine != "" {
 			r.tree.Update(m.source(st))
 		}
@@ -148,10 +174,48 @@ func newOutputsMgr(d *Daemon) (*outputsMgr, error) {
 func (m *outputsMgr) repoLocked(root string) *outputsRepo {
 	r, ok := m.repos[root]
 	if !ok {
-		r = &outputsRepo{root: root, tree: anyfs.NewRemoteTree(m.store, m.d.log)}
+		r = &outputsRepo{root: root, tree: anyfs.NewRemoteTree(m.files, m.local, m.d.log)}
+		r.repoID.Store("")
+		r.tree.SetBacking(m.backing(r))
 		m.repos[root] = r
 	}
 	return r
+}
+
+func (r *outputsRepo) setState(st outputsState) {
+	r.state = st
+	r.repoID.Store(st.RepoID)
+}
+
+// backing reads the repository's newest committed build slot from the
+// object store: the control plane returns its head with a store grant
+// for the repository's prefix (orchestrator.OutputsStore).
+func (m *outputsMgr) backing(r *outputsRepo) anyfs.Backing {
+	return func(ctx context.Context) (*anyfs.Tree, anyfs.Tier, error) {
+		repo, _ := r.repoID.Load().(string)
+		if repo == "" || m.d.pool == nil {
+			return nil, nil, errors.New("no repository id or control plane")
+		}
+		head, err := m.d.pool.OutputsStore(ctx, repo)
+		if err != nil {
+			return nil, nil, err
+		}
+		return openOutputsStore(ctx, repo, head)
+	}
+}
+
+// openOutputsStore loads the committed tree of a head and opens the
+// store tier holding its pages.
+func openOutputsStore(ctx context.Context, repo string, head orchestrator.OutputsStore) (*anyfs.Tree, anyfs.Tier, error) {
+	st, err := store.Open(head.Grant, store.RepoScope(repo), blobcache.MaxTTL)
+	if err != nil {
+		return nil, nil, err
+	}
+	ch, err := anyfs.LoadChain(ctx, st, head.Head.Layer)
+	if err != nil {
+		return nil, nil, fmt.Errorf("layers of %s: %w", head.Head.Layer, err)
+	}
+	return ch.Tree(), anyfs.NewStore(st, anyfs.StoreMedium()), nil
 }
 
 func (m *outputsMgr) saveLocked() {
@@ -225,20 +289,41 @@ func (m *outputsMgr) released(leaseID string, ran bool) {
 	}
 	r := m.repoLocked(ref.root)
 	mounted, build := r.state.Mounted, r.state.Build
-	r.state = ref.state
-	r.state.Mounted, r.state.Build = mounted, build
+	st := ref.state
+	st.Mounted, st.Build = mounted, build
+	r.setState(st)
 	m.saveLocked()
-	tree, st := r.tree, r.state
+	tree := r.tree
 	m.mu.Unlock()
 	tree.Update(m.source(st)) // drops kernel caches outside the lock
 }
 
-// hint records eager outputs that the proxy stored in the content cache.
+// hint moves eager outputs that the proxy stored in the spool into the
+// output cache, so the mount serves them without the machine.
 func (m *outputsMgr) hint(root string, files []manifest.Entry) {
 	m.mu.Lock()
 	r := m.repoLocked(root)
 	m.mu.Unlock()
-	r.tree.Hint(files)
+	done := map[string]bool{}
+	for _, e := range files {
+		if e.Kind != manifest.File || e.Hash == "" || !m.spool.Has(e.Hash) {
+			continue
+		}
+		f, err := os.Open(m.spool.Path(e.Hash))
+		if err != nil {
+			continue
+		}
+		_, err = r.tree.Ingest(context.Background(), e.Path, e.Size, e.MtimeNs, f)
+		f.Close()
+		if err != nil {
+			m.d.log.Warn("outputs: cannot cache eager output", "path", e.Path, "err", err)
+			continue
+		}
+		done[e.Hash] = true
+	}
+	for h := range done {
+		os.Remove(m.spool.Path(h))
+	}
 }
 
 // mount mounts every build directory of the repository at root.

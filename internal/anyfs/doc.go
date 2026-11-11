@@ -31,6 +31,12 @@
 // writeback, reclaim, thrash; metrics: resident_bytes, dirty_bytes,
 // working_set_bytes, fault_rate, reclaim_bytes.
 //
+// The laptop's output overlay stacks local -> peer -> store: RemoteTree
+// keeps contents downloaded whole from the remote slot as pages in the
+// local tier and as Files, and when the machine is gone serves listings
+// and pages from the slot's committed layer chain in the store
+// (Backing).
+//
 // File systems. Files materializes the content of tree nodes as local
 // read-only files (the page cache of whole files). LowerFS serves a
 // Source (a Tree with its Files, a directory, a remote listing) as a

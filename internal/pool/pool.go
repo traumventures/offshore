@@ -37,6 +37,10 @@ type Pool interface {
 	Reconcile(ctx context.Context) error
 	// DestroyAll removes every machine and cache of the pool.
 	DestroyAll(ctx context.Context) error
+	// OutputsStore returns the newest committed build slot head of a
+	// repository with a store grant for it (the laptop's output overlay
+	// reads it when the machine of the latest build is gone).
+	OutputsStore(ctx context.Context, repo string) (orchestrator.OutputsStore, error)
 }
 
 // Env is an environment image to make available. Context writes the build

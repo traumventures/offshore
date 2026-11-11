@@ -65,3 +65,27 @@ func TestGCLayers(t *testing.T) {
 		t.Fatalf("expired heads kept: %+v", o.heads)
 	}
 }
+
+func TestOutputsStoreNewestHeadWithGrant(t *testing.T) {
+	ctx := context.Background()
+	o := newTestOrch(t, newFake(), nil)
+	o.Stores = &StoreSet{Pool: "p", Override: &store.Config{Name: "storage", Dir: t.TempDir()}}
+	if _, err := o.OutputsStore(ctx, "r"); err != ErrNoHead {
+		t.Fatalf("without heads: %v", err)
+	}
+	now := time.Now()
+	o.mu.Lock()
+	o.addHeadLocked(scheduler.Snapshot{Repo: "r", Provider: "fake", Store: "storage", At: now.Add(-time.Hour), Layer: "1-old"}, nil, time.Time{})
+	o.addHeadLocked(scheduler.Snapshot{Repo: "r", Provider: "fake", Store: "storage", At: now, Layer: "2-new"}, []string{"1-old", "2-new"}, time.Time{})
+	o.mu.Unlock()
+	out, err := o.OutputsStore(ctx, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Head.Layer != "2-new" || len(out.Head.Chain) != 2 {
+		t.Fatalf("head %+v", out.Head)
+	}
+	if !out.Grant.Allows(store.RepoScope("r")) || out.Grant.Allows(store.RepoScope("other")) {
+		t.Fatalf("grant scopes %v", out.Grant.Scopes)
+	}
+}

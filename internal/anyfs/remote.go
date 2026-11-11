@@ -2,18 +2,22 @@ package anyfs
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
+	"os"
 	"path"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/traumventures/offshore/internal/cas"
 	"github.com/traumventures/offshore/internal/manifest"
 	"github.com/traumventures/offshore/internal/proto"
+	"github.com/zeebo/blake3"
 )
 
 // Remote reads the latest build slot of one repository on one machine
@@ -39,15 +43,26 @@ var ErrStale = errors.New("remote output changed while reading")
 // downFor is how long an unreachable remote is not asked again.
 const downFor = 20 * time.Second
 
+// Backing resolves the committed state of the remote build slot in the
+// object store: the tree of its layer head and a tier holding its pages.
+// It is the bottom of the laptop's stack local -> peer -> store, used
+// when the machine of the latest build cannot be reached.
+type Backing func(ctx context.Context) (*Tree, Tier, error)
+
 // RemoteTree caches the remote view of one repository's build
-// directories. Directory listings are fetched lazily, one directory at a
-// time, and belong to a generation that ends with every new remote run
-// (Update); file contents are kept across generations in the content
-// store (the laptop CAS), indexed by path, size and mtime, so unchanged
-// outputs are never downloaded twice. Source(prefix) serves one build
+// directories: the stack local -> peer (the machine of the latest build,
+// over QUIC) -> store (the slot's committed layers). Directory listings
+// are fetched lazily, one directory at a time, and belong to a generation
+// that ends with every new remote run (Update). File contents become
+// anyfs pages in the local tier and materialized files (Files), indexed
+// by path, size and mtime, so unchanged outputs are never downloaded
+// twice and reclaimed contents fault in again from the local pages, the
+// peer or the store. When the peer is unreachable, listings and contents
+// come from the Backing (SetBacking). Source(prefix) serves one build
 // directory as the lower layer of a UserOverlay.
 type RemoteTree struct {
-	store *cas.Store
+	files *Files
+	local Tier
 	log   *slog.Logger
 
 	mu        sync.Mutex
@@ -62,12 +77,22 @@ type RemoteTree struct {
 	flights   map[string]*flight
 	hooks     []func()
 	now       func() time.Time
+
+	backing  Backing
+	bGen     uint64 // generation of the resolution below
+	bTree    *Tree
+	bTier    Tier // local -> store
+	bErr     error
+	bUntil   time.Time
+	ingested atomic.Uint64
 }
 
+// indexed is the known content of a remote file: Node carries its digest
+// and pages.
 type indexed struct {
 	Size    int64
 	MtimeNs int64
-	Hash    string
+	Node    Node
 }
 
 type flight struct {
@@ -76,10 +101,65 @@ type flight struct {
 	err  error
 }
 
-// NewRemoteTree creates an empty tree backed by store.
-func NewRemoteTree(store *cas.Store, log *slog.Logger) *RemoteTree {
-	return &RemoteTree{store: store, log: log, dirs: map[string]map[string]proto.OutEntry{}, missing: map[string]bool{},
+// NewRemoteTree creates an empty tree whose contents are kept as pages
+// in local and materialized by files.
+func NewRemoteTree(files *Files, local Tier, log *slog.Logger) *RemoteTree {
+	return &RemoteTree{files: files, local: local, log: log, dirs: map[string]map[string]proto.OutEntry{}, missing: map[string]bool{},
 		index: map[string]indexed{}, flights: map[string]*flight{}, now: time.Now}
+}
+
+// SetBacking sets the store fallback (nil: none).
+func (t *RemoteTree) SetBacking(b Backing) {
+	t.mu.Lock()
+	t.backing, t.bTree, t.bTier, t.bErr, t.bUntil = b, nil, nil, nil, time.Time{}
+	t.mu.Unlock()
+}
+
+// resolveBacking returns the committed tree and the stack local -> store
+// of the current generation, resolving it once per generation (failures
+// are remembered for downFor).
+func (t *RemoteTree) resolveBacking(ctx context.Context) (*Tree, Tier, error) {
+	t.mu.Lock()
+	b, gen := t.backing, t.gen
+	switch {
+	case b == nil:
+		t.mu.Unlock()
+		return nil, nil, ErrUnavailable
+	case t.bGen == gen && t.bTree != nil:
+		tr, tier := t.bTree, t.bTier
+		t.mu.Unlock()
+		return tr, tier, nil
+	case t.bGen == gen && t.bErr != nil && t.now().Before(t.bUntil):
+		err := t.bErr
+		t.mu.Unlock()
+		return nil, nil, err
+	}
+	t.mu.Unlock()
+	_, err := t.do(fmt.Sprintf("backing\x00%d", gen), func() (string, error) {
+		rctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		tr, tier, err := b(rctx)
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if gen != t.gen {
+			return "", nil
+		}
+		t.bGen = gen
+		if err != nil {
+			t.bTree, t.bTier, t.bErr, t.bUntil = nil, nil, err, t.now().Add(downFor)
+			return "", err
+		}
+		t.bTree, t.bTier, t.bErr = tr, NewLink(t.local, tier, Policy{}, nil), nil
+		return "", nil
+	})
+	if err != nil {
+		t.log.Info("outputs: store fallback unavailable", "err", err)
+		return nil, nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	return t.resolveBacking(ctx)
 }
 
 // OnInvalidate registers a function called (outside the tree lock) after
@@ -146,16 +226,85 @@ func (t *RemoteTree) Stats() (dirs, files int) {
 	return len(t.dirs), len(t.index)
 }
 
-// Hint records known contents (eager outputs that were already
-// transferred into the store), so they are served without the machine.
-func (t *RemoteTree) Hint(files []manifest.Entry) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for _, e := range files {
-		if e.Kind == manifest.File && e.Hash != "" {
-			t.index[e.Path] = indexed{Size: e.Size, MtimeNs: e.MtimeNs, Hash: e.Hash}
+// Ingest stores the content of the remote file rel (size and mtime as
+// listed) from r as pages in the local tier and as a materialized file,
+// so it is served without the machine (e.g. eager outputs the proxy
+// already transferred), and returns the path of the materialized file.
+func (t *RemoteTree) Ingest(ctx context.Context, rel string, size, mtimeNs int64, r io.Reader) (string, error) {
+	rel = cleanRel(rel)
+	tmp := filepath.Join(t.files.dir, fmt.Sprintf(".ingest-%d-%d", time.Now().UnixNano(), t.ingested.Add(1)))
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp) // moved into place on success
+	h := blake3.New()
+	buf := make([]byte, PageSize)
+	n := Node{Path: rel, Kind: File, MtimeNs: mtimeNs}
+	for {
+		k, rerr := io.ReadFull(r, buf)
+		if k > 0 {
+			b := buf[:k]
+			key := KeyOf(b)
+			h.Write(b)
+			if _, err := out.Write(b); err != nil {
+				out.Close()
+				return "", err
+			}
+			if err := t.local.Put(ctx, key, b, Clean); err != nil {
+				out.Close()
+				return "", err
+			}
+			n.Pages = append(n.Pages, PageRef{Key: key, Len: int64(k)})
+			n.Size += int64(k)
+		}
+		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
+			break
+		}
+		if rerr != nil {
+			out.Close()
+			return "", rerr
 		}
 	}
+	if err := out.Close(); err != nil {
+		return "", err
+	}
+	if n.Size != size {
+		return "", fmt.Errorf("short read: %d of %d bytes", n.Size, size)
+	}
+	n.Digest = hex.EncodeToString(h.Sum(nil))
+	if err := t.files.Adopt(&n, tmp, true, true); err != nil {
+		return "", err
+	}
+	t.mu.Lock()
+	t.index[rel] = indexed{Size: size, MtimeNs: mtimeNs, Node: n}
+	t.mu.Unlock()
+	p, ok := t.files.Local(&n)
+	if !ok {
+		return "", fmt.Errorf("ingest %s: %w", rel, ErrNotFound)
+	}
+	return p, nil
+}
+
+// local returns the content of an indexed file from the local tiers:
+// the materialized file, or assembled from resident pages (or the store
+// pages of a resolved backing).
+func (t *RemoteTree) localContent(ctx context.Context, rel string, size, mtimeNs int64) (string, bool) {
+	t.mu.Lock()
+	ix, ok := t.index[rel]
+	tier := t.local
+	if t.bTier != nil && t.bGen == t.gen {
+		tier = t.bTier
+	}
+	t.mu.Unlock()
+	if !ok || ix.Size != size || ix.MtimeNs != mtimeNs {
+		return "", false
+	}
+	if p, ok := t.files.Local(&ix.Node); ok {
+		return p, true
+	}
+	p, err := t.files.Ensure(ctx, tier, &ix.Node)
+	return p, err == nil
 }
 
 // classify turns a source error into ErrNotExist, ErrStale or a remote
@@ -238,7 +387,7 @@ func (t *RemoteTree) List(ctx context.Context, dir string) (map[string]proto.Out
 		gen := t.gen
 		t.mu.Unlock()
 		if err != nil {
-			return nil, err
+			return t.listBacking(ctx, dir, err)
 		}
 		_, err = t.do(fmt.Sprintf("list\x00%d\x00%s", gen, dir), func() (string, error) {
 			lctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -266,15 +415,36 @@ func (t *RemoteTree) List(ctx context.Context, dir string) (map[string]proto.Out
 			t.mu.Unlock()
 			return "", nil
 		})
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrUnavailable) {
 			return nil, err
 		}
 		// Read the result back from the cache (or fetch again if a new
-		// generation started meanwhile).
+		// generation started meanwhile, or list the backing now that the
+		// machine is marked unreachable).
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 	}
+}
+
+// listBacking lists dir from the committed tree of the backing; cause is
+// returned if there is none.
+func (t *RemoteTree) listBacking(ctx context.Context, dir string, cause error) (map[string]proto.OutEntry, error) {
+	tr, _, err := t.resolveBacking(ctx)
+	if err != nil {
+		return nil, cause
+	}
+	if dir != "" {
+		if n, ok := tr.Get(dir); !ok || n.Kind != Dir {
+			return nil, fs.ErrNotExist
+		}
+	}
+	ch := tr.Children(dir)
+	m := make(map[string]proto.OutEntry, len(ch))
+	for _, n := range ch {
+		m[path.Base(n.Path)] = entryOfNode(n)
+	}
+	return m, nil
 }
 
 // Stat returns the remote entry of rel.
@@ -295,24 +465,22 @@ func (t *RemoteTree) Stat(ctx context.Context, rel string) (proto.OutEntry, erro
 }
 
 // Content returns the local path of the content of the remote file rel
-// described by e, downloading it into the store if needed.
+// described by e: from the local tiers, else downloaded from the peer
+// into pages, else (peer unreachable) from the store pages of the
+// committed slot.
 func (t *RemoteTree) Content(ctx context.Context, rel string, e proto.OutEntry) (string, error) {
 	rel = cleanRel(rel)
-	t.mu.Lock()
-	ix, ok := t.index[rel]
-	t.mu.Unlock()
-	if ok && ix.Size == e.Size && ix.MtimeNs == e.MtimeNs && t.store.Has(ix.Hash) {
-		return t.store.Path(ix.Hash), nil
+	if p, ok := t.localContent(ctx, rel, e.Size, e.MtimeNs); ok {
+		return p, nil
 	}
 	key := fmt.Sprintf("read\x00%s\x00%d\x00%d", rel, e.Size, e.MtimeNs)
-	hash, err := t.do(key, func() (string, error) {
+	return t.do(key, func() (string, error) {
 		t.mu.Lock()
 		src, err := t.availableLocked()
 		gen := t.gen
 		t.mu.Unlock()
 		if err != nil {
-			t.log.Info("outputs: not available locally", "path", rel)
-			return "", err
+			return t.contentBacking(ctx, rel, e, err)
 		}
 		rctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
@@ -325,28 +493,48 @@ func (t *RemoteTree) Content(ctx context.Context, rel string, e proto.OutEntry) 
 			}
 			pw.CloseWithError(err)
 		}()
-		h, err := t.store.Ingest(pr)
+		p, err := t.Ingest(rctx, rel, e.Size, e.MtimeNs, pr)
 		pr.CloseWithError(err)
 		if err != nil {
 			err = t.classify(gen, rel, err)
-			if errors.Is(err, ErrStale) {
+			switch {
+			case errors.Is(err, ErrStale):
 				t.mu.Lock()
 				if gen == t.gen {
 					delete(t.dirs, path.Dir(rel))
 				}
 				t.mu.Unlock()
+			case errors.Is(err, ErrUnavailable):
+				return t.contentBacking(ctx, rel, e, err)
 			}
 			return "", err
 		}
-		t.mu.Lock()
-		t.index[rel] = indexed{Size: e.Size, MtimeNs: e.MtimeNs, Hash: h}
-		t.mu.Unlock()
-		return h, nil
+		return p, nil
 	})
+}
+
+// contentBacking materializes rel from the store pages of the committed
+// slot if it holds the listed version (same size and mtime); cause is
+// returned otherwise.
+func (t *RemoteTree) contentBacking(ctx context.Context, rel string, e proto.OutEntry, cause error) (string, error) {
+	tr, tier, err := t.resolveBacking(ctx)
 	if err != nil {
-		return "", err
+		t.log.Info("outputs: not available locally", "path", rel)
+		return "", cause
 	}
-	return t.store.Path(hash), nil
+	n, ok := tr.Get(rel)
+	if !ok || n.Kind != File || n.Size != e.Size || n.MtimeNs != e.MtimeNs {
+		t.log.Info("outputs: listed version not in the store", "path", rel)
+		return "", cause
+	}
+	p, err := t.files.Ensure(ctx, tier, n)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	t.mu.Lock()
+	t.index[rel] = indexed{Size: n.Size, MtimeNs: n.MtimeNs, Node: *n}
+	t.mu.Unlock()
+	return p, nil
 }
 
 type countWriter struct {
@@ -441,8 +629,8 @@ func (s *RemoteSource) Local(n *Node) (string, bool) {
 	s.t.mu.Lock()
 	ix, ok := s.t.index[rel]
 	s.t.mu.Unlock()
-	if ok && ix.Size == n.Size && ix.MtimeNs == n.MtimeNs && s.t.store.Has(ix.Hash) {
-		return s.t.store.Path(ix.Hash), true
+	if ok && ix.Size == n.Size && ix.MtimeNs == n.MtimeNs {
+		return s.t.files.Local(&ix.Node)
 	}
 	return "", false
 }
