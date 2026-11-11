@@ -232,6 +232,14 @@ func New(cfg Config, log *slog.Logger) (*Worker, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Faulted-in source contents are a cache of the laptop's files: any
+	// of them can be fetched again, so they are reclaimed least recently
+	// used beyond an eighth of the disk budget (open files never; local
+	// modifications live in the projections' upper directories).
+	srcFiles.MarkAllBacked()
+	if total, _, ok := fsUsage(cfg.CacheDir); ok {
+		srcFiles.SetLimit(budgetBytes(cfg.DiskBudget, total) / 8)
+	}
 	var env []string
 	for _, kv := range os.Environ() {
 		// Neither pool secrets nor the server's tracing setup (whose

@@ -3,6 +3,7 @@ package anyfs
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/traumventures/offshore/internal/manifest"
+	"golang.org/x/sys/unix"
 )
 
 // WritableOptions configure a WritableFS mount.
@@ -26,6 +28,21 @@ type WritableOptions struct {
 	// entries (default 1h; Apply invalidates changed paths).
 	Timeout    time.Duration
 	AllowOther bool
+	// NoPassthrough disables kernel passthrough of clean files (it needs
+	// CAP_SYS_ADMIN and kernel >= 6.9; without it reads go through the
+	// daemon).
+	NoPassthrough bool
+}
+
+// WritableStats counts the file operations that reached the daemon.
+type WritableStats struct {
+	// Opens of regular files, PassthroughOpens those handed to the kernel
+	// (their reads never reach the daemon).
+	Opens            int64 `json:"opens"`
+	PassthroughOpens int64 `json:"passthrough_opens"`
+	Reads            int64 `json:"reads"`
+	Writes           int64 `json:"writes"`
+	CopyUps          int64 `json:"copy_ups"`
 }
 
 // WritableFS is a read-write FUSE file system over a TreeSource whose
@@ -48,12 +65,16 @@ type WritableFS struct {
 	mu      sync.RWMutex // guards the tree of src together with the fields below
 	dirty   map[string]*dirtyNode
 	mounts  map[string]bool // mount points of other file systems, shown as empty dirs
+	written map[string]bool // paths written here (kept out of passthrough)
 	version uint64
 	changed chan struct{} // closed and replaced on every Apply
 
 	root *wnode
 	srv  *fuse.Server
+	pt   bool // the kernel accepted passthrough
 	seq  atomic.Uint64
+
+	opens, ptOpens, reads, writes, copyUps atomic.Int64
 }
 
 // dirtyNode is a local modification.
@@ -79,7 +100,7 @@ func NewWritable(src *TreeSource, upper string, opt WritableOptions) (*WritableF
 		return nil, err
 	}
 	return &WritableFS{src: src, upper: upper, opt: opt, dirty: map[string]*dirtyNode{},
-		mounts: map[string]bool{}, changed: make(chan struct{})}, nil
+		mounts: map[string]bool{}, written: map[string]bool{}, changed: make(chan struct{})}, nil
 }
 
 // Mount mounts the file system at mnt.
@@ -97,12 +118,38 @@ func (w *WritableFS) Mount(mnt string) error {
 			FsName: w.opt.FsName, Name: w.opt.FsName, MaxWrite: 1 << 20,
 		},
 	}
+	if w.opt.NoPassthrough {
+		opts.DisabledCapabilities |= fuse.CAP_PASSTHROUGH
+	}
 	srv, err := fs.Mount(mnt, w.root, opts)
 	if err != nil {
 		return err
 	}
 	w.srv = srv
+	w.pt = !w.opt.NoPassthrough && os.Geteuid() == 0 && srv.KernelSettings().Flags64()&fuse.CAP_PASSTHROUGH != 0
 	return nil
+}
+
+func (w *WritableFS) markWritten(rel string) {
+	w.mu.Lock()
+	w.written[rel] = true
+	w.mu.Unlock()
+}
+
+func (w *WritableFS) wasWritten(rel string) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.written[rel]
+}
+
+// Passthrough reports whether clean files are served by kernel
+// passthrough.
+func (w *WritableFS) Passthrough() bool { return w.pt }
+
+// Stats returns the operation counters.
+func (w *WritableFS) Stats() WritableStats {
+	return WritableStats{Opens: w.opens.Load(), PassthroughOpens: w.ptOpens.Load(), Reads: w.reads.Load(),
+		Writes: w.writes.Load(), CopyUps: w.copyUps.Load()}
 }
 
 // Mountpoint returns the mount point.
@@ -351,11 +398,37 @@ func (w *WritableFS) newUpper() string {
 	return filepath.Join(w.upper, fmt.Sprintf("u%d-%d", time.Now().UnixNano(), w.seq.Add(1)))
 }
 
+// openClean opens the materialized content of a clean file and marks it
+// open in the file cache (reclaim skips it until the returned release).
+// For other views it returns no file.
+func (w *WritableFS) openClean(ctx context.Context, rel string) (view, *os.File, func(), error) {
+	for attempt := 0; ; attempt++ {
+		v, _, err := w.ensure(ctx, rel)
+		if err != nil || v.dirty || v.Kind != File || v.Digest == "" {
+			return v, nil, nil, err
+		}
+		files := w.src.Files()
+		if f, ok := files.Open(&v.Node); ok {
+			nd := v.Node
+			return v, f, func() { files.Release(&nd) }, nil
+		}
+		if attempt == 3 { // reclaimed right after every fault
+			return v, nil, nil, syscall.EIO
+		}
+	}
+}
+
 // copyUp turns rel into a dirty file and returns its upper path.
 func (w *WritableFS) copyUp(ctx context.Context, rel string, truncate bool) (string, error) {
-	v, content, err := w.ensure(ctx, rel)
+	v, in, release, err := w.openClean(ctx, rel)
 	if err != nil {
 		return "", err
+	}
+	if in != nil {
+		defer func() {
+			in.Close()
+			release()
+		}()
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -371,14 +444,32 @@ func (w *WritableFS) copyUp(ctx context.Context, rel string, truncate bool) (str
 		return "", syscall.EAGAIN
 	}
 	upper := w.newUpper()
-	if truncate || content == os.DevNull {
-		content = ""
+	if truncate {
+		in = nil
 	}
-	if err := copyFile(content, upper, 0o644); err != nil {
+	if err := copyHandle(in, upper); err != nil {
+		os.Remove(upper)
 		return "", err
 	}
+	w.copyUps.Add(1)
 	w.dirty[rel] = &dirtyNode{Node: cur.Node, Upper: upper, BaseDigest: cur.Digest, BaseExists: true}
 	return upper, nil
+}
+
+// copyHandle writes the content of in (nil: nothing) to a new file dst,
+// with a reflink where the file system supports it.
+func copyHandle(in *os.File, dst string) error {
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if in != nil && unix.IoctlFileClone(int(out.Fd()), int(in.Fd())) != nil {
+		if _, err := io.Copy(out, io.NewSectionReader(in, 0, 1<<62)); err != nil {
+			out.Close()
+			return err
+		}
+	}
+	return out.Close()
 }
 
 // setDirtyLocked records a new state of rel, keeping the base of an

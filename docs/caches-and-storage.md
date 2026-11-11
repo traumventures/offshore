@@ -292,7 +292,7 @@ resident/capacity, dirty, working set, faults/s and `THRASH` per machine.
 | worker build slot | kernel overlayfs (`redirect_dir=on,metacopy=on`): upper on the cache disk, lower = read-only FUSE over the committed chain with passthrough | `CAP_SYS_ADMIN` in the initial user namespace (machine containers run with `--cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor=unconfined`), FUSE passthrough needs Linux >= 6.9 (without it reads go through the daemon), upper/work and the file cache on a real file system (the cache volume, not the container's overlay root) |
 | worker build slot, unprivileged | userspace overlay (FUSE) over the same lower | `/dev/fuse` |
 | worker without FUSE | plain directory; commits scan it, a slot over a chain is extracted eagerly | nothing |
-| worker source projection | read-write anyfs FUSE (`WritableFS`) over the synced manifest, contents fetched per digest from the laptop; local writes are written back with conflict detection | `/dev/fuse` |
+| worker source projection | read-write anyfs FUSE (`WritableFS`) over the synced manifest, contents fetched per digest from the laptop (cached, LRU reclaim beyond budget/8, never open files); clean files by passthrough (inode per path + digest); local writes are written back with conflict detection | `/dev/fuse`; passthrough needs root and Linux >= 6.9 |
 | laptop output overlay (`target/`) | userspace overlay: upper in the client state, whiteouts, newest-mtime merge over the remote slot (lazy listings over QUIC, contents in the client CAS) | `/dev/fuse` (no privileges) |
 
 Why these choices (measured in `test/bench/tiers`): with passthrough no

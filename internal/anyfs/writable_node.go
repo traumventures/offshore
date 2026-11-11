@@ -3,8 +3,10 @@ package anyfs
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"io"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 
@@ -13,9 +15,27 @@ import (
 )
 
 // wnode is a node of a WritableFS (identified by its path).
+//
+// Passthrough. With kernel passthrough the opens of a clean file get its
+// materialized content as backing file, so reads (and mmaps) never reach
+// the daemon. go-fuse registers one backing file per inode and reuses it
+// for every passthrough open while one is open, so an inode must never
+// change content under open passthrough handles: the inode of a clean
+// file is keyed by its path and content digest (a change on the laptop
+// gives the path a new inode after the kernel looks it up again), and
+// the kernel refuses to mix passthrough and cached opens of one inode,
+// so each inode counts both and falls back to direct I/O (neutral to
+// both modes) for the minority: e.g. the copy-up on the first write of a
+// file that is open for reading keeps its upper file out of the kernel
+// while the clean handles stay open. Dirty files never use passthrough
+// (their writes and size changes go through the daemon).
 type wnode struct {
 	fs.Inode
 	w *WritableFS
+
+	mu         sync.Mutex
+	ptOpen     int // open passthrough handles
+	cachedOpen int // open handles using the page cache
 }
 
 var (
@@ -84,11 +104,24 @@ func (n *wnode) child(ctx context.Context, name string, v view, out *fuse.EntryO
 	if v.dirty {
 		out.SetAttrTimeout(0)
 	}
-	mode := kindBits(uint8(v.Kind))
-	if ch := n.GetChild(name); ch != nil && ch.StableAttr().Mode == mode {
+	attr := fs.StableAttr{Mode: kindBits(uint8(v.Kind))}
+	if v.Kind == File && !v.dirty {
+		attr.Ino = cleanIno(v.Path, v.Digest)
+	}
+	if ch := n.GetChild(name); ch != nil && ch.StableAttr().Mode == attr.Mode && (attr.Ino == 0 || ch.StableAttr().Ino == attr.Ino) {
 		return ch
 	}
-	return n.NewInode(ctx, &wnode{w: n.w}, fs.StableAttr{Mode: mode})
+	return n.NewInode(ctx, &wnode{w: n.w}, attr)
+}
+
+// cleanIno is the inode number of a clean file: one per path and
+// content (below go-fuse's automatic numbers, which start at 1<<63).
+func cleanIno(rel, digest string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(rel))
+	h.Write([]byte{0})
+	h.Write([]byte(digest))
+	return h.Sum64()&^(1<<63) | 2
 }
 
 func (n *wnode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -150,7 +183,12 @@ func (n *wnode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 func (n *wnode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	rel := n.rel()
 	w := n.w
+	w.opens.Add(1)
 	if flags&writeFlags != 0 {
+		if errno := n.lockNoPassthrough(ctx); errno != 0 {
+			return nil, 0, errno
+		}
+		defer n.mu.Unlock()
 		trunc := flags&syscall.O_TRUNC != 0
 		upper, err := w.copyUp(ctx, rel, trunc)
 		if err != nil {
@@ -161,31 +199,85 @@ func (n *wnode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, 
 				return nil, 0, errnoOf(err)
 			}
 		}
-		f, err := os.OpenFile(upper, int(flags)&^(syscall.O_CREAT|syscall.O_EXCL|syscall.O_APPEND|syscall.O_TRUNC), 0)
+		return n.openUpperLocked(upper, flags, true)
+	}
+	v, f, release, err := w.openClean(ctx, rel)
+	if err != nil {
+		return nil, 0, errnoOf(err)
+	}
+	switch {
+	case v.Kind == Dir:
+		return nil, 0, syscall.EISDIR
+	case v.dirty:
+		if errno := n.lockNoPassthrough(ctx); errno != 0 {
+			return nil, 0, errno
+		}
+		defer n.mu.Unlock()
+		return n.openUpperLocked(v.upper, flags, false)
+	case f == nil: // empty file without digest
+		null, err := os.Open(os.DevNull)
 		if err != nil {
 			return nil, 0, errnoOf(err)
 		}
-		return &whandle{f: f, writable: true}, 0, 0
+		return &whandle{f: null, w: w}, fuse.FOPEN_DIRECT_IO, 0
 	}
-	v, content, err := w.ensure(ctx, rel)
+	h := &whandle{f: f, w: w, release: release}
+	if !w.pt {
+		return h, fuse.FOPEN_KEEP_CACHE, 0
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.cachedOpen > 0 || w.wasWritten(rel) {
+		// Paths written here before stay out of passthrough: their next
+		// write must not wait for readers.
+		n.cachedOpen++
+		h.n = n
+		return h, fuse.FOPEN_KEEP_CACHE, 0
+	}
+	n.ptOpen++
+	h.n, h.pt = n, true
+	w.ptOpens.Add(1)
+	return &whandlePT{h}, 0, 0
+}
+
+// lockNoPassthrough locks n once no passthrough handle of it is open.
+// The kernel requires every open of an inode in passthrough mode to use
+// its backing file, which is the clean content; a write (or a read of
+// the dirty content) therefore waits briefly for the clean readers to
+// close and fails with ETXTBSY if they do not.
+func (n *wnode) lockNoPassthrough(ctx context.Context) syscall.Errno {
+	deadline := time.Now().Add(passthroughWait)
+	n.mu.Lock()
+	for n.ptOpen > 0 {
+		n.mu.Unlock()
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return syscall.ETXTBSY
+		}
+		time.Sleep(5 * time.Millisecond)
+		n.mu.Lock()
+	}
+	return 0
+}
+
+// passthroughWait bounds the wait of lockNoPassthrough.
+var passthroughWait = 2 * time.Second
+
+// openUpperLocked opens the upper file of a dirty file through the page
+// cache (n.mu held, no passthrough handle open).
+func (n *wnode) openUpperLocked(upper string, flags uint32, writable bool) (fs.FileHandle, uint32, syscall.Errno) {
+	f, err := os.OpenFile(upper, int(flags)&^(syscall.O_CREAT|syscall.O_EXCL|syscall.O_APPEND|syscall.O_TRUNC), 0)
 	if err != nil {
 		return nil, 0, errnoOf(err)
 	}
-	if v.Kind == Dir {
-		return nil, 0, syscall.EISDIR
+	h := &whandle{f: f, w: n.w, writable: writable}
+	if writable {
+		n.w.markWritten(n.rel())
 	}
-	f, err := os.Open(content)
-	if err != nil {
-		return nil, 0, errnoOf(err)
+	if n.w.pt {
+		n.cachedOpen++
+		h.n = n
 	}
-	h := &whandle{f: f}
-	if v.dirty {
-		return h, 0, 0
-	}
-	files := w.src.Files()
-	files.Acquire(&v.Node)
-	h.release = func() { files.Release(&v.Node) }
-	return h, fuse.FOPEN_KEEP_CACHE, 0
+	return h, 0, 0
 }
 
 func (n *wnode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
@@ -218,7 +310,19 @@ func (n *wnode) Create(ctx context.Context, name string, flags uint32, mode uint
 	w.setDirtyLocked(rel, &dirtyNode{Node: Node{Kind: File, Mode: mode & 0o7777}, Upper: upper})
 	v, _ := w.statLocked(rel)
 	w.mu.Unlock()
-	return n.child(ctx, name, v, out), &whandle{f: f, writable: true}, 0, 0
+	ch := n.child(ctx, name, v, out)
+	h := &whandle{f: f, w: w, writable: true}
+	w.markWritten(rel)
+	if w.pt {
+		// A new path: its inode has no passthrough handles (the kernel
+		// only creates names it does not know).
+		cn := ch.Operations().(*wnode)
+		cn.mu.Lock()
+		cn.cachedOpen++
+		h.n = cn
+		cn.mu.Unlock()
+	}
+	return ch, h, 0, 0
 }
 
 // create records a new directory or symlink.
@@ -381,9 +485,17 @@ func (n *wnode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn
 // a clean one.
 type whandle struct {
 	f        *os.File
+	w        *WritableFS
 	writable bool
 	release  func()
+	n        *wnode // counts the handle by mode (with passthrough)
+	pt       bool
 }
+
+// whandlePT offers its clean file for kernel passthrough.
+type whandlePT struct{ *whandle }
+
+func (h *whandlePT) PassthroughFd() (int, bool) { return int(h.f.Fd()), true }
 
 var (
 	_ fs.FileReader   = (*whandle)(nil)
@@ -395,6 +507,7 @@ var (
 )
 
 func (h *whandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	h.w.reads.Add(1)
 	k, err := h.f.ReadAt(dest, off)
 	if err != nil && err != io.EOF {
 		return nil, errnoOf(err)
@@ -406,11 +519,21 @@ func (h *whandle) Write(ctx context.Context, data []byte, off int64) (uint32, sy
 	if !h.writable {
 		return 0, syscall.EBADF
 	}
+	h.w.writes.Add(1)
 	k, err := h.f.WriteAt(data, off)
 	return uint32(k), errnoOf(err)
 }
 
 func (h *whandle) Release(ctx context.Context) syscall.Errno {
+	if h.n != nil {
+		h.n.mu.Lock()
+		if h.pt {
+			h.n.ptOpen--
+		} else {
+			h.n.cachedOpen--
+		}
+		h.n.mu.Unlock()
+	}
 	if h.release != nil {
 		h.release()
 	}
