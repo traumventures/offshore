@@ -345,6 +345,9 @@ type Status struct {
 	WarmRepos   []string `json:"warm_repos,omitempty"` // repo IDs with unexpired build slots
 	// Disk is the machine disk usage (nil: not measured).
 	Disk *DiskStatus `json:"disk,omitempty"`
+	// CacheFS is the file system of the cache medium checked against the
+	// machine's policy at startup (nil: not checked).
+	CacheFS *CacheFSStatus `json:"cache_fs,omitempty"`
 	// VM is the cache file system's virtual memory view (anyfs): resident,
 	// dirty and working set bytes, faults and reclaim, thrashing (nil:
 	// no cache file system).
@@ -374,6 +377,21 @@ type DiskStatus struct {
 	// SlotBytes is the size of each repository's build slot (repo id ->
 	// bytes).
 	SlotBytes map[string]int64 `json:"slot_bytes,omitempty"`
+}
+
+// CacheFSStatus is the cache medium's file system (see internal/hostfs).
+type CacheFSStatus struct {
+	Type    string `json:"type"`    // "xfs", "ext4", ...
+	Reflink bool   `json:"reflink"` // files can be cloned (FICLONE)
+	// Policy is what the machine requires ("xfs-reflink" on cloud
+	// machines; empty: anything, with warnings).
+	Policy string `json:"policy,omitempty"`
+	// OK: the policy is met. A cloud worker whose medium breaks it keeps
+	// serving (degraded: session snapshots copy or are skipped, crash
+	// consistency rests on fsync) and reports the problems here.
+	OK       bool     `json:"ok"`
+	Problems []string `json:"problems,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // VMStats is a machine's cache file system in virtual memory terms (see

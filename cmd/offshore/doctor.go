@@ -120,6 +120,7 @@ func runDoctor() []check {
 		}
 	}
 	checks = append(checks, checkCapacity(client, machines, machinesKnown))
+	checks = append(checks, runCacheFSCheck(ctx, client))
 
 	root, ferr := config.FindRepo(".")
 	var repo *config.Repo

@@ -1,22 +1,31 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/traumventures/offshore/internal/clock"
+	"github.com/traumventures/offshore/internal/hostfs"
+	"github.com/traumventures/offshore/internal/machine"
 )
 
 // fakeHost simulates mkfs/mount/blkid/findmnt/xfs_growfs.
 type fakeHost struct {
 	cmds    []string
-	fs      map[string]bool // device -> formatted
-	mounted string          // device mounted at the cache dir
+	fs      map[string]bool   // device -> formatted (xfs)
+	foreign map[string]string // device -> file system someone else made
+	mounted string            // device mounted at the cache dir
 }
 
 func (h *fakeHost) run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -26,6 +35,9 @@ func (h *fakeHost) run(_ context.Context, name string, args ...string) ([]byte, 
 	case "findmnt":
 		return []byte(h.mounted), nil
 	case "blkid":
+		if t := h.foreign[dev]; t != "" && !h.fs[dev] {
+			return []byte(t + "\n"), nil
+		}
 		if h.fs[dev] {
 			return []byte("xfs\n"), nil
 		}
@@ -158,5 +170,50 @@ func TestVolumeRescanAndGrow(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(rescan); string(b) != "1" || h.count("xfs_growfs "+a.cacheDir()) != 1 {
 		t.Fatalf("rescan %q, cmds %v", b, h.cmds)
+	}
+}
+
+func TestForeignVolumeReformattedAsXFS(t *testing.T) {
+	dev := filepath.Join(t.TempDir(), "vol0456")
+	os.WriteFile(dev, nil, 0o600)
+	a, h, _ := cacheAgent(t, &CacheSpec{Medium: CacheVolume, Device: dev})
+	h.foreign = map[string]string{dev: "ext4"}
+	if err := a.PrepareCache(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if h.count("mkfs.xfs -m reflink=1 -f "+dev) != 1 || h.mounted != dev {
+		t.Fatalf("ext4 volume kept: %v", h.cmds)
+	}
+}
+
+func TestMountedCacheChecked(t *testing.T) {
+	dev := filepath.Join(t.TempDir(), "vol0789")
+	os.WriteFile(dev, nil, 0o600)
+	a, _, _ := cacheAgent(t, &CacheSpec{Medium: CacheVolume, Device: dev})
+	var logBuf bytes.Buffer
+	a.Log = slog.New(slog.NewTextHandler(&logBuf, nil))
+	a.FSProbes = hostfs.Probes{
+		Statfs:    func(_ string, st *unix.Statfs_t) error { st.Type = hostfs.MagicXFS; return nil },
+		Mountinfo: func() (io.ReadCloser, error) { return nil, errors.New("none") },
+		Reflink:   func(string) bool { return false }, // xfs formatted without reflink
+	}
+	if err := a.PrepareCache(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logBuf.String(), "level=ERROR") || !strings.Contains(logBuf.String(), "reflink") {
+		t.Fatalf("no error for an xfs without reflink:\n%s", logBuf.String())
+	}
+}
+
+func TestWorkerLayoutCacheFSPolicy(t *testing.T) {
+	for prov, want := range map[string]string{"aws-ec2": "xfs-reflink", "oci": "xfs-reflink", StaticProvider: ""} {
+		s := Spec{Provider: prov, Layout: machine.Layout{Env: map[string]string{"A": "1"}}}
+		l := s.WorkerLayout()
+		if l.Env[machine.CacheFSEnv] != want || l.Env["A"] != "1" {
+			t.Errorf("%s: env %v", prov, l.Env)
+		}
+		if _, ok := s.Layout.Env[machine.CacheFSEnv]; ok {
+			t.Errorf("%s: spec env mutated", prov)
+		}
 	}
 }

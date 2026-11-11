@@ -56,5 +56,16 @@ Output identical to a local run.
 * macOS, iOS and Windows-native targets (other than `xwin` builds) need the
   respective host.
 
+## Host file systems
+
+The cache medium of cloud machines is xfs with reflink (formatted by the
+supervisor; anything else runs degraded and is reported, see
+[operations.md](operations.md#status-why-and-doctor)). local-docker and
+static hosts run on any Linux file system: xfs or btrfs (reflink) behave
+like cloud machines; ext4, overlay or tmpfs work, with session snapshots
+copying instead of cloning and warnings from the worker and
+`offshore doctor`. ext4's `noauto_da_alloc` mount option is warned about
+but safe for offshore's own files, whose commit points are fsynced.
+
 Only tools with an installed shim are proxied; `OFFSHORE_DISABLE=1`
 always runs locally.

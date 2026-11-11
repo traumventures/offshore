@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/traumventures/offshore/internal/hostfs"
 	"github.com/traumventures/offshore/internal/medium"
 )
 
@@ -125,6 +126,14 @@ func OpenLocal(opt LocalOptions) (*Local, error) {
 		if err != nil {
 			return nil
 		}
+		if !pageIntact(p, k, fi.Size(), dirty[k]) {
+			// Torn by a crash before its data reached the disk (page
+			// files are renamed into place without fsync): a clean page
+			// is fetched again, a dirty one is lost, not published wrong.
+			os.Remove(p)
+			delete(dirty, k)
+			return nil
+		}
 		pg := &lpage{key: k, size: fi.Size(), last: now}
 		if st, ok := fi.Sys().(*syscall.Stat_t); ok && opt.Pool != "" && st.Nlink > 2 {
 			pg.shared = true
@@ -148,6 +157,20 @@ func OpenLocal(opt LocalOptions) (*Local, error) {
 		return nil, err
 	}
 	return l, nil
+}
+
+// pageIntact checks a page file found at open: an empty file must be the
+// empty page; a dirty page (not yet written back, so not fetchable again)
+// is verified against its key.
+func pageIntact(path string, k Key, size int64, dirty bool) bool {
+	if size == 0 {
+		return k == KeyOf(nil)
+	}
+	if !dirty {
+		return true
+	}
+	b, err := os.ReadFile(path)
+	return err == nil && KeyOf(b) == k
 }
 
 func (l *Local) path(k Key) string { return filepath.Join(l.dir, string(k[:2]), string(k)) }
@@ -300,17 +323,15 @@ func (l *Local) readJournal() map[Key]bool {
 }
 
 func (l *Local) rewriteJournal() error {
-	tmp := l.journalPath() + ".tmp"
 	var b strings.Builder
 	for k, pg := range l.pages {
 		if pg.state == Dirty {
 			b.WriteString("+" + string(k) + "\n")
 		}
 	}
-	if err := os.WriteFile(tmp, []byte(b.String()), 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, l.journalPath()); err != nil {
+	// Replaced durably: a crash leaves the old or the new journal, never
+	// an empty one (ext4 noauto_da_alloc, xfs).
+	if err := hostfs.WriteFileSync(l.journalPath(), []byte(b.String()), 0o644); err != nil {
 		return err
 	}
 	f, err := os.OpenFile(l.journalPath(), os.O_APPEND|os.O_WRONLY, 0o644)

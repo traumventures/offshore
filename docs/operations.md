@@ -29,7 +29,23 @@ the machines of the pool, the repository configuration, every secret (it is
 resolved, its value is never printed), the environment image (where it
 exists, whether it will be built, the last background build) and FUSE
 (`/dev/fuse`, `fusermount3`; required only with `[outputs] mode = "fuse"`).
+In embedded mode with a local-docker provider the `cache medium` check
+inspects the file system of Docker's data root (`docker info`
+`DockerRootDir`, where the machines' cache volumes live) and warns when it
+is not reflink capable (not xfs/btrfs, or the FICLONE probe fails when the
+directory is writable) or ext4 mounted with `noauto_da_alloc`
+([caches-and-storage.md](caches-and-storage.md#build-slots-on-anyfs-commit-writeback-lazy-restore)).
 The exit status is 1 when a check failed.
+
+**Cache medium of cloud machines.** Cloud workers require xfs with reflink
+for their cache directory. A worker that finds something else keeps
+serving degraded and says so: the log line `cache medium breaks the
+machine policy`, `cache_fs` in its status (`offshore status --json`
+machine status: `type`, `reflink`, `ok`, `problems`) and
+`offshore_worker_cache_fs_ok{type,policy} 0`. Alert on that metric; the
+usual cause is a size without instance-store disk or volume on an image
+whose root file system is ext4. Fix it with `medium = "volume"` or an
+instance type with local NVMe (the supervisor formats both as xfs).
 
 ## Machine loss
 
@@ -78,7 +94,10 @@ dependencies; `internal/metrics`):
   `offshore_worker_memory_used_bytes`,
   `offshore_worker_compiler_cache_total{counter}` (sccache counters),
   `offshore_worker_transfer_bytes_total{direction}` (fetch, writeback,
-  output), `offshore_worker_ready`, `_draining`, `_warm_repos`, and the
+  output), `offshore_worker_ready`, `_draining`, `_warm_repos`,
+  `offshore_worker_cache_fs_ok{type,policy}` (0: the cache medium breaks
+  the machine's file system policy), `offshore_worker_cache_fs_reflink`,
+  and the
   cache file system in virtual memory terms
   ([caches-and-storage.md](caches-and-storage.md#anyfs-one-storage-core)):
   `offshore_cache_resident_bytes`, `_dirty_bytes`, `_working_set_bytes`,

@@ -78,6 +78,12 @@ func OpenFiles(dir string, obs Observer) (*Files, error) {
 			return nil
 		}
 		if fi, err := d.Info(); err == nil {
+			if fi.Size() == 0 && d.Name() != emptyDigest {
+				// Emptied by a crash before its data reached the disk
+				// (renamed into place without fsync): fetched again.
+				os.Remove(p)
+				return nil
+			}
 			fs_ = append(fs_, found{d.Name(), fi.Size(), fi.ModTime()})
 		}
 		return nil

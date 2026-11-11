@@ -18,6 +18,7 @@ import (
 	"github.com/traumventures/offshore/internal/access"
 	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/blobcache"
+	"github.com/traumventures/offshore/internal/hostfs"
 	"github.com/traumventures/offshore/internal/proto"
 	"github.com/traumventures/offshore/internal/store"
 )
@@ -187,7 +188,7 @@ func newCacheFS(dir string, opt cacheFSOptions) (*cacheFS, error) {
 	for _, d := range c.files.Digests() {
 		c.files.SetBacked(d) // their pages are in a repository tier or store
 	}
-	c.reflink = probeReflink(dir)
+	c.reflink = hostfs.ProbeReflink(dir)
 	if opt.Mode != nil {
 		c.mode = *opt.Mode
 	} else {
@@ -208,27 +209,6 @@ func probeMode(dir string, log *slog.Logger) fsMode {
 		return fsUser
 	}
 	return fsKernel
-}
-
-// probeReflink reports whether files below dir can be cloned.
-func probeReflink(dir string) bool {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return false
-	}
-	a, err := os.CreateTemp(dir, ".reflink-")
-	if err != nil {
-		return false
-	}
-	defer os.Remove(a.Name())
-	defer a.Close()
-	a.Write([]byte("x"))
-	b, err := os.CreateTemp(dir, ".reflink-")
-	if err != nil {
-		return false
-	}
-	defer os.Remove(b.Name())
-	defer b.Close()
-	return unix.IoctlFileClone(int(b.Fd()), int(a.Fd())) == nil
 }
 
 // repo returns (opening) a repository's stack.

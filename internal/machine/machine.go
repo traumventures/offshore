@@ -29,6 +29,10 @@ const (
 	// the supervisor (see HostStatus).
 	HostStatusEnv  = "OFFSHORE_HOST_STATUS"
 	HostStatusFile = HostStatusDir + "/status.json"
+	// CacheFSEnv names the cache medium policy of the worker
+	// (hostfs.Policy: "xfs-reflink" on cloud machines, set by the
+	// supervisor; empty: any file system with a warning).
+	CacheFSEnv = "OFFSHORE_CACHE_FS"
 	// ServerPort is the QUIC port of the server inside the container.
 	ServerPort = 7443
 )
