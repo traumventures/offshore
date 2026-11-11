@@ -62,6 +62,16 @@ type SizeSamples struct {
 	IdleShare   float64 `json:"idle_share"` // samples without sessions
 	CPUPressP95 float64 `json:"cpu_pressure_p95"`
 	MemPressP95 float64 `json:"memory_pressure_p95"`
+	// Cache file system (samples with VM): resident and dirty bytes,
+	// working set vs. local capacity, fault rate, share of samples
+	// thrashing. VMSamples = 0: no cache file system reported.
+	VMSamples      int     `json:"vm_samples,omitempty"`
+	CapacityMean   int64   `json:"capacity_mean,omitempty"`
+	ResidentMean   int64   `json:"resident_mean,omitempty"`
+	DirtyP95       int64   `json:"dirty_p95,omitempty"`
+	WorkingSetP95  int64   `json:"working_set_p95,omitempty"`
+	FaultRateMean  float64 `json:"fault_rate_mean,omitempty"`
+	ThrashingShare float64 `json:"thrashing_share,omitempty"`
 }
 
 // Cost is machine-hours × price. Machine cost is attributed to the tasks
@@ -390,6 +400,9 @@ func sampleStats(evs []events.Event, from, to time.Time) []SizeSamples {
 	type acc struct {
 		busy, res, mem, cpuP, memP []float64
 		idle, maxS                 int
+		vcap, vres, vdirty, vws    []float64
+		vfault                     []float64
+		thrash                     int
 	}
 	by := map[string]*acc{}
 	for _, ev := range evs {
@@ -416,6 +429,16 @@ func sampleStats(evs []events.Event, from, to time.Time) []SizeSamples {
 			a.idle++
 		}
 		a.maxS = max(a.maxS, ev.Sessions)
+		if vm := ev.VM; vm != nil {
+			a.vcap = append(a.vcap, float64(vm.Capacity))
+			a.vres = append(a.vres, float64(vm.Resident))
+			a.vdirty = append(a.vdirty, float64(vm.Dirty))
+			a.vws = append(a.vws, float64(vm.WorkingSet))
+			a.vfault = append(a.vfault, vm.FaultRate)
+			if vm.Thrashing || vm.Capacity > 0 && vm.WorkingSet > vm.Capacity {
+				a.thrash++
+			}
+		}
 	}
 	mean := func(xs []float64) float64 {
 		s := 0.0
@@ -435,11 +458,16 @@ func sampleStats(evs []events.Event, from, to time.Time) []SizeSamples {
 			Size: k, Samples: len(a.busy), BusyCPUMean: mean(a.busy), BusyCPUP95: p95(a.busy),
 			ReservedCPU: mean(a.res), MemoryMean: mean(a.mem), MemoryP95: p95(a.mem), SessionsMax: a.maxS,
 			IdleShare: div(float64(a.idle), float64(len(a.busy))), CPUPressP95: p95(a.cpuP), MemPressP95: p95(a.memP),
+			VMSamples: len(a.vres), CapacityMean: int64(mean(a.vcap)), ResidentMean: int64(mean(a.vres)), DirtyP95: int64(p95(a.vdirty)),
+			WorkingSetP95: int64(p95(a.vws)), FaultRateMean: mean(a.vfault), ThrashingShare: div(float64(a.thrash), float64(len(a.vres))),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Size < out[j].Size })
 	return out
 }
+
+// gb formats bytes as GB.
+func gb(b int64) string { return fmt.Sprintf("%.1fG", float64(b)/(1<<30)) }
 
 func div(a, b float64) float64 {
 	if b == 0 {
@@ -526,6 +554,22 @@ func (r Report) Write(w io.Writer) {
 				100*s.BusyCPUMean, 100*s.BusyCPUP95, 100*s.ReservedCPU, 100*s.MemoryMean, 100*s.MemoryP95, 100*s.IdleShare, s.SessionsMax, s.CPUPressP95, s.MemPressP95)
 		}
 		tw.Flush()
+		var vm []SizeSamples
+		for _, s := range r.Samples {
+			if s.VMSamples > 0 {
+				vm = append(vm, s)
+			}
+		}
+		if len(vm) > 0 {
+			fmt.Fprintln(w, "\ncache file system (machine samples)")
+			tw := tabwriter.NewWriter(w, 2, 2, 2, ' ', 0)
+			fmt.Fprintln(tw, "  SIZE\tSAMPLES\tRESIDENT/CAPACITY mean\tDIRTY p95\tWORKING SET p95\tFAULTS/s mean\tTHRASHING")
+			for _, s := range vm {
+				fmt.Fprintf(tw, "  %s\t%d\t%s / %s\t%s\t%s\t%.1f\t%.0f%%\n", s.Size, s.VMSamples, gb(s.ResidentMean), gb(s.CapacityMean),
+					gb(s.DirtyP95), gb(s.WorkingSetP95), s.FaultRateMean, 100*s.ThrashingShare)
+			}
+			tw.Flush()
+		}
 	}
 	var pl []string
 	for k, n := range r.Placements {

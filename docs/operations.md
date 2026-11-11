@@ -211,7 +211,11 @@ previous hook.
 history graphs of the pool (busy cores, session memory, sessions plus queue,
 cost per hour; seeded from the `machine_sample` events and extended by the
 2 s status polls, kept in memory for 3 h), one line per machine (busy-core
-bar and history, memory bar, PSI, sessions, price), a sortable session table
+bar and history, memory bar, PSI, sessions, price, and when the worker
+reports its cache file system (`Status.VM`): resident of local capacity,
+dirty bytes, working set, page faults per second and `THRASH` while the
+working set exceeds the local tier; dropped first on narrow terminals), a
+sortable session table
 (machine, agent, worktree, branch, elapsed, busy/reserved cores,
 used/reserved memory, command) and the queue. Keys: ↑/↓ PgUp/PgDn select,
 `e c m a w n` sort by elapsed, CPU, memory, agent, worktree, machine (again:
@@ -228,7 +232,9 @@ an analysis event log (`events-YYYY-MM-DD.jsonl` in its state directory,
 `[telemetry] events_retention_days`, default 30) of task and machine events.
 `offshore report [--since 7d] [--by agent,worktree] [--json]` shows cost per day, repository
 and size, per agent/worktree/branch/repo/user, utilisation and overprovisioning, queue wait p50/p95, warm vs.
-cold caches and estimator accuracy; `offshore sim export --since 7d -o
+cold caches and estimator accuracy, machine samples per size and, from
+samples with a cache file system (`machine_sample.vm`), resident/capacity,
+dirty and working set p95, fault rate and the share of samples thrashing; `offshore sim export --since 7d -o
 trace.json` converts the real runs into a simulator trace (both work
 embedded and remote, via the control plane's `POST /v1/events`, API key
 protected). See [scheduling.md](scheduling.md#calibrating-the-simulator-from-real-runs).
