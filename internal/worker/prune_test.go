@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,6 +165,33 @@ func TestPruneRepoRPC(t *testing.T) {
 	}
 	if res := w.slotOp(t.Context(), proto.SlotOp{Op: "explode"}); res.Err == "" {
 		t.Fatal("unknown op accepted")
+	}
+}
+
+// A prune before a placement must not wait for a long maintenance prune
+// (production: placements waited up to 20 minutes behind one), nor take
+// the lock at all for a repository without a slot.
+func TestPruneRepoBoundedByRunningPrune(t *testing.T) {
+	root := t.TempDir()
+	sl, _ := newSlots(root)
+	rustSlot(t, root)
+	w := &Worker{slots: sl, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	old := pruneLockWait
+	pruneLockWait = 100 * time.Millisecond
+	defer func() { pruneLockWait = old }()
+	w.pruneMu.Lock()
+	begin := time.Now()
+	res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotPrune, Repo: "repo"})
+	if res.Err == "" || time.Since(begin) > 5*time.Second {
+		t.Fatalf("prune behind a running prune: %+v after %s", res, time.Since(begin))
+	}
+	begin = time.Now()
+	if res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotPrune, Repo: "nope"}); !strings.Contains(res.Err, "no build slot") || time.Since(begin) > 50*time.Millisecond {
+		t.Fatalf("unknown repo waited for the lock: %+v after %s", res, time.Since(begin))
+	}
+	w.pruneMu.Unlock()
+	if res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotPrune, Repo: "repo"}); res.Err != "" {
+		t.Fatalf("prune after the lock is free: %+v", res)
 	}
 }
 
