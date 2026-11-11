@@ -219,3 +219,23 @@ func TestConfigTierStack(t *testing.T) {
 		t.Fatalf("stacked size: %+v %+v", got, s[1])
 	}
 }
+
+func TestProviderMaxMachinesInPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	cfg := "[pool]\nmax_machines = 4\n[providers.a]\ntype = \"local-docker\"\nmax_machines = 0\n[providers.b]\ntype = \"local-docker\"\n" +
+		"[[providers.a.size]]\nname = \"s\"\ncpu = 2\nmemory = \"4G\"\n[[providers.b.size]]\nname = \"s\"\ncpu = 2\nmemory = \"4G\"\n"
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	u, err := config.LoadPool(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Config(u).Policy
+	if lim, ok := p.ProviderMax["a"]; !ok || lim != 0 || !p.Disabled("a") {
+		t.Fatalf("a: %v", p.ProviderMax)
+	}
+	if _, ok := p.ProviderMax["b"]; ok || p.Disabled("b") {
+		t.Fatalf("b unset must have no limit: %v", p.ProviderMax)
+	}
+}

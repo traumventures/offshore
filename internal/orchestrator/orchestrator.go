@@ -909,7 +909,8 @@ func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
 	}
 	for id, m := range o.machines {
 		sm := scheduler.Machine{
-			ID: id, Provider: m.Provider, EnvHash: m.EnvHash, Size: m.Labels[provider.LabelSize], Draining: m.Draining,
+			ID: id, Provider: m.Provider, EnvHash: m.EnvHash, Size: m.Labels[provider.LabelSize],
+			Draining:  m.Draining || o.cfg.Policy.Disabled(m.Provider), // a disabled provider takes no sessions
 			Capacity:  scheduler.Resources{CPU: m.CPU, Memory: m.Memory},
 			CreatedAt: m.CreatedAt, ExpiresAt: m.ExpiresAt,
 		}
@@ -1705,9 +1706,14 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	for _, m := range o.machines {
 		expired := !m.ExpiresAt.IsZero() && !now.Before(m.ExpiresAt)
 		busy := m.Status != nil && len(m.Status.Sessions) > 0
+		_, inFlight := o.creating[m.ID]
 		switch {
 		case m.State == provider.Failed:
 			invariant = append(invariant, scheduler.Action{Kind: scheduler.Destroy, Machine: m.ID, Reason: "failed"})
+		case o.cfg.Policy.Disabled(m.Provider) && !inFlight && m.State != provider.Starting && !busy && len(m.pending) == 0:
+			// max_machines = 0: the provider is disabled; its machines
+			// finish their sessions and are destroyed.
+			invariant = append(invariant, scheduler.Action{Kind: scheduler.Destroy, Machine: m.ID, Reason: "provider disabled"})
 		case expired && m.State == provider.Running && busy:
 			m.Draining = true
 		case expired && m.State != provider.Starting:
