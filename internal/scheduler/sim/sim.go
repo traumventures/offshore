@@ -47,11 +47,36 @@ type Options struct {
 	// MinBilling is the minimum billed time per create or start (default
 	// 60s like EC2; negative = none).
 	MinBilling time.Duration
+	// Resize lets the policy grow machine disks (provider.DiskResizer).
+	Resize bool
+	// Bandwidth is the restore throughput from a provider's own store,
+	// CrossBandwidth from another provider's (bytes/s; defaults like the
+	// cost model); CrossEgress the price per GB across providers.
+	Bandwidth, CrossBandwidth int64
+	CrossEgress               float64
+	// Down makes providers fail creates with a capacity error during
+	// [From, To) seconds since the trace start.
+	Down []Outage
 	// Debug, when set, is called for every completed job with its wait.
 	Debug func(j Job, wait time.Duration)
 }
 
+// Outage is a period in which a provider has no capacity.
+type Outage struct {
+	Provider string
+	From, To float64 // seconds since the trace start
+}
+
 func (o *Options) defaults() {
+	if o.Bandwidth <= 0 {
+		o.Bandwidth = scheduler.DefaultBandwidth
+	}
+	if o.CrossBandwidth <= 0 {
+		o.CrossBandwidth = scheduler.DefaultCrossBW
+	}
+	if o.CrossEgress == 0 {
+		o.CrossEgress = scheduler.DefaultCrossEgress
+	}
 	if o.MaxLifetime <= 0 {
 		o.MaxLifetime = 24 * time.Hour
 	}
@@ -94,29 +119,38 @@ func latency(m map[string]time.Duration, prov string, def time.Duration) time.Du
 
 // Report summarises a simulation run.
 type Report struct {
-	Name         string         `json:"name"`
-	Jobs         int            `json:"jobs"`
-	Completed    int            `json:"completed"`
-	Failed       int            `json:"failed"`   // not completed: rejected, timed out or OOM killed too often
-	Rejected     int            `json:"rejected"` // larger than every size
-	TimedOut     int            `json:"timed_out"`
-	Cost         float64        `json:"cost"` // machine-hours * price
-	MachineHours float64        `json:"machine_hours"`
-	Machines     int            `json:"machines"` // machines created
-	MaxRunning   int            `json:"max_running"`
-	WaitP50      time.Duration  `json:"wait_p50"`
-	WaitP95      time.Duration  `json:"wait_p95"`
-	WaitMax      time.Duration  `json:"wait_max"`
-	TurnP50      time.Duration  `json:"turnaround_p50"` // wait + run time
-	TurnP95      time.Duration  `json:"turnaround_p95"`
-	CPUUtil      float64        `json:"cpu_util"` // used / provisioned core-seconds
-	MemUtil      float64        `json:"mem_util"`
-	Slowdown     float64        `json:"slowdown"` // mean run time / warm full-speed duration
-	OOMs         int            `json:"ooms"`
-	Swapped      int            `json:"swapped"` // jobs that ran while their machine swapped
-	WarmHits     int            `json:"warm_hits"`
-	WarmRate     float64        `json:"warm_rate"`
-	Actions      map[string]int `json:"actions"`
+	Name         string        `json:"name"`
+	Jobs         int           `json:"jobs"`
+	Completed    int           `json:"completed"`
+	Failed       int           `json:"failed"`   // not completed: rejected, timed out or OOM killed too often
+	Rejected     int           `json:"rejected"` // larger than every size
+	TimedOut     int           `json:"timed_out"`
+	Cost         float64       `json:"cost"` // machine-hours * price
+	MachineHours float64       `json:"machine_hours"`
+	Machines     int           `json:"machines"` // machines created
+	MaxRunning   int           `json:"max_running"`
+	WaitP50      time.Duration `json:"wait_p50"`
+	WaitP95      time.Duration `json:"wait_p95"`
+	WaitMax      time.Duration `json:"wait_max"`
+	TurnP50      time.Duration `json:"turnaround_p50"` // wait + run time
+	TurnP95      time.Duration `json:"turnaround_p95"`
+	CPUUtil      float64       `json:"cpu_util"` // used / provisioned core-seconds
+	MemUtil      float64       `json:"mem_util"`
+	Slowdown     float64       `json:"slowdown"` // mean run time / warm full-speed duration
+	OOMs         int           `json:"ooms"`
+	Swapped      int           `json:"swapped"` // jobs that ran while their machine swapped
+	WarmHits     int           `json:"warm_hits"`
+	WarmRate     float64       `json:"warm_rate"`
+	Restores     int           `json:"restores"`
+	Prunes       int           `json:"prunes"`
+	Resizes      int           `json:"resizes"`
+	Evictions    int           `json:"evictions"` // slots dropped because a disk was full
+	EgressCost   float64       `json:"egress_cost"`
+	// Flaps counts machines created or started within two minutes after a
+	// machine of the same environment was drained or stopped by
+	// consolidation (the production flapping case).
+	Flaps   int            `json:"flaps"`
+	Actions map[string]int `json:"actions"`
 }
 
 type job struct {
@@ -132,12 +166,16 @@ type job struct {
 }
 
 type run struct {
-	j       *job
-	reserve scheduler.Resources
-	work    float64 // remaining seconds at full speed
-	speed   float64
-	seq     int
-	start   time.Time
+	j        *job
+	reserve  scheduler.Resources
+	expected time.Duration // the policy's expected run time (release forecast)
+	warm     bool
+	restored bool
+	before   int64   // slot bytes at the start
+	work     float64 // remaining seconds at full speed
+	speed    float64
+	seq      int
+	start    time.Time
 }
 
 type machine struct {
@@ -155,10 +193,16 @@ type machine struct {
 	idle     time.Time
 	up       time.Time // compute billed since (create or start)
 	swapping bool
+	disk     int64            // disk size (0 = unlimited)
+	slots    map[string]int64 // repository -> slot bytes
 }
 
 type sim struct {
 	o        Options
+	fc       *scheduler.Forecast
+	est      map[string]estimate // per repository until the next observation
+	snaps    map[string][]scheduler.Snapshot
+	calm     map[string]time.Time // env -> last consolidation drain or stop
 	now      time.Time
 	machines []*machine
 	queue    []*job
@@ -168,12 +212,15 @@ type sim struct {
 	r        Report
 
 	cpuUsed, cpuProv, memUsed, memProv float64
+	start                              time.Time
 }
 
 // Run simulates trace under o.
 func Run(trace Trace, o Options) Report {
 	o.defaults()
-	s := &sim{o: o, now: trace.Start, recent: map[string]time.Time{}}
+	s := &sim{o: o, now: trace.Start, recent: map[string]time.Time{}, fc: scheduler.NewForecast(),
+		snaps: map[string][]scheduler.Snapshot{}, calm: map[string]time.Time{}}
+	s.start = trace.Start
 	s.r = Report{Name: o.Name, Jobs: len(trace.Jobs), Actions: map[string]int{}}
 	jobs := make([]*job, len(trace.Jobs))
 	last := 0.0
@@ -236,8 +283,22 @@ func Run(trace Trace, o Options) Report {
 					s.r.Swapped++
 				}
 				m.warm[r.j.Repo] = true
-				s.o.Estimator.Observe(r.j.Repo, scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), CPUSeconds: r.j.CPU * r.j.Duration,
-					Wall: r.j.runFor})
+				after := r.before
+				if r.j.SlotBytes > 0 {
+					if r.warm || r.restored {
+						after += int64(r.j.SlotGrowth)
+					} else {
+						after = int64(r.j.SlotBytes)
+					}
+					m.slots[r.j.Repo] = after
+					s.fitDisk(m, r.j.Repo)
+				}
+				u := scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), CPUSeconds: r.j.CPU * r.j.Duration,
+					Wall: r.j.runFor, Warm: r.warm, Provider: m.prov, SlotBytesBefore: r.before, SlotBytesAfter: after}
+				if r.restored {
+					u.Warm, u.Restored = false, true
+				}
+				s.observe(r.j.Repo, u)
 			}
 			m.runs = kept
 			if len(m.runs) == 0 && m.idle.IsZero() && m.state == scheduler.Running {
@@ -358,26 +419,54 @@ func (s *sim) advance(d time.Duration) {
 	s.r.MaxRunning = max(s.r.MaxRunning, running)
 }
 
+type estimate struct {
+	fallback scheduler.Resources
+	need     scheduler.Resources
+	profile  scheduler.Profile
+}
+
+// observe records a finished run with the estimator.
+func (s *sim) observe(repo string, u scheduler.Usage) {
+	s.o.Estimator.Observe(repo, u)
+	delete(s.est, repo)
+}
+
 func (s *sim) task(j *job) scheduler.Task {
 	fallback := scheduler.Resources{CPU: j.CPU, Memory: int64(j.Memory)}
+	e, ok := s.est[j.Repo]
+	if !ok || e.fallback != fallback {
+		e = estimate{fallback, s.o.Estimator.Estimate(j.Repo, fallback), s.o.Estimator.Profile(j.Repo)}
+		if s.est == nil {
+			s.est = map[string]estimate{}
+		}
+		s.est[j.Repo] = e
+	}
 	return scheduler.Task{ID: fmt.Sprintf("j%d", j.n), EnvHash: j.Env, RepoID: j.Repo, Key: j.Repo,
-		Request: s.o.Estimator.Estimate(j.Repo, fallback), Since: j.since}
+		Request: e.need, Since: j.since, Profile: e.profile}
 }
 
 // pool is the policy's view, built like the orchestrator's poolLocked.
 func (s *sim) pool() scheduler.Pool {
-	f := scheduler.Pool{Now: s.now, Sizes: s.o.Sizes, Recent: map[string]time.Time{}}
+	f := scheduler.Pool{Now: s.now, Sizes: s.o.Sizes, Recent: map[string]time.Time{}, Providers: map[string]scheduler.ProviderState{}}
 	for env, t := range s.recent {
 		f.Recent[env] = t
+	}
+	for _, sz := range s.o.Sizes {
+		f.Providers[sz.Provider] = scheduler.ProviderState{Boot: latency(s.o.Boot, sz.Provider, 60*time.Second),
+			Start: latency(s.o.Start, sz.Provider, 20*time.Second)}
 	}
 	for _, m := range s.machines {
 		sm := scheduler.Machine{ID: m.id, Provider: m.prov, EnvHash: m.env, Size: m.size.Name, State: m.state,
 			Draining: m.draining, Capacity: m.size.Capacity, CreatedAt: m.created, ExpiresAt: m.expires}
+		if m.state == scheduler.Starting {
+			sm.ReadyAt = m.readyAt
+		}
 		if m.state == scheduler.Running {
 			var cpu float64
 			var mem int64
 			for _, r := range m.runs {
 				sm.Reserved = sm.Reserved.Add(r.reserve)
+				sm.Releases = append(sm.Releases, scheduler.Release{At: r.start.Add(r.expected), Res: r.reserve, Start: r.start})
 				cpu += r.j.CPU
 				mem += int64(r.j.PeakMemory)
 			}
@@ -389,6 +478,14 @@ func (s *sim) pool() scheduler.Pool {
 				sm.Pressure.Memory = 1 - float64(m.size.Capacity.Memory)/float64(mem)
 			}
 			sm.Sessions = len(m.runs)
+			sm.DiskTotal, sm.CanResize = m.disk, s.o.Resize
+			if len(m.slots) > 0 {
+				sm.SlotBytes = map[string]int64{}
+				for repo, b := range m.slots {
+					sm.SlotBytes[repo] = b
+					sm.DiskUsed += b
+				}
+			}
 			for repo := range m.warm {
 				sm.WarmRepos = append(sm.WarmRepos, repo)
 			}
@@ -402,7 +499,51 @@ func (s *sim) pool() scheduler.Pool {
 	for _, j := range s.queue {
 		f.Queue = append(f.Queue, s.task(j))
 	}
+	f.Snapshots = s.snaps
+	for _, o := range s.o.Down {
+		at := s.start.Add(time.Duration(o.To * float64(time.Second)))
+		if s.now.Before(at) && !s.now.Before(s.start.Add(time.Duration(o.From*float64(time.Second)))) {
+			ps := f.Providers[o.Provider]
+			ps.Down = at
+			f.Providers[o.Provider] = ps
+		}
+	}
 	return f
+}
+
+// fitDisk drops other repositories' slots while m's disk is over full
+// (the worker's own eviction when nobody pruned).
+func (s *sim) fitDisk(m *machine, keep string) {
+	if m.disk <= 0 {
+		return
+	}
+	for {
+		var used int64
+		victim, vb := "", int64(0)
+		for repo, b := range m.slots {
+			used += b
+			if repo != keep && b > vb {
+				victim, vb = repo, b
+			}
+		}
+		if used <= m.disk || victim == "" {
+			return
+		}
+		delete(m.slots, victim)
+		delete(m.warm, victim)
+		s.r.Evictions++
+	}
+}
+
+// down reports whether prov has no capacity now.
+func (s *sim) down(prov string) bool {
+	for _, o := range s.o.Down {
+		if o.Provider == prov && !s.now.Before(s.start.Add(time.Duration(o.From*float64(time.Second)))) &&
+			s.now.Before(s.start.Add(time.Duration(o.To*float64(time.Second)))) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *sim) find(id string) *machine {
@@ -421,12 +562,20 @@ func (s *sim) settle(tick bool) {
 	if len(s.queue) == 0 && !tick {
 		return
 	}
-	s.execute(s.o.Policy.Plan(s.pool()))
+	f := s.pool()
+	s.fc.Observe(f)
+	s.fc.Apply(&f)
+	acts := s.o.Policy.Plan(f)
+	s.fc.Note(f, acts)
+	s.execute(acts)
 	s.placeQueued()
 }
 
 func (s *sim) placeQueued() {
 	for _, j := range append([]*job(nil), s.queue...) {
+		if s.o.QueueTimeout <= 0 && len(s.queue) > 0 && !s.anyFree(j) {
+			continue // no machine of its environment has room: Place would wait
+		}
 		if s.o.QueueTimeout > 0 && s.now.Sub(j.since) > s.o.QueueTimeout {
 			s.dequeue(j)
 			s.r.TimedOut++
@@ -440,7 +589,7 @@ func (s *sim) placeQueued() {
 		case scheduler.Assign:
 			if m := s.find(pl.Machine); m != nil && m.state == scheduler.Running {
 				s.dequeue(j)
-				s.assign(m, j, pl.Grant.Reserve)
+				s.assign(m, j, pl.Grant.Reserve, expected(pl, t, m), pl.Slot)
 			}
 		case scheduler.Reject:
 			s.dequeue(j)
@@ -449,21 +598,96 @@ func (s *sim) placeQueued() {
 	}
 }
 
+// anyFree reports whether a running machine of j's environment could
+// take any task (a cheap filter before building the pool).
+func (s *sim) anyFree(j *job) bool {
+	for _, m := range s.machines {
+		if m.env != j.Env || m.state != scheduler.Running || m.draining {
+			continue
+		}
+		var cpu float64
+		var mem int64
+		for _, r := range m.runs {
+			cpu += r.reserve.CPU
+			mem += r.reserve.Memory
+		}
+		if cpu < 2*m.size.Capacity.CPU && mem < m.size.Capacity.Memory {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *sim) dequeue(j *job) {
 	s.queue = slices.DeleteFunc(s.queue, func(o *job) bool { return o == j })
 }
 
-func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources) {
+// expected is the run time the policy expects for a placement.
+func expected(pl scheduler.Placement, t scheduler.Task, m *machine) time.Duration {
+	if pl.Expected > 0 {
+		return pl.Expected
+	}
+	if m.warm[t.RepoID] {
+		return t.Profile.High(t.Profile.WarmRun())
+	}
+	return t.Profile.High(t.Profile.ColdRun(m.prov))
+}
+
+func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.Duration, slot scheduler.SlotAction) {
 	j.wait += s.now.Sub(j.since)
 	j.attempts++
 	work := j.Duration
-	if m.warm[j.Repo] {
+	prep := 0.0 // seconds of slot preparation before the build runs
+	restored := false
+	switch slot.Kind {
+	case scheduler.SlotPrune:
+		s.r.Prunes++
+		prep = scheduler.DefaultPrune.Seconds()
+		freed := int64(0)
+		for freed < slot.Bytes {
+			victim, vb := "", int64(0)
+			for repo, b := range m.slots {
+				if repo != j.Repo && b > vb {
+					victim, vb = repo, b
+				}
+			}
+			if victim == "" {
+				if b := m.slots[j.Repo]; b > 0 {
+					m.slots[j.Repo] = b * 2 / 3
+				}
+				break
+			}
+			delete(m.slots, victim)
+			delete(m.warm, victim)
+			freed += vb
+		}
+	case scheduler.SlotResize:
+		s.r.Resizes++
+		prep = scheduler.DefaultResize.Seconds()
+		m.disk = max(m.disk, slot.Bytes)
+	case scheduler.SlotRestore:
+		s.r.Restores++
+		bw := s.o.Bandwidth
+		if slot.Snapshot.Store != m.prov {
+			bw = s.o.CrossBandwidth
+			egress := float64(slot.Snapshot.Bytes) / 1e9 * s.o.CrossEgress
+			s.r.EgressCost += egress
+			s.r.Cost += egress
+		}
+		prep = float64(slot.Snapshot.Bytes) / float64(bw)
+		m.slots[j.Repo] = slot.Snapshot.Bytes
+		restored = true
+	}
+	warm := m.warm[j.Repo]
+	if warm {
 		s.r.WarmHits++
-	} else {
+	} else if !restored {
 		work *= 1 + s.o.ColdPenalty
 	}
+	work += prep
 	s.seq++
-	m.runs = append(m.runs, &run{j: j, reserve: reserve, work: work, seq: s.seq, start: s.now})
+	m.runs = append(m.runs, &run{j: j, reserve: reserve, work: work, seq: s.seq, start: s.now, expected: exp, warm: warm,
+		restored: restored, before: m.slots[j.Repo]})
 	m.idle = time.Time{}
 	if !s.o.Swap {
 		s.oom(m)
@@ -484,7 +708,7 @@ func (s *sim) oom(m *machine) {
 		r := m.runs[k]
 		m.runs = m.runs[:k]
 		s.r.OOMs++
-		s.o.Estimator.Observe(r.j.Repo, scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), OOM: true, Wall: s.now.Sub(r.start)})
+		s.observe(r.j.Repo, scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), OOM: true, Wall: s.now.Sub(r.start)})
 		if r.j.attempts <= s.o.Retries {
 			r.j.since = s.now
 			s.enqueue(r.j)
@@ -521,10 +745,18 @@ func (s *sim) execute(acts []scheduler.Action) {
 		s.r.Actions[a.Kind.String()+":"+a.Reason]++
 		switch a.Kind {
 		case scheduler.Create:
+			if s.down(a.Size.Provider) {
+				s.r.Actions["create-failed:no capacity"]++
+				continue
+			}
+			if t, ok := s.calm[a.EnvHash]; ok && s.now.Sub(t) < 2*time.Minute {
+				s.r.Flaps++
+			}
 			s.ids++
 			m := &machine{id: fmt.Sprintf("m%04d", s.ids), prov: a.Size.Provider, env: a.EnvHash, size: a.Size,
 				state: scheduler.Starting, readyAt: s.now.Add(latency(s.o.Boot, a.Size.Provider, 60*time.Second)),
-				created: s.now, expires: s.now.Add(s.o.MaxLifetime), warm: map[string]bool{}, up: s.now}
+				created: s.now, expires: s.now.Add(s.o.MaxLifetime), warm: map[string]bool{}, up: s.now,
+				disk: a.Size.Capacity.Disk, slots: map[string]int64{}}
 			s.machines = append(s.machines, m)
 			s.r.Machines++
 			continue
@@ -535,6 +767,9 @@ func (s *sim) execute(acts []scheduler.Action) {
 		}
 		switch a.Kind {
 		case scheduler.Start:
+			if t, ok := s.calm[m.env]; ok && s.now.Sub(t) < 2*time.Minute && m.state == scheduler.Stopped {
+				s.r.Flaps++
+			}
 			if m.state == scheduler.Stopped {
 				m.state = scheduler.Starting
 				m.readyAt = s.now.Add(latency(s.o.Start, m.prov, 20*time.Second))
@@ -554,6 +789,10 @@ func (s *sim) execute(acts []scheduler.Action) {
 					s.r.Cost += short.Hours() * m.size.PricePerHour
 				}
 			}
+			if a.Reason == "consolidated" {
+				s.calm[m.env] = s.now
+			}
+			s.saveSnapshots(m)
 			if a.Kind == scheduler.Stop {
 				m.state = scheduler.Stopped
 			} else {
@@ -561,9 +800,27 @@ func (s *sim) execute(acts []scheduler.Action) {
 			}
 		case scheduler.Drain:
 			m.draining = true
+			if a.Reason == "consolidate" {
+				s.calm[m.env] = s.now
+			}
 		case scheduler.Undrain:
 			m.draining = false
 		}
+	}
+}
+
+// saveSnapshots models workers saving their slots when they stop: a
+// snapshot per warm repository in the provider's store.
+func (s *sim) saveSnapshots(m *machine) {
+	for repo, b := range m.slots {
+		if b <= 0 || !m.warm[repo] {
+			continue
+		}
+		ss := append([]scheduler.Snapshot{{Repo: repo, Provider: m.prov, Store: m.prov, Bytes: b, At: s.now}}, s.snaps[repo]...)
+		if len(ss) > 2 {
+			ss = ss[:2]
+		}
+		s.snaps[repo] = ss
 	}
 }
 

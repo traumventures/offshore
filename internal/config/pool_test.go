@@ -179,3 +179,23 @@ memory = "8G"
 		}
 	}
 }
+
+func TestCostModelKeys(t *testing.T) {
+	u, err := loadUserFrom(t, "[scheduler]\ncost_optimization = 0.8\ndisk_price_per_gb_month = 0.1\n"+
+		"[[scheduler.egress]]\nfrom = \"aws\"\nto = \"oci\"\nprice_per_gb = 0.09\nbandwidth = \"50M\"\n"+
+		"[providers.aws]\ntype = \"aws-ec2\"\n[[providers.aws.size]]\nname = \"x\"\ncpu = 4\nmemory = \"8G\"\ndisk = \"200G\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *u.Pool.CostOptimization != 0.8 || len(u.Pool.Egress) != 1 || u.Pool.Sizes[0].Disk != "200G" {
+		t.Fatalf("got %+v", u.Pool.Scheduler)
+	}
+	if d, _ := loadUserFrom(t, ""); *d.Pool.CostOptimization != 0.5 {
+		t.Fatal("default cost_optimization must be 0.5")
+	}
+	for _, bad := range []string{"[scheduler]\ncost_optimization = 1.5\n", "[scheduler]\nspeed = 0.5\n", "[[scheduler.egress]]\nbandwidth = \"fast\"\n"} {
+		if _, err := loadUserFrom(t, bad); err == nil {
+			t.Fatalf("%q must be rejected", bad)
+		}
+	}
+}

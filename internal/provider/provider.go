@@ -4,6 +4,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -149,6 +150,12 @@ type ImageHost interface {
 	// ImageBuilder builds images for this provider (its Docker CLI).
 	ImageBuilder() image.Builder
 }
+
+// ErrCapacity marks errors meaning the provider has no capacity or quota
+// for a machine right now (every instance type of a size failed with a
+// capacity, limit or quota error). The orchestrator downgrades such a
+// provider for a cooldown.
+var ErrCapacity = errors.New("no capacity")
 
 // Factory creates a provider.
 type Factory func(opts map[string]any) (Provider, error)

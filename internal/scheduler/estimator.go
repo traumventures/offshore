@@ -123,8 +123,17 @@ func (h *History) Estimate(key string, fallback Resources) Resources {
 	return out
 }
 
+// Profile implements Estimator.
+func (h *History) Profile(key string) Profile {
+	h.mu.Lock()
+	rs := append([]Usage{}, h.runs[key]...)
+	h.mu.Unlock()
+	return profileOf(rs)
+}
+
 // Static is an Estimator that always returns the configured value.
 type Static struct{}
 
 func (Static) Estimate(_ string, fallback Resources) Resources { return fallback }
 func (Static) Observe(string, Usage)                           {}
+func (Static) Profile(string) Profile                          { return Profile{} }

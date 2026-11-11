@@ -238,6 +238,10 @@ func (o *Orchestrator) Finish(ctx context.Context, leaseID, key string, u *sched
 		ev.Key = key
 	}
 	usage := *u
+	if usage.Provider == "" {
+		usage.Provider = ev.Provider
+	}
+	*u = usage // the estimator learns cold durations per provider
 	ev.Usage = &usage
 	if tid := tracing.TraceID(ctx); tid != "" {
 		ev.TraceID = tid

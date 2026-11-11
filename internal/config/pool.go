@@ -69,15 +69,24 @@ type Pool struct {
 // overcommitting memory needs soft limits and swap, otherwise tasks may be
 // OOM killed.
 type Scheduler struct {
-	Policy            string  `toml:"policy"`    // "default" (= "binpack") | "classic"
-	Estimator         string  `toml:"estimator"` // "history" (learn from runs) | "static" (repo config)
-	CPUOvercommit     float64 `toml:"cpu_overcommit"`
-	MemoryOvercommit  float64 `toml:"memory_overcommit"`
-	MaxCPUPressure    float64 `toml:"max_cpu_pressure"`    // 0..1, PSI some avg10; 0 = off
-	MaxMemoryPressure float64 `toml:"max_memory_pressure"` // 0..1; 0 = off
-	SoftLimit         float64 `toml:"soft_limit"`          // memory.high = need * soft_limit; 0 = off
-	Swap              bool    `toml:"swap"`
-	LimitJobs         bool    `toml:"limit_jobs"` // pass reserved CPU as build parallelism
+	Policy string `toml:"policy"` // "default" (cost model) | "binpack" | "classic"
+	// CostOptimization is the cost model's knob, 0..1 (default 0.5): 1
+	// optimises purely for cost, 0 purely for time to result.
+	CostOptimization *float64 `toml:"cost_optimization"`
+	// Egress are transfer prices and bandwidths from object stores to
+	// providers ([[scheduler.egress]] from = "aws", to = "oci",
+	// price_per_gb = 0.09, bandwidth = "50M" bytes/s).
+	Egress []Egress `toml:"egress"`
+	// DiskPricePerGBMonth prices extra disk of a resize (default 0.08).
+	DiskPricePerGBMonth float64 `toml:"disk_price_per_gb_month"`
+	Estimator           string  `toml:"estimator"` // "history" (learn from runs) | "static" (repo config)
+	CPUOvercommit       float64 `toml:"cpu_overcommit"`
+	MemoryOvercommit    float64 `toml:"memory_overcommit"`
+	MaxCPUPressure      float64 `toml:"max_cpu_pressure"`    // 0..1, PSI some avg10; 0 = off
+	MaxMemoryPressure   float64 `toml:"max_memory_pressure"` // 0..1; 0 = off
+	SoftLimit           float64 `toml:"soft_limit"`          // memory.high = need * soft_limit; 0 = off
+	Swap                bool    `toml:"swap"`
+	LimitJobs           bool    `toml:"limit_jobs"` // pass reserved CPU as build parallelism
 	// ConsolidateBelow drains the least loaded machine of an environment
 	// when its machines are reserved below this fraction (default 0.5,
 	// 0 = off). ConsolidateTarget caps the share the others may reach.
@@ -87,6 +96,16 @@ type Scheduler struct {
 	// min_machines: [[scheduler.warm_pool]] days = ["mon", "tue"], from = "08:00",
 	// to = "19:00", machines = 1, timezone = "Europe/Berlin".
 	WarmPool []WarmPool `toml:"warm_pool"`
+}
+
+// Egress is the transfer price and bandwidth from a store to the machines
+// of a provider. Stores are named like providers ("storage" for the pool's
+// [storage] section); empty matches any.
+type Egress struct {
+	From       string  `toml:"from"`
+	To         string  `toml:"to"`
+	PricePerGB float64 `toml:"price_per_gb"`
+	Bandwidth  string  `toml:"bandwidth"` // bytes per second, e.g. "100M"
 }
 
 // WarmPool is a scheduled warm pool window.
@@ -315,6 +334,10 @@ func (u *PoolConfig) applyDefaults() {
 	if f.Estimator == "" {
 		f.Estimator = "history"
 	}
+	if f.CostOptimization == nil {
+		v := 0.5
+		f.CostOptimization = &v
+	}
 	if len(u.Providers) == 0 {
 		// Without [providers]: one local-docker provider on this host.
 		cmd := []any{"docker"}
@@ -391,6 +414,19 @@ func (u *PoolConfig) Validate() error {
 	}
 	if f.ConsolidateBelow != nil && (*f.ConsolidateBelow < 0 || *f.ConsolidateBelow > 1) {
 		errs = append(errs, "pool.consolidate_below: must be between 0 (off) and 1")
+	}
+	if f.CostOptimization != nil && (*f.CostOptimization < 0 || *f.CostOptimization > 1) {
+		errs = append(errs, "scheduler.cost_optimization: must be between 0 (fastest result) and 1 (cheapest)")
+	}
+	for i, e := range f.Egress {
+		if e.PricePerGB < 0 {
+			errs = append(errs, fmt.Sprintf("scheduler.egress[%d].price_per_gb: must be >= 0", i))
+		}
+		if e.Bandwidth != "" {
+			if _, err := ParseBytes(e.Bandwidth); err != nil {
+				errs = append(errs, fmt.Sprintf("scheduler.egress[%d].bandwidth: %v", i, err))
+			}
+		}
 	}
 	if f.ConsolidateTarget < 0 || f.ConsolidateTarget > 1 {
 		errs = append(errs, "pool.consolidate_target: must be between 0 and 1")

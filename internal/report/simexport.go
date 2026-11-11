@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/traumventures/cloudsourced/internal/events"
+	"github.com/traumventures/cloudsourced/internal/scheduler"
 	"github.com/traumventures/cloudsourced/internal/scheduler/sim"
 )
 
@@ -67,6 +68,7 @@ func SimTrace(evs []events.Event, from, to time.Time, o ExportOptions) sim.Trace
 		jobs = append(jobs, job{at, sim.Job{
 			Repo: ev.Repo, Env: ev.Env, Duration: round(wall, 3), CPU: round(cpu, 2),
 			Memory: sim.Bytes(mem), PeakMemory: sim.Bytes(u.PeakMemory),
+			SlotBytes: sim.Bytes(u.SlotBytesAfter), SlotGrowth: sim.Bytes(slotGrowth(u)),
 		}})
 	}
 	sort.SliceStable(jobs, func(i, k int) bool { return jobs[i].at.Before(jobs[k].at) })
@@ -83,6 +85,14 @@ func SimTrace(evs []events.Event, from, to time.Time, o ExportOptions) sim.Trace
 		}
 	}
 	return t
+}
+
+// slotGrowth is what a run on an existing slot added to it.
+func slotGrowth(u *scheduler.Usage) int64 {
+	if u.SlotBytesBefore <= 0 || u.SlotBytesAfter <= u.SlotBytesBefore {
+		return 0
+	}
+	return u.SlotBytesAfter - u.SlotBytesBefore
 }
 
 func round(x float64, digits int) float64 {

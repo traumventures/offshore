@@ -199,7 +199,8 @@ command      = ["sudo", "-n", "docker"]
 max_machines = 4
 
 [scheduler]
-policy            = "default"
+policy            = "default"  # cost model; "binpack" / "classic" are kept for comparison
+cost_optimization = 0.5        # 1 = cheapest, 0 = fastest result (see below)
 estimator         = "history"  # learn per repo/tool/subcommand from cgroup usage, or "static"
 cpu_overcommit    = 2.0        # only slows builds down
 memory_overcommit = 1.25       # requires soft_limit or swap, otherwise OOM
@@ -214,6 +215,68 @@ cpu      = 4
 memory   = "8G"
 price_per_hour = 0.1
 ```
+
+Sizes may declare their disk (`disk = "200G"` in `[[providers.NAME.size]]`);
+the scheduler then plans build slots against it.
+
+#### Cost model and `cost_optimization`
+
+The default policy scores every candidate of a decision (run now on a
+machine, wait for a busy or starting machine, start or create a machine,
+prune or grow a full disk, restore a slot snapshot) by money and time to
+result and minimises
+
+    r * cost / min_cost + (1 - r) * time / min_time      (r = cost_optimization)
+
+normalised against the cheapest and the fastest candidate of the same
+decision. `cost` is what the pool pays: the machine time a placement
+occupies (full price where it extends a machine's uptime, its share where
+the machine is paid anyway), started and created machines, the egress of a
+snapshot restore and extra disk. `time` is queue wait + start or boot
+latency + slot preparation (prune, resize, restore) + the run, using what
+the estimator learned per key: warm and cold durations (cold per provider,
+because global result caches live in a provider's store), restore times and
+slot growth (`task_end.usage.slot_bytes_before/after`). `cost_optimization =
+1` optimises purely for cost (e.g. waits for a warm slot instead of building
+cold on an idle machine), `0` purely for time, `0.5` (default) accepts 10 %
+more cost for more than 10 % less time. Rendezvous hashing breaks ties.
+Waits are bounded by `queue_timeout`.
+
+Other inputs of the model: provider boot/start latencies (learned), snapshot
+locations (reported by workers when they save slots), per-repository slot
+sizes and the machine disk, and transfer prices between stores and providers:
+
+```toml
+[[scheduler.egress]]
+from         = "aws"      # store: provider name, or "storage" for [storage]
+to           = "oci"      # provider whose machines restore
+price_per_gb = 0.09
+bandwidth    = "50M"      # bytes/s
+disk_price_per_gb_month = 0.08   # [scheduler]: prices disk resizes
+```
+
+Unlisted pairs are free within a provider's own store and cost 0.09/GB at
+50 MB/s across. A full slot is handled by the cheaper/faster of: prune other
+slots (their next builds become cold, which the model charges), grow the disk
+(`provider.DiskResizer`, aws-ec2), or run elsewhere (cold, or restore a
+snapshot). Capacity and quota errors take a provider out of scale-out for a
+cooldown (2 min, doubling up to 30 min, reset on the next ready machine); a
+failed start backs off for 2 minutes instead of retrying in a loop.
+
+Consolidation is coordinated with creation: a machine is only drained when
+the peak demand of the last 5 minutes (running plus queued) fits on the
+others, never within 2 minutes of a scale-up, a drained machine is undrained
+before anything is started or created, and an emptied consolidated machine
+whose demand the others cannot take is undrained instead of stopped. This
+fixes the drain-then-create flapping seen in production
+(`internal/scheduler/sim/testdata/prod-flap.json`, regression test
+`TestRegressionDrainThenCreate`).
+
+`cloudsourced sim -sweep trace.json` sweeps `cost_optimization` from 0 to 1
+and prints the cost/time frontier (Pareto points marked); `sim
+-cost-optimization 0,0.5,1` compares chosen values, `-resize` lets
+machines grow disks. Traces exported with `sim export` carry slot sizes,
+so disk, slot growth, restores and multiple providers are simulated.
 
 Without `[providers]` the pool has one local-docker provider `local`
 (command `$CLOUDSOURCED_DOCKER`, default `docker`); a provider without

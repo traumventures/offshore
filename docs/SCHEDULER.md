@@ -5,9 +5,40 @@ and how the pool changes (`Plan`) as pure functions of a pool snapshot.
 The orchestrator only gathers state and executes the decisions, so policies
 can be tested and simulated without machines.
 
-## Default policy
+## Default policy: cost model
 
-`pool.policy = "default"` (alias `"binpack"`):
+`[scheduler] policy = "default"` decides with a cost model
+(`model.go`, `modelpolicy.go`); see the README section "Cost model and
+`cost_optimization`" for the objective. Per decision:
+
+- **Place**: candidates are every way to run now (each accepting machine
+  with free capacity: warm slot, restore of the best snapshot, cold; each
+  after prune or resize if the disk is too full) and every way to wait
+  (busy or starting machines of the environment, using the expected
+  release times of their sessions and the learned spread of run times).
+  Waiting is only considered within 80 % of `queue_timeout`.
+- **Plan / scale out**: a timeline of the queued tasks (oldest 16) on the
+  existing and starting machines is compared with the same timeline plus one
+  start or create candidate (every allowed size, the three best stopped
+  machines); the best option wins, repeatedly (up to 4 machines per plan).
+  Waiting for sessions that end soon therefore beats booting a machine.
+  Drained machines are undrained first.
+- **Consolidate**: as below, on the forecast peak of the last 5 minutes,
+  held for 2 minutes after a scale-up, never while anything is started.
+- **Idle stop**: an emptied consolidated machine is undrained when the
+  others cannot take the forecast demand.
+
+The orchestrator feeds the model: `Task.Profile` (estimator), expected
+releases (lease start + placement's expected run), provider latencies and
+cooldowns, snapshots (`snapshots.json` in the state dir), machine disk and
+slot sizes (worker status), `scheduler.Forecast`. Slot actions of a
+placement (prune via the worker slot RPC, `provider.DiskResizer`, restore)
+run before the lease is returned and are logged as `slot_action` events;
+capacity cooldowns as `provider_down`.
+
+## Binpack policy (before the cost model)
+
+`policy = "binpack"`, kept for comparison in the simulator:
 
 - **Placement**: machines with a warm build cache for the repository come
   first; then machines that still have *physical* room (CPU overcommit slows

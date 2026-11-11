@@ -84,6 +84,18 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 	if f.ConsolidateBelow != nil {
 		c.Policy.ConsolidateBelow = *f.ConsolidateBelow
 	}
+	if f.CostOptimization != nil {
+		c.Policy.CostOptimization = *f.CostOptimization
+	}
+	c.Policy.QueueTimeout = queue
+	c.Policy.DiskPricePerGBHour = f.DiskPricePerGBMonth / 730
+	for _, e := range f.Egress {
+		var bw int64
+		if e.Bandwidth != "" {
+			bw, _ = config.ParseBytes(e.Bandwidth)
+		}
+		c.Policy.Egress = append(c.Policy.Egress, scheduler.Egress{From: e.From, To: e.To, PricePerGB: e.PricePerGB, Bandwidth: bw})
+	}
 	for _, w := range f.WarmPool {
 		days, from, to, loc, err := w.Parse()
 		if err != nil {

@@ -30,6 +30,7 @@ type fixedEstimator struct{ r scheduler.Resources }
 
 func (f fixedEstimator) Estimate(string, scheduler.Resources) scheduler.Resources { return f.r }
 func (fixedEstimator) Observe(string, scheduler.Usage)                            {}
+func (fixedEstimator) Profile(string) scheduler.Profile                           { return scheduler.Profile{} }
 
 // A learned need above every size is capped at the largest admissible
 // size instead of making the key unschedulable.
