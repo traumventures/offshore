@@ -144,8 +144,10 @@ offshore outputs unmount    # unmount and discard local writes
 ```
 
 - The mount (owned by the daemon, `fusermount3`, file system type
-  `fuse.offshore-outputs`) is a writable union implemented with go-fuse
-  (`internal/outputfs`). Lower layer: the build slot of the latest remote
+  `fuse.offshore-outputs`) is a writable union implemented with go-fuse:
+  the anyfs userspace overlay (`anyfs.UserOverlay`, newest-mtime merge)
+  over the remote slot as an anyfs Source (`anyfs.RemoteTree`, the peer
+  tier; `internal/anyfs`). Lower layer: the build slot of the latest remote
   build of the repository. Upper layer: `$STATE/outputs/upper/<hash>`, a
   local directory next to the client state, never in the repository; every
   write goes there (cargo's locks and fingerprints, local rebuilds, copied

@@ -1,4 +1,4 @@
-package outputfs
+package anyfs
 
 import (
 	"bufio"
@@ -8,18 +8,19 @@ import (
 	"strings"
 )
 
-// Mounts returns the mount points of all output mounts visible to this
-// process (from /proc/self/mountinfo).
-func Mounts() []string {
+// Mounts returns the mount points of all mounts of file system type
+// fstype (e.g. "fuse.offshore-outputs") visible to this process (from
+// /proc/self/mountinfo).
+func Mounts(fstype string) []string {
 	f, err := os.Open("/proc/self/mountinfo")
 	if err != nil {
 		return nil
 	}
 	defer f.Close()
-	return parseMountinfo(bufio.NewScanner(f))
+	return parseMountinfo(bufio.NewScanner(f), fstype)
 }
 
-func parseMountinfo(sc *bufio.Scanner) []string {
+func parseMountinfo(sc *bufio.Scanner, fstype string) []string {
 	var out []string
 	for sc.Scan() {
 		// id parent major:minor root mountpoint options [optional...] - fstype source superopts
@@ -31,7 +32,7 @@ func parseMountinfo(sc *bufio.Scanner) []string {
 				break
 			}
 		}
-		if sep < 5 || sep+1 >= len(fields) || fields[sep+1] != FSType {
+		if sep < 5 || sep+1 >= len(fields) || fields[sep+1] != fstype {
 			continue
 		}
 		out = append(out, unescapeOctal(fields[4]))
@@ -58,10 +59,10 @@ func unescapeOctal(s string) string {
 	return b.String()
 }
 
-// IsMounted reports whether an output mount exists at mp.
-func IsMounted(mp string) bool {
+// IsMounted reports whether a mount of type fstype exists at mp.
+func IsMounted(fstype, mp string) bool {
 	mp = filepath.Clean(mp)
-	for _, m := range Mounts() {
+	for _, m := range Mounts(fstype) {
 		if m == mp {
 			return true
 		}
@@ -69,7 +70,7 @@ func IsMounted(mp string) bool {
 	return false
 }
 
-// Covering returns the output mount containing p, or "".
+// Covering returns the mount of mounts containing p, or "".
 func Covering(mounts []string, p string) string {
 	for _, m := range mounts {
 		if p == m || strings.HasPrefix(p, m+"/") {

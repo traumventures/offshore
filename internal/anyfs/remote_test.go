@@ -1,4 +1,4 @@
-package outputfs
+package anyfs
 
 import (
 	"bufio"
@@ -19,8 +19,8 @@ import (
 	"github.com/traumventures/offshore/internal/proto"
 )
 
-// fakeSource serves an in-memory build slot.
-type fakeSource struct {
+// fakeRemote serves an in-memory build slot.
+type fakeRemote struct {
 	mu    sync.Mutex
 	files map[string]string // rel -> content
 	mtime map[string]int64
@@ -30,11 +30,11 @@ type fakeSource struct {
 	reads int
 }
 
-func newFake() *fakeSource {
-	return &fakeSource{files: map[string]string{}, mtime: map[string]int64{}, dirs: map[string]bool{"": true}}
+func newFake() *fakeRemote {
+	return &fakeRemote{files: map[string]string{}, mtime: map[string]int64{}, dirs: map[string]bool{"": true}}
 }
 
-func (f *fakeSource) put(rel, content string, mtime int64) {
+func (f *fakeRemote) put(rel, content string, mtime int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.files[rel], f.mtime[rel] = content, mtime
@@ -49,10 +49,10 @@ func (f *fakeSource) put(rel, content string, mtime int64) {
 	}
 }
 
-func (f *fakeSource) Name() string { return "fake" }
-func (f *fakeSource) Close()       {}
+func (f *fakeRemote) Name() string { return "fake" }
+func (f *fakeRemote) Close()       {}
 
-func (f *fakeSource) List(ctx context.Context, dir string) ([]proto.OutEntry, error) {
+func (f *fakeRemote) List(ctx context.Context, dir string) ([]proto.OutEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lists++
@@ -65,12 +65,12 @@ func (f *fakeSource) List(ctx context.Context, dir string) ([]proto.OutEntry, er
 	var out []proto.OutEntry
 	seen := map[string]bool{}
 	for rel, c := range f.files {
-		if cleanDir(path.Dir(rel)) == dir {
+		if cleanRel(path.Dir(rel)) == dir {
 			out = append(out, proto.OutEntry{Name: path.Base(rel), Kind: manifest.File, Mode: 0o644, Size: int64(len(c)), MtimeNs: f.mtime[rel]})
 		}
 	}
 	for d := range f.dirs {
-		if d != "" && cleanDir(path.Dir(d)) == dir && !seen[d] {
+		if d != "" && cleanRel(path.Dir(d)) == dir && !seen[d] {
 			seen[d] = true
 			out = append(out, proto.OutEntry{Name: path.Base(d), Kind: manifest.Dir, Mode: 0o755, MtimeNs: f.mtime[d+"/"]})
 		}
@@ -78,7 +78,7 @@ func (f *fakeSource) List(ctx context.Context, dir string) ([]proto.OutEntry, er
 	return out, nil
 }
 
-func (f *fakeSource) Read(ctx context.Context, rel string, size, mtime int64, w io.Writer) error {
+func (f *fakeRemote) Read(ctx context.Context, rel string, size, mtime int64, w io.Writer) error {
 	f.mu.Lock()
 	f.reads++
 	down := f.down
@@ -98,22 +98,22 @@ func (f *fakeSource) Read(ctx context.Context, rel string, size, mtime int64, w 
 	return err
 }
 
-func (f *fakeSource) counts() (int, int) {
+func (f *fakeRemote) counts() (int, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lists, f.reads
 }
 
-func newTestTree(t *testing.T) *Tree {
+func newTestTree(t *testing.T) *RemoteTree {
 	t.Helper()
 	store, err := cas.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewTree(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewRemoteTree(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
-func readContent(t *testing.T, tr *Tree, rel string) (string, error) {
+func readContent(t *testing.T, tr *RemoteTree, rel string) (string, error) {
 	t.Helper()
 	e, err := tr.Stat(context.Background(), rel)
 	if err != nil {
@@ -127,7 +127,7 @@ func readContent(t *testing.T, tr *Tree, rel string) (string, error) {
 	return string(b), err
 }
 
-func TestTreeListsLazilyAndCaches(t *testing.T) {
+func TestRemoteTreeListsLazilyAndCaches(t *testing.T) {
 	src := newFake()
 	src.put("target/debug/app", "binary", 1)
 	src.put("target/debug/deps/libm.so", "dylib", 2)
@@ -159,7 +159,7 @@ func TestTreeListsLazilyAndCaches(t *testing.T) {
 	}
 }
 
-func TestTreeUpdateInvalidatesListingsKeepsUnchangedContent(t *testing.T) {
+func TestRemoteTreeUpdateInvalidatesListingsKeepsUnchangedContent(t *testing.T) {
 	src := newFake()
 	src.put("target/debug/a", "aaa", 1)
 	src.put("target/debug/b", "bbb", 1)
@@ -197,7 +197,7 @@ func TestTreeUpdateInvalidatesListingsKeepsUnchangedContent(t *testing.T) {
 	}
 }
 
-func TestTreeHintServesEagerOutputsWithoutMachine(t *testing.T) {
+func TestRemoteTreeHintServesEagerOutputsWithoutMachine(t *testing.T) {
 	src := newFake()
 	src.put("target/debug/app", "eager-binary", 5)
 	tr := newTestTree(t)
@@ -215,7 +215,7 @@ func TestTreeHintServesEagerOutputsWithoutMachine(t *testing.T) {
 	}
 }
 
-func TestTreeMachineGoneServesCache(t *testing.T) {
+func TestRemoteTreeMachineGoneServesCache(t *testing.T) {
 	src := newFake()
 	src.put("target/debug/deps/cached", "c", 1)
 	src.put("target/debug/deps/uncached", "u", 1)
@@ -254,7 +254,7 @@ func TestTreeMachineGoneServesCache(t *testing.T) {
 	}
 }
 
-func TestTreeStaleReadDropsListing(t *testing.T) {
+func TestRemoteTreeStaleReadDropsListing(t *testing.T) {
 	src := newFake()
 	src.put("target/x", "one", 1)
 	tr := newTestTree(t)
@@ -272,19 +272,19 @@ func TestTreeStaleReadDropsListing(t *testing.T) {
 	}
 }
 
-func TestTreeWithoutSource(t *testing.T) {
+func TestRemoteTreeWithoutSource(t *testing.T) {
 	tr := newTestTree(t)
 	if _, err := tr.List(context.Background(), "target"); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("got %v", err)
 	}
 }
 
-func TestParseMountinfo(t *testing.T) {
+func TestParseMountinfoByType(t *testing.T) {
 	in := `36 35 98:0 /mnt1 /mnt1 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
 100 29 0:77 / /home/u/my\040repo/target ro,nosuid,nodev,relatime shared:5 - fuse.offshore-outputs offshore ro,user_id=1000
 101 29 0:78 / /home/u/proj ro shared:6 - fuse.offshore offshore rw
 `
-	got := parseMountinfo(bufio.NewScanner(strings.NewReader(in)))
+	got := parseMountinfo(bufio.NewScanner(strings.NewReader(in)), "fuse.offshore-outputs")
 	if len(got) != 1 || got[0] != "/home/u/my repo/target" {
 		t.Fatalf("got %q", got)
 	}

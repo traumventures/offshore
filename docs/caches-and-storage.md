@@ -97,6 +97,31 @@ on demand through the worker's slot stream (`proto.KindSlot`, admin token;
 `orchestrator.WorkerSlotOps.PruneSlot`): older duplicate slots go cold
 first, then the newest is pruned in stages to the requested size.
 
+### Access classes
+
+The cache file system learns how a slot's files are used
+(`internal/access`). Every path maps to a pattern with hashed and numbered
+segments generalized (`target/debug/deps/*.rlib`,
+`target/debug/incremental/*/s-*/dep-graph.bin`,
+`target/debug/.fingerprint/*/*.json`). Per pattern and across sessions the
+worker counts creates, overwrites, deletes and reads (from the trees
+before and after each session and the read index), lifetimes and sizes,
+persisted as a small JSON file per repository, and classifies:
+
+| class | means | policy |
+| --- | --- | --- |
+| `immutable` | read-mostly, (almost) never written | upload early, prefetch after a restore, reclaimed last, deduplicated across slots |
+| `write-once` | new files most sessions, never overwritten | upload after 5 s, prefetch, reclaimed last, deduplicated |
+| `churn` | overwritten or replaced most sessions | stays local (never paged out to a volume), dirty for 10 min, pages of files deleted before the flush are skipped, reclaimed early |
+| `ephemeral` | created and deleted within about a session, never read | never written back, reclaimed first |
+
+Tool adapters seed the classifier with priors (cargo: `deps/` immutable,
+`incremental/` and `.fingerprint/` churn, `build/` write-once,
+`target/tmp` ephemeral; go: module cache immutable, build cache
+write-once; node: `node_modules` immutable, bundler caches churn). A
+pattern's own statistics override the prior once it was seen in 3
+sessions; unseen files fall back to their directory's statistics.
+
 ## Object store (`[storage]`)
 
 Internally a provider has four parts: **Compute** (machines), **Registry**
@@ -316,8 +341,15 @@ with the provider documentation cited in `internal/medium/defaults.go`:
 Override values per provider and medium with
 `[providers.NAME.profile.MEDIUM]` (see
 [configuration](configuration.md#providers)); measured values override
-both through `medium.SetMeasured` (a hook; no measurement source is wired
-yet).
+both through `medium.SetMeasured`: workers count the transfers of their
+cache file system per medium (page-ins as reads, writebacks and page-outs
+as writes; request size and time) and report the cumulative counters in
+their status (`tiers`). The orchestrator turns the deltas per machine into
+exponentially decayed sums per provider instance and medium (time
+constant one hour), fits time = latency + bytes / throughput over the
+requests and, after 16 requests, uses the result as the measured
+throughput and latency (profile `source = "measured"`) of the sizes the
+scheduler sees and of `medium.Resolve`.
 
 ## Disks
 
