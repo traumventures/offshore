@@ -270,6 +270,7 @@ func (s *Worker) Run(parent context.Context) error {
 	for _, r := range s.slots.list() {
 		s.cfs.unmount(r.Path) // mounts of a previous process are dead
 	}
+	s.recoverSnapshots(ctx) // sessions captured but not committed before a crash
 	if n := s.slots.gc(s.cfg.BuildTTL); n > 0 {
 		s.log.Info("removed expired build slots", "count", n)
 	}

@@ -49,6 +49,9 @@ type ScanStats struct {
 type scanned struct {
 	Node
 	ctime int64
+	// meta: a metadata-only copy-up (overlay metacopy): the content is
+	// the lower file's, a fresh ctime does not mean new content.
+	meta bool
 }
 
 // ctimeOf returns a file's change time (unix ns, 0 if unknown).
@@ -171,13 +174,13 @@ func buildTree(nodes []scanned, st *ScanStats) *Tree {
 // reusable reports whether n can take the digest and pages of Prev.
 func reusable(n *scanned, opt ScanOptions, paged bool) (*Node, bool) {
 	p, ok := opt.Prev.Get(n.Path)
-	if !ok || p.Kind != File || p.Mode != n.Mode || p.Size != n.Size || p.MtimeNs != n.MtimeNs || p.Digest == "" {
+	if !ok || p.Kind != File || (p.Mode != n.Mode && !n.meta) || p.Size != n.Size || p.MtimeNs != n.MtimeNs || p.Digest == "" {
 		return nil, false
 	}
 	if paged && len(p.Pages) == 0 && p.Size != 0 {
 		return nil, false
 	}
-	if opt.Since > 0 && n.ctime >= opt.Since {
+	if opt.Since > 0 && n.ctime >= opt.Since && !n.meta {
 		return nil, false
 	}
 	return p, true
@@ -187,22 +190,38 @@ func reusable(n *scanned, opt ScanOptions, paged bool) (*Node, bool) {
 // opt.Prev when unchanged, else read (and paged into opt.Sink). Files
 // removed meanwhile get Kind 0.
 func hashNodes(dir string, nodes []*scanned, opt ScanOptions, st *ScanStats) error {
+	return readFiles(dir, reuseNodes(nodes, opt, st), opt, st)
+}
+
+// reuseNodes takes digest and pages of unchanged files from opt.Prev and
+// returns the files that must be read.
+func reuseNodes(nodes []*scanned, opt ScanOptions, st *ScanStats) []*Node {
+	var read []*Node
+	for _, n := range nodes {
+		if n.Kind != File {
+			continue
+		}
+		if p, ok := reusable(n, opt, opt.Sink != nil); ok {
+			n.Digest, n.Pages = p.Digest, p.Pages
+			st.Reused++
+			continue
+		}
+		read = append(read, &n.Node)
+	}
+	return read
+}
+
+// readFiles reads the files below dir into their nodes (digest, pages to
+// opt.Sink); files gone meanwhile get Kind 0.
+func readFiles(dir string, nodes []*Node, opt ScanOptions, st *ScanStats) error {
 	var pk *Packer
 	if opt.Sink != nil {
 		pk = NewPacker(opt.Sink)
 	}
 	for _, n := range nodes {
-		if n.Kind != File {
-			continue
-		}
-		if p, ok := reusable(n, opt, pk != nil); ok {
-			n.Digest, n.Pages = p.Digest, p.Pages
-			st.Reused++
-			continue
-		}
 		path := filepath.Join(dir, filepath.FromSlash(n.Path))
 		alone := opt.Alone != nil && opt.Alone(n.Path, n.Size)
-		if err := readNode(&n.Node, path, pk, alone); err != nil {
+		if err := readNode(n, path, pk, alone); err != nil {
 			if os.IsNotExist(err) {
 				n.Kind = 0 // removed while scanning
 				continue
