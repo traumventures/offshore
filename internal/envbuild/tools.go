@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -23,6 +24,9 @@ type tool struct {
 	URL     string
 	SHA256  string // of the archive
 	Member  string // path of the binary inside the archive
+	// Dir, when set, is a directory inside the archive whose whole tree
+	// is installed (toolchains) instead of the single binary Member.
+	Dir string
 }
 
 // Pinned releases. Changing a version or checksum changes the environment
@@ -30,7 +34,16 @@ type tool struct {
 const (
 	sccacheVersion = "0.19.0"
 	moldVersion    = "3.0.0"
+	wildVersion    = "0.11.0"
+	// headstartVersion is the commit of github.com/PowderworksCode/headstart
+	// built by scripts/build-headstart.sh.
+	headstartVersion = "02ec0bf314"
 )
+
+// artifactBase is where offshore publishes toolchains it builds itself
+// (the aws-ec2 artifact bucket, private: downloads are signed with the
+// client's AWS credentials, see archive).
+const artifactBase = "https://offshore-artifactbucket-z7c0j8lsimso.s3.eu-central-1.amazonaws.com/toolchains/"
 
 var toolReleases = map[string]map[string]tool{
 	"sccache": {
@@ -40,6 +53,15 @@ var toolReleases = map[string]map[string]tool{
 	"mold": {
 		"x86_64":  moldTool("x86_64", "6c90d4a474c7c0409dfb575be03a5345878ac14fdba18de8b40fa58c60121189"),
 		"aarch64": moldTool("aarch64", "52c759d3689babaea4c42af2f31062a74ab83e17ffb5a8090232534c67b70577"),
+	},
+	"wild": {
+		"x86_64":  wildTool("x86_64", "71abbcb7264a31571f3eeb1b7342b0dd6e0ddbcaf280bcfe7e427c0a2bead79f"),
+		"aarch64": wildTool("aarch64", "4b3696f6b030a03d4e903abe267c2c858b22d03df53998d96d4a166a074dede5"),
+	},
+	// Patched rustc (-Zearly-metadata) and cargo (-Zheadstart), no
+	// upstream binary release; x86_64 only.
+	"headstart": {
+		"x86_64": headstartTool("x86_64", "b94ccd515bf3f88bfcd756f985fb7af4592731d10cc6204fa8f202a9d24ab976"),
 	},
 }
 
@@ -56,6 +78,21 @@ func moldTool(arch, sum string) tool {
 	return tool{
 		Name: "mold", Version: moldVersion, SHA256: sum, Member: dir + "/bin/mold",
 		URL: fmt.Sprintf("https://github.com/rui314/mold/releases/download/v%s/%s.tar.gz", moldVersion, dir),
+	}
+}
+
+func wildTool(arch, sum string) tool {
+	dir := fmt.Sprintf("wild-linker-%s-%s-unknown-linux-musl", wildVersion, arch)
+	return tool{
+		Name: "wild", Version: wildVersion, SHA256: sum, Member: dir + "/wild",
+		URL: fmt.Sprintf("https://github.com/wild-linker/wild/releases/download/%s/%s.tar.gz", wildVersion, dir),
+	}
+}
+
+func headstartTool(arch, sum string) tool {
+	return tool{
+		Name: "headstart", Version: headstartVersion, SHA256: sum, Dir: "headstart-" + headstartVersion,
+		URL: fmt.Sprintf("%sheadstart-%s-%s-unknown-linux-gnu.tar.gz", artifactBase, headstartVersion, arch),
 	}
 }
 
@@ -100,7 +137,17 @@ func (t tool) archive() (string, error) {
 		return "", fmt.Errorf("download %s %s: %w", t.Name, t.Version, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	body := io.Reader(resp.Body)
+	if resp.StatusCode == http.StatusForbidden && strings.HasPrefix(t.URL, artifactBase) {
+		// The artifact bucket is private: fetch with the AWS credentials
+		// of the client (AWS_PROFILE etc.) instead.
+		rc, serr := s3Get(t.URL)
+		if serr != nil {
+			return "", fmt.Errorf("download %s: %w (needs AWS credentials with read access to the artifact bucket, or a pre-seeded OFFSHORE_TOOL_CACHE)", t.URL, serr)
+		}
+		defer rc.Close()
+		body = rc
+	} else if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download %s: %s", t.URL, resp.Status)
 	}
 	tmp, err := os.CreateTemp(dir, "download-*")
@@ -109,7 +156,7 @@ func (t tool) archive() (string, error) {
 	}
 	defer os.Remove(tmp.Name())
 	h := sha256.New()
-	_, err = io.Copy(io.MultiWriter(tmp, h), resp.Body)
+	_, err = io.Copy(io.MultiWriter(tmp, h), body)
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
@@ -141,6 +188,9 @@ func (t tool) extract(dst string) error {
 		return fmt.Errorf("%s: %w", file, err)
 	}
 	tr := tar.NewReader(gz)
+	if t.Dir != "" {
+		return extractTree(tr, t.Dir, dst)
+	}
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
@@ -165,6 +215,77 @@ func (t tool) extract(dst string) error {
 		}
 		return err
 	}
+}
+
+// extractTree writes the regular files and directories below prefix in
+// the archive to dst, keeping their modes.
+func extractTree(tr *tar.Reader, prefix, dst string) error {
+	prefix = strings.TrimSuffix(prefix, "/") + "/"
+	n := 0
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		name := strings.TrimPrefix(h.Name, "./")
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		rel := filepath.FromSlash(strings.TrimPrefix(name, prefix))
+		if rel == "" {
+			continue
+		}
+		if !filepath.IsLocal(rel) {
+			return fmt.Errorf("archive entry %q escapes %s", h.Name, prefix)
+		}
+		p := filepath.Join(dst, rel)
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(p, 0o755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				return err
+			}
+			out, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(h.Mode)&0o755|0o644)
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(out, tr)
+			if cerr := out.Close(); err == nil {
+				err = cerr
+			}
+			if err != nil {
+				return err
+			}
+			n++
+		case tar.TypeLink:
+			// Hard links (tar -h packs identical files once) point at an
+			// earlier entry below the same prefix.
+			target := filepath.FromSlash(strings.TrimPrefix(strings.TrimPrefix(h.Linkname, "./"), prefix))
+			if !strings.HasPrefix(strings.TrimPrefix(h.Linkname, "./"), prefix) || !filepath.IsLocal(target) {
+				return fmt.Errorf("archive entry %q links outside %s", h.Name, prefix)
+			}
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				return err
+			}
+			os.Remove(p)
+			if err := os.Link(filepath.Join(dst, target), p); err != nil {
+				return err
+			}
+			n++
+		default:
+			return fmt.Errorf("archive entry %q: unsupported type %c", h.Name, h.Typeflag)
+		}
+	}
+	if n == 0 {
+		return fmt.Errorf("%s not in archive", prefix)
+	}
+	return nil
 }
 
 func fileSHA256(file string) (string, error) {

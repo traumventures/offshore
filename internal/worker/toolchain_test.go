@@ -3,7 +3,9 @@ package worker
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/traumventures/offshore/internal/proto"
@@ -56,5 +58,31 @@ func TestDirUsable(t *testing.T) {
 	os.WriteFile(filepath.Join(d, "f"), nil, 0o644)
 	if dirUsable(d) || dirUsable(filepath.Join(d, "f")) {
 		t.Fatal("occupied paths are not usable")
+	}
+}
+
+func TestLinkerShim(t *testing.T) {
+	if _, err := exec.LookPath("cc"); err != nil {
+		t.Skip("no cc")
+	}
+	t.Setenv("TMPDIR", t.TempDir())
+	for l, want := range map[string]string{
+		"mold": `"$@" -fuse-ld=mold` + "\n",
+		"wild": `"$@" -fuse-ld=bfd -B/usr/local/lib/offshore-wild` + "\n",
+	} {
+		if !validLinker(l) {
+			t.Fatalf("%s not valid", l)
+		}
+		dir, err := linkerShim(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(filepath.Join(dir, "cc"))
+		if err != nil || !strings.HasSuffix(string(b), want) {
+			t.Fatalf("%s shim %q, %v", l, b, err)
+		}
+	}
+	if validLinker("gold") || validLinker("../x") {
+		t.Fatal("unsupported linker accepted")
 	}
 }

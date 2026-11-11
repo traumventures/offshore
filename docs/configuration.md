@@ -286,7 +286,7 @@ arch       = "x86_64"       # x86_64 (default) | aarch64
 
 [environment]               # built into a content addressed image
 image  = "rust:1-slim-trixie"   # or: dockerfile = "ci/Dockerfile"
-linker = "mold"             # optional: mold | lld
+linker = "mold"             # optional: mold | lld | wild
 
 [environment.packages]
 apt = ["pkg-config", "libssl-dev", "clang"]
@@ -378,9 +378,10 @@ new image in the background (see [cli.md](cli.md#env)).
 | `base` | `"image"` or `"dockerfile"`; derived from the other two keys |
 | `packages.apt` | Debian/Ubuntu packages installed into the image |
 | `toolchains.rust` | `rust-toolchain(.toml)` path; the image installs that toolchain |
+| `toolchains.extra` | additional toolchains offshore provides as rustup linked toolchains of that name, only `["headstart"]`; opt-in, see [rust.md](rust.md#headstart-toolchain) |
 | `[[setup]]` | `run` (shell command, required), `inputs` (repository files whose content keys the layer) |
 | `env` | environment variables of every session |
-| `linker` | `mold` (pinned static release) or `lld` (distribution package); see [caches-and-storage.md](caches-and-storage.md#linker) |
+| `linker` | `mold` or `wild` (pinned static releases) or `lld` (distribution package); see [caches-and-storage.md](caches-and-storage.md#linker) and [rust.md](rust.md) for measurements |
 
 ### `[source]`
 
