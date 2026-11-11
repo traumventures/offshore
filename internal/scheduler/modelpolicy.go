@@ -365,14 +365,27 @@ func (p Default) freeSlotPossible(st *planState, env string) bool {
 	return false
 }
 
-// forecastReserved is the reservation consolidation plans for: the larger
-// of the present and the peak of the forecast window.
-func forecastReserved(f Pool, env string, now Resources) Resources {
+// flapGuard is how much consolidation guards against draining capacity the
+// next minutes need again (forecast peak, hold after a scale-up): fully up
+// to cost_optimization 0.5, fading out towards 1. A drain followed by a
+// create or start costs boot latency and a cold cache (time), while keeping
+// a lightly used machine costs its price (money): at 1 only money counts
+// and the pool consolidates on the present reservation.
+func (p Default) flapGuard() float64 {
+	return math.Min(1, 2*(1-p.costOptimization()))
+}
+
+// forecastReserved is the reservation consolidation plans for: the present
+// reservation raised towards the peak of the forecast window by the flap
+// guard.
+func (p Default) forecastReserved(f Pool, env string, now Resources) Resources {
 	d, ok := f.Demand[env]
 	if !ok {
 		return now
 	}
-	return Resources{CPU: math.Max(now.CPU, d.Peak.CPU), Memory: max(now.Memory, d.Peak.Memory)}
+	g := p.flapGuard()
+	peak := Resources{CPU: math.Max(now.CPU, d.Peak.CPU), Memory: max(now.Memory, d.Peak.Memory)}
+	return Resources{CPU: now.CPU + g*(peak.CPU-now.CPU), Memory: now.Memory + int64(g*float64(peak.Memory-now.Memory))}
 }
 
 // othersAbsorb reports whether the other running machines of m's
@@ -392,7 +405,7 @@ func (p Default) othersAbsorb(f Pool, m Machine) bool {
 	if capacity.CPU <= 0 {
 		return false
 	}
-	return share(forecastReserved(f, m.EnvHash, reserved), capacity) <= c.ConsolidateTarget
+	return share(p.forecastReserved(f, m.EnvHash, reserved), capacity) <= c.ConsolidateTarget
 }
 
 // consolidateModel is consolidate on the forecast: it drains only when the
@@ -406,8 +419,9 @@ func (p Default) consolidateModel(st *planState, running map[string]int) {
 	byEnv := map[string][]Machine{}
 	var envs []string
 	draining := map[string]bool{}
+	guarded := p.flapGuard() > 0
 	for _, m := range f.Machines {
-		if m.State == Starting {
+		if m.State == Starting && guarded {
 			draining[m.EnvHash] = true // still scaling up
 		}
 		if m.State != Running || !p.usable(m, f.Now) {
@@ -428,10 +442,11 @@ func (p Default) consolidateModel(st *planState, running map[string]int) {
 		if len(ms) < 2 || draining[env] || len(st.queued[env]) > 0 || running[env]-1 < p.warmTarget(f, env) {
 			continue
 		}
-		if d, ok := f.Demand[env]; ok && !d.LastScaleUp.IsZero() && f.Now.Sub(d.LastScaleUp) < c.ConsolidateHold {
+		hold := time.Duration(p.flapGuard() * float64(c.ConsolidateHold))
+		if d, ok := f.Demand[env]; ok && !d.LastScaleUp.IsZero() && f.Now.Sub(d.LastScaleUp) < hold {
 			continue
 		}
-		if slicesAny(st.acts, func(a Action) bool { return a.Kind == Undrain || a.Kind == Start || a.Kind == Create }) {
+		if guarded && slicesAny(st.acts, func(a Action) bool { return a.Kind == Undrain || a.Kind == Start || a.Kind == Create }) {
 			continue
 		}
 		var reserved, capacity Resources
@@ -439,7 +454,7 @@ func (p Default) consolidateModel(st *planState, running map[string]int) {
 			reserved = reserved.Add(m.Reserved)
 			capacity = capacity.Add(p.admissible(m))
 		}
-		demand := forecastReserved(f, env, reserved)
+		demand := p.forecastReserved(f, env, reserved)
 		if share(demand, capacity) >= c.ConsolidateBelow {
 			continue
 		}
