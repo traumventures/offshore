@@ -207,7 +207,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	defer func() {
 		// Capture the session before the next one can change the slot
 		// (committed in the background by slotReleased).
-		s.slots.finishing(slot)
+		s.slots.finishing(slot) // also on early returns
 		if err := s.snapshotSlot(context.Background(), slot, req.RepoID); err != nil && !errors.Is(err, errNoSnapshots) {
 			s.log.Warn("build slot session snapshot", "slot", slot, "err", err)
 		}
@@ -399,6 +399,10 @@ loop:
 	s.log.Info("session finished", "session", se.id, "code", exit.Code, "duration", time.Since(se.started).Round(time.Millisecond))
 	s.metrics.sessionEnded(exit.Code, exit.Usage.Wall.Seconds(), exit.Usage.OOM, exit.Cache)
 	unregister() // the session's processes are gone
+	// The client starts its next session as soon as it has the exit (and
+	// the write back): that session waits for this slot instead of taking
+	// another while the snapshot runs.
+	s.slots.finishing(slot)
 	exitAttrs(span, exit, req, clientGone)
 	if clientGone {
 		return nil
