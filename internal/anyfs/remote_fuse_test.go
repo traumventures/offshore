@@ -1,4 +1,4 @@
-package outputfs
+package anyfs
 
 import (
 	"errors"
@@ -15,7 +15,14 @@ import (
 	"time"
 )
 
-func mountTest(t *testing.T) (*fakeSource, *Tree, *FS, string, string) {
+// testFSName is the overlay type of the remote overlay tests (the
+// daemon's output mounts are "fuse.offshore-outputs").
+const testFSName = "offshore-test-outputs"
+
+// mountRemote mounts the build directory "target" of a fake remote build
+// like the daemon's output overlay: newest mtime wins, kernel caches
+// dropped on every new generation.
+func mountTest(t *testing.T) (*fakeRemote, *RemoteTree, *UserOverlay, string, string) {
 	t.Helper()
 	if _, err := os.Stat("/dev/fuse"); err != nil {
 		t.Skip("no /dev/fuse")
@@ -34,10 +41,14 @@ func mountTest(t *testing.T) (*fakeSource, *Tree, *FS, string, string) {
 	src.put("target/debug/app", "remote build", 7)
 	src.put("target/debug/deps/libm.so", "dylib", 7)
 	tr.Update(src)
-	f, err := Mount(tr, repo, "target", upper, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	f, err := MountUserOverlay(filepath.Join(repo, "target"), upper, tr.Source("target"), UserOverlayOptions{
+		FsName: "offshore", Name: testFSName, Merge: NewestMtime, Timeout: 2 * time.Second, NoPassthrough: true,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
 	if err != nil {
 		t.Skipf("mount: %v", err)
 	}
+	tr.OnInvalidate(f.Invalidate)
 	t.Cleanup(func() { f.Unmount() })
 	return src, tr, f, filepath.Join(repo, "target"), upper
 }
@@ -56,7 +67,7 @@ func names(t *testing.T, dir string) string {
 	return fmt.Sprint(out)
 }
 
-func TestFSOverlayReadsRemoteLazily(t *testing.T) {
+func TestRemoteOverlayReadsRemoteLazily(t *testing.T) {
 	src, tr, f, mp, _ := mountTest(t)
 	read := func(rel string) string {
 		b, err := os.ReadFile(filepath.Join(mp, rel))
@@ -65,7 +76,7 @@ func TestFSOverlayReadsRemoteLazily(t *testing.T) {
 		}
 		return string(b)
 	}
-	if !IsMounted(mp) {
+	if !IsMounted("fuse."+testFSName, mp) {
 		t.Fatal("not listed in mountinfo")
 	}
 	if got := read("debug/app"); got != "remote build" {
@@ -108,7 +119,7 @@ func TestFSOverlayReadsRemoteLazily(t *testing.T) {
 	}
 }
 
-func TestFSOverlayWrites(t *testing.T) {
+func TestRemoteOverlayWrites(t *testing.T) {
 	src, tr, _, mp, upper := mountTest(t)
 	p := func(rel string) string { return filepath.Join(mp, filepath.FromSlash(rel)) }
 	read := func(rel string) string {
@@ -238,5 +249,24 @@ func TestFSOverlayWrites(t *testing.T) {
 	must(os.WriteFile(p("debug/big"), []byte("y"), 0o644))
 	if _, r := src.counts(); r != reads || read("debug/big") != "y" {
 		t.Fatal("truncating open downloaded the file")
+	}
+}
+
+func TestRemoteOverlayStaleOpenRelists(t *testing.T) {
+	src, _, _, mp, _ := mountTest(t)
+	p := filepath.Join(mp, "debug", "app")
+	if _, err := os.Stat(p); err != nil {
+		t.Fatal(err)
+	}
+	// Rebuilt by a run that is still going on: the listing is stale.
+	// (Same size: the kernel keeps the listed size until its attribute
+	// cache expires or the next generation invalidates it.)
+	src.put("target/debug/app", "remote BUILD", 9)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "remote BUILD" {
+		t.Fatalf("stale open: %q", b)
 	}
 }
