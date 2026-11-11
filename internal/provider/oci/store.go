@@ -1,151 +1,154 @@
 package oci
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"os"
+	"path"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 
 	"github.com/traumventures/offshore/internal/blobcache"
+	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/store"
 )
 
-// objectStoreAPI is the part of the Object Storage client the cache uses.
-type objectStoreAPI interface {
-	HeadObject(ctx context.Context, req objectstorage.HeadObjectRequest) (objectstorage.HeadObjectResponse, error)
-	PutObject(ctx context.Context, req objectstorage.PutObjectRequest) (objectstorage.PutObjectResponse, error)
-	GetObject(ctx context.Context, req objectstorage.GetObjectRequest) (objectstorage.GetObjectResponse, error)
-	DeleteObject(ctx context.Context, req objectstorage.DeleteObjectRequest) (objectstorage.DeleteObjectResponse, error)
+var _ provider.StoreGranter = (*OCI)(nil)
+
+// NativeGranter makes the provider's bucket the pool's store: objects
+// below cache/<pool>/ (deleted after a day by the bucket's lifecycle rule).
+// Workers get pre-authenticated request URLs, one per granted scope
+// (prefix PARs with AnyObjectReadWrite, listing denied), instead of
+// credentials: OCI's S3 compatible API would need a user's customer secret
+// keys, which cannot be scoped.
+func (o *OCI) NativeGranter(ctx context.Context, name, pool string) (store.Granter, bool, error) {
+	in, err := o.ensureInfra(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	return newPARGranter(o.objects, name, o.region, in.namespace, in.bucket, path.Join("cache", pool)), true, nil
 }
 
-// objectStore is a compiler cache store in an Object Storage bucket below
-// a prefix (the counterpart of blobcache.S3Store; OCI's S3 compatible API
-// would need customer secret keys, the native API takes the instance
-// principal). Expiry is checked against the modification time on every
-// read; the bucket's lifecycle rule deletes cache/ objects after a day.
-type objectStore struct {
-	api       objectStoreAPI
+// parAPI is the part of the Object Storage client the granter uses.
+type parAPI interface {
+	CreatePreauthenticatedRequest(ctx context.Context, req objectstorage.CreatePreauthenticatedRequestRequest) (objectstorage.CreatePreauthenticatedRequestResponse, error)
+	ListPreauthenticatedRequests(ctx context.Context, req objectstorage.ListPreauthenticatedRequestsRequest) (objectstorage.ListPreauthenticatedRequestsResponse, error)
+	DeletePreauthenticatedRequest(ctx context.Context, req objectstorage.DeletePreauthenticatedRequestRequest) (objectstorage.DeletePreauthenticatedRequestResponse, error)
+}
+
+// parGranter mints store grants of pre-authenticated request URLs. A PAR
+// per scope is reused while it outlives the requested grant TTL (it is
+// created for twice the TTL), so a busy pool creates few of them; expired
+// ones are deleted at most once an hour.
+type parGranter struct {
+	api       parAPI
+	name      string
+	region    string
 	namespace string
 	bucket    string
-	prefix    string // "" or ending in "/"
-	ttl       time.Duration
+	prefix    string // pool prefix, no trailing "/"
 	now       func() time.Time
-	spool     int64 // larger or unknown-size bodies go through a temporary file
+
+	mu        sync.Mutex
+	pars      map[string]parEntry // scope -> PAR
+	lastSweep time.Time
 }
 
-var _ blobcache.Store = (*objectStore)(nil)
-
-func newObjectStore(api objectStoreAPI, namespace, bucket, prefix string, ttl time.Duration) *objectStore {
-	prefix = strings.Trim(prefix, "/")
-	if prefix != "" {
-		prefix += "/"
-	}
-	return &objectStore{api: api, namespace: namespace, bucket: bucket, prefix: prefix, ttl: blobcache.ClampTTL(ttl), now: time.Now, spool: 16 << 20}
+type parEntry struct {
+	url     string // URL of the scope's prefix, ending in "/"
+	expires time.Time
 }
 
-func (s *objectStore) name(key string) (*string, error) {
-	if !blobcache.ValidKey(key) {
-		return nil, fmt.Errorf("blobcache: invalid key %q", key)
-	}
-	return common.String(s.prefix + key), nil
+func newPARGranter(api parAPI, name, region, namespace, bucket, prefix string) *parGranter {
+	return &parGranter{api: api, name: name, region: region, namespace: namespace, bucket: bucket,
+		prefix: strings.Trim(prefix, "/"), now: time.Now, pars: map[string]parEntry{}}
 }
 
-func (s *objectStore) info(size *int64, mod *common.SDKTime) (blobcache.Info, error) {
-	if mod == nil || s.now().Sub(mod.Time) > s.ttl {
-		return blobcache.Info{}, blobcache.ErrNotFound
-	}
-	var n int64
-	if size != nil {
-		n = *size
-	}
-	return blobcache.Info{Size: n, ModTime: mod.Time}, nil
-}
+func (g *parGranter) Name() string { return g.name }
 
-func (s *objectStore) Get(ctx context.Context, key string) (io.ReadCloser, blobcache.Info, error) {
-	name, err := s.name(key)
-	if err != nil {
-		return nil, blobcache.Info{}, err
-	}
-	out, err := s.api.GetObject(ctx, objectstorage.GetObjectRequest{NamespaceName: &s.namespace, BucketName: &s.bucket, ObjectName: name})
-	if err != nil {
-		if notFound(err) {
-			return nil, blobcache.Info{}, blobcache.ErrNotFound
+func (g *parGranter) Grant(ctx context.Context, scopes []string, ttl time.Duration) (store.Grant, error) {
+	ttl = blobcache.ClampTTL(ttl)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	gr := store.Grant{Store: g.name, Prefix: g.prefix, URLs: map[string]string{}}
+	var expires time.Time
+	for _, s := range scopes {
+		s = strings.Trim(path.Clean("/"+s), "/")
+		if s == "" || slices.Contains(gr.Scopes, s) {
+			continue
 		}
-		return nil, blobcache.Info{}, err
-	}
-	info, err := s.info(out.ContentLength, out.LastModified)
-	if err != nil {
-		out.Content.Close()
-		return nil, blobcache.Info{}, err
-	}
-	return out.Content, info, nil
-}
-
-func (s *objectStore) Stat(ctx context.Context, key string) (blobcache.Info, error) {
-	name, err := s.name(key)
-	if err != nil {
-		return blobcache.Info{}, err
-	}
-	out, err := s.api.HeadObject(ctx, objectstorage.HeadObjectRequest{NamespaceName: &s.namespace, BucketName: &s.bucket, ObjectName: name})
-	if err != nil {
-		if notFound(err) {
-			return blobcache.Info{}, blobcache.ErrNotFound
+		e, ok := g.pars[s]
+		if !ok || e.expires.Before(now.Add(ttl)) {
+			var err error
+			if e, err = g.mint(ctx, s, now.Add(2*ttl)); err != nil {
+				return store.Grant{}, err
+			}
+			g.pars[s] = e
 		}
-		return blobcache.Info{}, err
+		gr.Scopes = append(gr.Scopes, s)
+		gr.URLs[s] = e.url
+		if expires.IsZero() || e.expires.Before(expires) {
+			expires = e.expires
+		}
 	}
-	return s.info(out.ContentLength, out.LastModified)
+	if !expires.IsZero() {
+		gr.Expires = expires.Unix()
+	}
+	if now.Sub(g.lastSweep) > time.Hour {
+		g.lastSweep = now
+		g.sweep(ctx, now)
+	}
+	return gr, nil
 }
 
-// Put buffers the body (memory or temporary file): uploads need the length.
-func (s *objectStore) Put(ctx context.Context, key string, r io.Reader, size int64) error {
-	name, err := s.name(key)
+// mint creates a prefix PAR for the objects of scope.
+func (g *parGranter) mint(ctx context.Context, scope string, expires time.Time) (parEntry, error) {
+	object := g.prefix + "/" + scope + "/"
+	pr, err := g.api.CreatePreauthenticatedRequest(ctx, objectstorage.CreatePreauthenticatedRequestRequest{
+		NamespaceName: common.String(g.namespace), BucketName: common.String(g.bucket),
+		CreatePreauthenticatedRequestDetails: objectstorage.CreatePreauthenticatedRequestDetails{
+			Name:                common.String("offshore-store " + scope),
+			ObjectName:          common.String(object),
+			AccessType:          objectstorage.CreatePreauthenticatedRequestDetailsAccessTypeAnyobjectreadwrite,
+			BucketListingAction: objectstorage.PreauthenticatedRequestBucketListingActionDeny,
+			TimeExpires:         &common.SDKTime{Time: expires},
+		}})
 	if err != nil {
-		return err
+		return parEntry{}, fmt.Errorf("oci: store grant for %s: %w", scope, err)
 	}
-	var body io.Reader
-	var n int64
-	if size >= 0 && size <= s.spool {
-		b, err := io.ReadAll(io.LimitReader(r, size+1))
+	base := parURL(g.region, pr.PreauthenticatedRequest)
+	if !strings.HasSuffix(base, "/") {
+		base += "/"
+	}
+	// A bucket-level PAR URL ends in /o/; objects keep their full names.
+	return parEntry{url: base + object, expires: expires}, nil
+}
+
+// sweep deletes expired store PARs of the pool (best effort).
+func (g *parGranter) sweep(ctx context.Context, now time.Time) {
+	var page *string
+	for {
+		out, err := g.api.ListPreauthenticatedRequests(ctx, objectstorage.ListPreauthenticatedRequestsRequest{
+			NamespaceName: common.String(g.namespace), BucketName: common.String(g.bucket),
+			ObjectNamePrefix: common.String(g.prefix + "/"), Page: page,
+		})
 		if err != nil {
-			return err
+			return
 		}
-		body, n = bytes.NewReader(b), int64(len(b))
-	} else {
-		f, err := os.CreateTemp("", "blobcache-oci-")
-		if err != nil {
-			return err
+		for _, p := range out.Items {
+			if p.TimeExpires != nil && p.TimeExpires.Time.Before(now) && p.Id != nil {
+				g.api.DeletePreauthenticatedRequest(ctx, objectstorage.DeletePreauthenticatedRequestRequest{
+					NamespaceName: common.String(g.namespace), BucketName: common.String(g.bucket), ParId: p.Id})
+			}
 		}
-		defer os.Remove(f.Name())
-		defer f.Close()
-		if n, err = io.Copy(f, r); err != nil {
-			return err
+		if out.OpcNextPage == nil {
+			return
 		}
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return err
-		}
-		body = f
+		page = out.OpcNextPage
 	}
-	if size >= 0 && n != size {
-		return fmt.Errorf("blobcache: short body (%d of %d bytes)", n, size)
-	}
-	_, err = s.api.PutObject(ctx, objectstorage.PutObjectRequest{NamespaceName: &s.namespace, BucketName: &s.bucket, ObjectName: name,
-		ContentLength: common.Int64(n), PutObjectBody: io.NopCloser(body), ContentType: common.String("application/octet-stream")})
-	return err
-}
-
-func (s *objectStore) Delete(ctx context.Context, key string) error {
-	name, err := s.name(key)
-	if err != nil {
-		return err
-	}
-	_, err = s.api.DeleteObject(ctx, objectstorage.DeleteObjectRequest{NamespaceName: &s.namespace, BucketName: &s.bucket, ObjectName: name})
-	if err != nil && notFound(err) {
-		return nil
-	}
-	return err
 }

@@ -113,7 +113,7 @@ prefix     = "cache/team"           # default "cache/<pool id>"
 access_key = "env:R2_ACCESS_KEY_ID" # env:/file:/cmd: references
 secret_key = "env:R2_SECRET_ACCESS_KEY"
 # role_arn   = "arn:aws:iam::123:role/cache"  # STS: per-repository credentials
-# path_style = true                            # MinIO, OCI
+# path_style = true                            # MinIO
 # dir        = "/srv/offshore-store"       # a directory every machine mounts (instead of bucket)
 ```
 
@@ -130,9 +130,9 @@ secret_key = "env:R2_SECRET_ACCESS_KEY"
 
 Native stores: `aws-ec2` uses the stack's bucket below `cache/<pool>/`
 (one-day lifecycle) and the stack's `StoreRole`; `local-docker` a volume
-`cs-store-<pool>` shared by its containers (`/store`); `oci` and `static`
-have none (use `[storage]`; OCI customer secret keys cannot be scoped per
-repository). Without a store, global caches stay machine-local and slots
+`cs-store-<pool>` shared by its containers (`/store`); `oci` its bucket
+below `cache/<pool>/` (one-day lifecycle) through pre-authenticated
+requests (below); `static` has none (use `[storage]`). Without a store, global caches stay machine-local and slots
 cannot move between machines.
 
 The control plane never moves cache data. With every lease (and every slot
@@ -141,7 +141,9 @@ repository's prefix (`repos/<repo id>/`) and the environment's
 (`envs/<env hash>/`), at most 12 h. With `role_arn` (and on `aws-ec2`) they
 come from STS AssumeRole with a session policy limited to those prefixes;
 otherwise the configured keys are handed out as they are, so give them only
-the bucket (or prefix) they need. Objects are build caches and never served
+the bucket (or prefix) they need. On `oci` the grant holds no credentials
+but one pre-authenticated request URL per prefix (read/write below it,
+no listing, no delete), see the [OCI guide](guides/oci.md#store-the-bucket-through-pre-authenticated-requests). Objects are build caches and never served
 after 24 h.
 
 ## Global result caches and the compiler cache

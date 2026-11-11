@@ -157,7 +157,7 @@ See the [OCI guide](guides/oci.md).
 | `allow_cidrs` | as for aws-ec2: required with a shared control plane, the orchestrator's public IP when embedded | clients that may reach machines (UDP 7443); an explicit list is reconciled on the security list (stale QUIC rules removed) |
 | `subnet`, `availability_domain` | created VCN / first AD | |
 | `image`, `image_arm64` | newest Oracle Linux 9 platform image | |
-| `bucket` | `offshore` | Object Storage bucket (binaries, machine secrets) |
+| `bucket` | `offshore` | Object Storage bucket (binaries, machine secrets, and the native store below `cache/<pool>/`, reached by workers through pre-authenticated requests) |
 | `repository`, `registry` | `offshore-env`, the region's OCIR | environment image repository |
 | `iam` | `true` | create the dynamic group and policy; `false` when the API user may not |
 | `disk_gb` | 100 (minimum 50) | boot volume |

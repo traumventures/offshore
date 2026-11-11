@@ -28,6 +28,14 @@ type StoreSource interface {
 	NativeStore(ctx context.Context, pool string) (c store.Config, ok bool, err error)
 }
 
+// StoreGranter is implemented by providers whose native store hands
+// workers something other than S3 credentials (OCI: pre-authenticated
+// request URLs per scope). It takes precedence over StoreSource; name is
+// the provider instance (the store's name in grants and snapshots).
+type StoreGranter interface {
+	NativeGranter(ctx context.Context, name, pool string) (g store.Granter, ok bool, err error)
+}
+
 // SecretChannel delivers the secret environment of a machine.
 type SecretChannel interface {
 	PutSecrets(ctx context.Context, machineID string, env map[string]string) error

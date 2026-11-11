@@ -39,13 +39,20 @@ type hostCompute interface {
 	TerminateInstance(ctx context.Context, req core.TerminateInstanceRequest) (core.TerminateInstanceResponse, error)
 }
 
+// hostObjects is the part of the Object Storage client the supervisor uses
+// (its secret object).
+type hostObjects interface {
+	GetObject(ctx context.Context, req objectstorage.GetObjectRequest) (objectstorage.GetObjectResponse, error)
+	DeleteObject(ctx context.Context, req objectstorage.DeleteObjectRequest) (objectstorage.DeleteObjectResponse, error)
+}
+
 // host is the supervisor side of the provider. It authenticates as the
 // instance (instance principal, certificates from the metadata service,
 // which the containers cannot reach).
 type host struct {
 	spec       supervisor.Spec
 	cfg        common.ConfigurationProvider
-	objects    objectStoreAPI
+	objects    hostObjects
 	compute    hostCompute
 	instanceID func(ctx context.Context) (string, error)
 	token      func(ctx context.Context, registry string) (string, error)

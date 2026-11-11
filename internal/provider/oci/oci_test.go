@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -15,8 +16,8 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/core"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 
-	"github.com/traumventures/offshore/internal/blobcache"
 	"github.com/traumventures/offshore/internal/provider"
+	"github.com/traumventures/offshore/internal/store"
 	"github.com/traumventures/offshore/internal/supervisor"
 )
 
@@ -298,44 +299,6 @@ func (f *fakeObjects) DeleteObject(_ context.Context, r objectstorage.DeleteObje
 	return objectstorage.DeleteObjectResponse{}, nil
 }
 
-func TestObjectStore(t *testing.T) {
-	now := time.Now()
-	f := &fakeObjects{objects: map[string][]byte{}, mod: now}
-	s := newObjectStore(f, "ns", "b", "cache/p/sccache", time.Hour)
-	ctx := context.Background()
-	if err := s.Put(ctx, "a/b", strings.NewReader("hello"), 5); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := f.objects["cache/p/sccache/a/b"]; !ok {
-		t.Fatalf("objects %v", f.objects)
-	}
-	if err := s.Put(ctx, "big", strings.NewReader("unknown size"), -1); err != nil {
-		t.Fatal(err)
-	}
-	r, info, err := s.Get(ctx, "a/b")
-	if err != nil || info.Size != 5 {
-		t.Fatal(info, err)
-	}
-	b, _ := io.ReadAll(r)
-	r.Close()
-	if string(b) != "hello" {
-		t.Error(string(b))
-	}
-	s.now = func() time.Time { return now.Add(2 * time.Hour) }
-	if _, err := s.Stat(ctx, "a/b"); !errors.Is(err, blobcache.ErrNotFound) {
-		t.Errorf("expired: %v", err)
-	}
-	if err := s.Delete(ctx, "a/b"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Delete(ctx, "a/b"); err != nil {
-		t.Errorf("deleting a missing object: %v", err)
-	}
-	if _, err := s.Stat(ctx, "../x"); err == nil {
-		t.Error("invalid key")
-	}
-}
-
 type fakeHostCompute struct {
 	actions []string
 }
@@ -400,5 +363,66 @@ func TestServerBinaries(t *testing.T) {
 	}
 	if err := checkBinary("/nonexistent", "amd64"); err == nil || !strings.Contains(err.Error(), "make build") {
 		t.Error(err)
+	}
+}
+
+type fakePARs struct {
+	created []objectstorage.CreatePreauthenticatedRequestDetails
+	listed  []objectstorage.PreauthenticatedRequestSummary
+	deleted []string
+}
+
+func (f *fakePARs) CreatePreauthenticatedRequest(_ context.Context, r objectstorage.CreatePreauthenticatedRequestRequest) (objectstorage.CreatePreauthenticatedRequestResponse, error) {
+	f.created = append(f.created, r.CreatePreauthenticatedRequestDetails)
+	uri := fmt.Sprintf("/p/tok%d/n/%s/b/%s/o/", len(f.created), *r.NamespaceName, *r.BucketName)
+	return objectstorage.CreatePreauthenticatedRequestResponse{PreauthenticatedRequest: objectstorage.PreauthenticatedRequest{AccessUri: &uri}}, nil
+}
+
+func (f *fakePARs) ListPreauthenticatedRequests(context.Context, objectstorage.ListPreauthenticatedRequestsRequest) (objectstorage.ListPreauthenticatedRequestsResponse, error) {
+	return objectstorage.ListPreauthenticatedRequestsResponse{Items: f.listed}, nil
+}
+
+func (f *fakePARs) DeletePreauthenticatedRequest(_ context.Context, r objectstorage.DeletePreauthenticatedRequestRequest) (objectstorage.DeletePreauthenticatedRequestResponse, error) {
+	f.deleted = append(f.deleted, *r.ParId)
+	return objectstorage.DeletePreauthenticatedRequestResponse{}, nil
+}
+
+func TestPARGranter(t *testing.T) {
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	f := &fakePARs{listed: []objectstorage.PreauthenticatedRequestSummary{
+		{Id: common.String("old"), TimeExpires: &common.SDKTime{Time: now.Add(-time.Minute)}},
+		{Id: common.String("live"), TimeExpires: &common.SDKTime{Time: now.Add(time.Hour)}},
+	}}
+	g := newPARGranter(f, "oci", "eu-frankfurt-1", "ns", "b", "cache/pool1")
+	g.now = func() time.Time { return now }
+	ctx := context.Background()
+	gr, err := g.Grant(ctx, []string{"repos/r1", "/envs/e1/"}, 12*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.created) != 2 || *f.created[0].ObjectName != "cache/pool1/repos/r1/" ||
+		f.created[0].AccessType != objectstorage.CreatePreauthenticatedRequestDetailsAccessTypeAnyobjectreadwrite ||
+		f.created[0].BucketListingAction != objectstorage.PreauthenticatedRequestBucketListingActionDeny {
+		t.Fatalf("created %+v", f.created)
+	}
+	want := "https://objectstorage.eu-frankfurt-1.oraclecloud.com/p/tok1/n/ns/b/b/o/cache/pool1/repos/r1/"
+	if gr.URLs["repos/r1"] != want || gr.Store != "oci" || len(gr.Scopes) != 2 || gr.Expires != now.Add(24*time.Hour).Unix() {
+		t.Fatalf("grant %+v", gr)
+	}
+	if len(f.deleted) != 1 || f.deleted[0] != "old" {
+		t.Fatalf("sweep deleted %v", f.deleted)
+	}
+	// Reused while the PAR outlives the grant TTL, minted again after.
+	g.now = func() time.Time { return now.Add(6 * time.Hour) }
+	if _, err := g.Grant(ctx, []string{"repos/r1"}, 12*time.Hour); err != nil || len(f.created) != 2 {
+		t.Fatalf("reuse: %d %v", len(f.created), err)
+	}
+	g.now = func() time.Time { return now.Add(13 * time.Hour) }
+	if _, err := g.Grant(ctx, []string{"repos/r1"}, 12*time.Hour); err != nil || len(f.created) != 3 {
+		t.Fatalf("renewal: %d %v", len(f.created), err)
+	}
+	// The grant opens as a store of URL prefixes.
+	if _, err := store.Open(gr, "repos/r1/chunks", 0); err != nil {
+		t.Fatal(err)
 	}
 }

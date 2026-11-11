@@ -88,14 +88,6 @@ arch           = "arm64"
 cpu            = 8                    # 8 OCPUs on A1.Flex
 memory         = "48G"
 price_per_hour = 0.10
-
-[storage]                             # required for shared caches and snapshots, see below
-endpoint   = "https://<namespace>.compat.objectstorage.eu-frankfurt-1.oraclecloud.com"
-bucket     = "offshore-cache"
-region     = "eu-frankfurt-1"
-path_style = true
-access_key = "env:OCI_S3_ACCESS_KEY"
-secret_key = "env:OCI_S3_SECRET_KEY"
 ```
 
 All options are listed in [configuration.md](../configuration.md#oci).
@@ -115,18 +107,25 @@ take no configuration. "Out of host capacity", service limit, quota and
 unavailable-shape errors move on to the next shape; when all fail the
 provider goes on cooldown.
 
-### `[storage]` is needed for shared caches
+### Store: the bucket, through pre-authenticated requests
 
-OCI has no native store in offshore: without `[storage]`, global caches
-(sccache, Go, ccache) stay on each machine and build slots cannot move
-between machines through snapshots. Use OCI's S3 compatibility API (or any
-other S3-compatible store): create a bucket, a customer secret key for a
-user that may use it (Profile, Customer secret keys), and point `[storage]`
-at `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com` with
-`path_style = true`. Customer secret keys cannot be scoped per repository,
-so workers receive the key itself: give its user access to this bucket
-only. Add a lifecycle rule that deletes objects after a day (offshore never
-serves cache objects older than 24 h).
+The provider's bucket is the pool's native store (global caches such as
+sccache, Go and ccache, and slot snapshots, so slots can move between
+machines): objects live below `cache/<pool id>/`, which the bucket's
+lifecycle rule deletes after a day. Workers get no credentials for it. With
+every lease the control plane creates (or reuses) one **pre-authenticated
+request per granted prefix** (`cache/<pool>/repos/<repo id>/`,
+`cache/<pool>/envs/<env hash>/`): read and write for objects below that
+prefix only, listing denied, valid for twice the grant time (24 h), and
+reused while it outlives a new grant. Expired requests are deleted once an
+hour. Pre-authenticated requests cannot delete objects; offshore never needs
+to (expired objects are not served and the lifecycle rule removes them).
+OCI's S3 compatibility API is not used: it needs a user's customer secret
+keys, which cannot be scoped.
+
+A `[storage]` section (any S3-compatible store, see
+[caches-and-storage.md](../caches-and-storage.md#object-store-storage)) replaces the
+native store.
 
 ## 3. First run
 
@@ -146,7 +145,8 @@ On first use the provider creates:
 * a private bucket `offshore` (worker binaries, served to machines by a
   read-only pre-authenticated link; machine secrets below `secrets/`, read
   once by the supervisor with its instance principal and deleted; a
-  lifecycle rule expires `cache/` and `secrets/` after a day);
+  lifecycle rule expires `cache/` and `secrets/` after a day; `cache/<pool>/`
+  is the pool's store, see above);
 * the OCIR repository `offshore-env` (registry
   `ocir.<region>.oci.oraclecloud.com` unless `registry` is set);
 * the dynamic group and policy (step 1).
@@ -190,7 +190,7 @@ finally the compartment. The OCI smoke test has a cleanup:
 | `disk_gb must be at least 50` | the minimum boot volume is 50 GB |
 | machine never becomes ready | the supervisor cannot read its secret or pull the image: check the dynamic group's matching rule and policy |
 | run falls back locally at connect | UDP 7443 not allowed from the client (`allow_cidrs`) |
-| every build on a new machine is cold | configure `[storage]` (global caches and snapshots need a store) |
+| every build on a new machine is cold | the store is unavailable: look for `store unavailable` / `store grant failed` in the orchestrator log (creating pre-authenticated requests needs `manage buckets` on the compartment) |
 
 `offshore doctor`, `offshore top` and the daemon or control plane log show
 the failing step.
