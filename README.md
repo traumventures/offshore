@@ -523,6 +523,41 @@ tried in order; "Out of host capacity", service limit and unavailable-shape
 errors move on to the next shape. A live smoke
 test is in `internal/orchestrator/ocismoke_test.go` (build tag `ocismoke`).
 
+### Static hosts
+
+`type = "static"` uses machines you already run (bare metal, a homelab,
+reserved instances) with sshd, Docker and systemd:
+
+```toml
+[providers.lab]
+type        = "static"
+registry    = "registry.lab:5000/cloudsourced-env"  # hosts pull environment images from here
+ssh_key     = "file:~/.ssh/cloudsourced"            # default file:~/.ssh/id_ed25519
+known_hosts = "~/.ssh/known_hosts"                  # host keys are verified
+hosts = [
+  { name = "build1", ssh = "root@10.0.0.5", cpu = 32, memory = "128G" },
+  { name = "build2", ssh = "root@10.0.0.6:2222", addr = "10.0.0.6:7443", cpu = 16, memory = "64G", arch = "arm64" },
+]
+
+[[providers.lab.size]]
+name = "lab"
+cpu = 16
+memory = "64G"
+```
+
+The orchestrator places one machine per host (the first free host with
+enough CPU and memory) and drives it over SSH: it uploads its own binary to
+`/var/lib/cloudsourced/bin/` once, then runs `<binary> supervisor static
+apply|start|stop|destroy|status`. `apply` writes the public machine spec,
+the secret environment (root-only, read once by the supervisor, which is
+the static provider's secret channel) and the `cloudsourced-supervisor`
+unit; the supervisor starts the containers as on a VM. At the end of a
+machine's lifetime the supervisor removes the machine instead of powering
+the host off; `destroy` does the same on request. Hosts must be logged in
+to `registry` (images are built locally and pushed there) and reachable
+on UDP 7443. Static hosts have no native object store: configure
+`[storage]` for snapshots and the shared result cache.
+
 ### Output overlay (output FUSE)
 
 By default only `eager` outputs come back after a run; `cloudsourced fetch`
