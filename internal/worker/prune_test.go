@@ -180,3 +180,13 @@ func TestSlotBudgetAndCaches(t *testing.T) {
 		t.Fatal("an unbounded cache must make the slot unbounded")
 	}
 }
+
+func TestBudgetBytes(t *testing.T) {
+	if got := budgetBytes(config.DiskBudget{}, 1000); got != 900 {
+		t.Errorf("default budget = %d, want 90%%", got)
+	}
+	b, _ := config.ParseDiskBudget("50G")
+	if got := budgetBytes(b, 100<<30); got != 50<<30 {
+		t.Errorf("50G budget = %d", got)
+	}
+}

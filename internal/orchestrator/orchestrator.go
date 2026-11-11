@@ -778,7 +778,7 @@ func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
 			sm.Sessions = len(st.Sessions)
 			sm.WarmRepos = st.WarmRepos
 			if d := st.Disk; d != nil {
-				sm.DiskTotal, sm.DiskUsed, sm.SlotBytes = d.Total, d.Used, d.SlotBytes
+				sm.DiskTotal, sm.DiskUsed, sm.SlotBytes, sm.DiskBudget = d.Total, d.Used, d.SlotBytes, d.Budget
 			}
 			sm.Draining = sm.Draining || st.Draining
 			if st.IdleSince > 0 {
@@ -1195,6 +1195,9 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	// sends its repository's TTL, which the server records per build slot.
 	if cfg.MaxLifetime > 0 {
 		spec.Env["OFFSHORE_BUILD_TTL"] = cfg.MaxLifetime.String()
+	}
+	if size.DiskBudget != "" {
+		spec.Env["OFFSHORE_DISK_BUDGET"] = size.DiskBudget
 	}
 	for k, v := range logs.Forward() { // machines log like the pool
 		spec.Env[k] = v

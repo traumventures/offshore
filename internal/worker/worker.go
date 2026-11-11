@@ -23,6 +23,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/traumventures/offshore/internal/auth"
 	"github.com/traumventures/offshore/internal/cas"
+	"github.com/traumventures/offshore/internal/config"
 	"github.com/traumventures/offshore/internal/labels"
 	"github.com/traumventures/offshore/internal/machine"
 	"github.com/traumventures/offshore/internal/manifest"
@@ -47,9 +48,10 @@ type Config struct {
 	CacheDir  string
 	DepsDir   string
 	BuildTTL  time.Duration // upper bound for build cache age
-	// DiskBudget is the bytes the cache disk may use before slots are
-	// pruned (OFFSHORE_DISK_BUDGET; 0: 90% of the filesystem).
-	DiskBudget int64
+	// DiskBudget is how much of the cache disk may be used before slots
+	// are pruned: [scheduler] disk_budget of the machine's size, passed by
+	// the orchestrator (zero: config.DefaultDiskBudget).
+	DiskBudget config.DiskBudget
 	// HostStatus is a file the server publishes machine.HostStatus to for
 	// the supervisor (OFFSHORE_HOST_STATUS; empty: none).
 	HostStatus string
@@ -121,11 +123,11 @@ func ConfigFromEnv() (Config, error) {
 		c.BuildTTL = d
 	}
 	if s := os.Getenv("OFFSHORE_DISK_BUDGET"); s != "" {
-		n, err := strconv.ParseInt(s, 10, 64)
+		b, err := config.ParseDiskBudget(s)
 		if err != nil {
-			return c, fmt.Errorf("server: OFFSHORE_DISK_BUDGET: %w", err)
+			return c, fmt.Errorf("server: disk budget: %w", err)
 		}
-		c.DiskBudget = n
+		c.DiskBudget = b
 	}
 	if s := os.Getenv("OFFSHORE_PROVISION"); s != "" {
 		if err := json.Unmarshal([]byte(s), &c.Provision); err != nil {

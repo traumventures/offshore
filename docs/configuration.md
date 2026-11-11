@@ -112,6 +112,7 @@ Sizes are `[[providers.NAME.size]]` tables:
 | `cpu`, `memory` | required | capacity used for scheduling (vCPUs, bytes) |
 | `price_per_hour` | 0 (unknown) | used for sizing decisions, `status` and `report` |
 | `disk` | unknown | machine disk (`"200G"`); the scheduler plans build slots against it |
+| `disk_budget` | `[scheduler] disk_budget` | cache disk machines of this size fill before pruning (`"85%"`, `"150G"`) |
 | `arch` | `amd64` (local-docker: the host) | `amd64` or `arm64`; repositories pick it with `resources.arch` |
 | `instance_types` | aws-ec2: the size name; oci: `VM.Standard.E5.Flex` / `VM.Standard.A1.Flex` | provider machine types tried in order on capacity errors (aws-ec2, oci only) |
 

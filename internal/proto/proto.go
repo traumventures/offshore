@@ -357,6 +357,9 @@ type DiskStatus struct {
 	Used          int64 `json:"used"`
 	Slots         int64 `json:"slots"`          // all build slots
 	MachineCaches int64 `json:"machine_caches"` // machine scope caches
+	// Budget is the bytes the worker lets the disk fill before it prunes
+	// slots ([scheduler] disk_budget of the machine's size).
+	Budget int64 `json:"budget,omitempty"`
 	// SlotBytes is the size of each repository's build slot (repo id ->
 	// bytes).
 	SlotBytes map[string]int64 `json:"slot_bytes,omitempty"`
