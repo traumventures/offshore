@@ -667,6 +667,9 @@ func fetch(globs []string) error {
 
 // supervisorCmd runs the supervisor of a VM machine.
 func supervisorCmd(args []string) error {
+	if len(args) > 0 && args[0] == "static" {
+		return staticHostCmd(args[1:])
+	}
 	fs := flag.NewFlagSet("supervisor", flag.ContinueOnError)
 	specPath := fs.String("spec", supervisor.SpecPath, "public machine spec")
 	stateDir := fs.String("state", supervisor.StateDir, "root-only agent state")
@@ -697,4 +700,36 @@ func supervisorCmd(args []string) error {
 		Shutdown: func() error { return exec.Command("shutdown", "-h", "now").Run() },
 	}
 	return a.Run(ctx)
+}
+
+// staticHostCmd is the host side of the static provider, run over SSH:
+// supervisor static apply|start|stop|destroy|status (apply reads a
+// supervisor.StaticPayload from stdin, status prints StaticStatus).
+func staticHostCmd(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: cloudsourced supervisor static apply|start|stop|destroy|status")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	h := supervisor.NewStaticHost(self)
+	ctx := context.Background()
+	switch args[0] {
+	case "apply":
+		var p supervisor.StaticPayload
+		if err := json.NewDecoder(os.Stdin).Decode(&p); err != nil {
+			return err
+		}
+		return h.Apply(ctx, p)
+	case "start":
+		return h.Start(ctx)
+	case "stop":
+		return h.Stop(ctx)
+	case "destroy":
+		return h.Destroy(ctx)
+	case "status":
+		return json.NewEncoder(os.Stdout).Encode(h.Status(ctx))
+	}
+	return fmt.Errorf("unknown static operation %q", args[0])
 }

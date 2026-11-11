@@ -20,6 +20,7 @@ import (
 	_ "github.com/traumventures/cloudsourced/internal/provider/awsec2"
 	_ "github.com/traumventures/cloudsourced/internal/provider/localdocker"
 	_ "github.com/traumventures/cloudsourced/internal/provider/oci"
+	_ "github.com/traumventures/cloudsourced/internal/provider/static"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
 	"github.com/traumventures/cloudsourced/internal/store"
 )

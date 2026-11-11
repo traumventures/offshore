@@ -36,7 +36,7 @@ type PoolConfig struct {
 }
 
 // Backends known to the configuration.
-var Backends = []string{"local-docker", "aws-ec2", "oci"}
+var Backends = []string{"local-docker", "aws-ec2", "oci", "static"}
 
 // cloudBackend reports whether a provider type launches cloud instances
 // with instance types (shapes).
@@ -210,7 +210,7 @@ func PoolConfigPath() string {
 //	[scheduler]             policy, estimator, overcommit, pressure, consolidation
 //	[[scheduler.warm_pool]] scheduled warm machines
 //	[[machine.setup]]       run = "..." once per machine
-//	[providers.NAME]        type = "local-docker" | "aws-ec2" | "oci", options
+//	[providers.NAME]        type = "local-docker" | "aws-ec2" | "oci" | "static", options
 //	[[providers.NAME.size]] machine types of that provider
 //	[telemetry]
 func LoadPool(path string) (*PoolConfig, error) {
