@@ -66,24 +66,24 @@ func init() {
 
 // EC2 is the aws-ec2 provider.
 type EC2 struct {
-	region     string
-	stack      string
-	ingress    provider.Ingress // allow_cidrs
-	diskGB     int32
-	amis       map[string]string // optional fixed AMI per architecture
-	docker     []string
-	binaries   map[string]string // server binary per architecture
-	subnet     string
-	cfg        aws.Config
-	ec2        *ec2.Client
-	ecr        *ecr.Client
-	s3         *s3.Client
-	cf         *cloudformation.Client
-	ssm        *ssm.Client
-	infraMu    sync.Mutex
-	infra      *infra
-	binMu      sync.Mutex
-	binKeys    map[string]string // architecture -> uploaded binary key
+	region   string
+	stack    string
+	ingress  provider.Ingress // allow_cidrs
+	diskGB   int32
+	amis     map[string]string // optional fixed AMI per architecture
+	docker   []string
+	binaries map[string]string // server binary per architecture
+	subnet   string
+	cfg      aws.Config
+	ec2      *ec2.Client
+	ecr      *ecr.Client
+	s3       *s3.Client
+	cf       *cloudformation.Client
+	ssm      *ssm.Client
+	infraMu  sync.Mutex
+	infra    *infra
+	binMu    sync.Mutex
+	binKeys  map[string]string // architecture -> uploaded binary key
 
 	builderOnce sync.Once
 	builder     *image.DockerBuilder
