@@ -321,8 +321,8 @@ type lfile struct {
 }
 
 var (
-	_ fs.FileReader   = (*lfile)(nil)
-	_ fs.FileReleaser = (*lfile)(nil)
+	_ fs.FileReader    = (*lfile)(nil)
+	_ fs.FileReleaser  = (*lfile)(nil)
 	_ fs.FileGetattrer = (*lfile)(nil)
 )
 

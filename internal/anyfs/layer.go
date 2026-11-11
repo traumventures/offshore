@@ -49,7 +49,7 @@ func NewLayerID(now time.Time) string {
 // ErrNoLayer means a layer or head is missing (or expired).
 var ErrNoLayer = errors.New("anyfs: no such layer")
 
-func layerObject(id string) string { return "layers/" + id + ".json.gz" }
+func layerObject(id string) string  { return "layers/" + id + ".json.gz" }
 func headObject(name string) string { return "heads/" + name }
 
 // SaveLayer writes a layer object.

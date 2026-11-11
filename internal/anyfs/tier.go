@@ -52,7 +52,9 @@ type (
 	// Cleaner marks a dirty page clean after it was written back.
 	Cleaner interface{ MarkClean(k Key) }
 	// Prefetcher pages in keys in the background (readahead).
-	Prefetcher interface{ Prefetch(ctx context.Context, keys []Key) }
+	Prefetcher interface {
+		Prefetch(ctx context.Context, keys []Key)
+	}
 )
 
 // Profile is the capability profile of a tier or a stack of tiers: the

@@ -38,8 +38,8 @@ func TestDiffApplyCases(t *testing.T) {
 	base := NewTree([]Node{d("d"), f("d/x", 1, "x"), f("d/y", 1, "y"), d("e"), f("e/z", 1, "z"), f("g", 1, "g")})
 	top := NewTree([]Node{
 		f("d/x", 2, "x2"), d("d"), // changed file
-		f("e", 3, "file"),         // directory replaced by a file
-		d("g"), f("g/h", 1, "h"),  // file replaced by a directory
+		f("e", 3, "file"),        // directory replaced by a file
+		d("g"), f("g/h", 1, "h"), // file replaced by a directory
 		f("n", 1, "new"),
 	})
 	layer := Diff(base, top)

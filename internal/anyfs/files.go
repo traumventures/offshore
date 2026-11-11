@@ -34,8 +34,8 @@ type Files struct {
 	faultB   int64
 	rate     rate
 
-	pmu   sync.Mutex
-	pages map[Key][]byte // last pages assembled (packed small files share them)
+	pmu    sync.Mutex
+	pages  map[Key][]byte // last pages assembled (packed small files share them)
 	porder []Key
 }
 
