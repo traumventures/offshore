@@ -567,7 +567,7 @@ func Prewarm(ctx context.Context, repo *config.Repo, argv []string, progress io.
 	l := labels.Merge(labels.Detect(repo.Root, "", os.Getenv), map[string]string{labels.Purpose: labels.PurposePrewarm})
 	rec := &events.Run{Time: time.Now(), Repo: repo.Root, Cwd: repo.Root, Tool: argv[0], Args: argv[1:],
 		Mode: events.Remote, Why: "cloudsourced prewarm", Labels: labels.Clean(l)}
-	code, err := runRemote(ctx, repo, config.Tool{}, argv[0], argv[1:], repo.Root, rec)
+	code, err := runRemote(ctx, repo, config.Tool{}, argv[0], argv[1:], repo.Root, rec, remoteRun{})
 	var fb *fallback
 	if errors.As(err, &fb) {
 		return 0, fb.err
