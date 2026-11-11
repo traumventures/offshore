@@ -3,7 +3,6 @@ package scheduler
 import (
 	"time"
 
-	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/medium"
 )
 
@@ -30,7 +29,7 @@ import (
 const ThrashPasses = 2
 
 // levelOf returns the profile of medium med in a stack (ok false: none).
-func levelOf(p anyfs.Profile, med string) (medium.Profile, bool) {
+func levelOf(p medium.Stack, med string) (medium.Profile, bool) {
 	for _, l := range p.Levels {
 		if l.Medium == med {
 			return l, true
@@ -41,7 +40,7 @@ func levelOf(p anyfs.Profile, med string) (medium.Profile, bool) {
 
 // SlotMedium is the medium a slot persists on: the stack's volume if it
 // has one, else its top tier.
-func SlotMedium(p anyfs.Profile) medium.Profile {
+func SlotMedium(p medium.Stack) medium.Profile {
 	if l, ok := levelOf(p, medium.Volume); ok {
 		return l
 	}
@@ -51,19 +50,19 @@ func SlotMedium(p anyfs.Profile) medium.Profile {
 // WithTop returns p with its top tier replaced by top (added when p is
 // empty) holding capacity bytes (e.g. a size whose local disk turns out
 // to be an instance-store NVMe disk).
-func WithTop(p anyfs.Profile, top medium.Profile, capacity int64) anyfs.Profile {
+func WithTop(p medium.Stack, top medium.Profile, capacity int64) medium.Stack {
 	levels := append([]medium.Profile{top}, p.Levels...)
 	if len(p.Levels) > 0 {
 		levels = append([]medium.Profile{top}, p.Levels[1:]...)
 	}
-	out := anyfs.Profile{Levels: levels, Capacity: capacity}
+	out := medium.Stack{Levels: levels, Capacity: capacity}
 	out.Name = out.String()
 	return out
 }
 
 // StackOf returns a stack profile of media top first (tests, defaults).
-func StackOf(capacity int64, levels ...medium.Profile) anyfs.Profile {
-	p := anyfs.Profile{Levels: levels, Capacity: capacity}
+func StackOf(capacity int64, levels ...medium.Profile) medium.Stack {
+	p := medium.Stack{Levels: levels, Capacity: capacity}
 	p.Name = p.String()
 	return p
 }
@@ -82,7 +81,7 @@ func pageInBytes(bytes, ws int64) int64 {
 // restored from a store with bandwidth bw into stack: the working set
 // faulted in (per page latency and transfer of the stack), at least the
 // transfer at bw.
-func LazyRestore(stack anyfs.Profile, bytes, ws, bw int64) time.Duration {
+func LazyRestore(stack medium.Stack, bytes, ws, bw int64) time.Duration {
 	n := pageInBytes(bytes, ws)
 	if n <= 0 {
 		return 0
@@ -97,14 +96,14 @@ func LazyRestore(stack anyfs.Profile, bytes, ws, bw int64) time.Duration {
 // ThrashTime is the extra build time when a working set of ws bytes runs
 // on a stack with local capacity capacity: ThrashPasses refaults of the
 // excess from the tier below the top (0 when it fits or is unknown).
-func ThrashTime(stack anyfs.Profile, capacity, ws int64) time.Duration {
+func ThrashTime(stack medium.Stack, capacity, ws int64) time.Duration {
 	if capacity <= 0 || ws <= capacity {
 		return 0
 	}
 	excess := ws - capacity
 	below := stack
 	if len(stack.Levels) >= 2 {
-		below = anyfs.Profile{Levels: stack.Levels[:2]}
+		below = medium.Stack{Levels: stack.Levels[:2]}
 	}
 	d := below.FaultTime(excess)
 	if d <= 0 {

@@ -7,6 +7,8 @@ import (
 	"io"
 
 	"github.com/zeebo/blake3"
+
+	"github.com/traumventures/offshore/internal/medium"
 )
 
 // Key identifies a page by content: the hex BLAKE3 hash of its bytes.
@@ -60,7 +62,7 @@ func (s State) String() string {
 }
 
 // PageSize is the target size of a page.
-const PageSize = 8 << 20
+const PageSize = medium.PageSize
 
 // SmallFile is the largest file packed together with others.
 const SmallFile = 1 << 20

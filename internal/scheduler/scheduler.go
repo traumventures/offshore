@@ -10,7 +10,7 @@ package scheduler
 import (
 	"time"
 
-	"github.com/traumventures/offshore/internal/anyfs"
+	"github.com/traumventures/offshore/internal/medium"
 )
 
 // VolumePolicy sizes the cache volumes of a volume size
@@ -89,9 +89,9 @@ type Size struct {
 	// Medium is where machines of the size keep their caches: "local"
 	// (default) or "volume" (Volume). Stack is the composite capability
 	// profile of the size's media (hot medium over the store).
-	Medium string        `json:"medium,omitempty"`
-	Stack  anyfs.Profile `json:"stack,omitzero"`
-	Volume VolumePolicy  `json:"volume,omitzero"`
+	Medium string       `json:"medium,omitempty"`
+	Stack  medium.Stack `json:"stack,omitzero"`
+	Volume VolumePolicy `json:"volume,omitzero"`
 }
 
 // ArchOf returns a size's architecture (amd64 when unset).
@@ -183,7 +183,7 @@ type Machine struct {
 	Medium string
 	Zone   string
 	Volume string
-	Stack  anyfs.Profile
+	Stack  medium.Stack
 	// VM is the machine's cache file system (anyfs) in virtual memory
 	// terms: working set vs. local capacity, fault rate, thrashing.
 	VM          VM

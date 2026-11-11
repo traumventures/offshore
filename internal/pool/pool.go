@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/config"
 	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/orchestrator"
@@ -83,7 +82,7 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 				s.Capacity.Disk = minB
 			}
 		}
-		s.Stack = anyfs.Profile{Name: strings.Join(tiers, ">")}
+		s.Stack = medium.Stack{Name: strings.Join(tiers, ">")}
 		for _, t := range tiers {
 			l := u.Profile(sz.Provider, t)
 			l.Medium = t // also without a profile (unknown provider type)

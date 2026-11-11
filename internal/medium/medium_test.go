@@ -44,12 +44,17 @@ func TestResolveLayers(t *testing.T) {
 }
 
 func TestStack(t *testing.T) {
-	s := Stack{Hot: Default("oci", Volume), Store: Default("oci", Store)}
-	// 48 MB/s volume is slower than the 200 MB/s store.
-	if got := s.RestoreTime(480 << 20); got != 10*time.Second {
-		t.Fatalf("restore %v", got)
+	s := Stack{Levels: []Profile{Default("oci", Volume), Default("oci", Store)}}
+	// The 48 MB/s volume is slower than the 200 MB/s store, plus 30 ms of
+	// store latency per 8 MiB page (480 MiB = 60 pages).
+	if got := s.FaultTime(480 << 20); got != 10*time.Second+60*30*time.Millisecond {
+		t.Fatalf("fault time %v", got)
 	}
-	if (Stack{}).Medium() != Local {
-		t.Fatal("default medium")
+	if (Stack{}).Medium() != Local || s.String() != "volume>store" || s.Durability() != ReachRegion {
+		t.Fatal("stack accessors")
+	}
+	c := Compose(Stack{Name: "l", Levels: []Profile{Default("oci", Local)}, Capacity: 5}, s)
+	if c.String() != "local>volume>store" || c.Capacity != 5 {
+		t.Fatalf("compose %+v", c)
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/medium"
 )
 
@@ -162,7 +161,7 @@ func sizePrice(s Size) float64 {
 
 // storagePrice is the hourly price of bytes on the medium the stack's
 // slots persist on.
-func storagePrice(st anyfs.Profile, bytes int64) float64 {
+func storagePrice(st medium.Stack, bytes int64) float64 {
 	return float64(max(bytes, 0)) / 1e9 * SlotMedium(st).PricePerGBHour()
 }
 

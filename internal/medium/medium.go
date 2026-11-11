@@ -21,6 +21,7 @@
 package medium
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -138,25 +139,80 @@ func (p Profile) TransferTime(bytes int64) time.Duration {
 	return time.Duration(float64(bytes) / float64(p.Throughput) * float64(time.Second))
 }
 
-// Stack is the composite profile of a machine: the hot medium builds read
-// and write (local disk or a volume) over the durable store.
+// PageSize is the target size of a page of the cache file system
+// (anyfs): the unit of page faults.
+const PageSize = 8 << 20
+
+// Stack is the capability profile of a stack of tiers (a cache file
+// system, internal/anyfs): the media from top (fastest, e.g. the local
+// disk) to bottom (the backing store) and the capacity of the top tier.
+// It is the scheduler's view of a size and a machine.
 type Stack struct {
-	Hot   Profile `json:"hot"`
-	Store Profile `json:"store"`
+	Name     string    `json:"name"`
+	Levels   []Profile `json:"levels"`
+	Capacity int64     `json:"capacity,omitempty"` // bytes of the top tier (0: unbounded/unknown)
 }
 
-// Medium is the hot medium's name (default local).
-func (s Stack) Medium() string {
-	if s.Hot.Medium == "" {
-		return Local
+// Top is the profile of the top medium.
+func (p Stack) Top() Profile {
+	if len(p.Levels) == 0 {
+		return Profile{}
 	}
-	return s.Hot.Medium
+	return p.Levels[0]
 }
 
-// RestoreTime is the time to fill bytes from the store into the hot
-// medium: bounded by the slower of both.
-func (s Stack) RestoreTime(bytes int64) time.Duration {
-	return max(s.Store.TransferTime(bytes), s.Hot.TransferTime(bytes))
+// Backing is the profile of the bottom (most durable) medium.
+func (p Stack) Backing() Profile {
+	if len(p.Levels) == 0 {
+		return Profile{}
+	}
+	return p.Levels[len(p.Levels)-1]
+}
+
+// Medium is the top medium's name (default local).
+func (p Stack) Medium() string {
+	if m := p.Top().Medium; m != "" {
+		return m
+	}
+	return Local
+}
+
+// Durability is the widest durability of any level.
+func (p Stack) Durability() Reach {
+	var d Reach
+	for _, l := range p.Levels {
+		d = max(d, l.Durability)
+	}
+	return d
+}
+
+// FaultTime estimates the time to page in bytes from the backing medium
+// in pages of PageSize: per page latency plus transfer, bounded by the
+// slowest level on the way up.
+func (p Stack) FaultTime(bytes int64) time.Duration {
+	if bytes <= 0 || len(p.Levels) == 0 {
+		return 0
+	}
+	var worst time.Duration
+	for _, l := range p.Levels {
+		worst = max(worst, l.TransferTime(bytes))
+	}
+	pages := (bytes + PageSize - 1) / PageSize
+	return worst + time.Duration(pages)*p.Backing().Latency
+}
+
+// String lists the stack, e.g. "local>volume>store".
+func (p Stack) String() string {
+	var s []string
+	for _, l := range p.Levels {
+		s = append(s, l.Medium)
+	}
+	return strings.Join(s, ">")
+}
+
+// Compose stacks two profiles (upper on top of lower).
+func Compose(upper, lower Stack) Stack {
+	return Stack{Name: upper.Name + ">" + lower.Name, Levels: append(append([]Profile{}, upper.Levels...), lower.Levels...), Capacity: upper.Capacity}
 }
 
 // Measured returns a measured profile for a provider instance and medium

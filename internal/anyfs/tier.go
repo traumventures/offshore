@@ -3,8 +3,6 @@ package anyfs
 import (
 	"context"
 	"errors"
-	"strings"
-	"time"
 
 	"github.com/traumventures/offshore/internal/medium"
 )
@@ -57,74 +55,13 @@ type (
 	}
 )
 
-// Profile is the capability profile of a tier or a stack of tiers: the
-// media from top to bottom (each a medium.Profile) and the local
-// capacity.
-type Profile struct {
-	Name     string           `json:"name"`
-	Levels   []medium.Profile `json:"levels"`
-	Capacity int64            `json:"capacity,omitempty"` // bytes of the top tier (0: unbounded)
-}
-
-// Top is the profile of the top medium.
-func (p Profile) Top() medium.Profile {
-	if len(p.Levels) == 0 {
-		return medium.Profile{}
-	}
-	return p.Levels[0]
-}
-
-// Backing is the profile of the bottom (most durable) medium.
-func (p Profile) Backing() medium.Profile {
-	if len(p.Levels) == 0 {
-		return medium.Profile{}
-	}
-	return p.Levels[len(p.Levels)-1]
-}
-
-// Durability is the widest durability of any level.
-func (p Profile) Durability() medium.Reach {
-	var d medium.Reach
-	for _, l := range p.Levels {
-		d = max(d, l.Durability)
-	}
-	return d
-}
-
-// FaultTime estimates the time to page in bytes from the backing medium
-// in pages of PageSize: per page latency plus transfer, bounded by the
-// slowest level on the way up.
-func (p Profile) FaultTime(bytes int64) time.Duration {
-	if bytes <= 0 || len(p.Levels) == 0 {
-		return 0
-	}
-	var worst time.Duration
-	for _, l := range p.Levels {
-		worst = max(worst, l.TransferTime(bytes))
-	}
-	pages := (bytes + PageSize - 1) / PageSize
-	return worst + time.Duration(pages)*p.Backing().Latency
-}
-
-// Stack returns the profile as a hot medium over a backing store (the
-// scheduler's view).
-func (p Profile) Stack() medium.Stack {
-	return medium.Stack{Hot: p.Top(), Store: p.Backing()}
-}
-
-// String lists the stack, e.g. "local>volume>store".
-func (p Profile) String() string {
-	var s []string
-	for _, l := range p.Levels {
-		s = append(s, l.Medium)
-	}
-	return strings.Join(s, ">")
-}
+// Profile is the capability profile of a tier or a stack of tiers
+// (medium.Stack: the media top first and the local capacity; the
+// scheduler reads the same type).
+type Profile = medium.Stack
 
 // Compose stacks two profiles (upper on top of lower).
-func Compose(upper, lower Profile) Profile {
-	return Profile{Name: upper.Name + ">" + lower.Name, Levels: append(append([]medium.Profile{}, upper.Levels...), lower.Levels...), Capacity: upper.Capacity}
-}
+func Compose(upper, lower Profile) Profile { return medium.Compose(upper, lower) }
 
 // Stats are a tier's residency and VM counters (cumulative counters
 // since the tier was opened).

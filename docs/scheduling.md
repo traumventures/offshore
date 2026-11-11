@@ -92,7 +92,7 @@ Rendezvous hashing breaks ties. Waits are bounded by `queue_timeout`.
 
 **Tier stacks.** A size's caches live in a stack of tiers (`stack`, see
 [configuration](configuration.md); `internal/anyfs`), and the model reads
-the composite profile (`scheduler.Size.Stack`, an `anyfs.Profile`):
+the composite profile (`scheduler.Size.Stack`, a `medium.Stack`; anyfs.Profile is the same type):
 
 - *lazy restore*: a restored or moved slot is mounted lazily, so a build
   waits only for its working set to fault in
