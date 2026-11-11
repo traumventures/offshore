@@ -9,6 +9,7 @@ RUNS=$W/runs
 RESULTS=${RESULTS:-$W/results.jsonl}
 JOBS=${JOBS:-8}
 TIERFS=$W/tierfs
+ANYFS=$W/anyfsbench
 LEAF=cargo-nextest/src/main.rs
 CORE=nextest-metadata/src/lib.rs
 export CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=1 CARGO_TERM_COLOR=never
@@ -150,6 +151,42 @@ layout_D() { # like B, lower lazily fetched from a slow "object store"; extra ti
   mount_overlay /mnt/lower $tag "${OVL_OPTS:-}"
   grep " /t overlay" /proc/mounts
   seq_restore $tag
+  umount_t; stop_fuse
+}
+
+# Layouts E and F use the real implementation (internal/anyfs via
+# anyfsbench): pages + a base layer in a directory store, local tier and
+# materialized files in a cache dir, read-only FUSE lower, kernel overlay.
+pack_anyfs() {
+  [ -f $RUNS/astore/heads/bench ] || { mkdir -p $RUNS/astore; $ANYFS pack -src $RUNS/A -store $RUNS/astore | tee -a $W/logs/anyfs-pack.log; }
+}
+start_anyfs() { # MNT args...
+  local mnt=$1; shift
+  statsfile=/tmp/stats-$$.json
+  $ANYFS mount "$@" -mnt $mnt -stats $statsfile > $W/logs/anyfs-$(date +%s).log 2>&1 &
+  fusepid=$!
+  for _ in $(seq 600); do grep -q " $mnt fuse" /proc/mounts && return 0; sleep 0.1; done
+  echo "anyfs mount failed"; tail $W/logs/anyfs-*.log; exit 1
+}
+commit_step() { # commit the merged /t as a layer (writeback cost)
+  $ANYFS commit -store $RUNS/astore -cache $RUNS/$1-cache -dir /t -to bench-$1 | python3 -c "import json,sys; d=json.load(sys.stdin); d['layout']='$1'; d['step']='commit'; print(json.dumps(d))" | tee -a "$RESULTS"
+}
+layout_E() { # anyfs, warm slot: every file materialized locally before the mount
+  local tag=${1:-E}; shift || true
+  pack_anyfs; umount_t; mkdir -p /mnt/lower
+  start_anyfs /mnt/lower -store $RUNS/astore -cache $RUNS/$tag-cache -warm "$@"
+  mount_overlay /mnt/lower $tag ",redirect_dir=on,metacopy=on"
+  seq_restore $tag
+  commit_step $tag
+  umount_t; stop_fuse
+}
+layout_F() { # anyfs, cold restore from a slow store (5 ms/object, 200 MB/s), prefetch <= 64 KiB
+  local tag=${1:-F}; shift || true
+  pack_anyfs; umount_t; mkdir -p /mnt/lower
+  start_anyfs /mnt/lower -store $RUNS/astore -cache $RUNS/$tag-cache -latency 5ms -bw 200e6 -prefetch 65536 "$@"
+  mount_overlay /mnt/lower $tag ",redirect_dir=on,metacopy=on"
+  seq_restore $tag
+  commit_step $tag
   umount_t; stop_fuse
 }
 
