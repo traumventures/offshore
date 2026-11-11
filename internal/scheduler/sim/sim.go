@@ -4,7 +4,11 @@
 // (Place for every waiting task, Plan while tasks wait and on every
 // reconcile tick) and models what the policy cannot see: boot and start
 // latency, CPU overcommit slowing tasks down, memory beyond physical
-// capacity swapping or being OOM killed, cold build caches.
+// capacity swapping or being OOM killed, cold build caches, and the cache
+// file system of each size's tier stack (anyfs): lazy restores fault in
+// a build's working set at the stack's fault time (the rest of the slot
+// pages in in the background), and a working set larger than the local
+// capacity thrashes (refaults from the tier below lengthen the build).
 package sim
 
 import (
@@ -160,6 +164,15 @@ type Report struct {
 	// consolidation (the production flapping case).
 	Flaps   int            `json:"flaps"`
 	Actions map[string]int `json:"actions"`
+	// Created counts machines created per size.
+	Created map[string]int `json:"created,omitempty"`
+	// Thrashed counts builds whose working set exceeded their machine's
+	// local capacity; ThrashTime is the build time it added. PageInBytes
+	// are the bytes faulted in before builds proceeded (lazy restores and
+	// refaults).
+	Thrashed    int           `json:"thrashed"`
+	ThrashTime  time.Duration `json:"thrash_time"`
+	PageInBytes int64         `json:"page_in_bytes"`
 }
 
 type job struct {
@@ -206,6 +219,18 @@ type machine struct {
 	slots    map[string]int64 // repository -> slot bytes
 	volume   string           // cache volume (medium volume)
 	resized  time.Time        // last disk resize
+	ws       int64            // working set of the last build
+	thrash   bool             // the last build thrashed
+}
+
+// capacity is the bytes m's top tier holds: its disk for a single hot
+// medium over the store, the size's local capacity for deeper stacks
+// (0: unknown, no thrashing).
+func (m *machine) capacity() int64 {
+	if len(m.size.Stack.Levels) <= 2 && m.disk > 0 {
+		return m.disk
+	}
+	return m.size.Stack.Capacity
 }
 
 // volume is a detached cache volume kept for reuse.
@@ -244,7 +269,7 @@ func Run(trace Trace, o Options) Report {
 	s := &sim{o: o, now: trace.Start, recent: map[string]time.Time{}, fc: scheduler.NewForecast(),
 		snaps: map[string][]scheduler.Snapshot{}, calm: map[string]time.Time{}}
 	s.start = trace.Start
-	s.r = Report{Name: o.Name, Jobs: len(trace.Jobs), Actions: map[string]int{}}
+	s.r = Report{Name: o.Name, Jobs: len(trace.Jobs), Actions: map[string]int{}, Created: map[string]int{}}
 	jobs := make([]*job, len(trace.Jobs))
 	last := 0.0
 	for i, tj := range trace.Jobs {
@@ -317,7 +342,8 @@ func Run(trace Trace, o Options) Report {
 					s.fitDisk(m, r.j.Repo)
 				}
 				u := scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), CPUSeconds: r.j.CPU * r.j.Duration,
-					Wall: r.j.runFor, Warm: r.warm, Provider: m.prov, SlotBytesBefore: r.before, SlotBytesAfter: after}
+					Wall: r.j.runFor, Warm: r.warm, Provider: m.prov, SlotBytesBefore: r.before, SlotBytesAfter: after,
+					WorkingSetBytes: int64(r.j.WorkingSet)}
 				if r.restored {
 					u.Warm, u.Restored = false, true
 				}
@@ -453,7 +479,7 @@ func (s *sim) advance(d time.Duration) {
 }
 
 func (s *sim) storage(sz scheduler.Size, bytes int64, sec float64) {
-	c := float64(bytes) / 1e9 * sz.Stack.Hot.PricePerGBHour() * sec / 3600
+	c := float64(bytes) / 1e9 * scheduler.SlotMedium(sz.Stack).PricePerGBHour() * sec / 3600
 	s.r.VolumeCost += c
 	s.r.Cost += c
 }
@@ -519,9 +545,12 @@ func (s *sim) pool() scheduler.Pool {
 			sm.Sessions = len(m.runs)
 			sm.DiskTotal, sm.CanResize = m.disk, s.o.Resize
 			sm.Medium, sm.Stack, sm.Volume = m.size.Medium, m.size.Stack, m.volume
+			// The cache file system's view, as the worker reports it.
+			sm.VM = scheduler.VM{Capacity: m.capacity(), WorkingSet: m.ws}
+			sm.VM.Thrashing = m.thrash && sm.VM.Capacity > 0 && m.ws > sm.VM.Capacity
 			if m.volume != "" {
 				sm.CanResize = m.size.Volume.Max == 0 || m.disk < m.size.Volume.Max
-				if cd := m.size.Stack.Hot.ResizeCooldown; cd > 0 && !m.resized.IsZero() {
+				if cd := scheduler.SlotMedium(m.size.Stack).ResizeCooldown; cd > 0 && !m.resized.IsZero() {
 					sm.ResizableAt = m.resized.Add(cd)
 				}
 			}
@@ -727,7 +756,8 @@ func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.D
 			s.r.EgressCost += egress
 			s.r.Cost += egress
 		}
-		prep = math.Max(float64(slot.Snapshot.Bytes)/float64(bw), m.size.Stack.Hot.TransferTime(slot.Snapshot.Bytes).Seconds())
+		prep = scheduler.LazyRestore(m.size.Stack, slot.Snapshot.Bytes, int64(j.WorkingSet), bw).Seconds()
+		s.r.PageInBytes += min(slot.Snapshot.Bytes, max(int64(j.WorkingSet), 0)) // 0: not modelled
 		m.slots[j.Repo] = slot.Snapshot.Bytes
 		restored = true
 	case scheduler.SlotMove:
@@ -741,7 +771,8 @@ func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.D
 			s.r.EgressCost += egress
 			s.r.Cost += egress
 		}
-		prep = float64(slot.Bytes)/float64(s.o.Bandwidth) + float64(slot.Bytes)/float64(bw)
+		prep = float64(slot.Bytes)/float64(s.o.Bandwidth) + scheduler.LazyRestore(m.size.Stack, slot.Bytes, int64(j.WorkingSet), bw).Seconds()
+		s.r.PageInBytes += min(slot.Bytes, max(int64(j.WorkingSet), 0))
 		m.slots[j.Repo] = slot.Bytes
 		restored = true
 	}
@@ -752,6 +783,16 @@ func (s *sim) assign(m *machine, j *job, reserve scheduler.Resources, exp time.D
 		work *= 1 + s.o.ColdPenalty
 	}
 	work += prep
+	// The working set beyond the local capacity faults in again during
+	// the build (the cache file system reports thrashing).
+	m.ws, m.thrash = int64(j.WorkingSet), false
+	if pen := scheduler.ThrashTime(m.size.Stack, m.capacity(), int64(j.WorkingSet)); pen > 0 {
+		work += pen.Seconds()
+		m.thrash = true
+		s.r.Thrashed++
+		s.r.ThrashTime += pen
+		s.r.PageInBytes += scheduler.ThrashPasses * (int64(j.WorkingSet) - m.capacity())
+	}
 	s.seq++
 	m.runs = append(m.runs, &run{j: j, reserve: reserve, work: work, seq: s.seq, start: s.now, expected: exp, warm: warm,
 		restored: restored, before: m.slots[j.Repo]})
@@ -830,6 +871,7 @@ func (s *sim) execute(acts []scheduler.Action) {
 			}
 			s.machines = append(s.machines, m)
 			s.r.Machines++
+			s.r.Created[a.Size.Name]++
 			continue
 		}
 		m := s.find(a.Machine)
@@ -911,7 +953,7 @@ func (s *sim) attachVolume(m *machine, id string) {
 				m.warm[repo] = true
 			}
 		}
-		m.readyAt = m.readyAt.Add(m.size.Stack.Hot.Attach)
+		m.readyAt = m.readyAt.Add(scheduler.SlotMedium(m.size.Stack).Attach)
 		s.r.VolumeAttaches++
 		return
 	}

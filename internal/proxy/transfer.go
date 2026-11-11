@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/cas"
 	"github.com/traumventures/offshore/internal/config"
 	"github.com/traumventures/offshore/internal/daemon"
 	"github.com/traumventures/offshore/internal/manifest"
-	"github.com/traumventures/offshore/internal/outputfs"
 	"github.com/traumventures/offshore/internal/proto"
 )
 
@@ -264,7 +264,7 @@ func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry, compress 
 	var todo []planned
 	needSet := map[string]bool{}
 	var need []string
-	mounts := outputfs.Mounts()
+	mounts := daemon.OutputMounts()
 	var store *cas.Store
 	var cached []manifest.Entry
 	for _, e := range files {
@@ -272,7 +272,7 @@ func ReceiveFiles(pc *proto.Conn, root string, files []manifest.Entry, compress 
 		if err != nil {
 			continue
 		}
-		if outputfs.Covering(mounts, dst) != "" {
+		if anyfs.Covering(mounts, dst) != "" {
 			if store == nil {
 				if store, err = cas.New(daemon.OutputsCASDir()); err != nil {
 					return err

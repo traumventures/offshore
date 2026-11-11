@@ -39,7 +39,7 @@ flowchart LR
     sup["supervisor (VMs)"] --> worker["worker<br/>sessions in cgroups,<br/>build slots, caches"]
   end
   tool -- "QUIC: exec, sources (FUSE),<br/>write-back, outputs" --> worker
-  worker -- "snapshots, global caches" --> store[("object store")]
+  worker -- "slot layers + pages, global caches" --> store[("object store")]
 ```
 
 | Component | Runs on | Does |
@@ -81,7 +81,7 @@ Reference:
 * [Configuration](docs/configuration.md): client, pool and repository files, every key
 * [CLI](docs/cli.md): all commands, flags and environment variables
 * [Tools, tests and outputs](docs/tools.md): tool adapters, test split, output overlay, port forwarding, rust-analyzer
-* [Caches and storage](docs/caches-and-storage.md): cache scopes, media (local disk, instance store, volumes, object store) and their capability profiles, pruning, snapshots, compiler cache
+* [Caches and storage](docs/caches-and-storage.md): cache scopes, media (local disk, instance store, volumes, object store) and their capability profiles, pruning, build slots on anyfs (commit, writeback, lazy restore), compiler cache
 * [Scheduling](docs/scheduling.md): placement, scaling, overcommit, simulator
 * [Control plane](docs/control-plane.md): shared orchestrator, TLS, container image, AWS deployment
 * [Operations](docs/operations.md): metrics, logs, tracing, events, report, top, doctor, retention

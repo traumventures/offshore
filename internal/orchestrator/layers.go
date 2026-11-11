@@ -221,7 +221,9 @@ func (o *Orchestrator) GCLayers(ctx context.Context, force bool) int {
 		return 0
 	}
 	o.layersGC = o.now()
-	victims := o.gcLayersLocked(o.now())
+	// Layer times are the workers' wall clock (not the orchestrator's
+	// test clock).
+	victims := o.gcLayersLocked(time.Now())
 	stores := o.Stores
 	o.mu.Unlock()
 	if stores == nil {

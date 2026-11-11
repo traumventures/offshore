@@ -68,7 +68,6 @@ Cloud tests are opt-in and create real resources; clean up afterwards.
 | script | measures |
 |---|---|
 | `test/bench/overlay-fresh.sh` | local cargo freshness on the output overlay ([tools.md](tools.md#cargo-freshness)) |
-| `test/bench/snapshot.sh` | snapshot save and lazy restore (`BENCH_STORE` for a mounted remote store) ([caches-and-storage.md](caches-and-storage.md#snapshots-and-lazy-restore)) |
 
 ## Operator tools
 

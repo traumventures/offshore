@@ -97,6 +97,31 @@ on demand through the worker's slot stream (`proto.KindSlot`, admin token;
 `orchestrator.WorkerSlotOps.PruneSlot`): older duplicate slots go cold
 first, then the newest is pruned in stages to the requested size.
 
+### Access classes
+
+The cache file system learns how a slot's files are used
+(`internal/access`). Every path maps to a pattern with hashed and numbered
+segments generalized (`target/debug/deps/*.rlib`,
+`target/debug/incremental/*/s-*/dep-graph.bin`,
+`target/debug/.fingerprint/*/*.json`). Per pattern and across sessions the
+worker counts creates, overwrites, deletes and reads (from the trees
+before and after each session and the read index), lifetimes and sizes,
+persisted as a small JSON file per repository, and classifies:
+
+| class | means | policy |
+| --- | --- | --- |
+| `immutable` | read-mostly, (almost) never written | upload early, prefetch after a restore, reclaimed last, deduplicated across slots |
+| `write-once` | new files most sessions, never overwritten | upload after 5 s, prefetch, reclaimed last, deduplicated |
+| `churn` | overwritten or replaced most sessions | stays local (never paged out to a volume), dirty for 10 min, pages of files deleted before the flush are skipped, reclaimed early |
+| `ephemeral` | created and deleted within about a session, never read | never written back, reclaimed first |
+
+Tool adapters seed the classifier with priors (cargo: `deps/` immutable,
+`incremental/` and `.fingerprint/` churn, `build/` write-once,
+`target/tmp` ephemeral; go: module cache immutable, build cache
+write-once; node: `node_modules` immutable, bundler caches churn). A
+pattern's own statistics override the prior once it was seen in 3
+sessions; unseen files fall back to their directory's statistics.
+
 ## Object store (`[storage]`)
 
 Internally a provider has four parts: **Compute** (machines), **Registry**
@@ -188,65 +213,64 @@ sessions use as `CARGO_TARGET_<host triple>_LINKER` unless set (with
 `.cargo/config.toml` stay untouched; a `target.<triple>.linker` in
 `.cargo/config.toml` is overridden by it.
 
-## Snapshots and lazy restore
+## Build slots on anyfs: commit, writeback, lazy restore
 
-A build slot (and a machine cache per digest) can move between machines
-through the store. `internal/snapshot` saves a directory as content
-addressed chunks (BLAKE3; small files packed into ~8 MB chunks with
-content-defined boundaries, large files split) plus a manifest with every
-file's mode, size, mtime and chunk ranges
-(`repos/<repo>/snapshots/<unix>.json.gz`, newest named by
-`snapshots/latest`). A save reuses the chunk ranges of the slot's previous
-save for files whose size and mtime did not change, so it reads and uploads
-only what changed; chunks older than 12 h are uploaded again, so a snapshot
-stays restorable although the store expires objects after 24 h.
+Build slots are mounts of the cache file system (`internal/anyfs`,
+`internal/worker/cachefs.go`). A slot's data directory (what slot caches
+bind into sessions) is a kernel overlayfs (`redirect_dir=on,metacopy=on`):
+a slot-local upper directory over a read-only FUSE lower that serves the
+tree of the repository's committed **layer chain**. File contents are
+materialized on first read (never on open) by a machine-wide file cache
+(`<cache>/anyfs/files`) from **pages** (content addressed, small files
+packed) of the repository's tier stack: a local page tier
+(`<cache>/anyfs/repos/<repo>/local`, ARC, capacity half the disk budget)
+over the repository's store prefix (`repos/<repo>/` of the store grant).
+Resident files reach the kernel with FUSE passthrough; files up to 64 KiB
+are prefetched at mount. Without CAP_SYS_ADMIN the userspace overlay serves
+the same union (logged at start); without `/dev/fuse` slots are plain
+directories (commits scan them, a new slot over a chain is extracted).
 
-A restore creates a new slot at once: directories, symlinks and sparse
-placeholders with the final sizes and the original mtimes (cargo compares
-mtimes, so a restored `target/` is fresh). File contents are filled on
-first access through a FUSE fill layer mounted on the slot's data directory
-(a loopback that fetches a file before it is opened, truncated or renamed)
-and by a background fill; once complete and not in use, the mount is
-replaced by the filled directory. Without FUSE the restore fills everything
-before it returns. The slot keeps its original creation time, so the 24 h
-bound holds across machines.
+**Commit = writeback.** The merged view is scanned against the slot's head
+tree (unchanged files reuse their pages, changed files become dirty pages)
+and committed as a layer (changed nodes + whiteouts) on top of the chain;
+the layer's pages are flushed to the store, the layer objects and then the
+head (`heads/slot`) written. Commits run when a slot has been idle for
+`[writeback] dirty_expire` (default 30 s), right after a session that grew
+the upper by more than `dirty_ratio` (default 0.1) of the disk budget, on a
+save, on drain and on SIGTERM. Pages of files deleted before a flush are
+discarded unwritten. Chains deeper than 16 layers, or whose base is older
+than 12 h, are compacted into a new base, which also rewrites pages older
+than 12 h (the store expires objects after 24 h; a chain's age is the age
+of its oldest data, the slot TTL). With reflinks, committed upper files are
+cloned into the file cache.
 
-The scheduler decides when (`orchestrator.SlotOps`): `SaveSlot` and
-`RestoreSlot` call the worker's slot stream with a fresh grant; the first
-session on a restored slot reports `usage.restored` and
-`usage.restore_seconds`. Saves happen:
+**Concurrent sessions** of a repository get another overlay over the same
+committed head (no copy). A **rebase** (fresh upper over the new head; the
+committed upper files move into the file cache) runs on idle slots whose
+upper exceeds 4 GiB and under disk pressure. **Reclaim** under the disk
+budget drops materialized files and clean pages first (faulted in again on
+use), then rebases idle slots, and only then falls back to the prune
+policies and cold slots. The working set, fault rate, dirty bytes and
+thrashing (refaults while the working set exceeds the local capacity) are
+reported as `Status.VM` (metrics `offshore_cache_resident_bytes`,
+`_dirty_bytes`, `_working_set_bytes`, `_fault_rate`, `_reclaim_bytes`,
+`_thrashing`; `machine_sample.vm`, `thrash` events).
 
-* before the orchestrator stops or destroys a machine (consolidation, idle
-  stop, expiry, making room; not after a failure), when its provider has a
-  store: every slot that changed since the worker's last snapshot is saved
-  and recorded with the machine's provider, so the scheduler's cache
-  affinity can restore it elsewhere;
-* for a **move** (`SlotMove`): the scheduler places a task on another
-  machine while an idle machine (typically draining) holds a newer warm
-  slot than any snapshot; the orchestrator saves it there and restores the
-  fresh snapshot on the target before the session starts;
-* by the worker itself when it drains at the end of its lifetime, and on
-  SIGTERM (the machine container has a 120 s stop timeout; the supervisor
-  stops it before an idle stop or termination of the instance). These
-  saves skip slots unchanged since their last snapshot.
-
-Snapshots are listed in `Status.Snapshots`. Events: `snapshot_save`, `snapshot_restore`
-([operations.md](operations.md#event-log-and-reports)).
-
-Measured with `test/bench/snapshot.sh` (local directory store, small crate
-with serde, serde_json, itoa, libc):
-
-| step | result |
-| --- | --- |
-| `target/` | 125.7 MB, 189 files, 24 chunks |
-| cold build (sccache filling) | 8.36 s |
-| snapshot save, first / incremental (one crate changed) | 0.18 s / 0.02 s (24 / 1 chunks uploaded) |
-| restore: skeleton / first file / full fill | 0.00 s / 0.00 s / 0.09 s |
-| units rebuilt by `cargo build` after the restore | 0 |
-| rebuild from scratch with the warm sccache | 3.29 s |
-
-With a remote store the fill is bounded by download bandwidth (about 1 s per
-125 MB at 1 Gbit/s); point `BENCH_STORE` at a mounted bucket to measure it.
+**Save, restore, move.** `orchestrator.SlotOps.SaveSlot` commits and
+flushes the slot and returns its head (`proto.LayerHead`: layer, chain,
+bytes); `RestoreSlot` mounts a head on the target machine, which is
+instant: contents fault in from the store on use. The first session on a
+restored slot reports `usage.restored` and `usage.restore_seconds`. Saves
+happen before the orchestrator stops or destroys a machine (slots changed
+since the worker's last flushed head), for a **move** (save on the source,
+mount on the target), and by the worker on drain and SIGTERM. Workers report
+flushed heads in `Status.Heads`; the orchestrator logs a `writeback` event
+per new head and keeps per repository the newest heads with their chains
+(`layers.json` in its state dir). Its garbage collection (every 10 min)
+deletes layer objects no kept head reaches and those older than 24 h;
+pages expire with the store TTL. Machine caches per digest are shared
+through the environment's store prefix as a single layer
+(`digests/<name>/<digest>/`).
 
 ## Media: local, volume, store
 
@@ -284,7 +308,7 @@ off by default until measurements justify them. Repository caches
   `volume_attach`, `volume_detach`, `volume_resize`, `volume_delete`
   (with `bytes`, and `cost`: the storage cost since the volume's previous
   event).
-* **store**: snapshots (incremental, chunked CAS) and global result
+* **store**: build slot layers and pages (content addressed) and global result
   caches; see below.
 
 ### Capability profiles
@@ -316,8 +340,15 @@ with the provider documentation cited in `internal/medium/defaults.go`:
 Override values per provider and medium with
 `[providers.NAME.profile.MEDIUM]` (see
 [configuration](configuration.md#providers)); measured values override
-both through `medium.SetMeasured` (a hook; no measurement source is wired
-yet).
+both through `medium.SetMeasured`: workers count the transfers of their
+cache file system per medium (page-ins as reads, writebacks and page-outs
+as writes; request size and time) and report the cumulative counters in
+their status (`tiers`). The orchestrator turns the deltas per machine into
+exponentially decayed sums per provider instance and medium (time
+constant one hour), fits time = latency + bytes / throughput over the
+requests and, after 16 requests, uses the result as the measured
+throughput and latency (profile `source = "measured"`) of the sizes the
+scheduler sees and of `medium.Resolve`.
 
 ## Disks
 
@@ -350,7 +381,7 @@ deleted.
 Machines use gp3 root volumes (`disk_gb`, default 100; 3000 IOPS and
 125 MB/s baseline). Instance types with local NVMe (`c6id`, `m6id`,
 `c7gd`) are faster for target directories but lose their content on stop,
-so their warm state only survives through snapshots. To compare on a real
+so their warm state only survives through committed layers in the store. To compare on a real
 machine:
 
 1. Start one machine per disk type (e.g. sizes on `c6i.2xlarge` and
@@ -361,8 +392,9 @@ machine:
 3. Builds: run the same `cargo build` cold, with warm sccache and warm slot
    on each, and compare `task_end.usage` (`wall`, `cpu_stall_seconds`) with
    `offshore report`.
-4. Restore: `test/bench/snapshot.sh` with `BENCH_STORE` on the machine
-   measures save and fill against each disk.
+4. Restore: `offshore` slot save on one machine and restore on the other
+   (`snapshot_save`/`snapshot_restore` events) plus `test/bench/tiers`
+   for the fault path against each disk.
 
 ## Lifetimes
 

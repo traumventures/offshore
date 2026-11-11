@@ -124,19 +124,22 @@ func (tm *tlMachine) earliest(need Resources, run time.Duration) (time.Time, boo
 	return time.Time{}, false
 }
 
-// quickRun is the expected run of t on a timeline machine.
+// quickRun is the expected run of t on a timeline machine, including
+// thrashing when t's working set exceeds the machine's local tier (so new
+// machines of sizes with more local capacity win against thrashing ones).
 func (p Default) quickRun(f Pool, tm *tlMachine, t Task) time.Duration {
+	pen, _, _ := thrashOf(tm.m, t)
 	if tm.m.Warm(t.RepoID) {
-		return t.Profile.WarmRun()
+		return t.Profile.WarmRun() + pen
 	}
 	run := t.Profile.ColdRun(tm.m.Provider)
 	if s, ok := p.bestSnapshot(f, tm.m.Provider, t); ok {
 		_, bw := p.egress(f, s.Store, tm.m.Provider)
-		if r := restoreTime(tm.m, s.Bytes, bw) + t.Profile.WarmRun(); r < run {
+		if r := restoreTime(tm.m, t, s.Bytes, bw) + t.Profile.WarmRun(); r < run {
 			run = r
 		}
 	}
-	return run
+	return run + pen
 }
 
 // ownMachine is the cost of the cheapest size fitting t for its cold run.
@@ -325,7 +328,7 @@ func (p Default) scaleOutModel(st *planState, env string) {
 						vm.WarmRepos = append(vm.WarmRepos, repo)
 					}
 					sort.Strings(vm.WarmRepos)
-					vlat := lat + s.Stack.Hot.Attach
+					vlat := lat + SlotMedium(s.Stack).Attach
 					vtm := &tlMachine{m: vm, ready: f.Now.Add(vlat), free: p.sizeAdmissible(s), price: priceOf(f, vm), created: true, latency: vlat}
 					cands = append(cands, cand{Action{Kind: Create, EnvHash: env, Size: s, Volume: v.ID, Reason: "queued demand, warm volume " + v.ID}, vtm})
 				}

@@ -50,7 +50,7 @@ func NewLayerID(now time.Time) string {
 var ErrNoLayer = errors.New("anyfs: no such layer")
 
 // LayerObject is the object key of a layer.
-func LayerObject(id string) string { return "layers/" + id + ".json.gz" }
+func LayerObject(id string) string  { return "layers/" + id + ".json.gz" }
 func headObject(name string) string { return "heads/" + name }
 
 // SaveLayer writes a layer object.

@@ -88,6 +88,8 @@ type cacheFSOptions struct {
 	RebaseBytes int64
 	Log         *slog.Logger
 	Now         func() time.Time
+	// Observer receives the stacks' events (page-ins, writebacks).
+	Observer anyfs.Observer
 }
 
 // cacheFS mounts and commits the build slots of a machine.
@@ -100,6 +102,7 @@ type cacheFS struct {
 	reflink    bool
 	allowOther bool
 	reclaimed  atomic.Int64 // bytes of materialized files reclaimed
+	obs        anyfs.Observer
 
 	mu     sync.Mutex
 	repos  map[string]*repoFS
@@ -116,11 +119,11 @@ type repoFS struct {
 	tier   repoTier
 	cmu    sync.Mutex // one commit or flush at a time
 
-	mu       sync.Mutex
-	remote   blobcache.Store
-	storeNm  string
-	expires  int64
-	link     *anyfs.Link
+	mu      sync.Mutex
+	remote  blobcache.Store
+	storeNm string
+	expires int64
+	link    *anyfs.Link
 }
 
 // slotMount is a mounted slot.
@@ -154,7 +157,11 @@ func newCacheFS(dir string, opt cacheFSOptions) (*cacheFS, error) {
 		if e.Type == anyfs.EvReclaim && e.Tier == "files" {
 			c.reclaimed.Add(e.Bytes)
 		}
+		if opt.Observer != nil {
+			opt.Observer(e)
+		}
 	}
+	c.obs = obs
 	var err error
 	if c.files, err = anyfs.OpenFiles(filepath.Join(dir, "files"), obs); err != nil {
 		return nil, err
@@ -214,7 +221,7 @@ func (c *cacheFS) repo(id string) (*repoFS, error) {
 		return r, nil
 	}
 	base := filepath.Join(c.dir, "repos", id)
-	local, err := anyfs.OpenLocal(anyfs.LocalOptions{Dir: filepath.Join(base, "local"), Capacity: c.opt.Capacity, Now: c.opt.Now})
+	local, err := anyfs.OpenLocal(anyfs.LocalOptions{Dir: filepath.Join(base, "local"), Capacity: c.opt.Capacity, Now: c.opt.Now, Observer: c.obs})
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +252,7 @@ func (c *cacheFS) setGrant(repo string, g store.Grant) error {
 		return err
 	}
 	r.remote, r.storeNm, r.expires = st, g.Store, g.Expires
-	r.link = anyfs.NewLink(r.local, anyfs.NewStore(st, anyfs.StoreMedium()), anyfs.Policy{Write: anyfs.WriteBack, DirtyExpire: 24 * time.Hour}, nil)
+	r.link = anyfs.NewLink(r.local, anyfs.NewStore(st, anyfs.StoreMedium()), anyfs.Policy{Write: anyfs.WriteBack, DirtyExpire: 24 * time.Hour}, r.c.obs)
 	return nil
 }
 

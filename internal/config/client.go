@@ -233,5 +233,5 @@ func clientSections(top map[string]bool) []string {
 	return sections(top, "control_plane", "user")
 }
 func poolSections(top map[string]bool) []string {
-	return sections(top, "pool", "scheduler", "machine", "providers", "storage")
+	return sections(top, "pool", "scheduler", "machine", "providers", "storage", "writeback")
 }

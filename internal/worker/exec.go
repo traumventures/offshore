@@ -201,6 +201,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		restored, restoreSecs = restoreUsage(m)
 	}
 	slotBefore := s.slots.size(slot)
+	faultsBefore := s.cfs.faultBytes()
 	slotAfter := int64(-1)
 	s.slots.update(slot, func(m *slotMeta) { m.Caches = slotCaches(req) })
 	defer func() {
@@ -366,6 +367,9 @@ loop:
 	exit.Usage.Warm = warm
 	slotAfter = s.recordSlotRun(slot, se.started)
 	exit.Usage.SlotBytesBefore, exit.Usage.SlotBytesAfter = slotBefore, slotAfter
+	// Working set: slot content faulted in during the session (machine
+	// wide, an upper bound with concurrent sessions) plus what it grew.
+	exit.Usage.WorkingSetBytes = s.cfs.faultBytes() - faultsBefore + max(0, slotAfter-slotBefore)
 	exit.Usage.Restored, exit.Usage.RestoreSeconds = restored, restoreSecs
 	exit.Usage.ExitCode = exit.Code
 	if s.cg.oomKilled(cgDir) {
@@ -500,8 +504,8 @@ func (s *Worker) writeback(pc *proto.Conn, frames chan frame, req proto.Exec) er
 		if p == nil {
 			continue
 		}
-		for _, d := range p.Dirty() {
-			c := proto.Change{Root: root, Path: d.Path, Deleted: d.Deleted, Kind: d.Kind, Mode: d.Mode, Target: d.Target, BaseHash: d.BaseHash}
+		for _, d := range p.Changes() {
+			c := proto.Change{Root: root, Path: d.Path, Deleted: d.Deleted, Kind: d.Kind, Mode: d.Mode, Target: d.Target, BaseHash: d.BaseDigest}
 			if !d.BaseExists {
 				c.BaseHash = ""
 			} else if c.BaseHash == "" {

@@ -38,8 +38,20 @@ type PoolConfig struct {
 	// Telemetry configures tracing of the orchestrator (control plane or
 	// embedded) and, forwarded, of its machines; and the event log.
 	Telemetry Telemetry `toml:"telemetry"`
+	// Writeback configures when workers commit build slots and write them
+	// back to the store ([writeback]).
+	Writeback Writeback `toml:"writeback"`
 	// Warnings are ignored sections found while loading.
 	Warnings []string `toml:"-"`
+}
+
+// Writeback configures build slot writeback on the workers: a slot is
+// committed (and its pages written back to the store) once it is idle for
+// dirty_expire (default "30s"), and right after a session that grew it by
+// more than dirty_ratio of the machine's disk budget (default 0.1).
+type Writeback struct {
+	DirtyRatio  float64 `toml:"dirty_ratio"`
+	DirtyExpire string  `toml:"dirty_expire"`
 }
 
 // Backends known to the configuration.
@@ -191,6 +203,14 @@ type Size struct {
 	// one, whose size then is the disk) or "volume" (an attachable volume,
 	// [providers.NAME.volume]).
 	Medium string `toml:"medium,omitempty"`
+	// Stack is the cache tier stack of the size, top (fastest) first, as
+	// in anyfs: an ordered subset of "local", "volume", "store" ending
+	// in "store", e.g. ["local", "volume", "store"] (the local disk caches
+	// a cache volume over the object store). Empty: derived from medium
+	// (["local", "store"] or ["volume", "store"]). A stack with "volume"
+	// gives the size cache volumes (medium "volume"); the scheduler
+	// estimates page-in, restore and thrashing from the composite profile.
+	Stack []string `toml:"stack,omitempty"`
 	// Arch is the machine architecture, "amd64" (default) or "arm64".
 	// Environments are built per architecture; a repository pins its
 	// architecture with resources.arch, and only sizes of that
@@ -201,6 +221,58 @@ type Size struct {
 	// (aws-ec2 instance types, oci shapes; default: the size name on
 	// aws-ec2, a flexible shape of the architecture on oci).
 	InstanceTypes []string `toml:"instance_types"`
+}
+
+// TierStack returns the size's cache tier stack (top first): Stack, or
+// derived from Medium.
+func (sz Size) TierStack() []string {
+	if len(sz.Stack) > 0 {
+		return sz.Stack
+	}
+	if sz.Medium == MediumVolume {
+		return []string{MediumVolume, medium.Store}
+	}
+	return []string{MediumLocal, medium.Store}
+}
+
+// HasVolume reports whether machines of the size get a cache volume
+// (medium "volume" or a stack with "volume").
+func (sz Size) HasVolume() bool {
+	return slices.Contains(sz.TierStack(), MediumVolume)
+}
+
+// validateStack checks a size's stack: an ordered subset of local,
+// volume, store ending in store, consistent with medium.
+func (sz Size) validateStack() error {
+	if len(sz.Stack) == 0 {
+		return nil
+	}
+	order := map[string]int{MediumLocal: 0, MediumVolume: 1, medium.Store: 2}
+	last := -1
+	for _, t := range sz.Stack {
+		o, ok := order[t]
+		if !ok {
+			return fmt.Errorf("unknown tier %q (local, volume, store)", t)
+		}
+		if o <= last {
+			return fmt.Errorf("%q: tiers must be distinct, ordered local, volume, store", sz.Stack)
+		}
+		last = o
+	}
+	if sz.Stack[len(sz.Stack)-1] != medium.Store {
+		return fmt.Errorf("%q: the bottom tier must be store", sz.Stack)
+	}
+	if len(sz.Stack) < 2 {
+		return fmt.Errorf("%q: needs a tier above store", sz.Stack)
+	}
+	vol := slices.Contains(sz.Stack, MediumVolume)
+	switch {
+	case sz.Medium == MediumVolume && !vol:
+		return fmt.Errorf("%q: medium volume needs volume in the stack", sz.Stack)
+	case sz.Medium == MediumLocal && vol:
+		return fmt.Errorf("%q: medium local conflicts with volume in the stack", sz.Stack)
+	}
+	return nil
 }
 
 // Machine architectures of sizes.
@@ -468,6 +540,14 @@ func (u *PoolConfig) Validate() error {
 			errs = append(errs, "scheduler.disk_budget: "+err.Error())
 		}
 	}
+	if r := u.Writeback.DirtyRatio; r < 0 || r > 1 {
+		errs = append(errs, "writeback.dirty_ratio: must be between 0 (default) and 1")
+	}
+	if e := u.Writeback.DirtyExpire; e != "" {
+		if d, err := ParseDuration(e); err != nil || d <= 0 {
+			errs = append(errs, fmt.Sprintf("writeback.dirty_expire: invalid duration %q", e))
+		}
+	}
 	if f.ConsolidateTarget < 0 || f.ConsolidateTarget > 1 {
 		errs = append(errs, "pool.consolidate_target: must be between 0 and 1")
 	}
@@ -508,11 +588,16 @@ func (u *PoolConfig) Validate() error {
 		switch sz.Medium {
 		case "", MediumLocal:
 		case MediumVolume:
+		default:
+			errs = append(errs, fmt.Sprintf("pool.size[%d].medium: unsupported %q (local, volume)", i, sz.Medium))
+		}
+		if err := sz.validateStack(); err != nil {
+			errs = append(errs, fmt.Sprintf("pool.size[%d].stack: %v", i, err))
+		}
+		if sz.HasVolume() {
 			if b := u.ProviderType(sz.Provider); b != "" && !volumeBackend(b) {
 				errs = append(errs, fmt.Sprintf("pool.size[%d].medium: %s (%s) has no volumes", i, sz.Provider, b))
 			}
-		default:
-			errs = append(errs, fmt.Sprintf("pool.size[%d].medium: unsupported %q (local, volume)", i, sz.Medium))
 		}
 		if _, ok := u.Providers[sz.Provider]; !ok {
 			errs = append(errs, fmt.Sprintf("pool.size[%d].provider: %q is not a configured provider (%s)", i, sz.Provider, strings.Join(u.ProviderNames(), ", ")))
@@ -604,6 +689,13 @@ func (u *PoolConfig) Document() (map[string]any, error) {
 		return nil, err
 	}
 	doc := map[string]any{"pool": pool, "scheduler": sched, "telemetry": tel}
+	if u.Writeback != (Writeback{}) {
+		wb, err := section(u.Writeback)
+		if err != nil {
+			return nil, err
+		}
+		doc["writeback"] = wb
+	}
 	if u.Storage.Configured() {
 		st, err := section(u.Storage)
 		if err != nil {

@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/traumventures/offshore/internal/manifest"
+	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/metrics"
 	"github.com/traumventures/offshore/internal/scheduler"
 	"github.com/traumventures/offshore/internal/store"
@@ -102,8 +103,8 @@ type SlotOp struct {
 
 // SlotResult answers a SlotOp.
 type SlotResult struct {
-	Freed    int64         `json:"freed,omitempty"`    // prune
-	Head  *LayerHead `json:"head,omitempty"` // save: the flushed head
+	Freed int64      `json:"freed,omitempty"` // prune
+	Head  *LayerHead `json:"head,omitempty"`  // save: the flushed head
 	// Pages and PageBytes are the pages a save wrote back; Seconds the
 	// duration of the operation.
 	Pages     int64   `json:"pages,omitempty"`
@@ -352,6 +353,10 @@ type Status struct {
 	// the store (commits after sessions, on drain): restorable on other
 	// machines.
 	Heads []LayerHead `json:"heads,omitempty"`
+	// Tiers are the cumulative transfer counters of the cache file
+	// system's media (page-ins, writebacks), from which the orchestrator
+	// measures medium profiles.
+	Tiers []medium.Counters `json:"tiers,omitempty"`
 	// Metrics is the server's metrics snapshot; the orchestrator republishes
 	// it with machine labels (no extra port or scope on the machine).
 	Metrics []metrics.Family `json:"metrics,omitempty"`

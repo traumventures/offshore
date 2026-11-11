@@ -9,6 +9,7 @@ package pool
 import (
 	"context"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/traumventures/offshore/internal/config"
@@ -70,16 +71,28 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 			Capacity: scheduler.Resources{CPU: sz.CPU, Memory: mem, Disk: disk}, PricePerHour: sz.PricePerHour,
 			Arch: config.MachineArch(sz.Arch), InstanceTypes: sz.InstanceTypes, DiskBudget: budget,
 			Medium: medium.Local}
-		s.Stack = medium.Stack{Hot: u.Profile(sz.Provider, medium.Local), Store: u.Profile(sz.Provider, medium.Store)}
-		if sz.Medium == config.MediumVolume {
+		tiers := sz.TierStack()
+		if sz.HasVolume() {
 			v := u.Volumes[sz.Provider]
 			minB, maxB, step, ttl := v.VolumeSizes(disk)
-			s.Medium, s.Stack.Hot = medium.Volume, u.Profile(sz.Provider, medium.Volume)
+			s.Medium = medium.Volume
 			s.Volume = scheduler.VolumePolicy{Min: minB, Max: maxB, Step: step, KeepDetached: v.KeepDetached, TTL: ttl,
 				Type: v.Type, IOPS: v.IOPS, Throughput: v.Throughput, VPUs: v.VPUs}
 			if s.Capacity.Disk == 0 {
 				s.Capacity.Disk = minB
 			}
+		}
+		s.Stack = medium.Stack{Name: strings.Join(tiers, ">")}
+		for _, t := range tiers {
+			l := u.Profile(sz.Provider, t)
+			l.Medium = t // also without a profile (unknown provider type)
+			s.Stack.Levels = append(s.Stack.Levels, l)
+		}
+		// The local capacity is the disk of the top tier: known for a
+		// single hot medium (local disk or volume); a local disk over a
+		// volume reports its size at run time (VM.Capacity).
+		if len(tiers) == 2 {
+			s.Stack.Capacity = s.Capacity.Disk
 		}
 		sizes = append(sizes, s)
 	}
@@ -95,6 +108,10 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 			MinMachines: f.MinMachines, MaxMachines: f.MaxMachines, IdleStop: idle,
 			ProviderMax: map[string]int{}, Variant: f.Policy, ConsolidateTarget: f.ConsolidateTarget,
 		},
+	}
+	c.DirtyRatio = u.Writeback.DirtyRatio
+	if u.Writeback.DirtyExpire != "" {
+		c.DirtyExpire, _ = config.ParseDuration(u.Writeback.DirtyExpire)
 	}
 	if d := u.Telemetry.EventsRetentionDays; d > 0 {
 		c.EventRetention = time.Duration(d) * 24 * time.Hour

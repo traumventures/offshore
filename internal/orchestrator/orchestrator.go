@@ -47,6 +47,10 @@ type Config struct {
 	Policy       scheduler.Config
 	// EventRetention bounds the analysis event log (0 = 30 days).
 	EventRetention time.Duration
+	// DirtyRatio and DirtyExpire are the workers' build slot writeback
+	// thresholds ([writeback]; zero: the workers' defaults).
+	DirtyRatio  float64
+	DirtyExpire time.Duration
 	// Profile resolves a provider's medium profile (instance-store sizes
 	// get medium.LocalNVMe once their disk is known; nil: defaults).
 	Profile func(provider, med string) medium.Profile `json:"-"`
@@ -297,6 +301,9 @@ type Orchestrator struct {
 	removed    []*Machine                // destroyed machines (cost history)
 	services   map[string][]provider.Service
 	changed    chan struct{}
+	// meter measures medium profiles from the workers' tier counters
+	// (installed with medium.SetMeasured).
+	meter *medium.Meter
 
 	// OnMachineDown is called when a machine stops or disappears, so that
 	// connections to it can be dropped.
@@ -321,8 +328,8 @@ type Orchestrator struct {
 	// (durations, slot sizes) for the cost model; nil = unknown.
 	Profile func(key string) scheduler.Profile
 
-	health         map[string]provHealth // provider instance -> health and latencies
-	leases         map[string]leaseInfo  // lease id -> expected session end
+	health         map[string]provHealth  // provider instance -> health and latencies
+	leases         map[string]leaseInfo   // lease id -> expected session end
 	heads          map[string]*repoLayers // build slot heads and layers (layers.go)
 	layersGC       time.Time
 	volumes        map[string]*VolumeState // managed cache volumes by id
@@ -369,7 +376,9 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		ProbeFunc: Probe, Clock: clk,
 		health: map[string]provHealth{}, leases: map[string]leaseInfo{}, heads: map[string]*repoLayers{},
 		volumes: map[string]*VolumeState{}, startBlocked: map[string]time.Time{}, forecast: scheduler.NewForecast(),
+		meter: medium.NewMeter(),
 	}
+	medium.SetMeasured(o.meter.Profile)
 	o.loadHeads()
 	o.loadVolumes()
 	o.metrics = newOrchMetrics(o)
@@ -610,6 +619,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		o.statusHeadsLocked(r.id, m)
 		o.statusVMLocked(r.id, m)
 		o.statusVolumeLocked(m)
+		o.meter.Update(r.id, m.Provider, m.Status.Tiers)
 		o.sampleLocked(r.id, m)
 	}
 	// The data is as old as the listing, not as the end of the probes:
@@ -707,6 +717,7 @@ func (o *Orchestrator) Sample(ctx context.Context) {
 		o.statusHeadsLocked(r.id, m)
 		o.statusVMLocked(r.id, m)
 		o.statusVolumeLocked(m)
+		o.meter.Update(r.id, m.Provider, m.Status.Tiers)
 		o.sampleLocked(r.id, m)
 	}
 }
@@ -780,9 +791,46 @@ func Probe(ctx context.Context, addr, fingerprint, token string) (proto.Status, 
 	return st, err
 }
 
+// measuredSizes returns the configured sizes with measured medium
+// profiles (from the workers' tier counters) merged into every level of
+// their stacks.
+func (o *Orchestrator) measuredSizes() []scheduler.Size {
+	sizes := o.cfg.Sizes
+	copied := false
+	for i, s := range sizes {
+		var levels []medium.Profile
+		stack := s.Stack.Levels
+		if len(stack) == 0 { // no configured stack: the hot medium over the store
+			hot := s.Medium
+			if hot == "" {
+				hot = medium.Local
+			}
+			stack = []medium.Profile{{Medium: hot}, {Medium: medium.Store}}
+		}
+		for j, l := range stack {
+			mp, ok := o.meter.Profile(s.Provider, l.Medium)
+			if !ok {
+				continue
+			}
+			if levels == nil {
+				levels = append([]medium.Profile(nil), stack...)
+			}
+			levels[j] = l.Merge(mp, "measured")
+		}
+		if levels == nil {
+			continue
+		}
+		if !copied {
+			sizes, copied = append([]scheduler.Size(nil), sizes...), true
+		}
+		sizes[i].Stack.Levels = levels
+	}
+	return sizes
+}
+
 // poolLocked builds the scheduler's view of the pool.
 func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
-	f := scheduler.Pool{Now: now, Sizes: o.cfg.Sizes, Recent: map[string]time.Time{}, EnvArch: map[string]string{}}
+	f := scheduler.Pool{Now: now, Sizes: o.measuredSizes(), Recent: map[string]time.Time{}, EnvArch: map[string]string{}}
 	for env, t := range o.recentEnvs {
 		f.Recent[env] = t
 	}
@@ -1249,6 +1297,12 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	if size.DiskBudget != "" {
 		spec.Env["OFFSHORE_DISK_BUDGET"] = size.DiskBudget
 	}
+	if cfg.DirtyRatio > 0 {
+		spec.Env["OFFSHORE_WRITEBACK_DIRTY_RATIO"] = strconv.FormatFloat(cfg.DirtyRatio, 'f', -1, 64)
+	}
+	if cfg.DirtyExpire > 0 {
+		spec.Env["OFFSHORE_WRITEBACK_DIRTY_EXPIRE"] = cfg.DirtyExpire.String()
+	}
 	for k, v := range logs.Forward() { // machines log like the pool
 		spec.Env[k] = v
 	}
@@ -1472,6 +1526,7 @@ func (o *Orchestrator) removeLocked(id string) {
 		return
 	}
 	delete(o.machines, id)
+	o.meter.Forget(id)
 	now := o.now()
 	m.State = provider.Failed
 	m.observe(now)

@@ -26,10 +26,12 @@ type Source interface {
 var rootNode = Node{Kind: Dir, Mode: 0o755}
 
 // TreeSource serves a Tree whose contents are materialized by Files from
-// the pages of a Tier. The tree can be replaced (Update) while mounted.
+// the pages of a Tier, or by a FileFetcher (a peer serving whole files by
+// digest). The tree can be replaced (Update, Apply) while mounted.
 type TreeSource struct {
 	files *Files
 	tier  Tier
+	fetch FileFetcher
 	mu    sync.RWMutex
 	tree  *Tree
 }
@@ -40,6 +42,15 @@ func NewTreeSource(t *Tree, files *Files, tier Tier) *TreeSource {
 		t = NewTree(nil)
 	}
 	return &TreeSource{files: files, tier: tier, tree: t}
+}
+
+// NewPeerSource returns a source for t whose file contents are fetched
+// whole by fetch (the peer tier: e.g. the laptop over QUIC, keyed by the
+// content digest of its manifest).
+func NewPeerSource(t *Tree, files *Files, fetch FileFetcher) *TreeSource {
+	s := NewTreeSource(t, files, nil)
+	s.fetch = fetch
+	return s
 }
 
 // Tree returns the current tree.
@@ -59,6 +70,44 @@ func (s *TreeSource) Update(t *Tree) []string {
 	var out []string
 	for _, n := range Diff(old, t) {
 		out = append(out, n.Path)
+	}
+	return out
+}
+
+// Apply puts layer on top of the tree (with full, the layer's nodes
+// replace the tree) and returns the paths that changed: the layer's
+// paths and every path below a removed or replaced directory. Cheaper
+// than Update for small deltas of large trees.
+func (s *TreeSource) Apply(layer []Node, full bool) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := s.tree
+	if full {
+		s.tree = NewTree(layer)
+		var out []string
+		for _, n := range Diff(old, s.tree) {
+			out = append(out, n.Path)
+		}
+		return out
+	}
+	s.tree = Apply(old, layer)
+	var out []string
+	var below func(dir string)
+	below = func(dir string) {
+		for _, c := range old.Children(dir) {
+			out = append(out, c.Path)
+			if c.Kind == Dir {
+				below(c.Path)
+			}
+		}
+	}
+	for _, n := range layer {
+		out = append(out, n.Path)
+		if n.Whiteout || n.Kind != Dir || n.Opaque {
+			if o, ok := old.Get(n.Path); ok && o.Kind == Dir {
+				below(n.Path)
+			}
+		}
 	}
 	return out
 }
@@ -87,6 +136,9 @@ func (s *TreeSource) Local(n *Node) (string, bool) { return s.files.Local(n) }
 
 // Fetch implements Source.
 func (s *TreeSource) Fetch(ctx context.Context, n *Node) (string, error) {
+	if s.fetch != nil {
+		return s.files.EnsureWith(ctx, n, s.fetch)
+	}
 	return s.files.Ensure(ctx, s.tier, n)
 }
 
@@ -146,4 +198,13 @@ func nodeOf(rel string, fi os.FileInfo, p string) Node {
 		n.Kind = Dir
 	}
 	return n
+}
+
+// StatSource is a Source whose lookups can fail for other reasons than
+// absence (a remote listing). Stat returns an error wrapping
+// fs.ErrNotExist or ErrUnavailable (both shown as absent by a
+// UserOverlay) or another error (EIO).
+type StatSource interface {
+	Source
+	Stat(ctx context.Context, rel string) (*Node, error)
 }

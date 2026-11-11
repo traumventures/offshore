@@ -159,28 +159,29 @@ func sizePrice(s Size) float64 {
 	return s.PricePerHour + storagePrice(s.Stack, max(s.Volume.Min, s.Capacity.Disk))
 }
 
-// storagePrice is the hourly price of bytes on the stack's hot medium.
+// storagePrice is the hourly price of bytes on the medium the stack's
+// slots persist on.
 func storagePrice(st medium.Stack, bytes int64) float64 {
-	return float64(max(bytes, 0)) / 1e9 * st.Hot.PricePerGBHour()
+	return float64(max(bytes, 0)) / 1e9 * SlotMedium(st).PricePerGBHour()
 }
 
 // Mobility: what it takes to use a warm build slot on another machine
 // depends on where the slot lives (its medium's reach):
 //
 //   - on a machine's local disk (reach machine): a snapshot to the store
-//     and a restore, bounded by the store's and the hot medium's
-//     throughput (SlotRestore, SlotMove);
+//     (the dirty part) and a lazy restore of the working set, bounded by
+//     the store and the stack's fault time (SlotRestore, SlotMove);
 //   - on a detached volume (reach zone): a new machine of a volume size in
 //     the volume's zone attaches it, the profile's attach time
 //     (Action.Volume, see scaleOutModel);
 //   - on a volume in another zone or provider: like local, via the store;
 //   - in the store (snapshots, global caches): restore from anywhere.
 
-// restoreTime is the time to fill bytes from a store with bandwidth bw
-// into m's hot medium.
-func restoreTime(m Machine, bytes, bw int64) time.Duration {
-	d := time.Duration(float64(bytes) / float64(bw) * float64(time.Second))
-	return max(d, m.Stack.Hot.TransferTime(bytes))
+// restoreTime is the time until t's build can proceed on a slot of bytes
+// restored lazily from a store with bandwidth bw into m's stack: its
+// working set faulted in (see LazyRestore).
+func restoreTime(m Machine, t Task, bytes, bw int64) time.Duration {
+	return LazyRestore(m.Stack, bytes, t.Profile.WorkingSet, bw)
 }
 
 func hours(d time.Duration) float64 { return d.Hours() }
@@ -366,7 +367,7 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) (r
 // diskPriceOf is the price per GB-hour of m's hot medium (the configured
 // disk price when its profile has none).
 func (p Default) diskPriceOf(m Machine) float64 {
-	if pr := m.Stack.Hot.PricePerGBHour(); pr > 0 {
+	if pr := SlotMedium(m.Stack).PricePerGBHour(); pr > 0 {
 		return pr
 	}
 	return p.diskPrice()
@@ -384,10 +385,29 @@ func (p Default) diskPrice() float64 {
 func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 	slow := slowdown(m, t)
 	scale := func(d time.Duration) time.Duration { return time.Duration(float64(d) * slow) }
+	pen, wsNeed, capacity := thrashOf(m, t)
 	var out []runChoice
 	add := func(rc runChoice, need int64) {
-		if rc, ok := p.prepare(f, m, t, rc, need); ok {
+		rc, ok := p.prepare(f, m, t, rc, need)
+		if !ok {
+			return
+		}
+		pen := pen
+		if rc.slot.Kind == SlotResize && pen > 0 {
+			pen = ThrashTime(m.Stack, capacity+max(rc.slot.Bytes-m.DiskTotal, 0), wsNeed)
+		}
+		if pen <= 0 {
 			out = append(out, rc)
+			return
+		}
+		// The working set does not fit the local tier: the build thrashes,
+		// unless the disk grows first (when no other slot action runs).
+		th := rc
+		th.run += pen
+		th.reason += ", thrashing"
+		out = append(out, th)
+		if rs, ok := p.thrashResize(f, m, t, rc, wsNeed, capacity); ok {
+			out = append(out, rs)
 		}
 	}
 	if m.Warm(t.RepoID) {
@@ -398,7 +418,7 @@ func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 		price, bw := p.egress(f, s.Store, m.Provider)
 		restore := t.Profile.Restore
 		if restore <= 0 || s.Store != storeOf(f, m.Provider) {
-			restore = restoreTime(m, s.Bytes, bw)
+			restore = restoreTime(m, t, s.Bytes, bw)
 		}
 		rc := runChoice{run: restore + scale(t.Profile.WarmRun()), cost: float64(s.Bytes) / 1e9 * price,
 			slot: SlotAction{Kind: SlotRestore, Repo: t.RepoID, Snapshot: s}, reason: "restore snapshot from " + s.Store}
@@ -409,7 +429,7 @@ func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 		st := storeOf(f, src.Provider)
 		_, upBW := p.egress(f, st, src.Provider)
 		price, downBW := p.egress(f, st, m.Provider)
-		move := max(time.Duration(float64(b)/float64(upBW)*float64(time.Second)), src.Stack.Hot.TransferTime(b)) + restoreTime(m, b, downBW)
+		move := saveTime(src, b, upBW) + restoreTime(m, t, b, downBW)
 		rc := runChoice{run: move + scale(t.Profile.WarmRun()), cost: float64(b) / 1e9 * price,
 			slot: SlotAction{Kind: SlotMove, Repo: t.RepoID, Bytes: b, From: src.ID,
 				Snapshot: Snapshot{Repo: t.RepoID, Provider: src.Provider, Store: st, Bytes: b, At: f.Now}},
@@ -418,6 +438,47 @@ func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 	}
 	add(runChoice{run: scale(t.Profile.ColdRun(m.Provider)), reason: "cold"}, slotNeed(m, t, 0))
 	return out
+}
+
+// thrashResize is rc after growing m's disk so that a working set of ws
+// fits its local tier (capacity bytes now). ok is false when the disk
+// cannot grow now or rc already prepares the slot otherwise.
+func (p Default) thrashResize(f Pool, m Machine, t Task, rc runChoice, ws, capacity int64) (runChoice, bool) {
+	if !m.CanResize || f.Now.Before(m.ResizableAt) || (rc.slot.Kind != SlotNone && rc.slot.Kind != SlotResize) {
+		return rc, false
+	}
+	grow := max(ws+ws/4-capacity, 10<<30)
+	if s, ok := sizeOf(f, m); ok && s.Volume.Step > grow {
+		grow = s.Volume.Step
+	}
+	target := m.DiskTotal + grow
+	if rc.slot.Kind == SlotResize {
+		target = max(target, rc.slot.Bytes)
+	} else {
+		rc.run += DefaultResize
+	}
+	left := m.ExpiresAt.Sub(f.Now)
+	if m.ExpiresAt.IsZero() || left <= 0 {
+		left = 24 * time.Hour
+	}
+	rc.cost += float64(target-max(m.DiskTotal, rc.slot.Bytes)) / 1e9 * p.diskPriceOf(m) * hours(left)
+	if rc.slot.Kind != SlotResize {
+		rc.reason += ", resize disk"
+	}
+	rc.reason += " for working set"
+	rc.slot = SlotAction{Kind: SlotResize, Repo: t.RepoID, Bytes: target}
+	return rc, true
+}
+
+// saveTime is the time to save a slot of bytes on src to its store with
+// bandwidth bw: with a cache file system only its dirty pages are not in
+// the store yet (writeback), else the whole slot.
+func saveTime(src Machine, bytes, bw int64) time.Duration {
+	up := bytes
+	if src.VM.Capacity > 0 {
+		up = min(src.VM.Dirty, bytes)
+	}
+	return max(time.Duration(float64(up)/float64(bw)*float64(time.Second)), src.Stack.Top().TransferTime(up))
 }
 
 // moveSource returns an idle running machine other than m with a warm slot
