@@ -52,6 +52,9 @@ func (s *slots) now() time.Time {
 	return s.clock.Now()
 }
 
+// uncommitted reports whether a slot has changes since its last commit.
+func (m slotMeta) uncommitted() bool { return m.Leases != m.Clean }
+
 type slotMeta struct {
 	Created  int64 `json:"created"`       // unix seconds of the oldest contained data
 	LastUsed int64 `json:"last_used"`     // unix seconds
@@ -75,10 +78,18 @@ type slotMeta struct {
 	// Base is the committed layer the slot's lower shows, Head the layer
 	// of its last commit (the merged view at Committed, unix seconds);
 	// UpperBytes the size of the upper directory then.
-	Base       string `json:"base,omitempty"`
-	Head       string `json:"head,omitempty"`
-	Committed  int64  `json:"committed,omitempty"`
-	UpperBytes int64  `json:"upper_bytes,omitempty"`
+	Base      string `json:"base,omitempty"`
+	Head      string `json:"head,omitempty"`
+	Committed int64  `json:"committed,omitempty"`
+	// Leases counts the sessions that leased the slot (counted when the
+	// lease starts, so a running session counts); Clean is the value of
+	// Leases the last commit covers. The slot has uncommitted changes
+	// while they differ: unlike comparing LastUsed with Committed (unix
+	// seconds), this holds for sessions within the same second and for a
+	// background commit that finishes while the next session runs.
+	Leases     int64 `json:"leases,omitempty"`
+	Clean      int64 `json:"clean,omitempty"`
+	UpperBytes int64 `json:"upper_bytes,omitempty"`
 	// Scanned is the watermark of Head (unix ns): the merged view had
 	// Head's tree then, later changes have a newer ctime in the upper
 	// directory (incremental commits).
@@ -170,6 +181,7 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 		byRecent(free)
 		c := free[0]
 		c.meta.LastUsed = now.Unix()
+		c.meta.Leases++
 		c.meta.TTL = int64(ttl / time.Second)
 		if err := writeMeta(c.path, c.meta); err != nil {
 			return "", false, err
@@ -185,7 +197,7 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 	if err := os.MkdirAll(p, 0o755); err != nil {
 		return "", false, err
 	}
-	meta := slotMeta{Created: now.Unix(), LastUsed: now.Unix(), TTL: int64(ttl / time.Second)}
+	meta := slotMeta{Created: now.Unix(), LastUsed: now.Unix(), TTL: int64(ttl / time.Second), Leases: 1}
 	if err := os.MkdirAll(filepath.Join(p, "data"), 0o755); err != nil {
 		return "", false, err
 	}

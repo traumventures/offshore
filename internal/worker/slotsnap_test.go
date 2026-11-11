@@ -121,3 +121,54 @@ func testSlotSessionSnapshots(t *testing.T, mode fsMode) {
 		t.Fatal("incomplete snapshot kept")
 	}
 }
+
+// A background commit of session 1 that finishes while session 2 runs
+// must not mark the slot committed: within the same second, the old
+// LastUsed/Committed comparison (unix seconds) did, so a rebase threw
+// session 2's writes away (e2e: no-op build recompiled after cargo run).
+func TestSlotCommitDuringNextSession(t *testing.T) {
+	for _, mode := range []fsMode{fsUser, fsKernel} {
+		t.Run(mode.String(), func(t *testing.T) { testSlotCommitDuringNextSession(t, mode) })
+	}
+}
+
+func testSlotCommitDuringNextSession(t *testing.T, mode fsMode) {
+	ctx := context.Background()
+	w, _ := fsWorkerAt(t, mode, t.TempDir(), t.TempDir(), cacheFSOptions{})
+	mt := time.Now().Add(-time.Hour)
+	slot := startSession(t, w)
+	put(t, filepath.Join(slot, "data", "f"), []byte("session 1"), mt)
+	w.slots.update(slot, func(m *slotMeta) { m.Runs++ })
+	if err := w.snapshotSlot(ctx, slot, "repo"); err != nil {
+		t.Fatal(err)
+	}
+	w.slots.release(slot)
+	if startSession(t, w) != slot {
+		t.Fatal("next session got another slot")
+	}
+	put(t, filepath.Join(slot, "data", "f"), []byte("session 2"), mt.Add(time.Minute))
+	if _, err := w.commitPending(ctx, slot, "repo"); err != nil { // background commit of session 1
+		t.Fatal(err)
+	}
+	w.slots.update(slot, func(m *slotMeta) { m.Runs++ })
+	if err := w.snapshotSlot(ctx, slot, "repo"); err != nil {
+		t.Fatal(err)
+	}
+	w.slots.release(slot)
+	m, _ := readMeta(slot)
+	if !m.uncommitted() {
+		t.Fatalf("slot committed with session 2 uncommitted: %+v", m)
+	}
+	if w.rebaseSlot(ctx, ref(t, w, slot)) {
+		t.Fatal("rebase of a slot with uncommitted changes")
+	}
+	if b, _ := os.ReadFile(filepath.Join(slot, "data", "f")); string(b) != "session 2" {
+		t.Fatalf("slot content %q", b)
+	}
+	if _, err := w.commitPending(ctx, slot, "repo"); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := readMeta(slot); m.uncommitted() {
+		t.Fatalf("slot uncommitted after committing session 2: %+v", m)
+	}
+}
