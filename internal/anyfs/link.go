@@ -141,15 +141,16 @@ func (l *Link) Start() {
 		l.mu.Unlock()
 		return
 	}
-	l.stop, l.stopped = make(chan struct{}), make(chan struct{})
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	l.stop, l.stopped = stop, stopped
 	l.mu.Unlock()
 	go func() {
-		defer close(l.stopped)
+		defer close(stopped)
 		t := time.NewTicker(l.pol.Interval)
 		defer t.Stop()
 		for {
 			select {
-			case <-l.stop:
+			case <-stop:
 				return
 			case <-t.C:
 				l.writeback(context.Background(), false)
