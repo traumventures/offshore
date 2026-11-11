@@ -120,6 +120,7 @@ type History struct {
 	Finished []Finished // most recent last, at most maxFinished
 	Placed   map[string]Placed
 	States   map[string][]StateChange
+	Storage  []StorageEvent // recent storage events, oldest first
 }
 
 const maxFinished = 200
@@ -137,6 +138,7 @@ func NewHistory(keep time.Duration) *History {
 // placements, state changes); samples are ignored here (see Seed).
 func (h *History) Events(evs []events.Event) {
 	for _, ev := range evs {
+		h.storageEvent(ev)
 		switch ev.Type {
 		case events.TaskPlaced:
 			p := Placed{Reason: ev.Reason, Placement: ev.Placement, Machine: ev.Machine, Arrival: ev.Arrival, Wait: time.Duration(ev.WaitMs) * time.Millisecond}

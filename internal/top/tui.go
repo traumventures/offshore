@@ -143,10 +143,18 @@ func (m *model) clamp() {
 	v := &m.view
 	v.Selected = min(max(v.Selected, 0), max(n-1, 0))
 	v.MSelected = min(max(v.MSelected, 0), max(k-1, 0))
+	v.SSelected = min(max(v.SSelected, 0), max(len(storageRows(m.snap))-1, 0))
 }
 
 // selectedID returns the detail target of the focused table's selection.
 func (m *model) selectedID() string {
+	if m.view.Focus == FocusStorage {
+		rows := storageRows(m.snap)
+		if i := m.view.SSelected; i >= 0 && i < len(rows) {
+			return "storage:" + rows[i].ID()
+		}
+		return ""
+	}
 	if m.view.Focus == FocusMachines {
 		ms := Machines(m.snap, m.view)
 		if i := m.view.MSelected; i >= 0 && i < len(ms) {
@@ -185,11 +193,20 @@ func (m *model) key(k string) tea.Cmd {
 	case "q", "esc", "ctrl+c":
 		return tea.Quit
 	case "tab", "shift+tab":
-		if v.Focus == FocusSessions {
-			v.Focus = FocusMachines
-		} else {
-			v.Focus = FocusSessions
+		// Sessions -> machines -> storage (when shown) -> sessions.
+		order := []Focus{FocusSessions, FocusMachines}
+		if len(storageRows(m.snap)) > 0 {
+			order = append(order, FocusStorage)
 		}
+		i := 0
+		for i < len(order) && order[i] != v.Focus {
+			i++
+		}
+		d := 1
+		if k == "shift+tab" {
+			d = len(order) - 1
+		}
+		v.Focus = order[(i+d)%len(order)]
 	case "enter":
 		v.Detail = m.selectedID()
 	case "up", "k":
@@ -215,6 +232,9 @@ func (m *model) key(k string) tea.Cmd {
 			v.Asc = !v.Asc
 		}
 	default:
+		if v.Focus == FocusStorage {
+			break
+		}
 		if v.Focus == FocusMachines {
 			keys := map[string]MSortKey{"s": MSortState, "c": MSortCPU, "m": MSortMem, "d": MSortDisk, "p": MSortPrice, "a": MSortAge, "n": MSortName}
 			if s, ok := keys[k]; ok {
@@ -241,9 +261,12 @@ func (m *model) key(k string) tea.Cmd {
 
 // move moves the selection of the focused table by d rows.
 func (m *model) move(d int) {
-	if m.view.Focus == FocusMachines {
+	switch m.view.Focus {
+	case FocusMachines:
 		m.view.MSelected += d
-	} else {
+	case FocusStorage:
+		m.view.SSelected += d
+	default:
 		m.view.Selected += d
 	}
 	m.clamp()
@@ -274,13 +297,10 @@ func (m *model) mouse(e tea.MouseEvent) tea.Cmd {
 	if !ok {
 		return nil
 	}
-	same := focus == v.Focus && (focus == FocusMachines && idx == v.MSelected || focus == FocusSessions && idx == v.Selected)
+	cur := map[Focus]*int{FocusSessions: &v.Selected, FocusMachines: &v.MSelected, FocusStorage: &v.SSelected}[focus]
+	same := focus == v.Focus && idx == *cur
 	v.Focus = focus
-	if focus == FocusMachines {
-		v.MSelected = idx
-	} else {
-		v.Selected = idx
-	}
+	*cur = idx
 	m.clamp()
 	if same {
 		v.Detail = m.selectedID()
@@ -306,6 +326,14 @@ func HitTest(s Snapshot, h *History, v View, rates map[string]float64, y int) (F
 	}
 	sTop := mTop + l.Machines + 1
 	if l.Storage > 0 {
+		stTop := sTop + 3
+		if y >= stTop && y < stTop+l.Storage {
+			off := window(min(max(v.SSelected, 0), max(len(stor)-1, 0)), v.SOffset, l.Storage, len(stor))
+			if i := off + y - stTop; i < len(stor) {
+				return FocusStorage, i, true
+			}
+			return 0, 0, false
+		}
 		sTop += l.Storage + storageFixed
 	}
 	sTop += 3

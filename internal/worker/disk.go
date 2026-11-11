@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -81,6 +82,7 @@ func (s *Worker) measureMachineCaches() {
 	if s.cfg.DepsDir != "" {
 		s.machineCacheBytes.Store(treeSize(s.cfg.DepsDir))
 	}
+	s.measureStorage(context.Background())
 }
 
 // diskStatus reports the cache disk: filesystem totals, slot bytes (from
@@ -100,5 +102,6 @@ func (s *Worker) diskStatus() *proto.DiskStatus {
 		d.Slots += r.Meta.Bytes
 		d.SlotBytes[r.Repo] += r.Meta.Bytes
 	}
+	d.Items = s.storageItems(used)
 	return d
 }
