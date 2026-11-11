@@ -218,8 +218,10 @@ func (s *Worker) commitPendingLocked(ctx context.Context, slot, repo string) (co
 				x.Head = top.ID
 			}
 			x.Scanned, x.UpperBytes = p.Scanned, p.Upper
-			if x.Runs == p.Runs {
-				x.Committed = now // no session ended since the capture
+			if x.Leases == p.Leases {
+				// No session started since the capture (which ran while
+				// the ending session held the slot).
+				x.Committed, x.Clean = now, p.Leases
 			}
 			if res.changed {
 				x.Bytes = res.tree.Bytes()

@@ -358,6 +358,7 @@ func (c *cacheFS) prepare(ctx context.Context, sl *slots, slot, repo string, ttl
 			m.Committed, m.Bytes = m.LastUsed, top.Bytes
 			if err := sl.update(slot, func(x *slotMeta) {
 				x.Base, x.Head, x.Created, x.Committed, x.Bytes = m.Base, m.Head, m.Created, m.Committed, m.Bytes
+				x.Clean = x.Leases - 1 // the head is the state before this session
 			}); err != nil {
 				return false, err
 			}
@@ -538,7 +539,8 @@ type slotPlan struct {
 	ReadsKnown bool             `json:"reads_known,omitempty"`
 	Scanned    int64            `json:"scanned_ns"`
 	Upper      int64            `json:"upper_bytes,omitempty"`
-	Runs       int64            `json:"runs"` // the slot's runs at the plan
+	Runs       int64            `json:"runs"`   // the slot's runs at the plan
+	Leases     int64            `json:"leases"` // the slot's leases at the plan
 }
 
 // plan stats a slot's changes since its head (the caller holds the slot
@@ -548,7 +550,7 @@ func (c *cacheFS) plan(ctx context.Context, slot string, r *repoFS, m slotMeta) 
 	if head == "" {
 		head = m.Base
 	}
-	p := slotPlan{Head: head, Runs: m.Runs}
+	p := slotPlan{Head: head, Runs: m.Runs, Leases: m.Leases}
 	ch, err := r.chain(ctx, head)
 	if err != nil {
 		return p, err

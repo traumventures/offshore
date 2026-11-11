@@ -90,6 +90,7 @@ func (s *Worker) commitSlot(ctx context.Context, ref slotRef) (commitResult, err
 				x.Head = top.ID
 			}
 			x.Committed, x.UpperBytes, x.Scanned = now, res.upper, res.scanned
+			x.Clean = x.Leases // the slot is held: no session runs
 			if res.changed {
 				x.Bytes = res.tree.Bytes()
 			}
@@ -194,7 +195,7 @@ func restoreUsage(m slotMeta) (bool, float64) {
 // unflushed reports whether a slot has changes the store lacks: used
 // since its last commit, or committed but not flushed by this worker.
 func (s *Worker) unflushed(r slotRef) bool {
-	if r.Meta.LastUsed > r.Meta.Committed {
+	if r.Meta.uncommitted() {
 		return true
 	}
 	if r.Meta.Head == "" || r.Meta.Head == r.Meta.Base && r.Meta.Restored != 0 {
@@ -301,7 +302,7 @@ func (s *Worker) maintainSlots(ctx context.Context) {
 		if r.Leased || ctx.Err() != nil {
 			continue
 		}
-		if r.Meta.LastUsed > r.Meta.Committed && now.Sub(time.Unix(r.Meta.LastUsed, 0)) >= s.cfs.opt.Idle {
+		if r.Meta.uncommitted() && now.Sub(time.Unix(r.Meta.LastUsed, 0)) >= s.cfs.opt.Idle {
 			s.maintainSlot(ctx, r, "idle")
 		} else if s.unflushed(r) {
 			s.flushWhenClean(ctx, r, false)
@@ -351,7 +352,7 @@ func (s *Worker) rebaseSlot(ctx context.Context, r slotRef) bool {
 	}
 	defer s.slots.releaseMaint(r.Path, r.Meta.Bytes)
 	m, err := readMeta(r.Path)
-	if err != nil || m.LastUsed > m.Committed {
+	if err != nil || m.uncommitted() {
 		return false // changed since the commit
 	}
 	base, err := s.cfs.rebase(ctx, r.Path, r.Repo, m)
@@ -405,7 +406,7 @@ func (s *Worker) reclaimSlots(over func() int64) int64 {
 		if over() <= 0 {
 			break
 		}
-		if r.Leased || r.Meta.Head == r.Meta.Base || r.Meta.LastUsed > r.Meta.Committed {
+		if r.Leased || r.Meta.Head == r.Meta.Base || r.Meta.uncommitted() {
 			continue
 		}
 		if s.rebaseSlot(ctx, r) {
