@@ -106,7 +106,13 @@ disk the machine admits no new sessions and reports draining (`drain_reason
 together (pages plus materialized files) are bounded by half the budget. The orchestrator can prune a repository's slots
 on demand through the worker's slot stream (`proto.KindSlot`, admin token;
 `orchestrator.WorkerSlotOps.PruneSlot`): older duplicate slots go cold
-first, then the newest is pruned in stages to the requested size.
+first, then the newest is pruned in stages to the requested size. Such a
+prune runs before a placement, so it is bounded: the orchestrator gives
+it 90 s (closing the stream at the deadline), the worker waits at most
+20 s for a prune already running and fails at once for a repository
+without a slot; on failure the session runs on its slot unpruned. (In
+production unbounded prunes held placements for up to 20 minutes behind
+a maintenance prune.)
 
 ### Access classes
 

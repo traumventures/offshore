@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/traumventures/offshore/internal/proto"
@@ -38,6 +39,11 @@ func (w WorkerSlotOps) call(ctx context.Context, t SlotTarget, op proto.SlotOp) 
 		return proto.SlotResult{}, err
 	}
 	defer conn.CloseWithError(0, "")
+	// The stream reads do not follow ctx: closing the connection ends a
+	// worker that does not answer in time (a prune blocked behind the
+	// worker's own maintenance held placements for up to 20 minutes).
+	stop := context.AfterFunc(ctx, func() { conn.CloseWithError(0, "deadline") })
+	defer stop()
 	_, pc, err := transport.OpenStream(ctx, conn, t.Token, proto.KindSlot)
 	if err != nil {
 		return proto.SlotResult{}, err
@@ -47,6 +53,9 @@ func (w WorkerSlotOps) call(ctx context.Context, t SlotTarget, op proto.SlotOp) 
 	}
 	var res proto.SlotResult
 	if err := pc.Expect(proto.TSlotResult, &res); err != nil {
+		if ctx.Err() != nil {
+			return res, fmt.Errorf("slot %s on %s: %w", op.Op, t.Machine, ctx.Err())
+		}
 		return res, err
 	}
 	if res.Err != "" {

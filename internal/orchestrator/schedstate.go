@@ -33,6 +33,11 @@ const (
 	slotTimeout = 5 * time.Minute
 )
 
+// pruneTimeout bounds a prune before a placement: the session keeps its
+// warm slot when the prune fails, so waiting longer costs more than the
+// disk the prune would free (a normal prune takes about a second).
+var pruneTimeout = 90 * time.Second
+
 // reconcileWait bounds how long Reconcile waits for its stops and
 // destroys (snapshot saves before a stop can take minutes); a var for tests.
 var reconcileWait = 5 * time.Second
@@ -420,7 +425,11 @@ func (o *Orchestrator) prepareSlot(ctx context.Context, machineID string, a sche
 	if a.Kind == scheduler.SlotNone {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, slotTimeout)
+	timeout := slotTimeout
+	if a.Kind == scheduler.SlotPrune {
+		timeout = pruneTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	o.mu.Lock()
 	t, m, ok := o.slotTargetLocked(machineID)

@@ -523,8 +523,22 @@ func (s *Worker) reclaimSources(over func() int64) int64 {
 // pruneRepo shrinks the slots of a repository to target bytes in total
 // (0: the policy prune of every slot): older slots go cold first, then
 // the newest is pruned in stages. It returns the bytes freed.
-func (s *Worker) pruneRepo(repo string, target int64) (int64, error) {
-	s.pruneMu.Lock()
+//
+// It is the orchestrator's prune before a placement, so the session
+// waits for it: it waits at most pruneLockWait (and until ctx ends) for a
+// maintenance prune holding pruneMu (in production a budget prune held
+// it for up to 20 minutes while a session hung, and every placement with
+// a prune waited for it) and fails then; the session runs on its warm
+// slot without the prune, and the budget prune frees the disk.
+func (s *Worker) pruneRepo(ctx context.Context, repo string, target int64) (int64, error) {
+	if !s.hasSlot(repo) {
+		return 0, fmt.Errorf("no build slot for repository %s", repo)
+	}
+	ctx, cancel := context.WithTimeout(ctx, pruneLockWait)
+	defer cancel()
+	if !lockCtx(ctx, &s.pruneMu) {
+		return 0, fmt.Errorf("prune of %s: %w (another prune is running)", repo, ctx.Err())
+	}
 	defer s.pruneMu.Unlock()
 	var refs []slotRef
 	for _, r := range s.slots.list() {
@@ -560,6 +574,39 @@ func (s *Worker) pruneRepo(repo string, target int64) (int64, error) {
 		freed += res.Freed
 	}
 	return freed, nil
+}
+
+// pruneLockWait bounds how long an on-demand prune waits for a running
+// prune.
+var pruneLockWait = 20 * time.Second
+
+// lockCtx locks mu unless ctx ends first.
+func lockCtx(ctx context.Context, mu *sync.Mutex) bool {
+	if mu.TryLock() {
+		return true
+	}
+	t := time.NewTicker(50 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+			if mu.TryLock() {
+				return true
+			}
+		}
+	}
+}
+
+// hasSlot reports whether repo has a build slot on this machine.
+func (s *Worker) hasSlot(repo string) bool {
+	for _, r := range s.slots.list() {
+		if r.Repo == repo {
+			return true
+		}
+	}
+	return false
 }
 
 // coldSlot removes a slot (stage 3 directly).
