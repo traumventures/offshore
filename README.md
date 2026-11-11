@@ -17,6 +17,12 @@ exit code. Sources are projected onto the machine at the same absolute path,
 build directories stay warm on the machine for up to 24 hours, outputs come
 back on demand, and when no machine is available the command runs locally.
 
+Think of an offshore oil rig: the heavy lifting happens out at sea, on build
+machines, and the rig is connected to the mainland (your laptop) by FUSE
+pipelines that carry building materials (sources) out and bring the product
+(build outputs) back. On the mainland everything looks as if the work was
+done locally.
+
 ## Architecture
 
 ```mermaid
