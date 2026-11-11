@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -268,5 +269,82 @@ func TestKernelOverlayOverLowerFS(t *testing.T) {
 	layer := Diff(ts.Tree(), tr)
 	if len(layer) == 0 {
 		t.Fatal("no diff")
+	}
+}
+
+func TestMountSlotMetaLayer(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("kernel overlay needs root")
+	}
+	if _, err := os.Stat("/dev/fuse"); err != nil {
+		t.Skip("no /dev/fuse")
+	}
+	ts, _, src := lowerFixture(t)
+	rlib, _ := ts.Tree().Get("debug/deps/b.rlib")
+	if _, err := ts.Fetch(ctx, rlib); err != nil { // resident: served from the files layer
+		t.Fatal(err)
+	}
+	faults := ts.Files().Stats().Faults
+	base := t.TempDir()
+	if err := KernelOverlaySupported(base); err != nil {
+		t.Skipf("no kernel overlay: %v", err)
+	}
+	mount := func() *Slot {
+		s, err := MountSlot(ctx, filepath.Join(base, "merged"), filepath.Join(base, "upper"), filepath.Join(base, "work"),
+			filepath.Join(base, "meta"), filepath.Join(base, "lazy"), ts, SlotOptions{Lower: LowerOptions{AllowOther: true}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.Unmount() })
+		return s
+	}
+	s := mount()
+	p := func(x string) string { return filepath.Join(s.Target, x) }
+	fi, err := os.Stat(p("debug/deps/a.fp"))
+	if err != nil || fi.ModTime().UnixNano() != 1700000000123456789 || fi.Size() != 4 {
+		t.Fatalf("attrs %v %v", fi, err)
+	}
+	if fi, err := os.Stat(p("debug/tool")); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Fatalf("mode %v %v", fi, err)
+	}
+	if tgt, err := os.Readlink(p("debug/link")); err != nil || tgt != "deps/b.rlib" {
+		t.Fatal(tgt, err)
+	}
+	for _, x := range []string{"debug/deps/b.rlib", "debug/deps/a.fp", "debug/tool"} {
+		got, err := os.ReadFile(p(x))
+		want, _ := os.ReadFile(filepath.Join(src, x))
+		if err != nil || string(got) != string(want) {
+			t.Fatalf("%s: %q %v", x, got, err)
+		}
+	}
+	if s.Lazy.Ops()["open"].Count != 2 { // a.fp and tool were not resident; b.rlib never reaches FUSE
+		t.Fatalf("lazy layer ops %+v", s.Lazy.Ops())
+	}
+	if ts.Files().Stats().Faults != faults+2 {
+		t.Fatal("non-resident content not faulted in")
+	}
+	// Metadata changes and hardlinks copy up metadata only.
+	os.Chmod(p("debug/deps/b.rlib"), 0o600)
+	if err := os.Link(p("debug/deps/b.rlib"), p("debug/uplift")); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(base, "upper", "debug", "uplift")); err != nil || fi.Sys().(*syscall.Stat_t).Blocks != 0 {
+		t.Fatalf("copy-up not metadata only: %v", err)
+	}
+	if err := os.Rename(p("debug/deps"), p("debug/deps2")); err != nil {
+		t.Fatalf("redirect_dir rename: %v", err)
+	}
+	if err := s.Unmount(); err != nil {
+		t.Fatal(err)
+	}
+	// Remount over a rebuilt meta layer with the content reclaimed: the
+	// upper's metacopy files follow their redirect to the lazy layer.
+	ts.Files().Drop(rlib.Digest)
+	s = mount()
+	if b, err := os.ReadFile(p("debug/uplift")); err != nil || len(b) != 100000 {
+		t.Fatalf("uplift after remount: %d %v", len(b), err)
+	}
+	if b, err := os.ReadFile(p("debug/deps2/b.rlib")); err != nil || len(b) != 100000 {
+		t.Fatalf("renamed dir after remount: %d %v", len(b), err)
 	}
 }

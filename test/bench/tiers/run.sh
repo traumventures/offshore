@@ -6,6 +6,7 @@
 #   test/bench/tiers/run.sh                 # all layouts
 #   test/bench/tiers/run.sh layout_A        # one layout (see bench.sh)
 #   test/bench/tiers/run.sh alt 5 A E       # A and E alternating in one window
+#   XFS=16G test/bench/tiers/run.sh ...     # runs/ on an xfs loop image (workers' cache volume fs)
 #   KEEP=1 test/bench/tiers/run.sh ...      # keep container + work dir
 #
 # Needs: sudo -n docker, /dev/fuse, ~12 GB free disk (target ~3.2 GB, lower
@@ -28,9 +29,15 @@ $D rm -f tierbench >/dev/null 2>&1 || true
 $D run -d --name tierbench --privileged --device /dev/fuse -v "$WORK:/work" \
   -e CARGO_HOME=/work/cargo-home -w /work/src "$IMAGE" sleep infinity >/dev/null
 $D exec tierbench bash -c 'command -v python3 >/dev/null || (apt-get -qq update && apt-get -qq install -y python3 >/dev/null)'
+if [ -n "${XFS:-}" ]; then  # XFS=16G: runs/ on an xfs (reflink) loop image, like the workers' cache volume
+  $D exec tierbench bash -c "command -v mkfs.xfs >/dev/null || apt-get -qq install -y xfsprogs >/dev/null
+    mountpoint -q /work/runs && exit 0
+    [ -f /work/runs.xfs ] || { truncate -s $XFS /work/runs.xfs && mkfs.xfs -q -m reflink=1 /work/runs.xfs; }
+    mkdir -p /work/runs && mount -o loop,discard /work/runs.xfs /work/runs"
+fi
 $D exec tierbench cargo fetch --locked
 ovl=",redirect_dir=on,metacopy=on"
-run() { $D exec ${OVL:+-e OVL_OPTS=$OVL} tierbench bash /work/bench.sh "$@"; }
+run() { $D exec ${OVL:+-e OVL_OPTS=$OVL} ${ALT_ARGS:+-e ALT_ARGS="$ALT_ARGS"} ${ALT_COMMIT:+-e ALT_COMMIT=1} tierbench bash /work/bench.sh "$@"; }
 out="$here/results-$(date +%F).jsonl"
 if [ "${1:-}" = alt ]; then  # alt ROUNDS TAG...: alternating A/E/... in one window (bench.sh layout_alt)
   shift; out="$here/results-alt-$(date +%F-%H%M).jsonl"
@@ -55,6 +62,6 @@ elif [ $# -gt 0 ]; then run "$@"; else
 fi
 cp "$WORK/results.jsonl" "$out" 2>/dev/null || true
 if [ -z "${KEEP:-}" ]; then
-  $D exec tierbench python3 -c "import shutil; shutil.rmtree('/work', ignore_errors=True)" || true
+  $D exec tierbench bash -c "umount /work/runs 2>/dev/null; python3 -c \"import shutil; shutil.rmtree('/work', ignore_errors=True)\"" || true
   $D rm -f tierbench >/dev/null
 fi

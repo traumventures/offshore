@@ -134,7 +134,7 @@ type slotMount struct {
 	repo  *repoFS
 	base  string
 	src   *anyfs.TreeSource
-	lower *anyfs.LowerFS
+	lower *anyfs.LowerFS // kernel mode: the lazy (digest view) layer
 	user  *anyfs.UserOverlay
 	// cancel stops the class prefetch (nil: none).
 	cancel context.CancelFunc
@@ -399,16 +399,13 @@ func (c *cacheFS) mount(ctx context.Context, slot, repo, base string) error {
 	upper, work := filepath.Join(slot, "upper"), filepath.Join(slot, "work")
 	mounted := false
 	if c.mode == fsKernel {
-		sm.lower, err = anyfs.MountLower(filepath.Join(slot, "lower"), src, anyfs.LowerOptions{FsName: "offshore-slot",
-			PrefetchMax: prefetchSmall, AllowOther: c.allowOther})
+		// Metadata layer + materialized files + lazy FUSE (digest
+		// view): resident content never goes through the daemon.
+		var ks *anyfs.Slot
+		ks, err = anyfs.MountSlot(ctx, data, upper, work, filepath.Join(slot, "meta"), filepath.Join(slot, "lower"), src,
+			anyfs.SlotOptions{Lower: anyfs.LowerOptions{FsName: "offshore-slot", PrefetchMax: prefetchSmall, AllowOther: c.allowOther}})
 		if err == nil {
-			err = anyfs.MountKernelOverlay(data, upper, work, sm.lower.Mountpoint())
-			if err != nil {
-				sm.lower.Unmount()
-				sm.lower = nil
-			}
-		}
-		if err == nil {
+			sm.lower = ks.Lazy
 			mounted = true
 		} else if !dirEmpty(upper) {
 			return fmt.Errorf("mount build slot: %w", err)

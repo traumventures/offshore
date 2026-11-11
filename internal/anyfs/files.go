@@ -98,6 +98,10 @@ func (f *Files) SetBacked(digest string) {
 	f.mu.Unlock()
 }
 
+// Dir returns the directory of the materialized files (by digest,
+// "ab/abcd...": the files data-only layer of a slot overlay).
+func (f *Files) Dir() string { return f.dir }
+
 func (f *Files) path(digest string) string {
 	return filepath.Join(f.dir, digest[:2], digest)
 }

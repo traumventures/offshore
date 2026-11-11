@@ -169,8 +169,8 @@ start_anyfs() { # MNT args...
   for _ in $(seq 600); do grep -q " $mnt fuse" /proc/mounts && return 0; sleep 0.1; done
   echo "anyfs mount failed"; tail $W/logs/anyfs-*.log; exit 1
 }
-commit_step() { # commit the merged /t as a layer (writeback cost)
-  $ANYFS commit -store $RUNS/astore -cache $RUNS/$1-cache -dir /t -to bench-$1 | python3 -c "import json,sys; d=json.load(sys.stdin); d['layout']='$1'; d['step']='commit'; print(json.dumps(d))" | tee -a "$RESULTS"
+commit_step() { # TAG [CACHE TAG]: commit the merged /t as a layer (writeback cost)
+  $ANYFS commit -store $RUNS/astore -cache $RUNS/${2:-$1}-cache -dir /t -to bench-$1 | python3 -c "import json,sys; d=json.load(sys.stdin); d['layout']='$1'; d['step']='commit'; print(json.dumps(d))" | tee -a "$RESULTS"
 }
 layout_E() { # anyfs, warm slot: every file materialized locally before the mount
   local tag=${1:-E}; shift || true
@@ -198,28 +198,38 @@ layout_F() { # anyfs, cold restore from a slow store (5 ms/object, 200 MB/s), pr
 #   layout_alt ROUNDS TAG...   e.g. layout_alt 5 A E
 # Tags: A = plain directory (A's target, continuing from S1), E = anyfs
 # (FUSE lower + overlay, warm slot), M = anyfs with the metadata layer
-# (no FUSE in the warm path).
-declare -A fpids sfiles
-alt_up() { # TAG
-  local tag=$1; mkdir -p /mnt/v/$tag
+# (no FUSE in the warm path); a second letter v adds the overlay option
+# volatile (Ev, Mv).
+declare -A fpids sfiles ctag
+alt_up() { # TAG [ALL TAGS...]
+  local tag=$1; shift; mkdir -p /mnt/v/$tag
   case $tag in
     A) mount --bind $RUNS/A /mnt/v/A ;;
     E*|M*)
-      local extra=(); [[ $tag == M* ]] && extra=(-meta $RUNS/$tag-meta)
-      mkdir -p /mnt/lower-$tag
-      start_anyfs /mnt/lower-$tag -store $RUNS/astore -cache $RUNS/$tag-cache -warm "${extra[@]}" ${ALT_ARGS:-}
-      fpids[$tag]=$fusepid; sfiles[$tag]=$statsfile
+      if [[ $tag == M* && -n "${fpids[E]:-}" ]]; then
+        # share E's daemon and materialized files (disk): its digest view
+        fpids[$tag]=${fpids[E]}; sfiles[$tag]=${sfiles[E]}; ctag[$tag]=E
+      else
+        local extra=(); [[ " $* " == *" M"* ]] && extra=(-meta $RUNS/$tag-meta)
+        mkdir -p /mnt/lower-$tag; rm -f $RUNS/$tag-meta.lowerdir
+        start_anyfs /mnt/lower-$tag -store $RUNS/astore -cache $RUNS/$tag-cache -seed $RUNS/A -warm "${extra[@]}" ${ALT_ARGS:-}
+        fpids[$tag]=$fusepid; sfiles[$tag]=$statsfile; ctag[$tag]=$tag
+      fi
       local lower=/mnt/lower-$tag
-      [[ $tag == M* ]] && lower=$(cat $RUNS/$tag-meta.lowerdir)
+      if [[ $tag == M* ]]; then
+        for _ in $(seq 600); do [ -s $RUNS/${ctag[$tag]}-meta.lowerdir ] && break; sleep 0.1; done
+        lower=$(cat $RUNS/${ctag[$tag]}-meta.lowerdir)
+      fi
       mkdir -p $RUNS/$tag/upper $RUNS/$tag/work
-      mount -t overlay overlay -o lowerdir=$lower,upperdir=$RUNS/$tag/upper,workdir=$RUNS/$tag/work,redirect_dir=on,metacopy=on /mnt/v/$tag ;;
+      local vol=; [[ $tag == ?v* ]] && vol=,volatile   # Ev, Mv: + volatile (no fsync on copy-up)
+      mount -t overlay overlay -o lowerdir=$lower,upperdir=$RUNS/$tag/upper,workdir=$RUNS/$tag/work,redirect_dir=on,metacopy=on$vol /mnt/v/$tag ;;
     *) echo "unknown alt tag $tag"; exit 1 ;;
   esac
 }
 alt_down() { # TAG
   local tag=$1
   umount /mnt/v/$tag || umount -l /mnt/v/$tag
-  if [ -n "${fpids[$tag]:-}" ]; then fusepid=${fpids[$tag]}; stop_fuse; fi
+  if [ -n "${fpids[$tag]:-}" ] && [ "${ctag[$tag]}" = "$tag" ]; then fusepid=${fpids[$tag]}; stop_fuse; fi
 }
 alt_step() { # TAG NAME
   local tag=$1
@@ -239,7 +249,7 @@ layout_alt() {
   pack_anyfs; umount_t
   cp -p $W/s1/leaf $SRC/$LEAF; cp -p $W/s1/core $SRC/$CORE
   local t r
-  for t in "$@"; do alt_up $t; done
+  for t in "$@"; do alt_up $t "$@"; done
   alt_all restore 0 "$@"
   alt_all noop 1 "$@"
   for (( r=0; r<rounds; r++ )); do
@@ -250,9 +260,9 @@ layout_alt() {
   for t in "$@"; do
     [ "$t" = A ] || [ -z "${ALT_COMMIT:-}" ] && continue
     fusepid=${fpids[$t]}; statsfile=${sfiles[$t]}
-    umount_t; mount --bind /mnt/v/$t /t; commit_step $t; umount_t
+    umount_t; mount --bind /mnt/v/$t /t; commit_step $t ${ctag[$t]}; umount_t
   done
-  for t in "$@"; do alt_down $t; done
+  local i; for (( i=$#; i>0; i-- )); do alt_down ${!i}; done  # M before the E daemon it shares
 }
 
 layout_freshclone() { # restore onto a source tree whose mtimes are "now" (git clone)

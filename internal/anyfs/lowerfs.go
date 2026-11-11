@@ -104,8 +104,10 @@ func MountLower(mnt string, src Source, opt LowerOptions) (*LowerFS, error) {
 	l.srv = srv
 	l.ptOK = !opt.NoPassthrough && srv.KernelSettings().Flags64()&fuse.CAP_PASSTHROUGH != 0
 	if opt.PrefetchMax > 0 {
-		if ts, ok := src.(*TreeSource); ok {
-			go ts.PrefetchSmall(context.Background(), opt.PrefetchMax, 16)
+		if ps, ok := src.(interface {
+			PrefetchSmall(context.Context, int64, int) int
+		}); ok {
+			go ps.PrefetchSmall(context.Background(), opt.PrefetchMax, 16)
 		}
 	}
 	return l, nil
@@ -305,15 +307,19 @@ func (n *lnode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, 
 	return &lfile{nd: nd, n: n, lazy: true}, fuse.FOPEN_KEEP_CACHE, 0
 }
 
+// filesSource is a Source whose content Files materializes (open files
+// are not reclaimed).
+type filesSource interface{ Files() *Files }
+
 func (n *lnode) acquire(nd *Node) {
-	if ts, ok := n.fsys.src.(*TreeSource); ok {
-		ts.files.Acquire(nd)
+	if fsrc, ok := n.fsys.src.(filesSource); ok {
+		fsrc.Files().Acquire(nd)
 	}
 }
 
 func (n *lnode) release(nd *Node) {
-	if ts, ok := n.fsys.src.(*TreeSource); ok {
-		ts.files.Release(nd)
+	if fsrc, ok := n.fsys.src.(filesSource); ok {
+		fsrc.Files().Release(nd)
 	}
 }
 
