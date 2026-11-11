@@ -279,6 +279,10 @@ Resources:
               - iam:UntagRole
               - iam:ListRoleTags
             Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StackPrefix}*-*"
+          - Sid: WorkerStoreGrants
+            Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StackPrefix}*-StoreRole-*"
           - Sid: StackRoleManagedPolicies
             Effect: Allow
             Action: [iam:AttachRolePolicy, iam:DetachRolePolicy]

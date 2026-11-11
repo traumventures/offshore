@@ -27,6 +27,7 @@ import (
 	"github.com/traumventures/cloudsourced/internal/orchestrator"
 	"github.com/traumventures/cloudsourced/internal/pool"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/cloudsourced/internal/store"
 	"github.com/traumventures/cloudsourced/internal/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -267,6 +268,8 @@ type Prepared struct {
 	// Labels are the session's effective labels (request labels plus
 	// user); the proxy sends them to the machine and the run log.
 	Labels map[string]string `json:"labels,omitempty"`
+	// Store is the lease's store grant for the worker (nil: none).
+	Store *store.Grant `json:"store,omitempty"`
 }
 
 // Response is one line of a daemon RPC response.
@@ -577,7 +580,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		Lease: lease.ID, RepoID: repoID, EnvHash: plan.Hash, Roots: versions, BuildTTL: ttl.String(),
 		Grant: lease.Grant, UsageKey: key, MemoryOvercommit: lease.MemoryOvercommit,
 		Provider: lease.Provider, Size: lease.Size, PricePerHour: lease.PricePerHour, Reason: lease.Reason, Timings: tm,
-		Labels: lbl,
+		Labels: lbl, Store: lease.Store,
 	}, nil
 }
 

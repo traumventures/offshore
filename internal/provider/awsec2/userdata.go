@@ -53,9 +53,7 @@ func hostSpec(spec provider.MachineSpec, region, stack, bucket, registry, image 
 			paramSecret:   secretParameter(stack, spec.ID),
 			paramRegistry: registry,
 			// Compiler cache objects of the pool, shared by its machines.
-			paramSccache: bucket + "/cache/" + pathSegment(spec.Owner) + "/sccache",
 		},
-		CompilerCache: &supervisor.CompilerCache{Port: sccachePort},
 	}
 }
 

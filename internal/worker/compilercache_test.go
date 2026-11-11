@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"github.com/traumventures/cloudsourced/internal/store"
 	"io"
 	"log/slog"
 	"maps"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/traumventures/cloudsourced/internal/proto"
 )
@@ -139,10 +141,32 @@ func TestBuiltinCompilerCacheEndpoint(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "abc123", "a", "b")); err != nil {
 		t.Fatalf("not stored under the environment hash: %v", err)
 	}
-	// External endpoint: namespace appended.
-	s2 := &Worker{cfg: Config{EnvHash: "abc123", SccacheEndpoint: "http://172.17.0.1:9000/cache/"}, log: s.log}
+	// A store grant for the environment backs the cache: objects are
+	// uploaded, and a machine with an empty local tier reads them.
+	storeDir := t.TempDir()
+	g, _ := store.NewGranter(ctx, store.Config{Name: "local", Dir: storeDir, Prefix: "cache"})
+	gr, _ := g.Grant(ctx, []string{store.RepoScope("r"), store.EnvScope("abc123")}, time.Hour)
+	s.noteGrant("r", &gr)
+	req, _ = http.NewRequest("PUT", s.ccEndpoint+"c/d", strings.NewReader("y"))
+	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != 201 {
+		t.Fatalf("PUT: %v %v", resp, err)
+	}
+	if _, err := os.Stat(filepath.Join(storeDir, "cache", "envs", "abc123", "abc123", "c", "d")); err != nil {
+		t.Fatalf("not uploaded to the store: %v", err)
+	}
+	s2 := &Worker{cfg: Config{EnvHash: "abc123", SccacheDir: t.TempDir()}, log: s.log}
 	s2.startCompilerCache(ctx)
-	if s2.ccEndpoint != "http://172.17.0.1:9000/cache/abc123/" {
-		t.Fatalf("external endpoint %q", s2.ccEndpoint)
+	s2.noteGrant("r", &gr)
+	resp, err = http.Get(s2.ccEndpoint + "c/d")
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("GET from the store: %v %v", resp, err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(b) != "y" {
+		t.Fatalf("content %q", b)
+	}
+	if got, ok := s2.grants.get("r", time.Minute); !ok || got.Store != "local" {
+		t.Fatal("grant not remembered")
 	}
 }

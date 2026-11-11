@@ -7,7 +7,6 @@ import (
 	"github.com/traumventures/cloudsourced/internal/clock"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/traumventures/cloudsourced/internal/blobcache"
 	"github.com/traumventures/cloudsourced/internal/machine"
 	"github.com/traumventures/cloudsourced/internal/provider"
 )
@@ -51,9 +49,6 @@ func (p *fakePlatform) Prepare(context.Context, Runner) error {
 	return nil
 }
 func (p *fakePlatform) StopSelf(context.Context) error { p.stops++; return nil }
-func (p *fakePlatform) CompilerCacheStore(context.Context) (blobcache.Store, error) {
-	return blobcache.NewDirStore(p.cacheDir, time.Hour)
-}
 
 // fakeDocker records commands and keeps containers, images and volumes.
 type fakeDocker struct {
@@ -203,41 +198,6 @@ func TestSpecRoundTrip(t *testing.T) {
 	s, err := LoadSpec(p)
 	if err != nil || s.Layout.ID != "m1" || s.IdleStopAfter() != 2*time.Minute || len(s.Layout.Services) != 1 {
 		t.Fatalf("spec %+v %v", s, err)
-	}
-}
-
-func TestCompilerCacheOnGateway(t *testing.T) {
-	a, p, d := testAgent(t)
-	p.cacheDir = t.TempDir()
-	d.gateway = "127.0.0.1"
-	a.Spec.CompilerCache = &CompilerCache{Port: 0}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	a.StartCompilerCache(ctx)
-	ep := a.Spec.Layout.Env[SccacheEndpointEnv]
-	if !strings.HasPrefix(ep, "http://127.0.0.1:") {
-		t.Fatalf("endpoint %q", ep)
-	}
-	req, _ := http.NewRequest(http.MethodPut, ep+"envhash/k1", strings.NewReader("obj"))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	resp, err = http.Get(ep + "envhash/k1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if string(b) != "obj" {
-		t.Fatalf("got %q (%s)", b, resp.Status)
-	}
-	if err := a.EnsureContainers(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(d.cmds[slices.IndexFunc(d.cmds, func(c string) bool { return strings.HasPrefix(c, "create --name cs-m1 ") })], SccacheEndpointEnv+"="+ep) {
-		t.Fatal("endpoint not passed to the machine")
 	}
 }
 

@@ -349,7 +349,7 @@ func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, 
 		Repo: repo.Root, RepoID: prep.RepoID, Roots: prep.Roots,
 		Argv: argv, Cwd: cwd, Env: env,
 		Grant: prep.Grant, MemoryOvercommit: prep.MemoryOvercommit,
-		Caches: ProtoCaches(repo), SlotTTL: prep.BuildTTL,
+		Caches: ProtoCaches(repo), SlotTTL: prep.BuildTTL, Store: prep.Store,
 		Eager: profile.Eager, Lease: prep.Lease,
 		Linker: repo.Environment.Linker, TraceParent: tracing.Inject(ctx), Labels: rec.Labels,
 	}

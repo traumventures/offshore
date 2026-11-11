@@ -45,13 +45,14 @@ import (
 
 	"github.com/traumventures/cloudsourced/internal/image"
 	"github.com/traumventures/cloudsourced/internal/provider"
+	"github.com/traumventures/cloudsourced/internal/store"
 )
 
 //go:embed stack.yaml
 var stackTemplate string
 
 // templateVersion must match the TemplateVersion output of stack.yaml.
-const templateVersion = "7"
+const templateVersion = "8"
 
 const (
 	serverPort = 7443
@@ -89,10 +90,14 @@ type EC2 struct {
 	builder     *image.DockerBuilder
 }
 
-var _ provider.ImageHost = (*EC2)(nil)
+var (
+	_ provider.ImageHost     = (*EC2)(nil)
+	_ provider.StoreSource   = (*EC2)(nil)
+	_ provider.SecretChannel = (*EC2)(nil)
+)
 
 type infra struct {
-	sg, profile, bucket, repo string
+	sg, profile, bucket, repo, storeRole string
 }
 
 func open(opts map[string]any) (provider.Provider, error) {
@@ -170,7 +175,7 @@ func (e *EC2) ensureInfra(ctx context.Context) (*infra, error) {
 		}
 	}
 	out := outputs(st)
-	in := &infra{sg: out["SecurityGroupId"], profile: out["InstanceProfileArn"], bucket: out["BucketName"], repo: out["RepositoryUri"]}
+	in := &infra{sg: out["SecurityGroupId"], profile: out["InstanceProfileArn"], bucket: out["BucketName"], repo: out["RepositoryUri"], storeRole: out["StoreRoleArn"]}
 	if in.sg == "" || in.profile == "" || in.bucket == "" || in.repo == "" {
 		return nil, fmt.Errorf("aws-ec2: stack %s lacks outputs (status %s)", e.stack, st.StackStatus)
 	}
@@ -479,12 +484,12 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	}
 	// The secret environment goes through SSM: the supervisor reads it
 	// with the instance role and deletes it.
-	if err := e.putSecrets(ctx, spec); err != nil {
+	if err := e.PutSecrets(ctx, spec.ID, spec.SecretEnv); err != nil {
 		return provider.Machine{}, err
 	}
 	out, instanceType, failed, err := launch(ctx, e.ec2.RunInstances, input, spec)
 	if err != nil {
-		e.deleteSecrets(context.Background(), spec.ID)
+		e.DeleteSecrets(context.Background(), spec.ID)
 		return provider.Machine{}, err
 	}
 	if len(failed) > 0 {
@@ -493,22 +498,24 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	id := aws.ToString(out.Instances[0].InstanceId)
 	if err := e.waitRunning(ctx, id); err != nil {
 		e.terminate(context.Background(), out.Instances)
-		e.deleteSecrets(context.Background(), spec.ID)
+		e.DeleteSecrets(context.Background(), spec.ID)
 		return provider.Machine{}, err
 	}
 	return e.byMachine(ctx, spec.ID)
 }
 
-func (e *EC2) putSecrets(ctx context.Context, spec provider.MachineSpec) error {
-	b, err := json.Marshal(spec.SecretEnv)
+// PutSecrets implements provider.SecretChannel: an SSM SecureString
+// parameter the supervisor reads once and deletes.
+func (e *EC2) PutSecrets(ctx context.Context, machineID string, env map[string]string) error {
+	b, err := json.Marshal(env)
 	if err != nil {
 		return err
 	}
 	in := &ssm.PutParameterInput{
-		Name: aws.String(secretParameter(e.stack, spec.ID)), Type: ssmtypes.ParameterTypeSecureString,
+		Name: aws.String(secretParameter(e.stack, machineID)), Type: ssmtypes.ParameterTypeSecureString,
 		Value:       aws.String(string(b)),
 		Description: aws.String("cloudsourced machine secrets, deleted by the machine after boot"),
-		Tags:        []ssmtypes.Tag{{Key: aws.String(tagProject), Value: aws.String(project)}, {Key: aws.String(provider.LabelMachine), Value: aws.String(spec.ID)}},
+		Tags:        []ssmtypes.Tag{{Key: aws.String(tagProject), Value: aws.String(project)}, {Key: aws.String(provider.LabelMachine), Value: aws.String(machineID)}},
 	}
 	if len(b) > 4096 {
 		in.Tier = ssmtypes.ParameterTierAdvanced
@@ -519,7 +526,8 @@ func (e *EC2) putSecrets(ctx context.Context, spec provider.MachineSpec) error {
 	return nil
 }
 
-func (e *EC2) deleteSecrets(ctx context.Context, id string) error {
+// DeleteSecrets implements provider.SecretChannel.
+func (e *EC2) DeleteSecrets(ctx context.Context, id string) error {
 	_, err := e.ssm.DeleteParameter(ctx, &ssm.DeleteParameterInput{Name: aws.String(secretParameter(e.stack, id))})
 	var nf *ssmtypes.ParameterNotFound
 	if err != nil && !errors.As(err, &nf) {
@@ -652,7 +660,7 @@ func (e *EC2) Destroy(ctx context.Context, id string) error {
 		return err
 	}
 	// Normally the supervisor has deleted it already.
-	return e.deleteSecrets(ctx, id)
+	return e.DeleteSecrets(ctx, id)
 }
 
 // terminate terminates instances.
@@ -685,3 +693,15 @@ func (e *EC2) List(ctx context.Context, owner string) ([]provider.Machine, error
 func (e *EC2) Volumes(context.Context, string) ([]provider.Volume, error) { return nil, nil }
 
 func (e *EC2) DeleteVolume(context.Context, string) error { return nil }
+
+// NativeStore implements provider.StoreSource: the stack's bucket below
+// cache/<pool>/ (deleted after one day by the bucket's lifecycle rule);
+// workers get credentials of the stack's store role scoped by a session
+// policy.
+func (e *EC2) NativeStore(ctx context.Context, pool string) (store.Config, bool, error) {
+	in, err := e.ensureInfra(ctx)
+	if err != nil {
+		return store.Config{}, false, err
+	}
+	return store.Config{Name: e.Name(), Bucket: in.bucket, Region: e.region, Prefix: "cache/" + pool, RoleARN: in.storeRole}, true, nil
+}

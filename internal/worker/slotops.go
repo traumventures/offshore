@@ -21,6 +21,7 @@ func (s *Worker) serveSlot(ctx context.Context, pc *proto.Conn) error {
 func (s *Worker) slotOp(ctx context.Context, op proto.SlotOp) proto.SlotResult {
 	var res proto.SlotResult
 	begin := time.Now()
+	s.noteGrant(op.Repo, op.Store)
 	var err error
 	switch op.Op {
 	case proto.SlotPrune:

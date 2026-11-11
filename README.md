@@ -692,6 +692,46 @@ repository's slots on demand through the worker's slot stream
 older duplicate slots go cold first, then the newest is pruned in stages to
 the requested size.
 
+### Object store (`[storage]`) and provider parts
+
+Internally a provider has four parts: **Compute** (machines), **Registry**
+(environment images), **Store** (an S3-compatible object store for slot
+snapshots and global caches) and **Secrets** (the channel that hands a new
+machine its secret environment). The pool's `[storage]` section replaces
+the Store part of every provider:
+
+```toml
+[storage]
+endpoint   = "https://<account>.r2.cloudflarestorage.com"   # "" = AWS S3
+bucket     = "cloudsourced-cache"
+region     = "auto"
+prefix     = "cache/team"           # default "cache/<pool id>"
+access_key = "env:R2_ACCESS_KEY_ID" # env:/file:/cmd: references
+secret_key = "env:R2_SECRET_ACCESS_KEY"
+# role_arn   = "arn:aws:iam::123:role/cache"  # STS: per-repository credentials
+# path_style = true                            # MinIO
+# dir        = "/srv/cloudsourced-store"       # a directory every machine mounts
+```
+
+Native stores: `aws-ec2` uses the stack's bucket below `cache/<pool>/`
+(one-day lifecycle) and the stack's `StoreRole`; `local-docker` a volume
+`cs-store-<pool>` shared by its containers (`/store`); `oci` has none (use
+`[storage]`; OCI customer secret keys cannot be scoped per repository).
+
+The control plane never moves cache data. With every lease (and every slot
+save or restore) it hands the worker a **grant**: credentials scoped to the
+repository's prefix (`repos/<repo id>/`) and the environment's
+(`envs/<env hash>/`), at most 12 h. With `role_arn` (and on `aws-ec2`) they
+come from STS AssumeRole with a session policy limited to those prefixes;
+otherwise the configured keys are handed out as they are, so give them only
+the bucket (or prefix) they need. Objects are build caches and never served
+after 24 h.
+
+Global result caches (sccache, ccache, Go) use a tiered store in the
+worker: a directory on the machine disk, backed by the grant's environment
+prefix, so a fresh machine reuses what earlier machines compiled. Without a
+store they stay machine-local.
+
 ### Compiler cache and linker
 
 A global cache with `tool = "sccache"` adds the pinned static sccache release
@@ -702,23 +742,16 @@ sandbox (`SCCACHE_SERVER_UDS`, `SCCACHE_DIR` in a private temporary
 directory); it ends with the session. The cache backend is WebDAV
 (`SCCACHE_WEBDAV_ENDPOINT`), served by `internal/blobcache`:
 
-* By default the worker serves it on `127.0.0.1` from a directory
-  store under `<deps dir>/sccache` (`CLOUDSOURCED_SCCACHE_DIR`). The
-  dependency volume is shared by the pool's machines, so a new machine gets
-  hits for everything an earlier one compiled. Keys are prefixed with the
-  environment hash, so toolchains never mix.
-* On AWS the supervisor serves the cache itself on the Docker bridge
-  gateway (port 7480, reachable from sessions, not from outside the host)
-  from the stack's bucket with the instance role (`s3://<bucket>/cache/<owner>/sccache/`,
-  deleted after a day by the bucket lifecycle rule), and passes
-  `CLOUDSOURCED_SCCACHE_ENDPOINT` to the worker; the worker appends
-  the environment hash to that URL (`blobcache.Handler` without a fixed
-  namespace). `blobcache.S3StoreFromEnv` (`CLOUDSOURCED_SCCACHE_S3=bucket/prefix`)
-  offers the same store to other hosts.
+The worker serves it on `127.0.0.1` from a tiered store: a directory under
+`<deps dir>/sccache` (`CLOUDSOURCED_SCCACHE_DIR`) backed by the pool's
+object store under the environment's prefix (see
+[Object store](#object-store-storage-and-provider-parts)), so a new machine
+gets hits for everything an earlier one compiled. Keys are prefixed with
+the environment hash, so toolchains never mix.
 
 sccache cannot cache incremental compilations, which cargo uses for
 workspace crates in dev profiles; dependencies are cached regardless.
-`incremental = false` sets `CARGO_INCREMENTAL=0` unless the run sets it.
+Set `CARGO_INCREMENTAL=0` in `[environment.env]` to make them cacheable.
 User settings of `RUSTC_WRAPPER` win. With `CLOUDSOURCED_VERBOSE=1` the proxy
 prints the run's statistics (`sccache: 3 hits / 1 misses (...)`); they are
 also part of the session's exit message (`proto.Exit.Cache`: `sccache_requests`, `_hits`, `_misses`, `_not_cacheable`, `_errors`; shown by `cloudsourced why`).

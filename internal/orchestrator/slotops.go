@@ -7,6 +7,7 @@ import (
 
 	"github.com/traumventures/cloudsourced/internal/proto"
 	"github.com/traumventures/cloudsourced/internal/scheduler"
+	"github.com/traumventures/cloudsourced/internal/store"
 	"github.com/traumventures/cloudsourced/internal/transport"
 )
 
@@ -14,6 +15,10 @@ import (
 // (proto.KindSlot). SlotTarget.Token must be an admin token of the
 // machine (Orchestrator.AdminToken). New wires it as Orchestrator.Slots.
 type WorkerSlotOps struct {
+	// Grant mints the store grant sent with saves and restores
+	// (Orchestrator.SlotGrant; nil: the worker uses the last grant it got
+	// with a session of the repository).
+	Grant func(ctx context.Context, machineID, repo string) *store.Grant
 	// Timeout bounds one operation (0: 30 minutes; saves and restores
 	// move gigabytes).
 	Timeout time.Duration
@@ -58,7 +63,7 @@ func (w WorkerSlotOps) PruneSlot(ctx context.Context, t SlotTarget, repo string,
 
 // SaveSlot implements SlotOps.
 func (w WorkerSlotOps) SaveSlot(ctx context.Context, t SlotTarget, repo string) (scheduler.Snapshot, error) {
-	res, err := w.call(ctx, t, proto.SlotOp{Op: proto.SlotSave, Repo: repo})
+	res, err := w.call(ctx, t, proto.SlotOp{Op: proto.SlotSave, Repo: repo, Store: w.grant(ctx, t, repo)})
 	if err != nil {
 		return scheduler.Snapshot{}, err
 	}
@@ -71,11 +76,18 @@ func (w WorkerSlotOps) SaveSlot(ctx context.Context, t SlotTarget, repo string) 
 // RestoreSlot implements SlotOps.
 func (w WorkerSlotOps) RestoreSlot(ctx context.Context, t SlotTarget, repo string, s scheduler.Snapshot) error {
 	info := proto.SnapshotInfo{Repo: s.Repo, Store: s.Store, Provider: s.Provider, Bytes: s.Bytes, At: s.At.Unix()}
-	_, err := w.call(ctx, t, proto.SlotOp{Op: proto.SlotRestore, Repo: repo, Snapshot: &info})
+	_, err := w.call(ctx, t, proto.SlotOp{Op: proto.SlotRestore, Repo: repo, Snapshot: &info, Store: w.grant(ctx, t, repo)})
 	return err
 }
 
 // SnapshotFromInfo converts a worker's snapshot description.
 func SnapshotFromInfo(i proto.SnapshotInfo) scheduler.Snapshot {
 	return scheduler.Snapshot{Repo: i.Repo, Provider: i.Provider, Store: i.Store, Bytes: i.Bytes, At: time.Unix(i.At, 0)}
+}
+
+func (w WorkerSlotOps) grant(ctx context.Context, t SlotTarget, repo string) *store.Grant {
+	if w.Grant == nil {
+		return nil
+	}
+	return w.Grant(ctx, t.Machine, repo)
 }

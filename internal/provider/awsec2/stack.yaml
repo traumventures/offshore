@@ -74,20 +74,6 @@ Resources:
               - Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub "${ArtifactBucket.Arn}/bin/*"
-              - Sid: CompilerCacheObjects
-                Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:DeleteObject
-                Resource: !Sub "${ArtifactBucket.Arn}/cache/*"
-              - Sid: CompilerCacheList
-                Effect: Allow
-                Action: s3:ListBucket
-                Resource: !GetAtt ArtifactBucket.Arn
-                Condition:
-                  StringLike:
-                    s3:prefix: cache/*
               - Sid: MachineSecrets
                 Effect: Allow
                 Action:
@@ -106,6 +92,38 @@ Resources:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles: [!Ref MachineRole]
+
+  StoreRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Assumed by the orchestrator (control plane credentials of this
+          account) to mint short-lived worker credentials for cache objects;
+          every grant narrows it further to a repository or environment
+          prefix with a session policy.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root" }
+            Action: sts:AssumeRole
+      MaxSessionDuration: 43200
+      Policies:
+        - PolicyName: cache-objects
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: !Sub "arn:aws:s3:::${ArtifactBucket}/cache/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::${ArtifactBucket}"
+                Condition:
+                  StringLike:
+                    s3:prefix: "cache/*"
 
   ArtifactBucket:
     Type: AWS::S3::Bucket
@@ -344,7 +362,7 @@ Resources:
 
 Outputs:
   TemplateVersion:
-    Value: "7"
+    Value: "8"
   SecurityGroupId:
     Value: !Ref MachineSecurityGroup
   InstanceProfileArn:
@@ -353,3 +371,5 @@ Outputs:
     Value: !Ref ArtifactBucket
   RepositoryUri:
     Value: !GetAtt EnvRepository.RepositoryUri
+  StoreRoleArn:
+    Value: !GetAtt StoreRole.Arn
