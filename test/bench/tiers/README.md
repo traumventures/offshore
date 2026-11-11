@@ -3,7 +3,7 @@
 Question: can a FUSE layer sit in the build path on a worker without hurting
 Rust build speed, so `target/` can mix tiers (local disk, volume, object store)?
 Measurement only; nothing here is production code. Feeds the design of the
-unified `internal/anyfs` core (sourcefs + outputfs + worker tiers).
+unified `internal/anyfs` core (sourcefs + output overlay + worker tiers).
 
 Files: `tierfs/` (Go, go-fuse v2.12.1 prototype), `bench.sh` (runs inside the
 container), `check.sh` (correctness checks), `run.sh` (host wrapper),
