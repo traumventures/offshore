@@ -282,8 +282,11 @@ exit message (`proto.Exit.Cache`) and shown by `offshore why`.
 ### Linker
 
 `[environment] linker = "mold"` installs the pinned static mold release
-(`lld` installs the distribution's `lld` package, Debian based images) and a
-driver `/usr/local/bin/offshore-cc-<linker>` (`cc ... -fuse-ld=<linker>`,
+(`wild` the pinned static [wild](https://github.com/wild-linker/wild)
+release, `lld` the distribution's `lld` package, Debian based images) and a
+driver `/usr/local/bin/offshore-cc-<linker>` (`cc ... -fuse-ld=<linker>`;
+gcc has no `-fuse-ld=wild`, so wild is `-fuse-ld=bfd
+-B/usr/local/lib/offshore-wild` with `ld.bfd` there linking to wild;
 last so it beats rustc's own `-fuse-ld=lld` for its bundled rust-lld), which
 sessions use as `CARGO_TARGET_<host triple>_LINKER` unless set (with
 `[outputs] mode = "fuse"` through a `cc` on `PATH` instead, see

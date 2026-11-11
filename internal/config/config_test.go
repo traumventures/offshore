@@ -209,3 +209,25 @@ func TestToolSplit(t *testing.T) {
 		t.Fatal("tool.npm.split accepted")
 	}
 }
+
+func TestLinkerValues(t *testing.T) {
+	for l, ok := range map[string]bool{"": true, "mold": true, "lld": true, "wild": true, "gold": false} {
+		dir := writeRepo(t, "version = 1\n[environment]\nimage = \"rust:1\"\nlinker = \""+l+"\"\n")
+		_, err := LoadRepo(dir)
+		if (err == nil) != ok {
+			t.Errorf("linker %q: err %v", l, err)
+		}
+	}
+	if LinkerArgs(LinkerMold) != "-fuse-ld=mold" || LinkerArgs(LinkerWild) != "-fuse-ld=bfd -B"+WildDir {
+		t.Fatal("linker args")
+	}
+}
+
+func TestExtraToolchainValues(t *testing.T) {
+	for v, ok := range map[string]bool{`["headstart"]`: true, `[]`: true, `["nightly"]`: false} {
+		dir := writeRepo(t, "version = 1\n[environment]\nimage = \"rust:1\"\n[environment.toolchains]\nextra = "+v+"\n")
+		if _, err := LoadRepo(dir); (err == nil) != ok {
+			t.Errorf("extra %s: err %v", v, err)
+		}
+	}
+}

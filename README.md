@@ -92,6 +92,7 @@ Reference:
 Guides:
 
 * Providers: [AWS EC2](docs/guides/aws.md), [Oracle Cloud](docs/guides/oci.md)
+* [Rust compile speed](docs/rust.md): measured compiler options, the parallel front end, wild, the opt-in headstart toolchain
 * Ecosystems: [Rust](docs/guides/rust.md), [TypeScript / Node](docs/guides/typescript.md), [Go](docs/guides/go.md)
 
 Project: [roadmap](docs/ROADMAP.md), [design plan](docs/PLAN.md) (German).

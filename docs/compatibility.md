@@ -17,7 +17,8 @@ Output identical to a local run.
   `cargo expand`, `cargo deny`, `cargo audit`, `cargo insta`
 * cross compilation with target toolchains: `cargo zigbuild`, `cargo xwin`,
   `wasm-pack build`, `trunk build`, `maturin build`
-* linkers `mold` and `lld` (`[environment] linker`)
+* linkers `mold`, `lld` and `wild` (`[environment] linker`)
+* the headstart toolchain (`[environment.toolchains] extra = ["headstart"]`, see [rust.md](rust.md))
 * Go: `go build`, `vet`, `run`, `mod`, `generate`, `go test` (split or
   remote), cgo with the image's C toolchain
 * Node: `bun`, `npm`, `pnpm`, `yarn` installs (into the machine's

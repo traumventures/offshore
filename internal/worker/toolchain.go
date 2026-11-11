@@ -125,7 +125,7 @@ func linkerShim(linker string) (string, error) {
 		return "", fmt.Errorf("linker %s: %w", linker, err)
 	}
 	dir := filepath.Join(os.TempDir(), "offshore-linker-"+linker)
-	script := fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *\" -c \"*|*\" -E \"*|*\" -S \"*) exec %s \"$@\";; esac\nexec %s \"$@\" -fuse-ld=%s\n", real, real, linker)
+	script := fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *\" -c \"*|*\" -E \"*|*\" -S \"*) exec %s \"$@\";; esac\nexec %s \"$@\" %s\n", real, real, config.LinkerArgs(linker))
 	cc := filepath.Join(dir, "cc")
 	if b, err := os.ReadFile(cc); err == nil && string(b) == script {
 		return dir, nil
@@ -141,4 +141,4 @@ func linkerShim(linker string) (string, error) {
 }
 
 // validLinker guards the shim's file name.
-func validLinker(l string) bool { return l == config.LinkerMold || l == config.LinkerLLD }
+func validLinker(l string) bool { return config.ValidLinker(l) }

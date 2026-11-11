@@ -66,7 +66,7 @@ type Environment struct {
 	Setup      []SetupStep       `toml:"setup"`
 	Env        map[string]string `toml:"env"`
 	// Linker selects the linker for Rust builds: "" (toolchain default),
-	// "mold" or "lld". The JSON tag keeps the environment hash of
+	// "mold", "lld" or "wild". The JSON tag keeps the environment hash of
 	// repositories without a linker setting unchanged.
 	Linker string `toml:"linker" json:"Linker,omitempty"`
 }
@@ -75,10 +75,30 @@ type Environment struct {
 const (
 	LinkerMold = "mold"
 	LinkerLLD  = "lld"
+	LinkerWild = "wild"
 )
 
+// WildDir holds the "ld" and "ld.bfd" links to wild that the environment
+// image installs: gcc has no -fuse-ld=wild, so the driver selects
+// -fuse-ld=bfd and finds wild under that name through -B.
+const WildDir = "/usr/local/lib/offshore-wild"
+
+// LinkerArgs are the C compiler driver arguments that select linker. They
+// come last on the command line: rustc passes -fuse-ld=lld (and -B for its
+// bundled rust-lld) on x86_64 Linux, and the last -fuse-ld wins.
+func LinkerArgs(linker string) string {
+	if linker == LinkerWild {
+		return "-fuse-ld=bfd -B" + WildDir
+	}
+	return "-fuse-ld=" + linker
+}
+
+// ValidLinker reports whether l is a supported environment.linker value
+// other than the toolchain default.
+func ValidLinker(l string) bool { return l == LinkerMold || l == LinkerLLD || l == LinkerWild }
+
 // LinkerDriver is the path of the C compiler driver wrapper that the
-// environment image installs for a linker (cc -fuse-ld=<linker>). Sessions
+// environment image installs for a linker (cc ... LinkerArgs). Sessions
 // use it as cargo's target linker.
 func LinkerDriver(linker string) string { return "/usr/local/bin/offshore-cc-" + linker }
 
@@ -90,7 +110,16 @@ type Packages struct {
 // Toolchains references toolchain version files.
 type Toolchains struct {
 	Rust string `toml:"rust"` // path to rust-toolchain(.toml), relative to the repo root
+	// Extra are additional toolchains offshore provides in the image as
+	// rustup linked toolchains of the same name ("headstart"). Projects
+	// select one themselves (cargo +headstart, RUSTUP_TOOLCHAIN). The
+	// JSON tag keeps the hash of environments without extras unchanged.
+	Extra []string `toml:"extra" json:"Extra,omitempty"`
 }
+
+// ToolchainHeadstart is the patched rustc/cargo of
+// github.com/PowderworksCode/headstart (-Zearly-metadata, -Zheadstart).
+const ToolchainHeadstart = "headstart"
 
 // SetupStep is an environment provisioning command. Its result is cached by
 // the hash of the previous layers, the command and the content of Inputs.
@@ -424,9 +453,14 @@ func (r *Repo) Validate() error {
 		errs = append(errs, fmt.Sprintf("editor.rust_analyzer: unsupported %q (local, lsp-remote)", r.Editor.RustAnalyzer))
 	}
 	switch r.Environment.Linker {
-	case "", LinkerMold, LinkerLLD:
+	case "", LinkerMold, LinkerLLD, LinkerWild:
 	default:
-		errs = append(errs, fmt.Sprintf("environment.linker: unsupported %q (mold, lld)", r.Environment.Linker))
+		errs = append(errs, fmt.Sprintf("environment.linker: unsupported %q (mold, lld, wild)", r.Environment.Linker))
+	}
+	for _, t := range r.Environment.Toolchains.Extra {
+		if t != ToolchainHeadstart {
+			errs = append(errs, fmt.Sprintf("environment.toolchains.extra: unsupported %q (headstart)", t))
+		}
 	}
 	for name, t := range r.Tools {
 		if _, err := ParsePorts(t.Ports); err != nil {

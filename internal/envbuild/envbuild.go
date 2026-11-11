@@ -100,6 +100,9 @@ func Resolve(r *config.Repo) (*Plan, error) {
 		fmt.Fprintf(&df, "COPY toolchain/%s /opt/offshore/toolchain/%s\n", name, name)
 		df.WriteString("RUN cd /opt/offshore/toolchain && (rustup toolchain install || rustup show) && rustup show active-toolchain\n")
 	}
+	if err := p.addToolchains(r, add, &df); err != nil {
+		return nil, err
+	}
 	for i, step := range env.Setup {
 		dir := fmt.Sprintf("setup/%d", i)
 		for _, in := range step.Inputs {
@@ -156,6 +159,26 @@ func Resolve(r *config.Repo) (*Plan, error) {
 	return p, nil
 }
 
+// addToolchains installs environment.toolchains.extra as rustup linked
+// toolchains (rustup toolchain link <name>), after the pinned toolchain so
+// rustup exists. The tree comes from a pinned archive like the tools.
+func (p *Plan) addToolchains(r *config.Repo, add func(string), df *strings.Builder) error {
+	extra := slices.Clone(r.Environment.Toolchains.Extra)
+	sort.Strings(extra)
+	for _, name := range slices.Compact(extra) {
+		t, err := releaseFor(name, r.Resources.Arch)
+		if err != nil {
+			return fmt.Errorf("environment.toolchains.extra: %w", err)
+		}
+		add(fmt.Sprintf("toolchain=%s@%s:%s", t.Name, t.Version, t.SHA256))
+		p.tools["toolchains/"+name] = t
+		dir := "/opt/offshore/toolchains/" + name
+		fmt.Fprintf(df, "COPY toolchains/%s %s\n", name, dir)
+		fmt.Fprintf(df, "RUN rustup toolchain link %s %s && rustc +%s -vV && cargo +%s -V\n", name, dir, name, name)
+	}
+	return nil
+}
+
 // addTools installs the compiler cache and linker selected by the
 // repository. Repositories without these settings get no extra lines, so
 // their Dockerfile and hash are unchanged.
@@ -185,6 +208,12 @@ func (p *Plan) addTools(r *config.Repo, add func(string), out *strings.Builder) 
 		}
 	}
 	switch l := r.Environment.Linker; l {
+	case config.LinkerWild:
+		if err := install("wild"); err != nil {
+			return fmt.Errorf("environment.linker: %w", err)
+		}
+		fmt.Fprintf(&df, "RUN mkdir -p %s && ln -sf /usr/local/bin/wild %s/ld && ln -sf /usr/local/bin/wild %s/ld.bfd\n", config.WildDir, config.WildDir, config.WildDir)
+		fmt.Fprintf(&df, "RUN printf '#!/bin/sh\\nexec cc \"$@\" %s\\n' > %s && chmod 755 %s\n", config.LinkerArgs(l), config.LinkerDriver(l), config.LinkerDriver(l))
 	case config.LinkerMold:
 		if err := install("mold"); err != nil {
 			return fmt.Errorf("environment.linker: %w", err)
@@ -196,7 +225,7 @@ func (p *Plan) addTools(r *config.Repo, add func(string), out *strings.Builder) 
 		// only selects the linker, so RUSTFLAGS stay untouched. The flag
 		// comes last: rustc itself passes -fuse-ld=lld for its bundled
 		// rust-lld on x86_64 Linux, and the last -fuse-ld wins.
-		fmt.Fprintf(&df, "RUN printf '#!/bin/sh\\nexec cc \"$@\" -fuse-ld=%s\\n' > %s && chmod 755 %s\n", l, config.LinkerDriver(l), config.LinkerDriver(l))
+		fmt.Fprintf(&df, "RUN printf '#!/bin/sh\\nexec cc \"$@\" %s\\n' > %s && chmod 755 %s\n", config.LinkerArgs(l), config.LinkerDriver(l), config.LinkerDriver(l))
 	}
 	return nil
 }
