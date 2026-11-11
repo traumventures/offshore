@@ -133,9 +133,34 @@ today: reclaim drops materialized files of ephemeral, then churn files
 before the least recently used rest, and a slot mounted fresh over a
 committed head prefetches its immutable and write-once files (larger than
 the small files prefetched anyway, up to 2 GiB or a quarter of the
-capacity). Placement, per-class writeback delays and cross-slot dedupe
-are part of the policy table but not applied yet: a commit is a full
-snapshot of the slot.
+capacity).
+
+The commit also applies the rest of the table to the pages it creates:
+
+* **Writeback delay per class.** Each page carries its class's hint
+  (`anyfs.PageHint`); the repository's link to the store writes dirty
+  pages back in the background when their delay expires (immutable at the
+  next pass, write-once after 5 s, unknown after 30 s, churn after 10 min,
+  ephemeral never by itself). Pages of files deleted before that are
+  discarded unwritten at the next commit. An idle commit only moves the
+  store head (layer objects + `heads/slot`, cheap) once all pages of the
+  head are clean, or flushes the head whole after 10 min (the most
+  committed work that lives only on the machine); save, move, drain,
+  SIGTERM and a session over the dirty threshold flush right away.
+* **Placement.** Churn and ephemeral pages are local-only: an exclusive
+  link (local over a volume) never demotes them on reclaim; they reach the
+  store only as part of a committed layer.
+* **Dedupe.** Immutable and write-once files from 16 KiB get a page of
+  their own whose key is their content digest (smaller files stay packed),
+  so the same file in another slot or repository is the same page. The
+  repositories' local page tiers share a machine-wide pool
+  (`<cache>/anyfs/pool`) by hardlink: a page is on disk once
+  (`shared_bytes` is subtracted from the reported residency), and once per
+  store prefix (a store put skips young existing objects). Repositories do
+  not share a store prefix: the prefix is the grant's security scope.
+
+Page hints live in memory: after a worker restart dirty pages use the
+default 30 s delay.
 
 ## Object store (`[storage]`)
 

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/traumventures/offshore/internal/access"
 	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/proto"
 	"github.com/traumventures/offshore/internal/store"
@@ -266,6 +267,8 @@ func (s *Worker) maintainSlots(ctx context.Context) {
 		}
 		if r.Meta.LastUsed > r.Meta.Committed && now.Sub(time.Unix(r.Meta.LastUsed, 0)) >= s.cfs.opt.Idle {
 			s.maintainSlot(ctx, r, "idle")
+		} else if s.unflushed(r) {
+			s.flushWhenClean(ctx, r)
 		} else if r.Meta.Head != r.Meta.Base && r.Meta.UpperBytes > s.cfs.opt.RebaseBytes {
 			s.rebaseSlot(ctx, r)
 		}
@@ -273,8 +276,23 @@ func (s *Worker) maintainSlots(ctx context.Context) {
 }
 
 // maintainSlot commits a slot and writes it back when the store is
-// reachable.
+// reachable: an idle commit leaves the pages to the class writeback and
+// moves the store head once they are clean (flushWhenClean), other
+// reasons flush right away.
 func (s *Worker) maintainSlot(ctx context.Context, r slotRef, why string) {
+	if why == "idle" {
+		if _, err := s.commitSlot(ctx, r); err != nil {
+			if !errors.Is(err, errSlotBusy) {
+				s.log.Warn("build slot commit", "repo", r.Repo, "slot", r.Path, "err", err)
+			}
+			return
+		}
+		if m, err := readMeta(r.Path); err == nil {
+			r.Meta = m
+			s.flushWhenClean(ctx, r)
+		}
+		return
+	}
 	if s.connectStore(r.Repo, nil) == nil {
 		if _, err := s.writebackSlot(ctx, r, why); err != nil && !errors.Is(err, errSlotBusy) {
 			s.log.Warn("build slot writeback", "repo", r.Repo, "slot", r.Path, "err", err)
@@ -355,4 +373,39 @@ func (s *Worker) reclaimSlots(over func() int64) int64 {
 		}
 	}
 	return over()
+}
+
+// maxFlushLag bounds how long a committed head waits for its pages'
+// class writeback before it is flushed whole (ephemeral and churn pages
+// included): at most this much committed work is only on the machine.
+const maxFlushLag = access.ChurnWritebackDelay
+
+// flushWhenClean moves the store head to a slot's committed head once
+// the class writeback has written all its pages (cheap: layer objects
+// and the head), or flushes it whole after maxFlushLag.
+func (s *Worker) flushWhenClean(ctx context.Context, ref slotRef) {
+	if ref.Meta.Head == "" || s.connectStore(ref.Repo, nil) != nil {
+		return
+	}
+	r, err := s.cfs.repo(ref.Repo)
+	if err != nil {
+		return
+	}
+	ch, err := r.chain(ctx, ref.Meta.Head)
+	if err != nil || ch.Top() == nil {
+		return
+	}
+	res := commitResult{repo: r, chain: ch, tree: ch.Tree()}
+	lag := s.cfg.now().Sub(time.Unix(ref.Meta.Committed, 0))
+	dirty := s.cfs.dirtyIn(r, res.tree)
+	if dirty > 0 && lag < maxFlushLag {
+		return
+	}
+	h, err := s.cfs.flush(ctx, res)
+	if err != nil {
+		s.log.Warn("build slot head flush", "repo", ref.Repo, "err", err)
+		return
+	}
+	s.log.Info("build slot written back", "why", "clean", "repo", ref.Repo, "layer", h.Layer, "dirty_pages", dirty,
+		"pages", h.Pages, "page_bytes", h.PageBytes)
 }
