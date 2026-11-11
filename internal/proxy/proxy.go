@@ -404,7 +404,7 @@ func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, 
 		Repo: repo.Root, RepoID: prep.RepoID, Roots: prep.Roots,
 		Argv: argv, Cwd: cwd, Env: env,
 		Grant: prep.Grant, MemoryOvercommit: prep.MemoryOvercommit,
-		Build: repo.Cache.Build.Paths, BuildTTL: prep.BuildTTL, Deps: repo.Cache.Deps.Paths,
+		Caches: ProtoCaches(repo), SlotTTL: prep.BuildTTL,
 		Eager: profile.Eager, Lease: prep.Lease,
 		Linker: repo.Environment.Linker, TraceParent: tracing.Inject(ctx), Labels: rec.Labels,
 	}
@@ -414,11 +414,6 @@ func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, 
 		req.Toolchain = clientToolchain()
 		for k, v := range cargoHomeRustflags(req.Toolchain.CargoHome, env) {
 			env[k] = v
-		}
-	}
-	if cc := repo.Cache.Compiler; cc.Tool != "" {
-		req.CompilerCache = &proto.CompilerCache{
-			Tool: cc.Tool, TTLSeconds: int64(repo.CompilerCacheTTL().Seconds()), Incremental: cc.Incremental,
 		}
 	}
 	if useTTY {
@@ -671,4 +666,16 @@ func Prewarm(ctx context.Context, repo *config.Repo, argv []string, progress io.
 		return 0, fb.err
 	}
 	return code, err
+}
+
+// ProtoCaches converts the repository caches for the worker.
+func ProtoCaches(repo *config.Repo) []proto.Cache {
+	out := make([]proto.Cache, 0, len(repo.Caches))
+	for _, c := range repo.Caches {
+		out = append(out, proto.Cache{
+			Name: c.Name, Scope: c.Scope, Paths: c.Paths, Digest: c.Digest, Install: c.Install,
+			Tool: c.Tool, MaxBytes: c.MaxBytes(), Prune: c.Prune, TTLSeconds: int64(c.TTLDuration().Seconds()),
+		})
+	}
+	return out
 }

@@ -591,7 +591,7 @@ func (d *Daemon) attachAll(ctx context.Context, lease orchestrator.Lease, repo *
 	for p, r := range roots {
 		var wl []string
 		if p == repo.Root {
-			wl = repo.Cache.Build.Paths
+			wl = append(repo.SlotPaths(), repo.DigestPaths()...)
 		}
 		if _, err := mc.attach(actx, r, wl); err != nil {
 			mc.close()

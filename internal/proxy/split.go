@@ -93,8 +93,8 @@ func planSplit(p config.Tool, tool string, args []string) *splitPlan {
 var splitArtifacts artifacts = fetchArtifacts{}
 
 func runSplit(ctx context.Context, repo *config.Repo, profile config.Tool, tool string, args []string, cwd string, rec *events.Run, plan *splitPlan) (int, error) {
-	if plan.remoteWhy == "" && len(repo.Cache.Build.Paths) == 0 {
-		plan.remoteWhy = "no [cache.build] paths: test binaries cannot be transferred"
+	if plan.remoteWhy == "" && len(repo.SlotPaths()) == 0 {
+		plan.remoteWhy = "no slot-scope cache paths: test binaries cannot be transferred"
 	}
 	if plan.remoteWhy != "" {
 		return runTestsRemotely(ctx, repo, profile, tool, args, cwd, rec, plan.remoteWhy)
@@ -161,7 +161,7 @@ func splitNextestRun(ctx context.Context, repo *config.Repo, profile config.Tool
 	}
 	h := fnv.New64a()
 	h.Write([]byte(cwd))
-	rel := filepath.Join(filepath.Clean(repo.Cache.Build.Paths[0]), "cloudsourced", fmt.Sprintf("nextest-%016x.tar.zst", h.Sum64()))
+	rel := filepath.Join(filepath.Clean(repo.SlotPaths()[0]), "cloudsourced", fmt.Sprintf("nextest-%016x.tar.zst", h.Sum64()))
 	archive := filepath.Join(repo.Root, rel)
 	fetched := false
 	stderr := newLineFilter(os.Stderr, "Archiving ", "Archived ")
