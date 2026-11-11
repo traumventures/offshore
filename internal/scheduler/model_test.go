@@ -321,3 +321,25 @@ func TestQueueNoLongerThanAStart(t *testing.T) {
 		t.Fatal("fresh request, warm slot in 30s: waiting is cheaper than a start and a cold build")
 	}
 }
+
+// providers.X.max_machines = 0 disables a provider: no create there and
+// its stopped machines are not started; unset means no own limit.
+func TestProviderMaxZeroDisables(t *testing.T) {
+	sizes := []Size{{Provider: "oci", Name: "m", Capacity: res(8, 16), PricePerHour: 0.1}, {Provider: "aws", Name: "m", Capacity: res(8, 16), PricePerHour: 0.4}}
+	st := machine("st", res(8, 16), Resources{})
+	st.Provider, st.State, st.Size = "oci", Stopped, "m"
+	f := Pool{Now: now, Sizes: sizes, Machines: []Machine{st}, Queue: queue(task(2, 4))}
+	for _, r := range []float64{0, 0.5, 1} {
+		for _, v := range []string{VariantDefault, VariantBinpack, VariantClassic} {
+			cfg := Config{Variant: v, CostOptimization: r, MaxMachines: 4, CPUOvercommit: 1, MemoryOvercommit: 1, ProviderMax: map[string]int{"oci": 0}}
+			for _, a := range (Default{Cfg: cfg}).Plan(f) {
+				if a.Kind == Start || a.Kind == Create && a.Size.Provider == "oci" {
+					t.Fatalf("%s r=%v: disabled provider used: %+v", v, r, a)
+				}
+			}
+		}
+	}
+	if !(Config{ProviderMax: map[string]int{"oci": 0}}).Disabled("oci") || (Config{ProviderMax: map[string]int{}}).Disabled("oci") {
+		t.Fatal("Disabled")
+	}
+}

@@ -284,7 +284,10 @@ func (o *Orchestrator) planLocked() []scheduler.Action {
 	acts := o.policy.Plan(f)
 	kept := acts[:0]
 	for _, a := range acts {
-		if a.Kind == scheduler.Create && !f.CanCreate(a.EnvHash, a.Size.Provider) {
+		if a.Kind == scheduler.Create && (!f.CanCreate(a.EnvHash, a.Size.Provider) || o.cfg.Policy.Disabled(a.Size.Provider)) {
+			continue
+		}
+		if m := o.machines[a.Machine]; (a.Kind == scheduler.Start || a.Kind == scheduler.Undrain) && m != nil && o.cfg.Policy.Disabled(m.Provider) {
 			continue
 		}
 		kept = append(kept, a)

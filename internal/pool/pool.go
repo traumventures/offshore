@@ -145,10 +145,9 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 		c.Policy.WarmPool = append(c.Policy.WarmPool, scheduler.WarmWindow{Days: days, From: from, To: to, Machines: w.Machines, Location: loc})
 	}
 	for name, opts := range u.Providers {
-		switch v := opts["max_machines"].(type) {
-		case int64:
-			c.Policy.ProviderMax[name] = int(v)
-		case float64:
+		// Unset: no own limit; 0: disabled (no new machines, stopped ones
+		// are not started again).
+		if v, ok := opts["max_machines"].(int64); ok {
 			c.Policy.ProviderMax[name] = int(v)
 		}
 	}
