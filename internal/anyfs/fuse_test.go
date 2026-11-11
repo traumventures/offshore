@@ -99,6 +99,29 @@ func TestLowerFSFaultsOnFirstRead(t *testing.T) {
 	}
 }
 
+func TestLowerFSOpsCachedByKernel(t *testing.T) {
+	ts, _, _ := lowerFixture(t)
+	l := mountLowerOrSkip(t, ts, LowerOptions{})
+	p := filepath.Join(l.Mountpoint(), "debug", "deps", "a.fp")
+	for range 5 {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(p + ".missing"); !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	ops := l.Ops()
+	// debug, deps, a.fp, a.fp.missing: each looked up once, then the
+	// kernel answers from its entry, attribute and negative caches.
+	if got := ops["lookup"].Count; got != 4 {
+		t.Fatalf("lookups %d, want 4: %+v", got, ops)
+	}
+	if got := ops["getattr"].Count; got != 0 {
+		t.Fatalf("getattr reached the daemon %d times: %+v", got, ops)
+	}
+}
+
 func TestLowerFSInvalidate(t *testing.T) {
 	ts, _, _ := lowerFixture(t)
 	l := mountLowerOrSkip(t, ts, LowerOptions{})

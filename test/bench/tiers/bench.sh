@@ -49,8 +49,9 @@ real,user,sys_=open('/tmp/time.txt').read().split()
 b=json.load(open('/tmp/before.json')); a=json.load(open('/tmp/after.json'))
 d={}
 for k,v in a.items():
-    if k=='ops':
-        d['ops']={o:v[o]-b.get('ops',{}).get(o,0) for o in v if v[o]-b.get('ops',{}).get(o,0)}
+    if isinstance(v,dict):  # per-op histograms (ops, op_seconds)
+        bb=b.get(k,{})
+        d[k]={o:round(v[o]-bb.get(o,0),4) for o in v if v[o]-bb.get(o,0)}
     elif isinstance(v,(int,float)):
         d[k]=round(v-b.get(k,0),3)
 print(json.dumps({"layout":sys.argv[1],"step":sys.argv[2],"compiled":int(sys.argv[3]),
@@ -162,7 +163,7 @@ pack_anyfs() {
 }
 start_anyfs() { # MNT args...
   local mnt=$1; shift
-  statsfile=/tmp/stats-$$.json
+  statsfile=/tmp/stats-$$${mnt//\//_}.json
   $ANYFS mount "$@" -mnt $mnt -stats $statsfile > $W/logs/anyfs-$(date +%s).log 2>&1 &
   fusepid=$!
   for _ in $(seq 600); do grep -q " $mnt fuse" /proc/mounts && return 0; sleep 0.1; done
@@ -188,6 +189,70 @@ layout_F() { # anyfs, cold restore from a slow store (5 ms/object, 200 MB/s), pr
   seq_restore $tag
   commit_step $tag
   umount_t; stop_fuse
+}
+
+# Alternating comparison in one window: every variant stays mounted at
+# /mnt/v/TAG for the whole run (its caches stay warm); each step
+# bind-mounts one variant at /t, so all variants build the same source
+# states back to back (order alternates per round).
+#   layout_alt ROUNDS TAG...   e.g. layout_alt 5 A E
+# Tags: A = plain directory (A's target, continuing from S1), E = anyfs
+# (FUSE lower + overlay, warm slot), M = anyfs with the metadata layer
+# (no FUSE in the warm path).
+declare -A fpids sfiles
+alt_up() { # TAG
+  local tag=$1; mkdir -p /mnt/v/$tag
+  case $tag in
+    A) mount --bind $RUNS/A /mnt/v/A ;;
+    E*|M*)
+      local extra=(); [[ $tag == M* ]] && extra=(-meta $RUNS/$tag-meta)
+      mkdir -p /mnt/lower-$tag
+      start_anyfs /mnt/lower-$tag -store $RUNS/astore -cache $RUNS/$tag-cache -warm "${extra[@]}" ${ALT_ARGS:-}
+      fpids[$tag]=$fusepid; sfiles[$tag]=$statsfile
+      local lower=/mnt/lower-$tag
+      [[ $tag == M* ]] && lower=$(cat $RUNS/$tag-meta.lowerdir)
+      mkdir -p $RUNS/$tag/upper $RUNS/$tag/work
+      mount -t overlay overlay -o lowerdir=$lower,upperdir=$RUNS/$tag/upper,workdir=$RUNS/$tag/work,redirect_dir=on,metacopy=on /mnt/v/$tag ;;
+    *) echo "unknown alt tag $tag"; exit 1 ;;
+  esac
+}
+alt_down() { # TAG
+  local tag=$1
+  umount /mnt/v/$tag || umount -l /mnt/v/$tag
+  if [ -n "${fpids[$tag]:-}" ]; then fusepid=${fpids[$tag]}; stop_fuse; fi
+}
+alt_step() { # TAG NAME
+  local tag=$1
+  fusepid=${fpids[$tag]:-}; statsfile=${sfiles[$tag]:-}
+  umount_t; mount --bind /mnt/v/$tag /t
+  step "$tag" "$2"
+  umount_t
+}
+alt_all() { # NAME ROUND TAG...: one step per tag, order reversed on odd rounds
+  local name=$1 r=$2; shift 2
+  local tags=("$@") i
+  if (( r % 2 )); then for (( i=${#tags[@]}-1; i>=0; i-- )); do alt_step ${tags[i]} $name; done
+  else for i in "${tags[@]}"; do alt_step $i $name; done; fi
+}
+layout_alt() {
+  local rounds=$1; shift
+  pack_anyfs; umount_t
+  cp -p $W/s1/leaf $SRC/$LEAF; cp -p $W/s1/core $SRC/$CORE
+  local t r
+  for t in "$@"; do alt_up $t; done
+  alt_all restore 0 "$@"
+  alt_all noop 1 "$@"
+  for (( r=0; r<rounds; r++ )); do
+    edit $LEAF; alt_all leaf $r "$@"
+    edit $CORE; alt_all core $((r+1)) "$@"
+  done
+  alt_all noop2 0 "$@"
+  for t in "$@"; do
+    [ "$t" = A ] || [ -z "${ALT_COMMIT:-}" ] && continue
+    fusepid=${fpids[$t]}; statsfile=${sfiles[$t]}
+    umount_t; mount --bind /mnt/v/$t /t; commit_step $t; umount_t
+  done
+  for t in "$@"; do alt_down $t; done
 }
 
 layout_freshclone() { # restore onto a source tree whose mtimes are "now" (git clone)

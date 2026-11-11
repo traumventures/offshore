@@ -114,7 +114,7 @@ func main() {
 			f := files.Stats()
 			b, _ := json.Marshal(map[string]any{"faults": s.Faults, "page_ins": s.PageIns, "page_in_bytes": s.PageInBytes,
 				"resident_bytes": s.ResidentBytes + f.ResidentBytes, "file_faults": f.Faults, "file_fault_bytes": f.PageInBytes,
-				"wait_seconds": waited.Seconds()})
+				"wait_seconds": waited.Seconds(), "ops": opCounts(fs.Ops()), "op_seconds": opSeconds(fs.Ops())})
 			os.WriteFile(*stats, b, 0o644)
 		}
 		sig := make(chan os.Signal, 4)
@@ -129,6 +129,22 @@ func main() {
 	default:
 		log.Fatalf("unknown command %q", cmd)
 	}
+}
+
+func opCounts(m map[string]anyfs.OpStat) map[string]int64 {
+	out := map[string]int64{}
+	for k, v := range m {
+		out[k] = v.Count
+	}
+	return out
+}
+
+func opSeconds(m map[string]anyfs.OpStat) map[string]float64 {
+	out := map[string]float64{}
+	for k, v := range m {
+		out[k] = v.Seconds
+	}
+	return out
 }
 
 func loadChain(ctx context.Context, ds blobcache.Store) anyfs.Chain {

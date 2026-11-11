@@ -46,6 +46,7 @@ type LowerFS struct {
 	root  *lnode
 	mnt   string
 	ptOK  bool
+	ops   *opCounter
 	cache sync.Map // rel -> *fs.Inode (looked up nodes, for invalidation)
 }
 
@@ -90,8 +91,8 @@ func MountLower(mnt string, src Source, opt LowerOptions) (*LowerFS, error) {
 	if opt.NoPassthrough {
 		fopts.DisabledCapabilities |= fuse.CAP_PASSTHROUGH
 	}
-	raw := &lowerRaw{RawFileSystem: fs.NewNodeFS(l.root, fopts)}
-	srv, err := fuse.NewServer(raw, mnt, &fopts.MountOptions)
+	l.ops = &opCounter{RawFileSystem: &lowerRaw{RawFileSystem: fs.NewNodeFS(l.root, fopts)}}
+	srv, err := fuse.NewServer(l.ops, mnt, &fopts.MountOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -128,6 +129,10 @@ func (s *TreeSource) PrefetchSmall(ctx context.Context, max int64, parallel int)
 
 // Mountpoint returns the mount point.
 func (l *LowerFS) Mountpoint() string { return l.mnt }
+
+// Ops returns the histogram of FUSE requests that reached the daemon
+// (count and service time per operation).
+func (l *LowerFS) Ops() map[string]OpStat { return l.ops.Ops() }
 
 // Passthrough reports whether the kernel accepted passthrough.
 func (l *LowerFS) Passthrough() bool { return l.ptOK }
