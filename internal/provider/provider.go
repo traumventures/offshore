@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -26,7 +27,18 @@ const (
 	LabelFinger    = "offshore.fingerprint"
 	LabelSize      = "offshore.size"
 	LabelArch      = "offshore.arch" // machine architecture (amd64, arm64)
+	// LabelPrice is the hourly price of the machine's size at creation
+	// (cost stays right when the size leaves the pool configuration).
+	LabelPrice = "offshore.price-per-hour"
 )
+
+// PriceLabel formats a price for LabelPrice ("" for unknown).
+func PriceLabel(p float64) string {
+	if p <= 0 {
+		return ""
+	}
+	return strconv.FormatFloat(p, 'f', -1, 64)
+}
 
 // MachineSpec describes a machine to create. Providers treat the server
 // environment as opaque: Env is public, SecretEnv must be delivered
@@ -37,6 +49,9 @@ type MachineSpec struct {
 	Image   string // environment image reference
 	EnvHash string
 	Size    string // machine type name
+	// PricePerHour is the configured price of Size (0: unknown); providers
+	// record it as LabelPrice.
+	PricePerHour float64
 	// Arch is the machine architecture ("amd64", "arm64"; empty: amd64);
 	// Image is built for it.
 	Arch string

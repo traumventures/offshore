@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"io"
 	"testing"
 	"time"
 
@@ -61,5 +62,38 @@ func TestUptimeSurvivesRestart(t *testing.T) {
 		if got[id] != d {
 			t.Errorf("%s up %v, want %v (all %v)", id, got[id], d, got)
 		}
+	}
+}
+
+// A machine whose size left the pool configuration keeps its price: from
+// its LabelPrice, else from its events, else the configuration.
+func TestPriceSurvivesSizeRemoval(t *testing.T) {
+	dir := t.TempDir()
+	log := events.Open(dir, 0)
+	log.Append(events.Event{Type: events.MachineReady, Machine: "old", Provider: "fake", Size: "x4", Price: 0.25, Time: time.Now().Add(-time.Hour)})
+	log.Close()
+	f := newFake()
+	f.machines["tagged"] = &provider.Machine{ID: "tagged", State: provider.Running,
+		Labels: map[string]string{provider.LabelSize: "x4", provider.LabelPrice: "0.5"}}
+	f.machines["old"] = &provider.Machine{ID: "old", State: provider.Running, Labels: map[string]string{provider.LabelSize: "x4"}}
+	o := newTestOrchDir(t, f, dir)
+	if err := o.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]float64{}
+	for _, m := range o.Snapshot() {
+		got[m.ID] = m.PricePerHour
+	}
+	if got["tagged"] != 0.5 || got["old"] != 0.25 {
+		t.Fatalf("prices %v", got)
+	}
+	// New machines record the configured price on the provider.
+	o2 := newTestOrch(t, newFake(), func(c *Config) { c.Sizes[0].PricePerHour = 0.75 })
+	if _, err := o2.Acquire(context.Background(), req("r"), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	fp := o2.provs["fake"].(*fakeProvider)
+	if len(fp.specs) != 1 || fp.specs[0].PricePerHour != 0.75 {
+		t.Fatalf("spec price %+v", fp.specs)
 	}
 }
