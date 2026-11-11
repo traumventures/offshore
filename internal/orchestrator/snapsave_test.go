@@ -23,11 +23,11 @@ func (r *recordingSlots) PruneSlot(context.Context, SlotTarget, string, int64) (
 	return 0, nil
 }
 
-func (r *recordingSlots) SaveSlot(_ context.Context, t SlotTarget, repo string) (scheduler.Snapshot, error) {
+func (r *recordingSlots) SaveSlot(_ context.Context, t SlotTarget, repo string) (proto.LayerHead, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.saved = append(r.saved, t.Machine+"/"+repo)
-	return scheduler.Snapshot{Repo: repo, Store: "storage", Bytes: 1 << 30, At: time.Now()}, nil
+	return proto.LayerHead{Repo: repo, Store: "storage", Layer: "1-ab", Chain: []string{"1-ab"}, Bytes: 1 << 30, At: time.Now().Unix()}, nil
 }
 
 func (r *recordingSlots) RestoreSlot(_ context.Context, t SlotTarget, repo string, s scheduler.Snapshot) error {
@@ -56,7 +56,7 @@ func TestSaveBeforeStopAndMove(t *testing.T) {
 	st.IdleSince = idle
 	st.Disk = &proto.DiskStatus{Total: 100 << 30, SlotBytes: map[string]int64{"r1": 1 << 30, "r2": 2 << 30}}
 	// r2 was saved by the worker after the machine went idle: unchanged.
-	st.Snapshots = []proto.SnapshotInfo{{Repo: "r2", Store: "storage", Bytes: 2 << 30, At: idle + 10}}
+	st.Heads = []proto.LayerHead{{Repo: "r2", Store: "storage", Layer: "2-cd", Bytes: 2 << 30, At: idle + 10}}
 	f.mu.Unlock()
 	o.refreshed = time.Time{}
 	if err := o.Refresh(ctx); err != nil {
@@ -78,9 +78,9 @@ func TestSaveBeforeStopAndMove(t *testing.T) {
 		t.Fatalf("saved before stop %v, want only the changed slot r1", slots.saved)
 	}
 	o.mu.Lock()
-	snaps := o.snapshots["r1"]
+	snaps := o.heads["r1"].Heads
 	o.mu.Unlock()
-	if len(snaps) == 0 || snaps[0].Provider != "fake" || snaps[0].Store != "storage" {
+	if len(snaps) == 0 || snaps[0].Provider != "fake" || snaps[0].Store != "storage" || snaps[0].Layer != "1-ab" {
 		t.Fatalf("recorded snapshots %+v", snaps)
 	}
 }

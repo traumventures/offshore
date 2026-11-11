@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/traumventures/offshore/internal/clock"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -15,8 +14,8 @@ import (
 
 // slots manages warm, worker-local build directories per repository.
 // A session leases one slot exclusively, so concurrent builds of the same
-// repository never share a build directory. New slots are cloned from the
-// most recently used one with reflinks when the filesystem supports it.
+// repository never share a build directory. New slots start over the
+// repository's committed layer chain (cachefs.go), not as copies.
 // Slot data never outlives its TTL, measured from the creation of the
 // oldest data it contains. The TTL is the repository's (sent with every
 // session) and recorded per slot, so repositories with different TTLs can
@@ -29,6 +28,16 @@ type slots struct {
 	// pinned slots may be leased but never removed or pruned (a restore
 	// is filling them through a FUSE mount).
 	pinned map[string]bool
+	// remove deletes a slot directory (unmounting it; default RemoveAll).
+	remove func(string)
+}
+
+func (s *slots) removeDir(p string) {
+	if s.remove != nil {
+		s.remove(p)
+		return
+	}
+	os.RemoveAll(p)
 }
 
 // busyLocked reports whether a slot must not be removed.
@@ -61,6 +70,13 @@ type slotMeta struct {
 	// (0: built here); RestoreSeconds the time spent restoring so far.
 	Restored       int64   `json:"restored,omitempty"`
 	RestoreSeconds float64 `json:"restore_seconds,omitempty"`
+	// Base is the committed layer the slot's lower shows, Head the layer
+	// of its last commit (the merged view at Committed, unix seconds);
+	// UpperBytes the size of the upper directory then.
+	Base       string `json:"base,omitempty"`
+	Head       string `json:"head,omitempty"`
+	Committed  int64  `json:"committed,omitempty"`
+	UpperBytes int64  `json:"upper_bytes,omitempty"`
 }
 
 // slotCache is a slot-scope cache path with its pruning settings.
@@ -121,7 +137,7 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 		path string
 		meta slotMeta
 	}
-	var free, all []cand
+	var free []cand
 	used := map[int]bool{}
 	for _, de := range des {
 		n, err := strconv.Atoi(de.Name())
@@ -132,14 +148,13 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 		m, err := readMeta(p)
 		if err != nil || now.Sub(time.Unix(m.Created, 0)) >= ttl {
 			if !s.busyLocked(p) {
-				os.RemoveAll(p) // expired: never reuse old build data
+				s.removeDir(p) // expired: never reuse old build data
 			} else {
 				used[n] = true
 			}
 			continue
 		}
 		used[n] = true
-		all = append(all, cand{p, m})
 		if !s.leased[p] {
 			free = append(free, cand{p, m})
 		}
@@ -167,35 +182,14 @@ func (s *slots) lease(repoID string, ttl time.Duration) (string, bool, error) {
 		return "", false, err
 	}
 	meta := slotMeta{Created: now.Unix(), LastUsed: now.Unix(), TTL: int64(ttl / time.Second)}
-	// Warm start: clone the most recently used slot if reflinks are cheap.
-	byRecent(all)
-	cloned := false
-	if len(all) > 0 {
-		src := filepath.Join(all[0].path, "data")
-		if _, err := os.Stat(src); err == nil {
-			cmd := exec.Command("cp", "-a", "--reflink=always", src, filepath.Join(p, "data"))
-			if err := cmd.Run(); err == nil {
-				meta.Created = all[0].meta.Created
-				meta.Runs, meta.Caches = all[0].meta.Runs, all[0].meta.Caches
-				if b, err := os.ReadFile(filepath.Join(all[0].path, readsFile)); err == nil {
-					os.WriteFile(filepath.Join(p, readsFile), b, 0o644)
-				}
-				cloned = true
-			} else {
-				os.RemoveAll(filepath.Join(p, "data"))
-			}
-		}
-	}
-	if !cloned {
-		if err := os.MkdirAll(filepath.Join(p, "data"), 0o755); err != nil {
-			return "", false, err
-		}
+	if err := os.MkdirAll(filepath.Join(p, "data"), 0o755); err != nil {
+		return "", false, err
 	}
 	if err := writeMeta(p, meta); err != nil {
 		return "", false, err
 	}
 	s.leased[p] = true
-	return p, cloned, nil
+	return p, false, nil
 }
 
 func (s *slots) release(slot string) {
@@ -326,7 +320,7 @@ func (s *slots) gc(ttl time.Duration) (removed int) {
 			}
 			m, err := readMeta(p)
 			if err != nil || m.expired(s.now(), ttl) {
-				os.RemoveAll(p)
+				s.removeDir(p)
 				removed++
 			}
 		}

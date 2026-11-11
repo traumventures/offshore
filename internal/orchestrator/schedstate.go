@@ -2,11 +2,7 @@ package orchestrator
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
-	"sort"
 	"time"
 
 	"github.com/traumventures/offshore/internal/events"
@@ -78,68 +74,6 @@ func (o *Orchestrator) providerReadyLocked(prov string, d time.Duration, started
 	o.health[prov] = h
 }
 
-// snapshotsPath persists known build slot snapshots.
-func (o *Orchestrator) snapshotsPath() string { return filepath.Join(o.stateDir, "snapshots.json") }
-
-func (o *Orchestrator) loadSnapshots() {
-	b, err := os.ReadFile(o.snapshotsPath())
-	if err != nil {
-		return
-	}
-	var m map[string][]scheduler.Snapshot
-	if json.Unmarshal(b, &m) == nil && m != nil {
-		o.snapshots = m
-	}
-}
-
-func (o *Orchestrator) saveSnapshotsLocked() {
-	b, err := json.Marshal(o.snapshots)
-	if err != nil {
-		return
-	}
-	tmp := o.snapshotsPath() + ".tmp"
-	if os.WriteFile(tmp, b, 0o600) == nil {
-		os.Rename(tmp, o.snapshotsPath())
-	}
-}
-
-// snapshotsKeep bounds the snapshots remembered per repository.
-const snapshotsKeep = 4
-
-// addSnapshotLocked remembers a snapshot (newest first).
-func (o *Orchestrator) addSnapshotLocked(s scheduler.Snapshot) {
-	if s.Repo == "" || s.At.IsZero() {
-		return
-	}
-	ss := o.snapshots[s.Repo]
-	for _, x := range ss {
-		if x.Store == s.Store && x.At.Equal(s.At) {
-			return
-		}
-	}
-	ss = append(ss, s)
-	sort.Slice(ss, func(i, j int) bool { return ss[i].At.After(ss[j].At) })
-	if len(ss) > snapshotsKeep {
-		ss = ss[:snapshotsKeep]
-	}
-	o.snapshots[s.Repo] = ss
-	o.saveSnapshotsLocked()
-}
-
-// statusSnapshotsLocked takes the snapshots a worker reports.
-func (o *Orchestrator) statusSnapshotsLocked(m *Machine) {
-	if m.Status == nil {
-		return
-	}
-	for _, si := range m.Status.Snapshots {
-		prov := si.Provider
-		if prov == "" {
-			prov = m.Provider
-		}
-		o.addSnapshotLocked(scheduler.Snapshot{Repo: si.Repo, Provider: prov, Store: si.Store, Bytes: si.Bytes, At: time.Unix(si.At, 0)})
-	}
-}
-
 // schedPoolLocked adds the cost model's inputs to a pool snapshot:
 // provider latencies and health, snapshots, expected releases, readiness,
 // disk resizability and the demand forecast.
@@ -150,8 +84,8 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 		f.Providers[name] = scheduler.ProviderState{Boot: h.boot, Start: h.start, Down: h.down, Store: name}
 	}
 	f.Snapshots = map[string][]scheduler.Snapshot{}
-	for repo, ss := range o.snapshots {
-		f.Snapshots[repo] = append([]scheduler.Snapshot(nil), ss...)
+	for repo, rl := range o.heads {
+		f.Snapshots[repo] = append([]scheduler.Snapshot(nil), rl.Heads...)
 	}
 	for i := range f.Machines {
 		sm := &f.Machines[i]

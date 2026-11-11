@@ -109,6 +109,10 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 			ProviderMax: map[string]int{}, Variant: f.Policy, ConsolidateTarget: f.ConsolidateTarget,
 		},
 	}
+	c.DirtyRatio = u.Writeback.DirtyRatio
+	if u.Writeback.DirtyExpire != "" {
+		c.DirtyExpire, _ = config.ParseDuration(u.Writeback.DirtyExpire)
+	}
 	if d := u.Telemetry.EventsRetentionDays; d > 0 {
 		c.EventRetention = time.Duration(d) * 24 * time.Hour
 	}

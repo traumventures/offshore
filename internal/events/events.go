@@ -47,9 +47,10 @@ const (
 	// (busy cores, session memory), pressure and session count.
 	MachineSample = "machine_sample"
 
-	// SnapshotSave and SnapshotRestore: a build slot was saved to or
-	// restored from an object store (Repo, Slot, Bytes, Chunks, NewChunks,
-	// Seconds, Store, Provider, Machine).
+	// SnapshotSave and SnapshotRestore: a build slot was committed and
+	// flushed to an object store (its head) or a head was mounted on a
+	// machine (Repo, Slot, Bytes, Pages written, Seconds, Store, Provider,
+	// Machine).
 	SnapshotSave    = "snapshot_save"
 	SnapshotRestore = "snapshot_restore"
 	// SlotAction: the scheduler handled a full or growing build slot
@@ -126,12 +127,10 @@ type Event struct {
 	Disk     *Disk                `json:"disk,omitempty"` // machine disk usage
 
 	// Snapshot fields (SnapshotSave, SnapshotRestore, SlotAction).
-	Slot      string  `json:"slot,omitempty"`
-	Store     string  `json:"store,omitempty"`
-	Bytes     int64   `json:"bytes,omitempty"`
-	Chunks    int64   `json:"chunks,omitempty"`
-	NewChunks int64   `json:"new_chunks,omitempty"`
-	Seconds   float64 `json:"seconds,omitempty"`
+	Slot    string  `json:"slot,omitempty"`
+	Store   string  `json:"store,omitempty"`
+	Bytes   int64   `json:"bytes,omitempty"`
+	Seconds float64 `json:"seconds,omitempty"`
 	// Pages is the page count of a cache file system event.
 	Pages int64 `json:"pages,omitempty"`
 	// VM is the cache file system state of a machine (MachineSample,

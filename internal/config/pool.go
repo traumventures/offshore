@@ -38,8 +38,20 @@ type PoolConfig struct {
 	// Telemetry configures tracing of the orchestrator (control plane or
 	// embedded) and, forwarded, of its machines; and the event log.
 	Telemetry Telemetry `toml:"telemetry"`
+	// Writeback configures when workers commit build slots and write them
+	// back to the store ([writeback]).
+	Writeback Writeback `toml:"writeback"`
 	// Warnings are ignored sections found while loading.
 	Warnings []string `toml:"-"`
+}
+
+// Writeback configures build slot writeback on the workers: a slot is
+// committed (and its pages written back to the store) once it is idle for
+// dirty_expire (default "30s"), and right after a session that grew it by
+// more than dirty_ratio of the machine's disk budget (default 0.1).
+type Writeback struct {
+	DirtyRatio  float64 `toml:"dirty_ratio"`
+	DirtyExpire string  `toml:"dirty_expire"`
 }
 
 // Backends known to the configuration.
@@ -528,6 +540,14 @@ func (u *PoolConfig) Validate() error {
 			errs = append(errs, "scheduler.disk_budget: "+err.Error())
 		}
 	}
+	if r := u.Writeback.DirtyRatio; r < 0 || r > 1 {
+		errs = append(errs, "writeback.dirty_ratio: must be between 0 (default) and 1")
+	}
+	if e := u.Writeback.DirtyExpire; e != "" {
+		if d, err := ParseDuration(e); err != nil || d <= 0 {
+			errs = append(errs, fmt.Sprintf("writeback.dirty_expire: invalid duration %q", e))
+		}
+	}
 	if f.ConsolidateTarget < 0 || f.ConsolidateTarget > 1 {
 		errs = append(errs, "pool.consolidate_target: must be between 0 and 1")
 	}
@@ -669,6 +689,13 @@ func (u *PoolConfig) Document() (map[string]any, error) {
 		return nil, err
 	}
 	doc := map[string]any{"pool": pool, "scheduler": sched, "telemetry": tel}
+	if u.Writeback != (Writeback{}) {
+		wb, err := section(u.Writeback)
+		if err != nil {
+			return nil, err
+		}
+		doc["writeback"] = wb
+	}
 	if u.Storage.Configured() {
 		st, err := section(u.Storage)
 		if err != nil {

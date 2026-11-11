@@ -154,7 +154,7 @@ Per decision:
 
 The orchestrator feeds the model: `Task.Profile` (estimator), expected
 releases (lease start + placement's expected run), provider latencies and
-cooldowns, snapshots (`snapshots.json` in the state dir), machine disk and
+cooldowns, slot heads and layers (`layers.json` in the state dir), machine disk and
 slot sizes (worker status), `scheduler.Forecast`. Slot actions of a
 placement (prune via the worker slot RPC, `provider.DiskResizer`, restore)
 run before the lease is returned and are logged as `slot_action` events;
@@ -257,7 +257,7 @@ cheapest size for the aggregate demand, no consolidation) for comparison.
 The pool snapshot the policy sees contains, per machine, the disk
 (`DiskTotal`, `DiskUsed`, the worker's `Budget`) and the size of each
 repository's build slot (`Status.Disk`), and the snapshots held in object
-stores (`Status.Snapshots`, plus those the orchestrator saved, each recorded
+stores (`Status.Heads`, plus those the orchestrator saved, each recorded
 with the provider of the machine it came from). Sizes may declare `disk`. Sessions report their slot
 size before and after the run (`task_end.usage.slot_bytes_before/after`).
 The mechanisms for a full disk (prune, move by snapshot and restore, grow

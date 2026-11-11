@@ -78,6 +78,7 @@ func (s *Worker) outputsRoot(repoID string) (*os.Root, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: %v", fs.ErrNotExist, err)
 	}
+	s.mountSlot(slot, repoID)
 	r, err := os.OpenRoot(filepath.Join(slot, "data"))
 	if err != nil {
 		return nil, "", err

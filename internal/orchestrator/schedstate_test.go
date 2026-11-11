@@ -67,19 +67,21 @@ func TestCapacityErrorCoolsDownProvider(t *testing.T) {
 	}
 }
 
-func TestSnapshotsPersistAndDedupe(t *testing.T) {
+func TestHeadsPersistAndDedupe(t *testing.T) {
 	dir := t.TempDir()
 	o := newTestOrchDir(t, newFake(), dir)
 	at := time.Unix(1_800_000_000, 0)
 	o.mu.Lock()
 	for i := 0; i < 6; i++ {
-		o.addSnapshotLocked(scheduler.Snapshot{Repo: "r", Store: "fake", Bytes: 1, At: at.Add(time.Duration(i) * time.Minute)})
+		o.addHeadLocked(scheduler.Snapshot{Repo: "r", Store: "fake", Bytes: 1, At: at.Add(time.Duration(i) * time.Minute), Layer: fmt.Sprint(i)}, nil, time.Time{})
 	}
-	o.addSnapshotLocked(scheduler.Snapshot{Repo: "r", Store: "fake", Bytes: 1, At: at.Add(5 * time.Minute)})
+	if o.addHeadLocked(scheduler.Snapshot{Repo: "r", Store: "fake", Bytes: 1, At: at.Add(5 * time.Minute), Layer: "5"}, nil, time.Time{}) {
+		t.Fatal("duplicate head added")
+	}
 	o.mu.Unlock()
 	o2 := newTestOrchDir(t, newFake(), dir)
-	ss := o2.snapshots["r"]
-	if len(ss) != snapshotsKeep || !ss[0].At.Equal(at.Add(5*time.Minute)) {
-		t.Fatalf("got %+v", ss)
+	ss := o2.heads["r"].Heads
+	if len(ss) != headsKeep || !ss[0].At.Equal(at.Add(5*time.Minute)) || len(o2.heads["r"].Chains) != headsKeep {
+		t.Fatalf("got %+v", o2.heads["r"])
 	}
 }

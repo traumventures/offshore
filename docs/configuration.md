@@ -97,6 +97,15 @@ price_per_hour = 0.1
 [caches-and-storage.md](caches-and-storage.md#object-store-storage), and
 `[telemetry]` in [operations.md](operations.md#tracing).
 
+`[writeback]` sets when workers commit build slots and write their pages
+back to the store
+([caches-and-storage.md](caches-and-storage.md#build-slots-on-anyfs-commit-writeback-lazy-restore)):
+
+| `[writeback]` key | default | |
+|---|---|---|
+| `dirty_expire` | `"30s"` | a slot idle this long is committed and written back |
+| `dirty_ratio` | `0.1` | a session that grows a slot by more than this fraction of the disk budget is committed right after it ends |
+
 ### Providers
 
 Every `[providers.NAME]` table is one provider instance; `type` selects the

@@ -52,7 +52,7 @@ func newServerMetrics(s *Worker) *serverMetrics {
 		if st.Draining {
 			draining = 1
 		}
-		return []metrics.Family{
+		fams := []metrics.Family{
 			metrics.GaugeFamily("offshore_worker_sessions_running", "Sessions running now.", metrics.Sample{Value: float64(len(st.Sessions))}),
 			metrics.GaugeFamily("offshore_worker_pressure", "PSI some avg10 of the machine (0..1).",
 				metrics.Sample{Labels: metrics.L("resource", "cpu"), Value: st.Pressure.CPU},
@@ -65,6 +65,21 @@ func newServerMetrics(s *Worker) *serverMetrics {
 			metrics.GaugeFamily("offshore_worker_draining", "1 while the machine drains before expiry.", metrics.Sample{Value: draining}),
 			metrics.GaugeFamily("offshore_worker_warm_repos", "Repositories with unexpired build slots.", metrics.Sample{Value: float64(len(st.WarmRepos))}),
 		}
+		if v := st.VM; v != nil {
+			thrash := 0.0
+			if v.Thrashing {
+				thrash = 1
+			}
+			fams = append(fams,
+				metrics.GaugeFamily("offshore_cache_resident_bytes", "Build slot cache bytes resident on the local disk (pages and materialized files).", metrics.Sample{Value: float64(v.ResidentBytes)}),
+				metrics.GaugeFamily("offshore_cache_dirty_bytes", "Build slot pages not yet written back to the store.", metrics.Sample{Value: float64(v.DirtyBytes)}),
+				metrics.GaugeFamily("offshore_cache_working_set_bytes", "Build slot pages touched within the working set window.", metrics.Sample{Value: float64(v.WorkingSetBytes)}),
+				metrics.GaugeFamily("offshore_cache_fault_rate", "Build slot page faults per second (exponentially weighted).", metrics.Sample{Value: v.FaultRate}),
+				metrics.GaugeFamily("offshore_cache_reclaim_bytes", "Build slot bytes reclaimed since the worker started.", metrics.Sample{Value: float64(v.ReclaimBytes)}),
+				metrics.GaugeFamily("offshore_cache_thrashing", "1 while the working set exceeds the local capacity with refaults.", metrics.Sample{Value: thrash}),
+			)
+		}
+		return fams
 	})
 	return m
 }

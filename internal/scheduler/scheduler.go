@@ -432,6 +432,9 @@ type Snapshot struct {
 	Store    string    `json:"store"`    // store name (provider name or "storage")
 	Bytes    int64     `json:"bytes"`
 	At       time.Time `json:"at"`
+	// Layer is the head layer of the committed chain (internal/anyfs):
+	// restoring mounts it lazily.
+	Layer string `json:"layer,omitempty"`
 }
 
 // Estimator predicts the resource need of tasks from past runs.

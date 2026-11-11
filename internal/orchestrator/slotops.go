@@ -62,27 +62,22 @@ func (w WorkerSlotOps) PruneSlot(ctx context.Context, t SlotTarget, repo string,
 }
 
 // SaveSlot implements SlotOps.
-func (w WorkerSlotOps) SaveSlot(ctx context.Context, t SlotTarget, repo string) (scheduler.Snapshot, error) {
+func (w WorkerSlotOps) SaveSlot(ctx context.Context, t SlotTarget, repo string) (proto.LayerHead, error) {
 	res, err := w.call(ctx, t, proto.SlotOp{Op: proto.SlotSave, Repo: repo, Store: w.grant(ctx, t, repo)})
 	if err != nil {
-		return scheduler.Snapshot{}, err
+		return proto.LayerHead{}, err
 	}
-	if res.Snapshot == nil {
-		return scheduler.Snapshot{}, errors.New("worker returned no snapshot")
+	if res.Head == nil {
+		return proto.LayerHead{}, errors.New("worker returned no head")
 	}
-	return SnapshotFromInfo(*res.Snapshot), nil
+	return *res.Head, nil
 }
 
 // RestoreSlot implements SlotOps.
 func (w WorkerSlotOps) RestoreSlot(ctx context.Context, t SlotTarget, repo string, s scheduler.Snapshot) error {
-	info := proto.SnapshotInfo{Repo: s.Repo, Store: s.Store, Provider: s.Provider, Bytes: s.Bytes, At: s.At.Unix()}
-	_, err := w.call(ctx, t, proto.SlotOp{Op: proto.SlotRestore, Repo: repo, Snapshot: &info, Store: w.grant(ctx, t, repo)})
+	h := proto.LayerHead{Repo: s.Repo, Store: s.Store, Provider: s.Provider, Layer: s.Layer, Bytes: s.Bytes, At: s.At.Unix()}
+	_, err := w.call(ctx, t, proto.SlotOp{Op: proto.SlotRestore, Repo: repo, Head: &h, Store: w.grant(ctx, t, repo)})
 	return err
-}
-
-// SnapshotFromInfo converts a worker's snapshot description.
-func SnapshotFromInfo(i proto.SnapshotInfo) scheduler.Snapshot {
-	return scheduler.Snapshot{Repo: i.Repo, Provider: i.Provider, Store: i.Store, Bytes: i.Bytes, At: time.Unix(i.At, 0)}
 }
 
 func (w WorkerSlotOps) grant(ctx context.Context, t SlotTarget, repo string) *store.Grant {

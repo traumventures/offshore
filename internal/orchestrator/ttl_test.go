@@ -104,3 +104,16 @@ func TestDiskBudgetToWorker(t *testing.T) {
 		t.Fatalf("OFFSHORE_DISK_BUDGET = %q, want 80%%", got)
 	}
 }
+
+func TestWritebackToWorker(t *testing.T) {
+	f := newFake()
+	o := newTestOrch(t, f, func(c *Config) { c.DirtyRatio, c.DirtyExpire = 0.2, time.Minute })
+	if _, err := o.Acquire(context.Background(), req("r"), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e := f.specs[0].Env; e["OFFSHORE_WRITEBACK_DIRTY_RATIO"] != "0.2" || e["OFFSHORE_WRITEBACK_DIRTY_EXPIRE"] != "1m0s" {
+		t.Fatalf("env %v", e)
+	}
+}

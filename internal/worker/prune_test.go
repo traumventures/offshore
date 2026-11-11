@@ -112,7 +112,7 @@ func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 func TestPruneSlotPolicyStages(t *testing.T) {
 	slot, meta := rustSlot(t, t.TempDir())
 	tgt := filepath.Join(slot, "data", "target", "debug")
-	r := pruneSlot(slot, meta, 0, defaultUnreadRuns, false)
+	r := pruneSlot(slot, meta, 0, defaultUnreadRuns, false, rmAll)
 	if r.Sessions != 1 || r.Units != 1 || r.Cold {
 		t.Fatalf("result %+v", r)
 	}
@@ -133,10 +133,10 @@ func TestPruneSlotPolicyStages(t *testing.T) {
 func TestPruneSlotTargetGoesCold(t *testing.T) {
 	slot, meta := rustSlot(t, t.TempDir())
 	// The latest run's unit is protected: a tiny target ends cold.
-	if r := pruneSlot(slot, meta, 1, defaultUnreadRuns, false); r.Cold || !exists(slot) || r.BytesLeft == 0 {
+	if r := pruneSlot(slot, meta, 1, defaultUnreadRuns, false, rmAll); r.Cold || !exists(slot) || r.BytesLeft == 0 {
 		t.Fatalf("without allowCold: %+v", r)
 	}
-	if r := pruneSlot(slot, meta, 1, defaultUnreadRuns, true); !r.Cold || exists(slot) {
+	if r := pruneSlot(slot, meta, 1, defaultUnreadRuns, true, rmAll); !r.Cold || exists(slot) {
 		t.Fatalf("with allowCold: %+v", r)
 	}
 }
@@ -190,3 +190,5 @@ func TestBudgetBytes(t *testing.T) {
 		t.Errorf("50G budget = %d", got)
 	}
 }
+
+func rmAll(p string) { os.RemoveAll(p) }
