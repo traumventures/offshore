@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -101,5 +103,27 @@ func TestS3GrantAssumesScopedRole(t *testing.T) {
 	}
 	if _, err := Open(Grant{Bucket: "b", Scopes: []string{"x"}}, "x", 0); err == nil {
 		t.Fatal("grant without credentials opened")
+	}
+}
+
+// A store of a provider configured with a shared config profile assumes
+// its role with that profile's credentials, not the default chain.
+func TestS3GranterProfile(t *testing.T) {
+	dir := t.TempDir()
+	creds := filepath.Join(dir, "credentials")
+	os.WriteFile(creds, []byte("[ops]\naws_access_key_id = AKIDOPS\naws_secret_access_key = secret\n"), 0o600)
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", creds)
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(dir, "config"))
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	t.Setenv("AWS_PROFILE", "")
+	g, err := newS3Granter(context.Background(), Config{Name: "aws", Bucket: "b", Region: "eu-central-1",
+		RoleARN: "arn:aws:iam::1:role/r", Profile: "ops"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := g.sts.(*sts.Client).Options().Credentials.Retrieve(context.Background())
+	if err != nil || c.AccessKeyID != "AKIDOPS" {
+		t.Fatalf("credentials %+v %v", c, err)
 	}
 }
