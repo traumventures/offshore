@@ -65,6 +65,10 @@ type Daemon struct {
 	stop  context.CancelFunc
 
 	metrics *daemonMetrics
+
+	// ctx lives as long as Serve; background work (prebuilds) uses it.
+	ctx context.Context
+	env *envWatch
 }
 
 // NewDaemon creates the daemon from the client configuration and, in
@@ -79,6 +83,7 @@ func NewDaemon(log *slog.Logger) (*Daemon, error) {
 	}
 	d := &Daemon{log: log, roots: map[string]*root{}, conns: map[string]*machineConn{}}
 	d.metrics = newDaemonMetrics(d)
+	d.env = newEnvWatch(d)
 	if d.outputs, err = newOutputsMgr(d); err != nil {
 		return nil, err
 	}
@@ -143,6 +148,7 @@ func (d *Daemon) dropConn(id string) {
 func (d *Daemon) Serve(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	d.stop = cancel
+	d.ctx = ctx
 	defer cancel()
 	if err := os.MkdirAll(StateDir(), 0o700); err != nil {
 		return err
@@ -209,12 +215,16 @@ func (d *Daemon) Serve(ctx context.Context) error {
 
 // Request is a daemon RPC request.
 type Request struct {
-	Op    string   `json:"op"` // prepare | release | sync | status | queue | metrics | down | reconcile | shutdown | ping | outputs-mount | outputs-ensure | outputs-unmount | outputs-status | outputs-hint
+	Op    string   `json:"op"` // prepare | release | sync | status | queue | metrics | down | reconcile | shutdown | ping | outputs-mount | outputs-ensure | outputs-unmount | outputs-status | outputs-hint | env-build | env-status | unreachable
 	Root  string   `json:"root,omitempty"`
 	Cwd   string   `json:"cwd,omitempty"`
 	Tool  string   `json:"tool,omitempty"`
 	Args  []string `json:"args,omitempty"`
 	Lease string   `json:"lease,omitempty"`
+	// Machine is the machine of Lease (op "unreachable").
+	Machine string `json:"machine,omitempty"`
+	// Wait makes op "env-build" run the build and stream its progress.
+	Wait bool `json:"wait,omitempty"`
 	// Usage reports what a finished session consumed (op "release").
 	UsageKey string           `json:"usage_key,omitempty"`
 	Usage    *scheduler.Usage `json:"usage,omitempty"`
@@ -326,6 +336,14 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 		err := d.pool.Release(ctx, req.Lease, req.UsageKey, req.Usage)
 		tracing.End(span, err)
 		return nil, err
+	case "env-build":
+		return d.env.buildNow(ctx, req.Root, req.Wait, progress)
+	case "env-status":
+		return d.env.status(ctx, req.Root)
+	case "unreachable":
+		// The proxy lost its session because the machine went away.
+		d.dropConn(req.Machine)
+		return nil, d.pool.Unreachable(ctx, req.Lease, req.Machine)
 	case "events":
 		src, ok := d.pool.(pool.EventSource)
 		if !ok {
@@ -427,6 +445,7 @@ func (d *Daemon) rootFor(path string, rules manifest.Rules) (*root, error) {
 	if err != nil {
 		return nil, err
 	}
+	r.setOnChange(func(paths []string) { d.env.changed(path, paths) })
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if existing, ok := d.roots[path]; ok {
@@ -464,6 +483,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		return nil, err
 	}
 	span.SetAttributes(attribute.String("cloudsourced.env_hash", plan.Hash))
+	d.env.observe(repo, plan, "configuration changed (run of "+req.Tool+")")
 	var tm events.Timings
 	mark := time.Now()
 	lap := func() int64 {

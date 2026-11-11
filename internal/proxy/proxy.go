@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -231,7 +232,90 @@ type session struct {
 	root   string
 }
 
-func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, tool string, args []string, cwd string, rec *events.Run, opt remoteRun) (code int, err error) {
+// runRemote runs the command on a machine. When the machine is lost while
+// the command runs and nothing was written back yet, it runs it once more
+// on another machine (see retryable).
+func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, tool string, args []string, cwd string, rec *events.Run, opt remoteRun) (int, error) {
+	for attempt := 1; ; attempt++ {
+		st := &attemptState{}
+		code, err := runAttempt(parent, repo, profile, tool, args, cwd, rec, opt, st)
+		var lost *machineLost
+		if !errors.As(err, &lost) {
+			return code, err
+		}
+		ok, why := retryable(st, attempt, os.Getenv("CLOUDSOURCED_NO_RETRY") != "", lost.probe)
+		if !ok {
+			rec.Error = lost.Error() + " (not retried: " + why + ")"
+			daemon.Call(context.Background(), daemon.Request{Op: "record", Run: rec}, nil)
+			return code, lost
+		}
+		warn("machine %s was lost while the command ran (%v); nothing was written back, running it again on another machine", lost.machine, lost.err)
+		rec.LostMachine = lost.machine
+	}
+}
+
+// attemptState is what a remote attempt did that decides whether it may be
+// repeated.
+type attemptState struct {
+	started     atomic.Bool // the session started on the machine
+	writeback   atomic.Bool // the write-back phase began
+	stdinUsed   atomic.Bool // local stdin bytes were forwarded (cannot be replayed)
+	interrupted atomic.Bool // the user signalled the command
+}
+
+// machineLost is a session that ended without an exit status because the
+// connection to its machine failed.
+type machineLost struct {
+	machine string
+	err     error
+	// probe reports whether the machine still answers (then the session
+	// failed for another reason and is not retried).
+	probe func() bool
+}
+
+func (m *machineLost) Error() string {
+	return fmt.Sprintf("remote session: connection to machine %s lost: %v", m.machine, m.err)
+}
+
+func (m *machineLost) Unwrap() error { return m.err }
+
+// retryable decides whether a lost attempt runs again on another machine.
+// Write-back stays exactly-once: local files only change in the write-back
+// phase of the attempt that reported an exit status, so a lost attempt has
+// applied nothing, and an attempt whose write-back began is never repeated.
+func retryable(st *attemptState, attempt int, disabled bool, probe func() bool) (bool, string) {
+	switch {
+	case disabled:
+		return false, "CLOUDSOURCED_NO_RETRY is set"
+	case attempt > 1:
+		return false, "already retried once"
+	case !st.started.Load():
+		return false, "the session had not started"
+	case st.writeback.Load():
+		return false, "write-back had begun"
+	case st.stdinUsed.Load():
+		return false, "standard input was consumed and cannot be replayed"
+	case st.interrupted.Load():
+		return false, "the command was interrupted"
+	case probe != nil && probe():
+		return false, "the machine is still reachable"
+	}
+	return true, ""
+}
+
+// machineAnswers reports whether a machine accepts connections again.
+func machineAnswers(addr, fingerprint string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := transport.Dial(ctx, addr, fingerprint)
+	if err != nil {
+		return false
+	}
+	conn.CloseWithError(0, "")
+	return true
+}
+
+func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, tool string, args []string, cwd string, rec *events.Run, opt remoteRun, st *attemptState) (code int, err error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	// Ctrl+C during preparation aborts cleanly.
@@ -271,6 +355,12 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 	release := daemon.Request{Op: "release", Lease: prep.Lease, UsageKey: prep.UsageKey, TraceParent: tracing.Inject(ctx)}
 	started := false
 	defer func() {
+		var lost *machineLost
+		if errors.As(err, &lost) {
+			// The lease's machine is gone; runRemote records the run
+			// unless it retries.
+			daemon.Call(context.Background(), daemon.Request{Op: "unreachable", Lease: prep.Lease, Machine: prep.Machine}, nil)
+		}
 		// Runs that fall back to local execution are recorded by Main.
 		if started {
 			if err != nil {
@@ -280,6 +370,9 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 			rec.Exit = &c
 			rec.Timings.Total = events.Ms(time.Since(t0))
 			release.Run = rec
+		}
+		if lost != nil {
+			release.Run = nil
 		}
 		daemon.Call(context.Background(), release, nil)
 	}()
@@ -345,12 +438,12 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 		return 0, &fallback{fmt.Errorf("connect to machine %s: %w", prep.Machine, err)}
 	}
 	defer conn.CloseWithError(0, "")
-	st, pc, err := transport.OpenStream(cctx, conn, prep.Token, proto.KindExec)
+	qs, pc, err := transport.OpenStream(cctx, conn, prep.Token, proto.KindExec)
 	if err != nil {
 		tracing.End(cspan, err)
 		return 0, &fallback{err}
 	}
-	defer st.Close()
+	defer qs.Close()
 	if err := pc.Send(proto.TExec, req); err != nil {
 		tracing.End(cspan, err)
 		return 0, &fallback{err}
@@ -363,6 +456,7 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 	cspan.SetAttributes(attribute.String("cloudsourced.session", sstarted.Session), attribute.Int64("cloudsourced.server_wait_ms", sstarted.WaitMs))
 	cspan.End()
 	started = true
+	st.started.Store(true)
 	verbose := os.Getenv("CLOUDSOURCED_VERBOSE") != ""
 	t1 := time.Now()
 	rec.Slot = sstarted.Slot
@@ -383,7 +477,7 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 	if stderr == nil {
 		stderr = os.Stderr
 	}
-	exit, err := stream(pc, useTTY, opt.noTTY && !opt.stdin, stdout, stderr)
+	exit, err := stream(pc, useTTY, opt.noTTY && !opt.stdin, stdout, stderr, st)
 	code = exit.Code
 	execAttrs(xspan, exit)
 	tracing.End(xspan, err)
@@ -392,12 +486,20 @@ func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, t
 	t2 := time.Now()
 	rec.Timings.Run = events.Ms(t2.Sub(t1))
 	if err != nil {
+		var perr *proto.Error
+		if !errors.As(err, &perr) {
+			// No exit status: the connection broke. Whether the machine
+			// is gone is probed only when a retry is otherwise possible.
+			addr, fp := prep.Addr, prep.Fingerprint
+			return code, &machineLost{machine: prep.Machine, err: err, probe: func() bool { return machineAnswers(addr, fp) }}
+		}
 		return code, fmt.Errorf("remote session: %w", err)
 	}
 	usage := exit.Usage
 	usage.Cache = exit.Cache
 	release.Usage = &usage
 	rec.Usage, rec.Cache, rec.Warm = &usage, exit.Cache, usage.Warm
+	st.writeback.Store(true)
 	_, wspan := tracing.Start(ctx, "proxy.writeback")
 	touched, err := receiveWriteback(pc, repo)
 	wspan.SetAttributes(attribute.Int("cloudsourced.roots_touched", len(touched)))
@@ -456,7 +558,7 @@ func FormatCompilerCache(c map[string]int64) string {
 
 // stream forwards stdio, terminal and signals until the remote exits.
 // noStdin closes the remote stdin right away.
-func stream(pc *proto.Conn, useTTY, noStdin bool, stdout, stderr io.Writer) (proto.Exit, error) {
+func stream(pc *proto.Conn, useTTY, noStdin bool, stdout, stderr io.Writer, st *attemptState) (proto.Exit, error) {
 	if useTTY {
 		if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
 			defer term.Restore(int(os.Stdin.Fd()), old)
@@ -474,13 +576,14 @@ func stream(pc *proto.Conn, useTTY, noStdin bool, stdout, stderr io.Writer) (pro
 				}
 				continue
 			}
+			st.interrupted.Store(true)
 			pc.Send(proto.TSignal, proto.Signal{Sig: int(sig)})
 		}
 	}()
 	if noStdin || !forwardStdin(useTTY) {
 		pc.Write(proto.TStdinEOF, nil)
 	} else {
-		go copyStdin(pc)
+		go copyStdin(pc, os.Stdin, st)
 	}
 	for {
 		t, p, err := pc.Read()
@@ -526,12 +629,13 @@ func forwardStdin(useTTY bool) bool {
 	return m&os.ModeNamedPipe != 0 || (m&os.ModeCharDevice != 0 && term.IsTerminal(int(os.Stdin.Fd())))
 }
 
-func copyStdin(pc *proto.Conn) {
+func copyStdin(pc *proto.Conn, in *os.File, st *attemptState) {
 	{
 		buf := make([]byte, 32<<10)
 		for {
-			n, err := os.Stdin.Read(buf)
+			n, err := in.Read(buf)
 			if n > 0 {
+				st.stdinUsed.Store(true)
 				if pc.Write(proto.TStdin, buf[:n]) != nil {
 					return
 				}
