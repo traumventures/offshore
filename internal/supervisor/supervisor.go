@@ -40,6 +40,7 @@ type Spec struct {
 	ExpiresAt int64             `json:"expires_at"`                  // unix seconds (0: never)
 	IdleStop  int64             `json:"idle_stop_seconds,omitempty"` // 0: never stop itself
 	Params    map[string]string `json:"params,omitempty"`            // provider specific (region, secret name, ...)
+	Cache     *CacheSpec        `json:"cache,omitempty"`             // cache medium (nil: Docker volume on the root disk)
 }
 
 // Expires returns the expiry time (zero: none).
@@ -157,6 +158,13 @@ type Supervisor struct {
 	Shutdown func() error        // powers the host off (terminates the instance)
 	Clock    clock.Clock         // idle and expiry decisions (nil: real time)
 	Sleep    func(time.Duration) // for tests
+	// Host runs host commands (mkfs, mount, ...; nil: exec). BootID
+	// identifies the boot (nil: the kernel's); SysBlock is /sys/class/block.
+	Host     HostRunner
+	BootID   func() string
+	SysBlock string
+
+	touched time.Time // last touchCache
 }
 
 func (a *Supervisor) now() time.Time {
@@ -298,6 +306,9 @@ func (a *Supervisor) EnsureContainers(ctx context.Context) error {
 				return err
 			}
 			for _, v := range []string{l.CacheVolume, l.DepsVolume} {
+				if strings.HasPrefix(v, "/") {
+					continue // a host directory (the mounted cache medium)
+				}
 				if _, err := a.Docker(ctx, nil, nil, "volume", "create", v); err != nil {
 					return err
 				}
@@ -385,6 +396,9 @@ func (a *Supervisor) Run(ctx context.Context) error {
 	if err := a.waitDocker(ctx); err != nil {
 		return err
 	}
+	if err := a.PrepareCache(ctx); err != nil {
+		return err // systemd restarts the supervisor
+	}
 	for i := 0; ; i++ {
 		err := a.EnsureContainers(ctx)
 		if err == nil {
@@ -419,6 +433,12 @@ func (a *Supervisor) Run(ctx context.Context) error {
 			if err := g.GrowDisk(ctx); err != nil {
 				a.Log.Warn("growing the disk", "err", err)
 			}
+		}
+		if err := a.GrowCache(ctx); err != nil {
+			a.Log.Warn("growing the cache volume", "err", err)
+		}
+		if err := a.touchCache(); err != nil {
+			a.Log.Warn("marking the cache volume used", "err", err)
 		}
 	}
 }

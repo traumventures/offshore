@@ -55,6 +55,16 @@ const (
 	// SlotAction: the scheduler handled a full or growing build slot
 	// (Reason: resize, prune, move, cold; Repo, Machine, Bytes).
 	SlotAction = "slot_action"
+	// Volume events (Volume, Provider, Zone, Machine, Bytes, Seconds):
+	// a cache volume was created, attached to a new machine, detached
+	// from a machine that is gone (kept for reuse, or followed by
+	// VolumeDelete), grown (Bytes: the new size) or deleted. Cost is the
+	// volume's storage cost since its previous event.
+	VolumeCreate = "volume_create"
+	VolumeAttach = "volume_attach"
+	VolumeDetach = "volume_detach"
+	VolumeResize = "volume_resize"
+	VolumeDelete = "volume_delete"
 	// ProviderDown: a provider reported no capacity or quota; it gets no
 	// new machines for Seconds (cooldown with backoff).
 	ProviderDown = "provider_down"
@@ -109,6 +119,11 @@ type Event struct {
 	Chunks    int64   `json:"chunks,omitempty"`
 	NewChunks int64   `json:"new_chunks,omitempty"`
 	Seconds   float64 `json:"seconds,omitempty"`
+
+	// Volume fields.
+	Volume string  `json:"volume,omitempty"`
+	Zone   string  `json:"zone,omitempty"`
+	Cost   float64 `json:"cost,omitempty"`
 
 	// Labels describe who ran a task (worktree, repo, branch, user, agent
 	// and free labels; see internal/labels). Set on task events.

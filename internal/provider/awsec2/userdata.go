@@ -48,6 +48,7 @@ func hostSpec(spec provider.MachineSpec, region, stack, bucket, registry, image 
 		},
 		ExpiresAt: spec.ExpiresAt.Unix(),
 		IdleStop:  int64(spec.IdleStop.Seconds()),
+		Cache:     cacheSpec(spec),
 		Params: map[string]string{
 			paramRegion:   region,
 			paramSecret:   secretParameter(stack, spec.ID),
@@ -55,6 +56,19 @@ func hostSpec(spec provider.MachineSpec, region, stack, bucket, registry, image 
 			// Compiler cache objects of the pool, shared by its machines.
 		},
 	}
+}
+
+// instanceStore matches the instance-store NVMe disks of Nitro instances
+// (EBS volumes have their own by-id names).
+const instanceStore = "/dev/disk/by-id/nvme-Amazon_EC2_NVMe_Instance_Storage_*"
+
+// cacheSpec places the cache: on the attached EBS volume, else on the
+// first instance-store disk if the instance type has one.
+func cacheSpec(spec provider.MachineSpec) *supervisor.CacheSpec {
+	if spec.Volume != "" {
+		return &supervisor.CacheSpec{Medium: supervisor.CacheVolume, Device: VolumeDevice(spec.Volume), TTLSeconds: int64(spec.CacheTTL.Seconds())}
+	}
+	return &supervisor.CacheSpec{Medium: supervisor.CacheLocal, LocalDevices: instanceStore}
 }
 
 // userData renders the first boot script: Docker, the server binary, the

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/traumventures/offshore/internal/medium"
 	"maps"
 	"os"
 	"runtime"
@@ -26,6 +27,12 @@ type PoolConfig struct {
 	// [providers.oci] with type = "oci".
 	// Every other key of the table is passed to the provider as an option.
 	Providers map[string]map[string]any `toml:"providers"`
+	// Volumes are the providers' cache volume settings
+	// ([providers.NAME.volume]).
+	Volumes map[string]VolumeConfig `toml:"-"`
+	// Profiles override capability profiles of the providers' media
+	// ([providers.NAME.profile.MEDIUM]).
+	Profiles map[string]map[string]ProfileConfig `toml:"-"`
 	// Storage overrides the providers' native object stores.
 	Storage Storage `toml:"storage"`
 	// Telemetry configures tracing of the orchestrator (control plane or
@@ -179,6 +186,11 @@ type Size struct {
 	Disk string `toml:"disk,omitempty"`
 	// DiskBudget overrides [scheduler] disk_budget for machines of this size.
 	DiskBudget string `toml:"disk_budget,omitempty"`
+	// Medium is where the machine's caches live: "local" (default; the
+	// root disk, or the instance-store NVMe of instance types that have
+	// one, whose size then is the disk) or "volume" (an attachable volume,
+	// [providers.NAME.volume]).
+	Medium string `toml:"medium,omitempty"`
 	// Arch is the machine architecture, "amd64" (default) or "arm64".
 	// Environments are built per architecture; a repository pins its
 	// architecture with resources.arch, and only sizes of that
@@ -249,7 +261,7 @@ func LoadPool(path string) (*PoolConfig, error) {
 		f.Pool, f.Telemetry, f.Storage = raw.Pool, raw.Telemetry, raw.Storage
 		f.Pool.Scheduler = raw.Scheduler
 		f.Pool.Provision = raw.Machine.Setup
-		if f.Providers, f.Pool.Sizes, err = splitProviders(raw.Providers); err != nil {
+		if f.Providers, f.Pool.Sizes, f.Volumes, f.Profiles, err = splitProviders(raw.Providers); err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
 		top, _ := topLevel(data)
@@ -266,36 +278,53 @@ func LoadPool(path string) (*PoolConfig, error) {
 	return f, nil
 }
 
-// splitProviders separates the [[providers.NAME.size]] tables from the
-// provider options.
-func splitProviders(in map[string]map[string]any) (map[string]map[string]any, []Size, error) {
+// splitProviders separates the [[providers.NAME.size]],
+// [providers.NAME.volume] and [providers.NAME.profile.MEDIUM] tables from
+// the provider options.
+func splitProviders(in map[string]map[string]any) (map[string]map[string]any, []Size, map[string]VolumeConfig, map[string]map[string]ProfileConfig, error) {
 	var sizes []Size
 	out := map[string]map[string]any{}
+	vols := map[string]VolumeConfig{}
+	profs := map[string]map[string]ProfileConfig{}
 	for _, name := range slices.Sorted(maps.Keys(in)) {
 		opts := maps.Clone(in[name])
-		if raw, ok := opts["size"]; ok {
-			delete(opts, "size")
-			data, err := toml.Marshal(map[string]any{"size": raw})
-			if err != nil {
-				return nil, nil, fmt.Errorf("providers.%s.size: %w", name, err)
+		var t struct {
+			Size    []Size                   `toml:"size"`
+			Volume  *VolumeConfig            `toml:"volume"`
+			Profile map[string]ProfileConfig `toml:"profile"`
+		}
+		sub := map[string]any{}
+		for _, k := range []string{"size", "volume", "profile"} {
+			if raw, ok := opts[k]; ok {
+				delete(opts, k)
+				sub[k] = raw
 			}
-			var t struct {
-				Size []Size `toml:"size"`
+		}
+		if len(sub) > 0 {
+			data, err := toml.Marshal(sub)
+			if err != nil {
+				return nil, nil, nil, nil, fmt.Errorf("providers.%s: %w", name, err)
 			}
 			if err := decodeStrict(data, &t); err != nil {
-				return nil, nil, fmt.Errorf("providers.%s.size: %w", name, err)
+				return nil, nil, nil, nil, fmt.Errorf("providers.%s: %w", name, err)
 			}
-			for _, sz := range t.Size {
-				sz.Provider = name
-				sizes = append(sizes, sz)
-			}
+		}
+		for _, sz := range t.Size {
+			sz.Provider = name
+			sizes = append(sizes, sz)
+		}
+		if t.Volume != nil {
+			vols[name] = *t.Volume
+		}
+		if len(t.Profile) > 0 {
+			profs[name] = t.Profile
 		}
 		out[name] = opts
 	}
 	if len(out) == 0 {
 		out = nil
 	}
-	return out, sizes, nil
+	return out, sizes, vols, profs, nil
 }
 
 func (u *PoolConfig) applyDefaults() {
@@ -476,6 +505,15 @@ func (u *PoolConfig) Validate() error {
 				errs = append(errs, fmt.Sprintf("pool.size[%d].disk_budget: %v", i, err))
 			}
 		}
+		switch sz.Medium {
+		case "", MediumLocal:
+		case MediumVolume:
+			if b := u.ProviderType(sz.Provider); b != "" && !volumeBackend(b) {
+				errs = append(errs, fmt.Sprintf("pool.size[%d].medium: %s (%s) has no volumes", i, sz.Provider, b))
+			}
+		default:
+			errs = append(errs, fmt.Sprintf("pool.size[%d].medium: unsupported %q (local, volume)", i, sz.Medium))
+		}
 		if _, ok := u.Providers[sz.Provider]; !ok {
 			errs = append(errs, fmt.Sprintf("pool.size[%d].provider: %q is not a configured provider (%s)", i, sz.Provider, strings.Join(u.ProviderNames(), ", ")))
 		}
@@ -493,6 +531,25 @@ func (u *PoolConfig) Validate() error {
 	}
 	if f.MinMachines < 0 || f.MaxMachines < 1 || f.MinMachines > f.MaxMachines {
 		errs = append(errs, "pool: need 0 <= min_machines <= max_machines and max_machines >= 1")
+	}
+	for _, name := range slices.Sorted(maps.Keys(u.Volumes)) {
+		prefix := "providers." + name + ".volume"
+		if _, ok := u.Providers[name]; !ok {
+			continue
+		}
+		if b := u.ProviderType(name); b != "" && !volumeBackend(b) {
+			errs = append(errs, fmt.Sprintf("%s: %s providers have no volumes", prefix, b))
+		}
+		errs = append(errs, u.Volumes[name].validate(prefix)...)
+	}
+	for _, name := range slices.Sorted(maps.Keys(u.Profiles)) {
+		for _, med := range slices.Sorted(maps.Keys(u.Profiles[name])) {
+			prefix := "providers." + name + ".profile." + med
+			if med != MediumLocal && med != MediumVolume && med != medium.Store {
+				errs = append(errs, fmt.Sprintf("%s: unknown medium (local, volume, store)", prefix))
+			}
+			errs = append(errs, u.Profiles[name][med].validate(prefix)...)
+		}
 	}
 	errs = append(errs, u.Telemetry.validate()...)
 	if len(errs) > 0 {

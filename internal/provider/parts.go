@@ -50,6 +50,14 @@ type DiskResizer interface {
 	ResizeDisk(ctx context.Context, id string, bytes int64) error
 }
 
+// LocalDisks is implemented by providers whose instance types may have
+// instance-store disks (medium local caches live on them).
+type LocalDisks interface {
+	// InstanceStorage returns the instance-store capacity of an instance
+	// type (0: none).
+	InstanceStorage(ctx context.Context, instanceType string) (int64, error)
+}
+
 // Parts is a provider split into its parts (nil: not supported).
 type Parts struct {
 	Compute  Compute

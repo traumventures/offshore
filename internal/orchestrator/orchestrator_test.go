@@ -27,6 +27,10 @@ type fakeProvider struct {
 	tokens    []string // tokens seen by probe
 	destroyed []string
 	stopped   []string
+	// volume operations
+	volCaps    provider.VolumeCaps
+	volCreated int
+	resized    int
 }
 
 func newFake() *fakeProvider { return newNamedFake("fake") }
@@ -47,7 +51,14 @@ func (f *fakeProvider) Create(_ context.Context, s provider.MachineSpec) (provid
 		CreatedAt: time.Now(), ExpiresAt: s.ExpiresAt, Fingerprint: s.Finger, Labels: map[string]string{provider.LabelSize: s.Size}}
 	f.machines[s.ID] = m
 	f.status[s.ID] = &proto.Status{Machine: s.ID, Ready: true, CPU: s.CPU, Memory: s.Memory, IdleSince: time.Now().Unix()}
-	f.volumes["cs-cache-"+s.ID] = cacheVolume(s.ID)
+	if s.Volume != "" {
+		v := f.volumes[s.Volume]
+		v.State, v.Machine = provider.VolumeAttached, s.ID
+		f.volumes[s.Volume] = v
+		m.Zone = "z1"
+	} else {
+		f.volumes["cs-cache-"+s.ID] = cacheVolume(s.ID)
+	}
 	return *m, nil
 }
 
@@ -73,6 +84,12 @@ func (f *fakeProvider) Destroy(_ context.Context, id string) error {
 	defer f.mu.Unlock()
 	delete(f.machines, id)
 	delete(f.volumes, "cs-cache-"+id)
+	for vid, v := range f.volumes {
+		if v.Machine == id {
+			v.State, v.Machine = provider.VolumeAvailable, ""
+			f.volumes[vid] = v
+		}
+	}
 	f.destroyed = append(f.destroyed, id)
 	return nil
 }
@@ -93,12 +110,13 @@ func cacheVolume(id string) provider.Volume {
 		State: provider.VolumeAvailable, Labels: map[string]string{provider.LabelMachine: id}}
 }
 
-func (f *fakeProvider) VolumeCaps() provider.VolumeCaps { return provider.VolumeCaps{} }
+func (f *fakeProvider) VolumeCaps() provider.VolumeCaps { return f.volCaps }
 
 func (f *fakeProvider) CreateVolume(_ context.Context, s provider.VolumeSpec) (provider.Volume, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	v := provider.Volume{ID: s.Name, Name: s.Name, Kind: provider.VolumeCache, Bytes: s.Bytes, State: provider.VolumeAvailable, ExpiresAt: s.ExpiresAt}
+	f.volCreated++
+	v := provider.Volume{ID: s.Name, Name: s.Name, Kind: provider.VolumeCache, Zone: "z1", Bytes: s.Bytes, State: provider.VolumeAvailable, ExpiresAt: s.ExpiresAt}
 	f.volumes[v.ID] = v
 	return v, nil
 }
@@ -127,6 +145,7 @@ func (f *fakeProvider) ResizeVolume(_ context.Context, id string, bytes int64) e
 	v := f.volumes[id]
 	v.Bytes = bytes
 	f.volumes[id] = v
+	f.resized++
 	return nil
 }
 

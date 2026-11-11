@@ -218,6 +218,7 @@ Resources:
                   - ec2:DescribeImages
                   - ec2:DescribeTags
                   - ec2:DescribeVolumes
+                  - ec2:DescribeInstanceTypes
                   - ecr:GetAuthorizationToken
                   - logs:DescribeLogGroups
                 Resource: "*"

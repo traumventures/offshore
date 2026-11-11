@@ -115,9 +115,48 @@ Sizes are `[[providers.NAME.size]]` tables:
 | `disk_budget` | `[scheduler] disk_budget` | cache disk machines of this size fill before pruning (`"85%"`, `"150G"`) |
 | `arch` | `amd64` (local-docker: the host) | `amd64` or `arm64`; repositories pick it with `resources.arch` |
 | `instance_types` | aws-ec2: the size name; oci: `VM.Standard.E5.Flex` / `VM.Standard.A1.Flex` | provider machine types tried in order on capacity errors (aws-ec2, oci only) |
+| `medium` | `local` | where the cache lives: `local` (root disk, or the instance-store NVMe disk of instance types that have one, formatted on every boot; aws-ec2 takes `disk` from the instance type then) or `volume` (an attachable volume, `[providers.NAME.volume]`; aws-ec2, oci, local-docker) |
 
 A provider without sizes gets one size `default` of `pool.machine_cpu` and
 `pool.machine_memory`.
+
+Cache volumes of `medium = "volume"` sizes are configured per provider in
+`[providers.NAME.volume]` (see [caches and storage](caches-and-storage.md#volumes)).
+Volumes are off by default (`medium = "local"`).
+
+| volume key | default | |
+|---|---|---|
+| `type` | `gp3` | aws-ec2 volume type |
+| `iops`, `throughput` | gp3 baseline (3000, 125 MiB/s) | aws-ec2 provisioned IOPS and MiB/s |
+| `vpus` | 10 (balanced) | oci volume performance units per GB |
+| `min` | the size's `disk`, else `100G` | size of a new volume |
+| `max` | provider limit | largest size a volume grows to |
+| `step` | `50G` | least growth of a resize (aws-ec2: one resize per volume every 6 h) |
+| `keep_detached` | `false` | keep the volume when its machine is destroyed; a later machine of the provider reuses it (and is placed in its zone) |
+| `ttl` | `24h` | a detached volume is deleted after this long; content unused for longer is wiped when it is attached |
+
+Each medium has a capability profile with approximate defaults per provider
+type (see [caches and storage](caches-and-storage.md#capability-profiles));
+`[providers.NAME.profile.MEDIUM]` (`MEDIUM` = `local`, `volume`, `store`)
+overrides single values: `throughput` (per second, `"500M"`), `iops`,
+`latency` (`"1ms"`), `price_per_gb_month`, `request_per_1k`,
+`egress_per_gb`, `attach`, `provision` (durations), `max_size`,
+`resize_cooldown`.
+
+```toml
+[providers.aws]
+type = "aws-ec2"
+[providers.aws.volume]
+throughput = 250
+keep_detached = true
+[providers.aws.profile.volume]
+price_per_gb_month = 0.0952   # eu-central-1 gp3
+[[providers.aws.size]]
+name = "c7a.4xlarge"
+cpu = 16
+memory = "32G"
+medium = "volume"
+```
 
 #### `local-docker`
 

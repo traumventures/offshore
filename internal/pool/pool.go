@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/traumventures/offshore/internal/config"
+	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/orchestrator"
 	"github.com/traumventures/offshore/internal/provider"
 	"github.com/traumventures/offshore/internal/scheduler"
@@ -67,12 +68,25 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 		}
 		s := scheduler.Size{Provider: sz.Provider, Name: sz.Name,
 			Capacity: scheduler.Resources{CPU: sz.CPU, Memory: mem, Disk: disk}, PricePerHour: sz.PricePerHour,
-			Arch: config.MachineArch(sz.Arch), InstanceTypes: sz.InstanceTypes, DiskBudget: budget}
+			Arch: config.MachineArch(sz.Arch), InstanceTypes: sz.InstanceTypes, DiskBudget: budget,
+			Medium: medium.Local}
+		s.Stack = medium.Stack{Hot: u.Profile(sz.Provider, medium.Local), Store: u.Profile(sz.Provider, medium.Store)}
+		if sz.Medium == config.MediumVolume {
+			v := u.Volumes[sz.Provider]
+			minB, maxB, step, ttl := v.VolumeSizes(disk)
+			s.Medium, s.Stack.Hot = medium.Volume, u.Profile(sz.Provider, medium.Volume)
+			s.Volume = scheduler.VolumePolicy{Min: minB, Max: maxB, Step: step, KeepDetached: v.KeepDetached, TTL: ttl,
+				Type: v.Type, IOPS: v.IOPS, Throughput: v.Throughput, VPUs: v.VPUs}
+			if s.Capacity.Disk == 0 {
+				s.Capacity.Disk = minB
+			}
+		}
 		sizes = append(sizes, s)
 	}
 	f := u.Pool
 	c := orchestrator.Config{
-		Owner: f.ID, Sizes: sizes, MaxLifetime: lifetime, QueueTimeout: queue,
+		Profile: u.Profile,
+		Owner:   f.ID, Sizes: sizes, MaxLifetime: lifetime, QueueTimeout: queue,
 		Provision: provision, Swap: f.Swap,
 		Policy: scheduler.Config{
 			CPUOvercommit: f.CPUOvercommit, MemoryOvercommit: f.MemoryOvercommit,

@@ -25,6 +25,7 @@ import (
 	"github.com/traumventures/offshore/internal/events"
 	"github.com/traumventures/offshore/internal/labels"
 	"github.com/traumventures/offshore/internal/logs"
+	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/proto"
 	"github.com/traumventures/offshore/internal/provider"
 	"github.com/traumventures/offshore/internal/scheduler"
@@ -46,6 +47,9 @@ type Config struct {
 	Policy       scheduler.Config
 	// EventRetention bounds the analysis event log (0 = 30 days).
 	EventRetention time.Duration
+	// Profile resolves a provider's medium profile (instance-store sizes
+	// get medium.LocalNVMe once their disk is known; nil: defaults).
+	Profile func(provider, med string) medium.Profile `json:"-"`
 }
 
 // Default repository cache lifetimes of requests that carry none (older
@@ -264,7 +268,8 @@ type creation struct {
 	env     string
 	size    scheduler.Size
 	at      time.Time
-	started bool // start of a stopped machine (else create)
+	started bool   // start of a stopped machine (else create)
+	volume  string // detached cache volume the create attaches (policy choice)
 }
 
 // Orchestrator manages one owner's pool.
@@ -314,11 +319,13 @@ type Orchestrator struct {
 	// (durations, slot sizes) for the cost model; nil = unknown.
 	Profile func(key string) scheduler.Profile
 
-	health       map[string]provHealth // provider instance -> health and latencies
-	leases       map[string]leaseInfo  // lease id -> expected session end
-	snapshots    map[string][]scheduler.Snapshot
-	startBlocked map[string]time.Time // machine -> no start before
-	forecast     *scheduler.Forecast
+	health         map[string]provHealth // provider instance -> health and latencies
+	leases         map[string]leaseInfo  // lease id -> expected session end
+	snapshots      map[string][]scheduler.Snapshot
+	volumes        map[string]*VolumeState // managed cache volumes by id
+	localDisksOnce sync.Once
+	startBlocked   map[string]time.Time // machine -> no start before
+	forecast       *scheduler.Forecast
 
 	// Slots performs build slot operations on workers (prune, snapshot
 	// save and restore); nil disables slot moves and prunes.
@@ -358,9 +365,10 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
 		ProbeFunc: Probe, Clock: clk,
 		health: map[string]provHealth{}, leases: map[string]leaseInfo{}, snapshots: map[string][]scheduler.Snapshot{},
-		startBlocked: map[string]time.Time{}, forecast: scheduler.NewForecast(),
+		volumes: map[string]*VolumeState{}, startBlocked: map[string]time.Time{}, forecast: scheduler.NewForecast(),
 	}
 	o.loadSnapshots()
+	o.loadVolumes()
 	o.metrics = newOrchMetrics(o)
 	o.obs = newObserver(stateDir, cfg.EventRetention)
 	o.loadRecent()
@@ -379,6 +387,7 @@ func (o *Orchestrator) SetConfig(cfg Config) {
 		o.policy = scheduler.Default{Cfg: cfg.Policy}
 	}
 	o.cfg = cfg
+	o.localDisksOnce = sync.Once{} // sizes are new: resolve their disks again
 }
 
 // Config returns the pool configuration in effect.
@@ -595,6 +604,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		m.Status = r.status
 		m.StatusAt = time.Now()
 		o.statusSnapshotsLocked(m)
+		o.statusVolumeLocked(m)
 		o.sampleLocked(r.id, m)
 	}
 	// The data is as old as the listing, not as the end of the probes:
@@ -665,6 +675,7 @@ func (o *Orchestrator) Sample(ctx context.Context) {
 		st := r.st
 		m.Status, m.StatusAt = &st, time.Now()
 		o.statusSnapshotsLocked(m)
+		o.statusVolumeLocked(m)
 		o.sampleLocked(r.id, m)
 	}
 }
@@ -979,7 +990,7 @@ func (o *Orchestrator) markLocked(acts []scheduler.Action) {
 		case scheduler.Create:
 			id := newID(6)
 			acts[i].Machine = id
-			o.creating[id] = creation{prov: a.Size.Provider, env: a.EnvHash, size: a.Size, at: o.now()}
+			o.creating[id] = creation{prov: a.Size.Provider, env: a.EnvHash, size: a.Size, at: o.now(), volume: a.Volume}
 		case scheduler.Start:
 			if m, ok := o.machines[a.Machine]; ok {
 				m.State = provider.Starting
@@ -1076,6 +1087,7 @@ func (o *Orchestrator) destroyMachine(ctx context.Context, id, reason string) {
 	o.mu.Lock()
 	o.removeLocked(id)
 	o.mu.Unlock()
+	go o.releaseVolume(context.WithoutCancel(ctx), id)
 }
 
 func (o *Orchestrator) setState(id string, st provider.State) {
@@ -1225,10 +1237,26 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 			spec.Image = ref
 		}
 	}
-	o.log.Info("creating machine", "id", id, "provider", size.Provider, "size", size.Name, "env", envHash[:min(12, len(envHash))], "image", spec.Image)
+	var vol *VolumeState
+	if size.Medium == medium.Volume {
+		o.mu.Lock()
+		want, repo := o.creating[id].volume, o.waitingRepoLocked(envHash)
+		o.mu.Unlock()
+		if vol, err = o.acquireVolume(ctx, id, size, want, repo); err != nil {
+			return err
+		}
+		spec.Volume, spec.CacheTTL = vol.ID, vol.Policy.TTL
+	}
+	o.log.Info("creating machine", "id", id, "provider", size.Provider, "size", size.Name, "env", envHash[:min(12, len(envHash))], "image", spec.Image, "volume", spec.Volume)
 	m, err := prov.Create(ctx, spec)
 	if err != nil {
+		if vol != nil {
+			go o.releaseVolume(context.WithoutCancel(ctx), id)
+		}
 		return o.provErr(size.Provider, "create", err)
+	}
+	if vol != nil {
+		o.attachedVolume(vol, m.Zone)
 	}
 	m.Fingerprint = ident.Fingerprint
 	o.mu.Lock()
@@ -1424,6 +1452,7 @@ func (o *Orchestrator) removeLocked(id string) {
 // destroyed, expiring busy machines drain, orphaned volumes are deleted)
 // and executes the policy's pool plan.
 func (o *Orchestrator) Reconcile(ctx context.Context) error {
+	o.localDisksOnce.Do(func() { o.resolveLocalDisks(ctx) })
 	start := time.Now()
 	ctx, span := tracing.Start(ctx, "orchestrator.reconcile")
 	err := o.reconcile(ctx)
@@ -1511,10 +1540,27 @@ func (o *Orchestrator) reapProvider(ctx context.Context, p provider.Provider) er
 		alive[id] = true
 	}
 	o.mu.Unlock()
+	o.syncVolumes(ctx, o.provName(p), pv, vols)
+	// Managed volumes whose machine disappeared without a destroy (it
+	// terminated itself at expiry) are released like destroyed ones.
+	o.mu.Lock()
+	var gone []string
+	for _, v := range o.volumes {
+		if v.Machine != "" && v.Provider == o.provName(p) && !alive[v.Machine] && o.machines[v.Machine] == nil {
+			gone = append(gone, v.Machine)
+		}
+	}
+	o.mu.Unlock()
+	for _, id := range gone {
+		go o.releaseVolume(context.WithoutCancel(ctx), id)
+	}
 	now := o.now()
 	for _, v := range vols {
-		if v.State != provider.VolumeAvailable {
-			continue // attached, or changing state
+		o.mu.Lock()
+		managed := o.managedLocked(v.ID)
+		o.mu.Unlock()
+		if v.State != provider.VolumeAvailable || managed {
+			continue // attached, changing state, or managed (syncVolumes)
 		}
 		owner := v.Labels[provider.LabelMachine]
 		expired := v.Expired(now)
@@ -1560,6 +1606,8 @@ func (o *Orchestrator) DestroyAll(ctx context.Context) error {
 		o.removeLocked(id)
 	}
 	o.machines = map[string]*Machine{}
+	o.volumes = map[string]*VolumeState{}
+	o.saveVolumesLocked()
 	o.recentEnvs = map[string]time.Time{}
 	o.saveRecentLocked()
 	o.mu.Unlock()
