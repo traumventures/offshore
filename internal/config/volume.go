@@ -90,7 +90,7 @@ func (v VolumeConfig) validate(prefix string) []string {
 	return errs
 }
 
-// ProfileConfig is [providers.NAME.profile.MEDIUM] (MEDIUM = local,
+// ProfileConfig is [providers.NAME.media.MEDIUM] (MEDIUM = local,
 // volume or store): overrides of the medium's capability profile defaults.
 type ProfileConfig struct {
 	Throughput      string  `toml:"throughput"` // per second, e.g. "500M"

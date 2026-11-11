@@ -563,7 +563,7 @@ with the provider documentation cited in `internal/medium/defaults.go`:
 | local-docker, static | local / volume | host disk | | 0 | ~1 s | |
 
 Override values per provider and medium with
-`[providers.NAME.profile.MEDIUM]` (see
+`[providers.NAME.media.MEDIUM]` (see
 [configuration](configuration.md#providers)); measured values override
 both through `medium.SetMeasured`: workers count the transfers of their
 cache file system per medium (page-ins as reads, writebacks and page-outs

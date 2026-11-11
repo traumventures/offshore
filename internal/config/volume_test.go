@@ -20,10 +20,10 @@ max = "1T"
 step = "100G"
 keep_detached = true
 ttl = "12h"
-[providers.aws.profile.volume]
+[providers.aws.media.volume]
 attach = "20s"
 price_per_gb_month = 0.1
-[providers.aws.profile.store]
+[providers.aws.media.store]
 throughput = "500M"
 [[providers.aws.size]]
 name = "v"
@@ -72,8 +72,8 @@ memory = "8G"
 		"[providers.a]\ntype = \"aws-ec2\"\n[providers.a.volume]\nmin = \"2T\"\nmax = \"1T\"\n",
 		"[providers.a]\ntype = \"aws-ec2\"\n[providers.a.volume]\nttl = \"soon\"\n",
 		"[providers.a]\ntype = \"aws-ec2\"\n[providers.a.volume]\nsize = \"1T\"\n",
-		"[providers.a]\ntype = \"aws-ec2\"\n[providers.a.profile.ram]\niops = 1\n",
-		"[providers.a]\ntype = \"aws-ec2\"\n[providers.a.profile.volume]\nattach = \"quick\"\n",
+		"[providers.a]\ntype = \"aws-ec2\"\n[providers.a.media.ram]\niops = 1\n",
+		"[providers.a]\ntype = \"aws-ec2\"\n[providers.a.media.volume]\nattach = \"quick\"\n",
 	} {
 		if _, err := loadUserFrom(t, bad); err == nil {
 			t.Errorf("accepted %q", bad)
@@ -126,5 +126,26 @@ memory = "8G"
 		if _, err := loadUserFrom(t, bad); err == nil {
 			t.Errorf("accepted %q", bad)
 		}
+	}
+}
+
+// The credentials profile option of aws-ec2/oci ("profile") is a plain
+// provider option and must not collide with the media tables.
+func TestProviderProfileOptionWithMedia(t *testing.T) {
+	u, err := loadUserFrom(t, `
+[providers.aws]
+type = "aws-ec2"
+profile = "ops"
+[providers.aws.media.store]
+throughput = "500M"
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Providers["aws"]["profile"] != "ops" {
+		t.Fatalf("options %+v", u.Providers["aws"])
+	}
+	if s := u.Profile("aws", medium.Store); s.Throughput != 500<<20 {
+		t.Fatalf("store %+v", s)
 	}
 }

@@ -16,7 +16,7 @@
 //
 // Profiles have approximate code defaults (see defaults.go, with the
 // provider documentation they come from), can be overridden in the pool
-// configuration ([providers.NAME.profile.MEDIUM]) and by measured values
+// configuration ([providers.NAME.media.MEDIUM]) and by measured values
 // (SetMeasured).
 package medium
 
