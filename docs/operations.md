@@ -230,19 +230,41 @@ previous hook.
 
 ## Top
 
-`offshore top` is a full-screen view in the style of zenith:
-history graphs of the pool (busy cores, session memory, sessions plus queue,
-cost per hour; seeded from the `machine_sample` events and extended by the
-2 s status polls, kept in memory for 3 h), one line per machine (busy-core
-bar and history, memory bar, PSI, sessions, price, and when the worker
-reports its cache file system (`Status.VM`): resident of local capacity,
-dirty bytes, working set, page faults per second and `THRASH` while the
-working set exceeds the local tier; dropped first on narrow terminals), a
-sortable session table
-(machine, agent, worktree, branch, elapsed, busy/reserved cores,
-used/reserved memory, command) and the queue. Keys: ↑/↓ PgUp/PgDn select,
-`e c m a w n` sort by elapsed, CPU, memory, agent, worktree, machine (again:
-reverse), `r` reverse, `+`/`-` zoom the graph window (1m..3h), `q` quit.
+`offshore top` is a full-screen view in the style of zenith that uses the
+whole terminal (the height is split between the graphs and the tables on
+every resize; tiny terminals keep one row each, tables scroll):
+
+* graphs of the active (running/starting) machines: busy cores and session
+  memory, seeded from the `machine_sample` events and extended by the 2 s
+  status polls (kept in memory for 3 h);
+* Machines: aligned columns MACHINE, PROVIDER/SIZE, STATE, CPU, MEM, DISK
+  (bar plus used/total), SESS, $/H and, when the worker reports its cache
+  file system (`Status.VM`), CACHE (resident/capacity), DIRTY, WS (working
+  set) and FAULTS (per second, `THRASH`); optional columns are dropped
+  first on narrow terminals. The panel title shows `$X/h now · $Y today`.
+  Default order: busy, idle (shortest idle first), starting, draining,
+  stopped, failed, then age;
+* Storage: per build slot (repository on a machine) the slot size, the
+  newest store head of the repository with its commit age, how far the
+  machine's last commit lags behind it, and the store; the title sums the
+  store bytes per repository and the page-in/writeback rate of the window;
+* Sessions: running sessions, then queued requests, then recently
+  finished sessions (exit code, duration, average cores, peak memory) in
+  one table: MACHINE, SESSION, STATE, USER@HOST, WORKTREE, BRANCH, ELAPSED,
+  CPU and MEM (bar plus used/reserved), COMMAND.
+
+Keys: ↑/↓ PgUp/PgDn select, Tab switches between the session and machine
+tables, Enter opens a detail view (Esc/q back, ↑/↓ the next row), `r`
+reverses, `+`/`-` zoom the graph window (1m..3h), `q` quits. Sessions sort
+by `e c m w n u` (elapsed, CPU, memory, worktree, machine, user@host),
+machines by `s c m d p a n` (state, CPU, memory, disk, price, age, name);
+pressing the key again reverses. The mouse selects a row; clicking the
+selected row opens it. The machine detail shows all fields, the lifecycle
+history, CPU/memory/pressure/disk graphs of the machine, its build slots,
+running and recent sessions and its cost today; the session detail shows
+command, client, worktree, branch, repository, labels, machine, placement
+(reason, wait), live CPU/memory graphs and, for finished sessions, exit
+code, usage, build slot and stall figures.
 `offshore top --once [--width N] [--window 10m]` prints one plain text
 frame without colors, for agents and scripts. Busy cores per session come
 from the session's cgroup CPU time between polls (`Status.Sessions[]

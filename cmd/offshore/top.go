@@ -60,7 +60,23 @@ func topCmd(args []string) error {
 	if *interval < 500*time.Millisecond {
 		*interval = 500 * time.Millisecond
 	}
-	return top.Run(fetchTop, seedTop, *interval)
+	var since time.Time
+	fetch := func(ctx context.Context) (top.Snapshot, error) {
+		s, err := fetchTop(ctx)
+		if err != nil {
+			return s, err
+		}
+		// Events since the previous poll: finished sessions, placements,
+		// machine lifecycle (the first poll leaves them to the seed).
+		if !since.IsZero() {
+			if evs, err := seedTop(ctx, since.Add(-5*time.Second)); err == nil { // overlap: History dedupes
+				s.Events = evs
+			}
+		}
+		since = s.Time
+		return s, nil
+	}
+	return top.Run(fetch, seedTop, *interval)
 }
 
 // fetchTop polls machines, queue and today's cost through the daemon.
