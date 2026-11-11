@@ -169,3 +169,23 @@ func TestMachineCacheColumns(t *testing.T) {
 		t.Errorf("narrow frame:\n%s", out)
 	}
 }
+
+// Graphs count only active machines: a stopped machine adds no capacity,
+// and two samples of one machine in a bucket count once.
+func TestGraphsOnlyActiveMachines(t *testing.T) {
+	h := NewHistory(0)
+	h.Add(fakeSnapshot(100, now))
+	if p := h.Pool[len(h.Pool)-1]; p.CapCPU != 32 || p.CapMem != 64*gib || p.CostPerHour != 1.5 {
+		t.Fatalf("live point counts stopped machines: %+v", p)
+	}
+	h2 := NewHistory(0)
+	c := &scheduler.Resources{CPU: 16, Memory: 30 * gib}
+	h2.Seed([]events.Event{
+		{Type: events.MachineSample, Time: now.Add(-60 * time.Second), Machine: "a", Capacity: c, Price: 1},
+		{Type: events.MachineSample, Time: now.Add(-52 * time.Second), Machine: "a", Capacity: c, Price: 1},
+		{Type: events.MachineSample, Time: now.Add(-55 * time.Second), Machine: "b", Capacity: c, Price: 1},
+	})
+	if len(h2.Pool) != 1 || h2.Pool[0].CapMem != 60*gib || h2.Pool[0].CostPerHour != 2 {
+		t.Fatalf("seeded %+v", h2.Pool)
+	}
+}

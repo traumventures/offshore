@@ -105,17 +105,31 @@ func (h *History) Add(s Snapshot) {
 // events.SampleInterval per running machine). Snapshots added later
 // continue it. The queue is not sampled and stays 0 in seeded points.
 func (h *History) Seed(evs []events.Event) {
-	buckets := map[int64]*Point{}
-	seeded := map[string][]MPoint{}
+	// One sample per machine and bucket (the last): samples are taken
+	// about every SampleInterval, so two can fall into one bucket and
+	// would count the machine's capacity twice.
+	type key struct {
+		t  int64
+		id string
+	}
+	last := map[key]events.Event{}
 	for _, ev := range evs {
 		if ev.Type != events.MachineSample {
 			continue
 		}
-		t := ev.Time.Truncate(events.SampleInterval)
-		b := buckets[t.Unix()]
+		k := key{ev.Time.Truncate(events.SampleInterval).Unix(), ev.Machine}
+		if old, ok := last[k]; !ok || !ev.Time.Before(old.Time) {
+			last[k] = ev
+		}
+	}
+	buckets := map[int64]*Point{}
+	seeded := map[string][]MPoint{}
+	for k, ev := range last {
+		t := time.Unix(k.t, 0)
+		b := buckets[k.t]
 		if b == nil {
 			b = &Point{T: t}
-			buckets[t.Unix()] = b
+			buckets[k.t] = b
 		}
 		mp := MPoint{T: t}
 		if ev.Capacity != nil {

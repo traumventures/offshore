@@ -305,6 +305,7 @@ type Orchestrator struct {
 	recentEnvs map[string]time.Time      // env hash -> last use (warm pool)
 	images     map[string]string         // env hash -> image
 	removed    []*Machine                // destroyed machines (cost history)
+	seedUptime map[string]*Machine       // uptime replayed at start, merged on first listing
 	services   map[string][]provider.Service
 	changed    chan struct{}
 	// meter measures medium profiles from the workers' tier counters
@@ -391,6 +392,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 	o.loadVolumes()
 	o.metrics = newOrchMetrics(o)
 	o.obs = newObserver(stateDir, cfg.EventRetention)
+	o.loadUptime()
 	o.loadRecent()
 	return o, nil
 }
@@ -552,6 +554,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		m, ok := o.machines[pm.ID]
 		if !ok {
 			m = &Machine{Provider: tm.prov, pending: map[string]pendingLease{}}
+			o.mergeUptimeLocked(m, pm.ID, pm.State)
 			o.machines[pm.ID] = m
 		}
 		if listedAt.Before(m.listed) {
@@ -600,6 +603,9 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 			o.removeLocked(id)
 			down = append(down, id)
 		}
+	}
+	if o.seedUptime != nil {
+		o.settleUptimeLocked()
 	}
 	cb := o.OnMachineDown
 	o.mu.Unlock()
