@@ -71,9 +71,18 @@ func (s *Worker) startCompilerCache(ctx context.Context) {
 	s.log.Info("compiler cache", "endpoint", s.ccEndpoint, "dir", s.cfg.SccacheDir)
 }
 
+// sessionTmp is a session's temporary directory ($TMPDIR), removed when
+// the session ends. It lies below the cache directory: temporary files
+// (rustc, sccache, linkers) then live on the cache medium, which the disk
+// watermarks and the prune account for, not on the container's root file
+// system.
+func (s *Worker) sessionTmp(session string) string {
+	return filepath.Join(s.cfg.CacheDir, "tmp", session)
+}
+
 // sccacheDir is the private directory of a session's sccache server.
-func sccacheDir(session string) string {
-	return filepath.Join(os.TempDir(), "offshore-sccache-"+session)
+func (s *Worker) sccacheDir(session string) string {
+	return filepath.Join(s.sessionTmp(session), "sccache")
 }
 
 // compilerCacheEnv returns the session variables for the compiler cache
@@ -82,7 +91,7 @@ func sccacheDir(session string) string {
 func (s *Worker) compilerCacheEnv(req proto.Exec, session string, has func(string) bool) [][2]string {
 	var out [][2]string
 	if cc := req.GlobalCache(config.CacheToolSccache); cc != nil && s.ccEndpoint != "" {
-		dir := sccacheDir(session)
+		dir := s.sccacheDir(session)
 		if !has("RUSTC_WRAPPER") {
 			out = append(out, [2]string{"RUSTC_WRAPPER", "sccache"})
 		}
@@ -188,7 +197,7 @@ func parseSccacheJSON(b []byte) (map[string]int64, int64, error) {
 // sccacheStats reads the statistics of the session's sccache server and
 // stops it. It returns nil if the session never started one.
 func (s *Worker) sccacheStats(env []string, session string) map[string]int64 {
-	if !sccacheStarted(session) {
+	if !s.sccacheStarted(session) {
 		return nil
 	}
 	st, err := awaitSccacheWrites(env, sccacheWriteWait)
@@ -199,15 +208,15 @@ func (s *Worker) sccacheStats(env []string, session string) map[string]int64 {
 	return st
 }
 
-func sccacheStarted(session string) bool {
-	_, err := os.Stat(filepath.Join(sccacheDir(session), "server.sock"))
+func (s *Worker) sccacheStarted(session string) bool {
+	_, err := os.Stat(filepath.Join(s.sccacheDir(session), "server.sock"))
 	return err == nil
 }
 
 // stopSccache stops the session's sccache server (if any). Without
 // cgroups it might otherwise outlive the session.
-func stopSccache(env []string, session string) {
-	if sccacheStarted(session) {
+func (s *Worker) stopSccache(env []string, session string) {
+	if s.sccacheStarted(session) {
 		awaitSccacheWrites(env, sccacheWriteWait)
 		runSccache(env, "--stop-server")
 	}

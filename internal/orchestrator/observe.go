@@ -275,6 +275,13 @@ func (o *Orchestrator) Finish(ctx context.Context, leaseID, key string, u *sched
 		ev.TraceID = tid
 	}
 	o.obs.log.Append(ev)
+	if usage.OOM || usage.Killer == "worker_shutdown" {
+		k := ev
+		k.Type, k.Predicted = events.TaskKilled, nil
+		o.obs.log.Append(k)
+		o.log.Warn("session killed", "task", leaseID, "key", ev.Key, "machine", ev.Machine, "killer", usage.Killer,
+			"oom", usage.OOM, "peak_memory", usage.PeakMemory, "reserve_memory", ev.Reserve)
+	}
 }
 
 // thrashUsage derives the session's thrash time from its refaulted bytes

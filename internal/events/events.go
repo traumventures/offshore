@@ -38,6 +38,11 @@ const (
 	// TaskWaiting: a queued request is still waiting (every
 	// WaitingInterval): what for (Waiting) and the reason.
 	TaskWaiting = "task_waiting"
+	// TaskKilled: a session was killed by the machine rather than ending
+	// on its own (Usage.Killer: cgroup_oom, machine_oom, worker_shutdown;
+	// Usage.OOM for memory), written next to its task_end so OOM kills
+	// and machine stops under running sessions are easy to find.
+	TaskKilled = "task_killed"
 	// SessionSample: a running session's cgroup, sampled by the worker
 	// every 5 s (Sample; Task, Machine, Repo, Key, Labels).
 	SessionSample = "session_sample"

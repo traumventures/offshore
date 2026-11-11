@@ -12,10 +12,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/traumventures/offshore/internal/orchestrator"
@@ -74,7 +76,7 @@ func (r *Remote) call(ctx context.Context, path string, body io.Reader, contentT
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	resp, err := r.http.Do(req)
+	resp, err := r.do(ctx, req, progress)
 	if err != nil {
 		return fmt.Errorf("control plane: %w", err)
 	}
@@ -108,6 +110,73 @@ func (r *Remote) call(ctx context.Context, path string, body io.Reader, contentT
 		return fmt.Errorf("control plane: %w", err)
 	}
 	return errors.New("control plane closed the connection")
+}
+
+// ControlPlaneWait bounds how long a request waits for an unreachable
+// control plane (connection refused while it restarts, a proxy answering
+// 502/503) before it fails.
+var ControlPlaneWait = 60 * time.Second
+
+// do sends req, retrying with backoff while the control plane cannot be
+// reached at all (nothing of the request was processed) for up to
+// ControlPlaneWait. Requests whose body cannot be replayed are sent once.
+func (r *Remote) do(ctx context.Context, req *http.Request, progress io.Writer) (*http.Response, error) {
+	replayable := req.Body == nil || req.Body == http.NoBody || req.GetBody != nil
+	var start time.Time
+	backoff := 500 * time.Millisecond
+	for {
+		resp, err := r.http.Do(req)
+		retry := false
+		var why string
+		switch {
+		case err != nil:
+			retry, why = unreachable(err), err.Error()
+		case resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable:
+			retry, why = true, resp.Status
+		}
+		if !retry || !replayable || ctx.Err() != nil {
+			return resp, err
+		}
+		if start.IsZero() {
+			start = time.Now()
+			if progress == nil {
+				progress = os.Stderr
+			}
+			fmt.Fprintf(progress, "offshore: control plane unreachable (%s), waiting up to %s for it\n", why, ControlPlaneWait)
+		}
+		if time.Since(start)+backoff > ControlPlaneWait {
+			if err == nil {
+				return resp, nil
+			}
+			return nil, fmt.Errorf("unreachable for %s: %w", ControlPlaneWait, err)
+		}
+		if resp != nil {
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+		}
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		backoff = min(backoff*2, 5*time.Second)
+		if req.GetBody != nil {
+			b, gerr := req.GetBody()
+			if gerr != nil {
+				return nil, gerr
+			}
+			req.Body = b
+		}
+	}
+}
+
+// unreachable reports a connection that failed before the control plane
+// saw the request (it is down or restarting).
+func unreachable(err error) bool {
+	var op *net.OpError
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) ||
+		(errors.As(err, &op) && op.Op == "dial")
 }
 
 func (r *Remote) callJSON(ctx context.Context, path string, in any, progress io.Writer, out any) error {

@@ -9,11 +9,10 @@ import (
 	"time"
 
 	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 func TestRetryable(t *testing.T) {
-	gone := func() bool { return false }
-	alive := func() bool { return true }
 	state := func(f func(*attemptState)) *attemptState {
 		st := &attemptState{}
 		st.started.Store(true)
@@ -27,32 +26,23 @@ func TestRetryable(t *testing.T) {
 		st       *attemptState
 		attempt  int
 		disabled bool
-		probe    func() bool
 		want     bool
 	}{
-		{"lost while running", state(nil), 1, false, gone, true},
-		{"second loss", state(nil), 2, false, gone, false},
-		{"disabled", state(nil), 1, true, gone, false},
-		{"machine still answers", state(nil), 1, false, alive, false},
-		{"not started", &attemptState{}, 1, false, gone, false},
-		{"write-back begun", state(func(s *attemptState) { s.writeback.Store(true) }), 1, false, gone, false},
-		{"stdin consumed", state(func(s *attemptState) { s.stdinUsed.Store(true) }), 1, false, gone, false},
-		{"interrupted", state(func(s *attemptState) { s.interrupted.Store(true) }), 1, false, gone, false},
+		{"lost while running", state(nil), 1, false, true},
+		{"second loss", state(nil), 2, false, false},
+		{"disabled", state(nil), 1, true, false},
+		{"not started", &attemptState{}, 1, false, false},
+		{"write-back begun", state(func(s *attemptState) { s.writeback.Store(true) }), 1, false, false},
+		{"stdin consumed", state(func(s *attemptState) { s.stdinUsed.Store(true) }), 1, false, false},
+		{"interrupted", state(func(s *attemptState) { s.interrupted.Store(true) }), 1, false, false},
 	}
 	for _, c := range cases {
-		probed := false
-		probe := func() bool { probed = true; return c.probe() }
-		got, why := retryable(c.st, c.attempt, c.disabled, probe)
+		got, why := retryable(c.st, c.attempt, c.disabled)
 		if got != c.want {
 			t.Errorf("%s: %v (%s), want %v", c.name, got, why, c.want)
 		}
 		if !got && why == "" {
 			t.Errorf("%s: no reason given", c.name)
-		}
-		// The probe (a network dial) only runs when nothing else rules a
-		// retry out.
-		if probed && c.name != "lost while running" && c.name != "machine still answers" {
-			t.Errorf("%s: probed needlessly", c.name)
 		}
 	}
 }
@@ -132,7 +122,7 @@ func TestStreamRecordsStdinUse(t *testing.T) {
 	if !st.stdinUsed.Load() {
 		t.Fatal("stdin use not recorded")
 	}
-	if ok, _ := retryable(st, 1, false, func() bool { return false }); ok {
+	if ok, _ := retryable(st, 1, false); ok {
 		t.Fatal("retry after consumed stdin")
 	}
 }
@@ -142,5 +132,30 @@ func TestMachineLostError(t *testing.T) {
 	err := error(&machineLost{machine: "m1", err: base})
 	if !errors.Is(err, base) || err.Error() != "remote session: connection to machine m1 lost: timeout: no recent network activity" {
 		t.Fatalf("%v", err)
+	}
+}
+
+// OOM kills and worker shutdowns under a running command are retried;
+// other failures and normal exits are not.
+func TestKilledByMachine(t *testing.T) {
+	cases := []struct {
+		code int
+		u    scheduler.Usage
+		want bool
+	}{
+		{137, scheduler.Usage{OOM: true, Killer: "cgroup_oom"}, true},
+		{101, scheduler.Usage{OOM: true, Killer: "cgroup_oom"}, true}, // rustc killed, cargo reports 101
+		{137, scheduler.Usage{Signal: 9, Killer: "worker_shutdown"}, true},
+		{130, scheduler.Usage{Signal: 2, Killer: "client_signal"}, false},
+		{101, scheduler.Usage{}, false},
+		{0, scheduler.Usage{OOM: true}, false},
+	}
+	for _, c := range cases {
+		if got := killedByMachine(c.code, c.u); got != c.want {
+			t.Errorf("%d %+v: %v, want %v", c.code, c.u, got, c.want)
+		}
+	}
+	if s := (&sessionKilled{machine: "m1", oom: true, peak: 3 << 30}).Error(); s != "killed by OOM on shared machine m1 (peak 3.0 GiB)" {
+		t.Errorf("%q", s)
 	}
 }

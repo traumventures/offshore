@@ -213,6 +213,12 @@ type Machine struct {
 	observed bool
 	price    float64 // hourly price recorded at creation or in its events (0: unknown)
 	pending  map[string]pendingLease
+	// stopping: a stop or destroy passed its last check and is under way;
+	// the machine is not undrained any more.
+	stopping bool
+	// undrains counts undrain decisions (a stop that began before one is
+	// cancelled).
+	undrains int
 	// listed is when the provider view in Machine was taken (the start of
 	// the listing) or last changed locally. Older listings are stale: a
 	// slow readiness poll must not overwrite a newer state or expiry.
@@ -1186,8 +1192,9 @@ func (o *Orchestrator) markLocked(acts []scheduler.Action) {
 				m.Draining = true
 			}
 		case scheduler.Undrain:
-			if m, ok := o.machines[a.Machine]; ok {
+			if m, ok := o.machines[a.Machine]; ok && !m.stopping {
 				m.Draining = false
+				m.undrains++
 			}
 		}
 	}
@@ -1247,8 +1254,53 @@ func (o *Orchestrator) execute(ctx context.Context, acts []scheduler.Action, wai
 	}
 }
 
+// commitDown decides, after the slots were saved (which takes minutes),
+// whether a stop or destroy still proceeds: a machine that was undrained
+// meanwhile or got a lease (a session placed on it) keeps running, since
+// stopping it would kill those sessions. Otherwise it is marked stopping
+// and is not undrained any more.
+func (o *Orchestrator) commitDown(id, what, reason string, undrains int) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	m, ok := o.machines[id]
+	if !ok {
+		return true
+	}
+	if m.undrains != undrains || len(m.pending) > 0 {
+		o.log.Warn(what+" of machine cancelled: it took work while its slots were saved", "id", id, "reason", reason,
+			"undrained", m.undrains != undrains, "leases", len(m.pending))
+		m.Draining = false
+		o.refreshed = time.Time{}
+		o.notify()
+		return false
+	}
+	m.stopping = true
+	return true
+}
+
+// undrainsOf returns the machine's undrain count (see commitDown).
+func (o *Orchestrator) undrainsOf(id string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if m, ok := o.machines[id]; ok {
+		return m.undrains
+	}
+	return 0
+}
+
 func (o *Orchestrator) stopMachine(ctx context.Context, id, reason string) {
+	u := o.undrainsOf(id)
 	o.saveBeforeStop(ctx, id, "stop: "+reason)
+	if !o.commitDown(id, "stop", reason, u) {
+		return
+	}
+	defer func() {
+		o.mu.Lock()
+		if m, ok := o.machines[id]; ok {
+			m.stopping = false
+		}
+		o.mu.Unlock()
+	}()
 	o.log.Info("stopping machine", "id", id, "reason", reason)
 	p, err := o.provOf(id)
 	if err != nil {
@@ -1268,7 +1320,11 @@ func (o *Orchestrator) stopMachine(ctx context.Context, id, reason string) {
 
 func (o *Orchestrator) destroyMachine(ctx context.Context, id, reason string) {
 	if reason != "failed" {
+		u := o.undrainsOf(id)
 		o.saveBeforeStop(ctx, id, "destroy: "+reason)
+		if !o.commitDown(id, "destroy", reason, u) {
+			return
+		}
 	}
 	o.log.Info("destroying machine", "id", id, "reason", reason)
 	p, err := o.provOf(id)

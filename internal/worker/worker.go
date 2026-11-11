@@ -70,6 +70,9 @@ type Config struct {
 	// long a slot stays idle before its commit, default 30s).
 	DirtyRatio  float64
 	DirtyExpire time.Duration
+	// SourceWait bounds how long a source file fault waits for the client
+	// to reconnect after its connection was lost (zero: 60s).
+	SourceWait time.Duration
 	// SourceCache bounds the fetched source contents: a share of the disk
 	// budget or a size ([scheduler] source_cache: OFFSHORE_SOURCE_CACHE;
 	// zero: config.DefaultSourceCache).
@@ -216,12 +219,15 @@ type Worker struct {
 	mounts   map[string]*anyfs.WritableFS // source projections by root
 	srcFiles *anyfs.Files                 // their faulted-in file contents
 	sources  map[string]*quic.Conn        // root -> client connection serving blobs
-	sessions map[string]*session
+	// sourceWake is closed (and replaced) whenever sources changes:
+	// faults waiting for a client to reconnect wake up.
+	sourceWake chan struct{}
+	sessions   map[string]*session
 	// cpuLast is the machine CPU time at cpuAt; Measured.CPU is the rate
 	// since then (cores busy), refreshed at most every cpuInterval.
 	cpuLast, cpuRate float64
 	cpuAt            time.Time
-	idleSince        time.Time
+	idleSince        time.Time // last status request (an orchestrator probe)
 	lastProbe        time.Time // last status request (an orchestrator probe)
 	ready            bool
 	draining         bool
@@ -284,7 +290,8 @@ func New(cfg Config, log *slog.Logger) (*Worker, error) {
 	s := &Worker{
 		cfg: cfg, log: log, store: store, slots: sl, self: self, env: env,
 		mounts: map[string]*anyfs.WritableFS{}, srcFiles: srcFiles, sources: map[string]*quic.Conn{},
-		sessions: map[string]*session{}, idleSince: cfg.now(), lastProbe: cfg.now(), cacheMedium: cacheMed,
+		sourceWake: make(chan struct{}),
+		sessions:   map[string]*session{}, idleSince: cfg.now(), lastProbe: cfg.now(), cacheMedium: cacheMed,
 	}
 	if s.cfs, err = newWorkerCacheFS(cfg, log, anyfs.RecordTransfers(&s.tiers, nil)); err != nil {
 		return nil, err
@@ -304,6 +311,8 @@ func (s *Worker) Run(parent context.Context) error {
 		s.cfs.unmount(r.Path) // mounts of a previous process are dead
 	}
 	s.recoverSnapshots(ctx) // sessions captured but not committed before a crash
+	// Temporary directories of sessions of a previous process.
+	os.RemoveAll(filepath.Join(s.cfg.CacheDir, "tmp"))
 	if n := s.slots.gc(s.cfg.BuildTTL); n > 0 {
 		s.log.Info("removed expired build slots", "count", n)
 	}
@@ -642,6 +651,8 @@ func (s *Worker) serveSync(ctx context.Context, conn *quic.Conn, pc *proto.Conn)
 	root := m.Root
 	s.mu.Lock()
 	s.sources[root] = conn
+	close(s.sourceWake)
+	s.sourceWake = make(chan struct{})
 	s.mu.Unlock()
 	if err := pc.Send(proto.TAck, proto.Ack{Version: p.Version()}); err != nil {
 		return err
@@ -711,6 +722,12 @@ func deltaLayer(d manifest.Delta) []anyfs.Node {
 // it holds the content (e.g. written back from here), else from the
 // client serving the root. (Concurrent faults of one digest share a
 // fetch in anyfs.Files.)
+//
+// Network trouble does not fail the read at once: a blob stream that
+// makes no progress for blobStall is abandoned, a lost client connection
+// is waited for until the client reconnects and attaches the root again
+// (the daemon does so on its own), and the fetch is retried with backoff
+// for up to sourceWait. Only then does the build see an I/O error.
 func (s *Worker) fetchFile(ctx context.Context, root string, n *anyfs.Node, w io.Writer) error {
 	if s.store.Has(n.Digest) {
 		f, err := os.Open(s.store.Path(n.Digest))
@@ -720,43 +737,173 @@ func (s *Worker) fetchFile(ctx context.Context, root string, n *anyfs.Node, w io
 			return err
 		}
 	}
-	s.mu.Lock()
-	conn := s.sources[root]
-	s.mu.Unlock()
-	if conn == nil {
-		return errors.New("client not connected")
+	var waitStart time.Time
+	var lastErr error
+	backoff := 250 * time.Millisecond
+	for {
+		s.mu.Lock()
+		conn, wake := s.sources[root], s.sourceWake
+		s.mu.Unlock()
+		if conn == nil || conn.Context().Err() != nil {
+			if lastErr == nil {
+				lastErr = errors.New("client not connected")
+			}
+			if err := s.waitSource(ctx, root, wake, &waitStart, lastErr, nil); err != nil {
+				return err
+			}
+			continue
+		}
+		written, err := s.fetchOnce(ctx, conn, root, n, w)
+		if err == nil {
+			return nil
+		}
+		var be *blobError
+		if errors.As(err, &be) || ctx.Err() != nil {
+			return err // the client answered, or the caller gave up
+		}
+		lastErr = err
+		var pause <-chan time.Time
+		if conn.Context().Err() == nil {
+			// The connection looks alive but the stream failed or
+			// stalled: try again shortly (or on a new connection).
+			pause = time.After(backoff)
+			backoff = min(backoff*2, 5*time.Second)
+		}
+		if werr := s.waitSource(ctx, root, wake, &waitStart, err, pause); werr != nil {
+			return werr
+		}
+		if written > 0 {
+			// Part of the content reached w: anyfs restarts the fault.
+			return fmt.Errorf("%w: %v", anyfs.ErrRetryFetch, err)
+		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+}
+
+// blobStall is how long a blob transfer may make no progress before it is
+// abandoned and retried.
+var blobStall = 20 * time.Second
+
+// sourceWait bounds how long a source fault keeps retrying after the
+// client became unreachable.
+func (s *Worker) sourceWait() time.Duration {
+	if s.cfg.SourceWait > 0 {
+		return s.cfg.SourceWait
+	}
+	return 60 * time.Second
+}
+
+// waitSource blocks until the sources change (a client attached a root
+// again), pause fires (nil: none), or the trouble that began at *start
+// outlasts sourceWait.
+func (s *Worker) waitSource(ctx context.Context, root string, wake <-chan struct{}, start *time.Time, cause error, pause <-chan time.Time) error {
+	if start.IsZero() {
+		*start = time.Now()
+		s.log.Warn("source client unreachable, retrying", "root", root, "wait", s.sourceWait(), "err", cause)
+	}
+	left := s.sourceWait() - time.Since(*start)
+	fail := fmt.Errorf("source client for %s unreachable for %s: %w", root, s.sourceWait(), cause)
+	if left <= 0 {
+		s.log.Warn("source fetch failed", "root", root, "err", fail)
+		return fail
+	}
+	t := time.NewTimer(left)
+	defer t.Stop()
+	select {
+	case <-wake:
+		return nil
+	case <-pause:
+		return nil
+	case <-t.C:
+		s.log.Warn("source fetch failed", "root", root, "err", fail)
+		return fail
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// blobError is an error the client reported for a blob request (not a
+// transport failure).
+type blobError struct{ msg string }
+
+func (e *blobError) Error() string { return e.msg }
+
+// errBlobStall reports a blob stream without progress for blobStall.
+var errBlobStall = errors.New("blob transfer stalled")
+
+// fetchOnce fetches a file over conn and reports how many bytes reached w.
+// The stream is abandoned when no data arrives for blobStall.
+func (s *Worker) fetchOnce(ctx context.Context, conn *quic.Conn, root string, n *anyfs.Node, w io.Writer) (int64, error) {
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	st, pc, err := transport.OpenStream(ctx, conn, "", proto.KindBlob)
+	octx, ocancel := context.WithTimeout(ctx, blobStall)
+	st, pc, err := transport.OpenStream(octx, conn, "", proto.KindBlob)
+	ocancel()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer st.Close()
-	if err := pc.Send(proto.TBlobReq, proto.BlobReq{Root: root, Path: n.Path, Hash: n.Digest}); err != nil {
+	// Progress watchdog: every frame read extends the deadline.
+	var progress atomic.Int64
+	progress.Store(time.Now().UnixNano())
+	stalled := atomic.Bool{}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		t := time.NewTicker(blobStall / 4)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				st.CancelRead(1)
+				st.CancelWrite(1)
+				return
+			case <-t.C:
+				if time.Since(time.Unix(0, progress.Load())) > blobStall {
+					stalled.Store(true)
+					st.CancelRead(1)
+					st.CancelWrite(1)
+					return
+				}
+			}
+		}
+	}()
+	wrap := func(err error) error {
+		if err != nil && stalled.Load() {
+			return fmt.Errorf("%w (%s without data): %v", errBlobStall, blobStall, err)
+		}
 		return err
+	}
+	if err := pc.Send(proto.TBlobReq, proto.BlobReq{Root: root, Path: n.Path, Hash: n.Digest}); err != nil {
+		return 0, wrap(err)
 	}
 	var resp proto.BlobResp
 	if err := pc.Expect(proto.TBlobResp, &resp); err != nil {
-		return err
+		return 0, wrap(err)
 	}
+	progress.Store(time.Now().UnixNano())
 	if resp.Err != "" {
-		return errors.New(resp.Err)
+		return 0, &blobError{resp.Err}
 	}
-	cw := &countingWriter{w: w}
+	cw := &countingWriter{w: w, progress: &progress}
 	err = pc.ReadData(cw)
 	s.countBytes(float64(cw.n), transferFetch)
-	return err
+	return cw.n, wrap(err)
 }
 
 type countingWriter struct {
-	w io.Writer
-	n int64
+	w        io.Writer
+	n        int64
+	progress *atomic.Int64 // last write (unix nanoseconds); nil: none
 }
 
 func (c *countingWriter) Write(p []byte) (int, error) {
 	k, err := c.w.Write(p)
 	c.n += int64(k)
+	if c.progress != nil {
+		c.progress.Store(time.Now().UnixNano())
+	}
 	return k, err
 }
 

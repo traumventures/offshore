@@ -261,8 +261,12 @@ fails.
   downloaded once on the client into the user cache directory,
   `OFFSHORE_TOOL_CACHE` overrides) is added to the environment image.
   Each session gets its own sccache server on a unix socket inside the
-  session sandbox (`SCCACHE_SERVER_UDS`, `SCCACHE_DIR` in a private
-  temporary directory); `RUSTC_WRAPPER` is set unless the user set it. The
+  session sandbox (`SCCACHE_SERVER_UDS`, `SCCACHE_DIR` in the session's
+  temporary directory); `RUSTC_WRAPPER` is set unless the user set it.
+  Every session's `$TMPDIR` is `<cache dir>/tmp/<session>` on the cache
+  medium (not the container's `/tmp` on the machine's root disk), so
+  temporary files of rustc, sccache and linkers count in the disk
+  watermarks; it is removed when the session ends and at worker start. The
   backend is WebDAV (`SCCACHE_WEBDAV_ENDPOINT`) served by the worker on
   `127.0.0.1` (`internal/blobcache`) from `<deps dir>/sccache`
   (`OFFSHORE_SCCACHE_DIR`) backed by the store.

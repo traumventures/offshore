@@ -28,12 +28,15 @@ type machineConn struct {
 	token string // session token of the newest lease on this machine
 	conn  *quic.Conn
 	roots map[string]*rootSync
+	// closed: the connection was closed on purpose (no reconnect).
+	closed bool
 }
 
 // rootSync streams one root's manifest to one machine.
 type rootSync struct {
-	mc   *machineConn
-	root *root
+	mc          *machineConn
+	root        *root
+	workerLocal []string
 
 	mu      sync.Mutex
 	queue   []manifest.Delta
@@ -118,12 +121,71 @@ func (mc *machineConn) ensureConn(ctx context.Context) error {
 	}
 	mc.conn = conn
 	go mc.serveBlobs(conn)
+	go mc.watch(conn)
 	return nil
+}
+
+// reconnectWindow bounds how long a lost machine connection is redialed:
+// a session on the machine blocks its source reads for a while (the
+// worker's source wait) and resumes once the roots are attached again.
+var reconnectWindow = 2 * time.Minute
+
+// watch re-establishes the connection and re-attaches the roots that were
+// attached when conn broke (a network interruption): file faults of
+// running sessions wait for the source instead of failing.
+func (mc *machineConn) watch(conn *quic.Conn) {
+	<-conn.Context().Done()
+	mc.mu.Lock()
+	if mc.closed {
+		mc.mu.Unlock()
+		return
+	}
+	type att struct {
+		r  *root
+		wl []string
+	}
+	var roots []att
+	for _, rs := range mc.roots {
+		roots = append(roots, att{rs.root, rs.workerLocal})
+	}
+	mc.mu.Unlock()
+	if len(roots) == 0 {
+		return
+	}
+	cause := context.Cause(conn.Context())
+	mc.log.Warn("machine connection lost, reconnecting", "machine", mc.id, "err", cause)
+	deadline := time.Now().Add(reconnectWindow)
+	backoff := 500 * time.Millisecond
+	for time.Now().Before(deadline) {
+		mc.mu.Lock()
+		stop := mc.closed
+		mc.mu.Unlock()
+		if stop {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		var err error
+		for _, a := range roots {
+			if _, err = mc.attach(ctx, a.r, a.wl); err != nil {
+				break
+			}
+		}
+		cancel()
+		if err == nil {
+			mc.log.Info("machine connection restored", "machine", mc.id, "roots", len(roots))
+			return
+		}
+		mc.log.Debug("reconnect failed", "machine", mc.id, "err", err)
+		time.Sleep(backoff)
+		backoff = min(backoff*2, 10*time.Second)
+	}
+	mc.log.Warn("machine connection not restored", "machine", mc.id, "window", reconnectWindow)
 }
 
 func (mc *machineConn) close() {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
+	mc.closed = true
 	for _, rs := range mc.roots {
 		rs.stop(errors.New("closed"))
 	}
@@ -167,7 +229,7 @@ func (mc *machineConn) attach(ctx context.Context, r *root, workerLocal []string
 		delete(mc.roots, r.path)
 	}
 	conn, token := mc.conn, mc.token
-	rs := &rootSync{mc: mc, root: r, wake: make(chan struct{}, 1), ackCh: make(chan struct{})}
+	rs := &rootSync{mc: mc, root: r, workerLocal: workerLocal, wake: make(chan struct{}, 1), ackCh: make(chan struct{})}
 	mc.roots[r.path] = rs
 	mc.mu.Unlock()
 

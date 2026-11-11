@@ -24,6 +24,7 @@ import (
 	"github.com/traumventures/offshore/internal/events"
 	"github.com/traumventures/offshore/internal/labels"
 	"github.com/traumventures/offshore/internal/proto"
+	"github.com/traumventures/offshore/internal/scheduler"
 	"github.com/traumventures/offshore/internal/tracing"
 	"github.com/traumventures/offshore/internal/transport"
 	"go.opentelemetry.io/otel/attribute"
@@ -186,19 +187,41 @@ type session struct {
 func runRemote(parent context.Context, repo *config.Repo, profile config.Tool, tool string, args []string, cwd string, rec *events.Run, opt remoteRun) (int, error) {
 	for attempt := 1; ; attempt++ {
 		st := &attemptState{}
+		st.retried.Store(attempt > 1)
 		code, err := runAttempt(parent, repo, profile, tool, args, cwd, rec, opt, st)
+		var killed *sessionKilled
+		if errors.As(err, &killed) {
+			// The attempt's write-back was not applied: running it again
+			// is safe. Its usage was reported, so the next placement
+			// reserves more memory after an OOM kill.
+			if ok, why := retryable(st, attempt, os.Getenv("OFFSHORE_NO_RETRY") != ""); !ok {
+				warn("%v (not retried: %s)", killed, why)
+				return code, nil
+			}
+			warn("%v, retrying", killed)
+			rec.Error = ""
+			continue
+		}
 		var lost *machineLost
 		if !errors.As(err, &lost) {
 			return code, err
 		}
-		ok, why := retryable(st, attempt, os.Getenv("OFFSHORE_NO_RETRY") != "", lost.probe)
+		ok, why := retryable(st, attempt, os.Getenv("OFFSHORE_NO_RETRY") != "")
 		if !ok {
 			rec.Error = lost.Error() + " (not retried: " + why + ")"
 			daemon.Call(context.Background(), daemon.Request{Op: "record", Run: rec}, nil)
 			return code, lost
 		}
-		warn("machine %s was lost while the command ran (%v); nothing was written back, running it again on another machine", lost.machine, lost.err)
+		// A machine that answers again lost the connection to a network
+		// interruption; its session ended with the connection. Either
+		// way nothing was written back, so the command runs again.
+		if lost.probe != nil && lost.probe() {
+			warn("the connection to machine %s broke while the command ran (%v); nothing was written back, running it again", lost.machine, lost.err)
+		} else {
+			warn("machine %s was lost while the command ran (%v); nothing was written back, running it again on another machine", lost.machine, lost.err)
+		}
 		rec.LostMachine = lost.machine
+		rec.Error = ""
 	}
 }
 
@@ -209,6 +232,7 @@ type attemptState struct {
 	writeback   atomic.Bool // the write-back phase began
 	stdinUsed   atomic.Bool // local stdin bytes were forwarded (cannot be replayed)
 	interrupted atomic.Bool // the user signalled the command
+	retried     atomic.Bool // this is the second attempt
 }
 
 // machineLost is a session that ended without an exit status because the
@@ -216,8 +240,8 @@ type attemptState struct {
 type machineLost struct {
 	machine string
 	err     error
-	// probe reports whether the machine still answers (then the session
-	// failed for another reason and is not retried).
+	// probe reports whether the machine answers again (a network
+	// interruption rather than a lost machine; only for the message).
 	probe func() bool
 }
 
@@ -227,11 +251,33 @@ func (m *machineLost) Error() string {
 
 func (m *machineLost) Unwrap() error { return m.err }
 
+// sessionKilled is a session the machine killed: an OOM kill (the
+// machine is shared, neighbours may have taken the memory) or the worker
+// stopping under it. The attempt applied nothing locally.
+type sessionKilled struct {
+	machine string
+	oom     bool
+	peak    int64
+}
+
+func (k *sessionKilled) Error() string {
+	if k.oom {
+		return fmt.Sprintf("killed by OOM on shared machine %s (peak %.1f GiB)", k.machine, float64(k.peak)/(1<<30))
+	}
+	return fmt.Sprintf("killed: machine %s shut down under the command", k.machine)
+}
+
+// killedByMachine reports whether a session's end is a kill by its
+// machine that a retry elsewhere can fix.
+func killedByMachine(code int, u scheduler.Usage) bool {
+	return code != 0 && (u.OOM || u.Killer == "worker_shutdown")
+}
+
 // retryable decides whether a lost attempt runs again on another machine.
 // Write-back stays exactly-once: local files only change in the write-back
 // phase of the attempt that reported an exit status, so a lost attempt has
 // applied nothing, and an attempt whose write-back began is never repeated.
-func retryable(st *attemptState, attempt int, disabled bool, probe func() bool) (bool, string) {
+func retryable(st *attemptState, attempt int, disabled bool) (bool, string) {
 	switch {
 	case disabled:
 		return false, "OFFSHORE_NO_RETRY is set"
@@ -245,8 +291,6 @@ func retryable(st *attemptState, attempt int, disabled bool, probe func() bool) 
 		return false, "standard input was consumed and cannot be replayed"
 	case st.interrupted.Load():
 		return false, "the command was interrupted"
-	case probe != nil && probe():
-		return false, "the machine is still reachable"
 	}
 	return true, ""
 }
@@ -437,8 +481,7 @@ func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, 
 	if err != nil {
 		var perr *proto.Error
 		if !errors.As(err, &perr) {
-			// No exit status: the connection broke. Whether the machine
-			// is gone is probed only when a retry is otherwise possible.
+			// No exit status: the connection broke.
 			addr, fp := prep.Addr, prep.Fingerprint
 			return code, &machineLost{machine: prep.Machine, err: err, probe: func() bool { return machineAnswers(addr, fp) }}
 		}
@@ -448,6 +491,12 @@ func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, 
 	usage.Cache = exit.Cache
 	release.Usage = &usage
 	rec.Usage, rec.Cache, rec.Warm = &usage, exit.Cache, usage.Warm
+	if killedByMachine(code, usage) {
+		if ok, _ := retryable(st, 1, os.Getenv("OFFSHORE_NO_RETRY") != ""); ok && !st.retried.Load() {
+			// Skip the write-back: the retry produces it.
+			return code, &sessionKilled{machine: prep.Machine, oom: usage.OOM, peak: usage.PeakMemory}
+		}
+	}
 	st.writeback.Store(true)
 	_, wspan := tracing.Start(ctx, "proxy.writeback")
 	touched, err := receiveWriteback(pc, repo)

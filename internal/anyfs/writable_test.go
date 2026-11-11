@@ -278,3 +278,35 @@ func BenchmarkTreeSourceApplySmallDelta(b *testing.B) {
 		ts.Apply([]Node{p.file("d001/f00001.rs", fmt.Sprint(i))}, false)
 	}
 }
+
+// A fetcher that broke midway and asks for a restart gets a clean start:
+// the partial content is discarded and the digest still verifies.
+func TestFilesEnsureWithRestartsFetch(t *testing.T) {
+	files, err := OpenFiles(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &peer{}
+	n := p.file("f", "hello world")
+	var calls atomic.Int64
+	flaky := func(ctx context.Context, n *Node, w io.Writer) error {
+		if calls.Add(1) == 1 {
+			w.Write([]byte("hel"))
+			return fmt.Errorf("%w: stream reset", ErrRetryFetch)
+		}
+		return p.fetch(ctx, n, w)
+	}
+	path, err := files.EnsureWith(ctx, &n, flaky)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "hello world" || calls.Load() != 2 {
+		t.Fatalf("content %q after %d fetches", b, calls.Load())
+	}
+	// Restarts are bounded.
+	m := p.file("g", "again")
+	always := func(context.Context, *Node, io.Writer) error { return ErrRetryFetch }
+	if _, err := files.EnsureWith(ctx, &m, always); !errors.Is(err, ErrRetryFetch) {
+		t.Fatalf("endless restarts: %v", err)
+	}
+}

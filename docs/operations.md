@@ -47,20 +47,47 @@ usual cause is a size without instance-store disk or volume on an image
 whose root file system is ext4. Fix it with `medium = "volume"` or an
 instance type with local NVMe (the supervisor formats both as xfs).
 
-## Machine loss
+## Machine loss and network interruptions
 
-If a session ends without an exit status because the
-connection to its machine broke (the machine stopped, was destroyed or became
-unreachable) and the machine does not answer a new connection, the proxy runs
-the command once more on another machine and prints one line saying so; the
-run log records `lost_machine`. Write-back stays exactly-once: local files
-only change in the write-back phase of the attempt that reported an exit
-status, so the lost attempt has applied nothing. There is no retry when the
-write-back had begun, standard input had been forwarded (it cannot be
+**Source link.** The daemon keeps one connection per machine that serves
+the source files the machine's file system faults in. When it breaks (a
+network interruption: `timeout: no recent network activity`), the daemon
+redials with backoff for up to two minutes and attaches the roots again; a
+failed attach of a new root no longer closes the connection that running
+sessions use. On the worker, a source read whose client is unreachable,
+or whose transfer makes no progress for 20 s, blocks and retries until the
+client is back, for at most 60 s from the first failure; only then does
+the build see an I/O error (`EIO`). The worker logs
+`source client unreachable, retrying` and `source fetch failed`.
+
+**Retry of the command.** If a session ends without an exit status because
+the connection to its machine broke (the machine stopped, was destroyed or
+the network failed), the proxy runs the command once more and prints one
+line saying so (`the connection to machine … broke` when the machine
+answers again, `machine … was lost` otherwise); the run log records
+`lost_machine`. A session the machine killed is retried the same way:
+an OOM kill (`killed by OOM on shared machine …, retrying`; its usage is
+reported first, so the estimator reserves more memory for the key on the
+next placement) or the worker stopping under it (`worker_shutdown`). The
+control plane writes a `task_killed` event next to the `task_end` of such
+sessions. Write-back stays exactly-once: local files only change in the
+write-back phase of the attempt that reported an exit status and is not
+retried, so a retried attempt has applied nothing. There is no retry when
+the write-back had begun, standard input had been forwarded (it cannot be
 replayed), the user signalled the command, the session had not started yet
-(that falls back as before), the worker reported an error, the machine still
-answers, after a second loss, or with `OFFSHORE_NO_RETRY=1`. Output the
-first attempt already printed stays on the terminal.
+(that falls back as before), the worker reported an error, after a second
+failure, or with `OFFSHORE_NO_RETRY=1`. Output the first attempt already
+printed stays on the terminal.
+
+**Control plane restarts.** Requests the control plane never received
+(connection refused, no route, a proxy answering 502/503) are retried
+with backoff for up to 60 s, with one line `control plane unreachable …,
+waiting`; then the run falls back or fails as before.
+
+**Machine stops.** A stop or destroy first saves the machine's changed
+build slots, which takes minutes. If the machine is undrained or a session
+is placed on it meanwhile, the stop is cancelled (control plane log: `stop
+of machine cancelled`); once committed the machine is not undrained.
 
 ## Metrics
 

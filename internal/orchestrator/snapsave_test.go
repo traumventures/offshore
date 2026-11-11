@@ -84,3 +84,39 @@ func TestSaveBeforeStopAndMove(t *testing.T) {
 		t.Fatalf("recorded snapshots %+v", snaps)
 	}
 }
+
+// A stop whose slot save overlapped a placement (the machine got a lease)
+// or an undrain is cancelled: stopping would kill the new sessions.
+func TestStopCancelledWhenMachineTookWork(t *testing.T) {
+	f := newFake()
+	o := newTestOrch(t, f, nil)
+	ctx := context.Background()
+	l, err := o.Acquire(ctx, req("r1"), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := l.MachineID
+	o.stopMachine(ctx, id, "idle") // the lease is still held
+	f.mu.Lock()
+	n := len(f.stopped)
+	f.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("machine with a lease stopped: %v", f.stopped)
+	}
+	o.Release(l.ID)
+	// An undrain between the start of the stop and its commit.
+	u := o.undrainsOf(id)
+	o.mu.Lock()
+	o.markLocked([]scheduler.Action{{Kind: scheduler.Undrain, Machine: id}})
+	o.mu.Unlock()
+	if o.commitDown(id, "stop", "idle", u) {
+		t.Fatal("stop committed after an undrain")
+	}
+	o.stopMachine(ctx, id, "idle")
+	f.mu.Lock()
+	n = len(f.stopped)
+	f.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("idle machine without leases not stopped: %v", f.stopped)
+	}
+}

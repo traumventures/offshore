@@ -42,18 +42,19 @@ func TestSessionEnvCompilerCache(t *testing.T) {
 	}
 	m := envMap(s.sessionEnv(req, "abc"))
 	want := map[string]string{
-		"RUSTC_WRAPPER":                            "sccache",
-		"SCCACHE_WEBDAV_ENDPOINT":                  "http://127.0.0.1:1234/",
-		"SCCACHE_WEBDAV_KEY_PREFIX":                "_ttl/3600",
-		"SCCACHE_SERVER_UDS":                       sccacheDir("abc") + "/server.sock",
-		"SCCACHE_DIR":                              sccacheDir("abc"),
-		"SCCACHE_IDLE_TIMEOUT":                     "0",
-		"CCACHE_REMOTE_STORAGE":                    "http://127.0.0.1:1234/ccache|layout=subdirs",
-		"CCACHE_DIR":                               "/cache/ccache",
-		"GOCACHEPROG":                              "/bin/cs gocacheprog /cache/gocache http://127.0.0.1:1234/_ttl/7200/",
+		"RUSTC_WRAPPER":             "sccache",
+		"SCCACHE_WEBDAV_ENDPOINT":   "http://127.0.0.1:1234/",
+		"SCCACHE_WEBDAV_KEY_PREFIX": "_ttl/3600",
+		"SCCACHE_SERVER_UDS":        s.sccacheDir("abc") + "/server.sock",
+		"SCCACHE_DIR":               s.sccacheDir("abc"),
+		"SCCACHE_IDLE_TIMEOUT":      "0",
+		"TMPDIR":                    "/cache/tmp/abc",
+		"CCACHE_REMOTE_STORAGE":     "http://127.0.0.1:1234/ccache|layout=subdirs",
+		"CCACHE_DIR":                "/cache/ccache",
+		"GOCACHEPROG":               "/bin/cs gocacheprog /cache/gocache http://127.0.0.1:1234/_ttl/7200/",
 		"CARGO_TARGET_" + hostTriple() + "_LINKER": "/usr/local/bin/offshore-cc-mold",
-		"RUSTFLAGS":                                "-Dwarnings", // untouched
-		"FOO":                                      "1",
+		"RUSTFLAGS": "-Dwarnings", // untouched
+		"FOO":       "1",
 	}
 	for k, v := range want {
 		if m[k] != v {

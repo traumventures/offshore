@@ -153,7 +153,7 @@ Started by providers and the worker, not by users:
 | `OFFSHORE_REQUIRE_REMOTE=1` | fail instead of falling back to local execution |
 | `OFFSHORE_STDIN=always\|never` | stdin forwarding policy |
 | `OFFSHORE_VERBOSE=1` | print the machine and cache statistics of each run |
-| `OFFSHORE_NO_RETRY=1` | no second attempt when the machine is lost mid-run |
+| `OFFSHORE_NO_RETRY=1` | no second attempt when the machine is lost or kills the command (OOM, shutdown) mid-run |
 | `OFFSHORE_SPLIT=0` | run split tests entirely remotely |
 | `OFFSHORE_PORTS=8080,3000:3001` | forward local ports into the session (replaces `[tool.X] ports`) |
 | `OFFSHORE_AGENT=NAME` | agent label of sessions (default: detected) |

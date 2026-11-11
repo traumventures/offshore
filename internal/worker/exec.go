@@ -285,12 +285,15 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	}()
 
 	env := s.sessionEnv(req, se.id)
+	if err := os.MkdirAll(s.sessionTmp(se.id), 0o1777); err != nil {
+		return prepErr(fmt.Errorf("session temporary directory: %w", err))
+	}
+	defer os.RemoveAll(s.sessionTmp(se.id))
 	sccache := req.GlobalCache(config.CacheToolSccache) != nil && s.ccEndpoint != ""
 	if sccache {
-		if err := os.MkdirAll(sccacheDir(se.id), 0o700); err != nil {
+		if err := os.MkdirAll(s.sccacheDir(se.id), 0o700); err != nil {
 			return prepErr(fmt.Errorf("compiler cache: %w", err))
 		}
-		defer os.RemoveAll(sccacheDir(se.id))
 	}
 	// Toolchain first: dependency caches ($CARGO_HOME/registry) nest in it.
 	binds := s.relocation(req).binds
@@ -423,7 +426,7 @@ loop:
 	if sccache {
 		// Before the kill: the session's sccache server runs in its cgroup.
 		if clientGone {
-			stopSccache(env, se.id)
+			s.stopSccache(env, se.id)
 		} else {
 			exit.Cache = s.sccacheStats(env, se.id)
 		}
@@ -555,6 +558,9 @@ func (s *Worker) sessionEnv(req proto.Exec, id string) []string {
 	for _, kv := range s.compilerCacheEnv(req, id, func(k string) bool { _, ok := m[k]; return ok }) {
 		set(kv[0], kv[1])
 	}
+	// Temporary files go to the session's directory on the cache medium
+	// (the client's $TMPDIR is meaningless here).
+	set("TMPDIR", s.sessionTmp(id))
 	set("PWD", req.Cwd)
 	set("OFFSHORE_ACTIVE", "1")
 	set("OFFSHORE_SESSION", id)

@@ -102,7 +102,7 @@ Environment:
   OFFSHORE_AGENT=NAME         agent label of sessions (default: detected, see docs/operations.md)
   OFFSHORE_LABELS=k=v,k=v     extra session labels (status, top, why, report --by)
   OFFSHORE_VERBOSE=1          print the machine used for each run
-  OFFSHORE_NO_RETRY=1         no second attempt when the machine is lost mid-run
+  OFFSHORE_NO_RETRY=1         no second attempt when the machine is lost or kills the command (OOM)
   OFFSHORE_SPLIT=0            run cargo test / nextest entirely remotely (no local test run)
   OFFSHORE_PORTS=8080,3000:3001  forward local ports into the session
   OFFSHORE_CONFIG=FILE        client configuration (default ~/.config/offshore/config.toml)

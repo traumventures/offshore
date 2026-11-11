@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -275,6 +276,14 @@ func (f *Files) Ensure(ctx context.Context, tier Tier, n *Node) (string, error) 
 // QUIC for the source projection).
 type FileFetcher func(ctx context.Context, n *Node, w io.Writer) error
 
+// ErrRetryFetch, wrapped in a FileFetcher's error, asks EnsureWith to
+// discard what the fetcher wrote and call it again (the transfer broke
+// midway and the source is available again).
+var ErrRetryFetch = errors.New("retry fetch")
+
+// maxFetchRestarts bounds the restarts after ErrRetryFetch.
+const maxFetchRestarts = 3
+
 // EnsureWith materializes a node's content with fetch (a page fault of
 // the whole file) and returns its path. The content is verified against
 // the node's digest; concurrent calls share one fetch.
@@ -289,16 +298,28 @@ func (f *Files) EnsureWith(ctx context.Context, n *Node, fetch FileFetcher) (str
 		if err != nil {
 			return err
 		}
-		h := blake3.New()
-		cw := &countWriter{w: io.MultiWriter(out, h)}
-		err = fetch(ctx, n, cw)
+		var cw *countWriter
+		for restart := 0; ; restart++ {
+			h := blake3.New()
+			cw = &countWriter{w: io.MultiWriter(out, h)}
+			err = fetch(ctx, n, cw)
+			if err != nil && errors.Is(err, ErrRetryFetch) && restart < maxFetchRestarts && ctx.Err() == nil {
+				if err = out.Truncate(0); err == nil {
+					_, err = out.Seek(0, io.SeekStart)
+				}
+				if err == nil {
+					continue
+				}
+			}
+			if err == nil {
+				if got := hex.EncodeToString(h.Sum(nil)); got != d {
+					err = fmt.Errorf("content of %s changed: want %s, got %s", n.Path, Key(d).Short(), Key(got).Short())
+				}
+			}
+			break
+		}
 		if cerr := out.Close(); err == nil {
 			err = cerr
-		}
-		if err == nil {
-			if got := hex.EncodeToString(h.Sum(nil)); got != d {
-				err = fmt.Errorf("content of %s changed: want %s, got %s", n.Path, Key(d).Short(), Key(got).Short())
-			}
 		}
 		if err != nil {
 			os.Remove(tmp)

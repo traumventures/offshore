@@ -622,12 +622,11 @@ func (d *Daemon) attachAll(ctx context.Context, lease orchestrator.Lease, repo *
 			wl = append(repo.SlotPaths(), repo.DigestPaths()...)
 		}
 		if _, err := mc.attach(actx, r, wl); err != nil {
-			mc.close()
-			d.mu.Lock()
-			if d.conns[lease.MachineID] == mc {
-				delete(d.conns, lease.MachineID)
-			}
-			d.mu.Unlock()
+			// The connection stays: roots of sessions already running
+			// on the machine keep being served, and a broken
+			// connection is re-established by machineConn.watch. The
+			// machine is closed only when the orchestrator reports it
+			// down (dropConn).
 			return fmt.Errorf("attach %s: %w", p, err)
 		}
 	}
