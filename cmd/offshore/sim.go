@@ -224,13 +224,14 @@ func simCmd(args []string) error {
 // printReports writes reports as a table.
 func printReports(w *os.File, rs []sim.Report) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "run\tjobs\tdone\tcost $\tmachine-h\tcreated\twait p50\twait p95\twait max\tturn p50\tturn p95\tcpu util\tmem util\tslowdown\tOOMs\twarm\tflaps\tthrashed\tpage-in\t")
+	fmt.Fprintln(tw, "run\tjobs\tdone\tcost $\tmachine-h\tcreated\twait p50\twait p95\twait max\tturn p50\tturn p95\tcpu util\tmem util\tslowdown\tOOMs\twarm\tflaps\tthrashed\tpage-in\tidle-h\tcold\tlate\tregret p95\t")
 	for _, r := range rs {
-		fmt.Fprintf(tw, "%s\t%d\t%d\t%.2f\t%.1f\t%d\t%s\t%s\t%s\t%s\t%s\t%.0f%%\t%.0f%%\t%.2f\t%d\t%.0f%%\t%d\t%d\t%s\t\n",
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%.2f\t%.1f\t%d\t%s\t%s\t%s\t%s\t%s\t%.0f%%\t%.0f%%\t%.2f\t%d\t%.0f%%\t%d\t%d\t%s\t%.1f\t%.0f%%\t%d\t%s\t\n",
 			r.Name, r.Jobs, r.Completed, r.Cost, r.MachineHours, r.Machines,
 			r.WaitP50.Round(time.Second), r.WaitP95.Round(time.Second), r.WaitMax.Round(time.Second),
 			r.TurnP50.Round(time.Second), r.TurnP95.Round(time.Second),
-			100*r.CPUUtil, 100*r.MemUtil, r.Slowdown, r.OOMs, 100*r.WarmRate, r.Flaps, r.Thrashed, gbytes(r.PageInBytes))
+			100*r.CPUUtil, 100*r.MemUtil, r.Slowdown, r.OOMs, 100*r.WarmRate, r.Flaps, r.Thrashed, gbytes(r.PageInBytes),
+			r.IdleHours, 100*r.ColdRate, r.Late, r.RegretP95.Round(time.Second))
 	}
 	tw.Flush()
 }

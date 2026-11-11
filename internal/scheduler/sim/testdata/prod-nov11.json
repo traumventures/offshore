@@ -1,0 +1,18 @@
+{"start": "2026-11-11T11:00:00Z", "end": 6987, "jobs": [
+{"at":2689.215,"repo":"","env":"","duration":267.146,"cpu":1.49,"memory":"0M","peak_memory":"11502M"},
+{"at":3578.386,"repo":"82bbd8a85d92b4f1009f","env":"0fdf835e82e6fb97250658c08228ae01dcc105a1211aaaf82c366fd583b07cc5","duration":133.766,"cpu":2.96,"memory":"4096M","peak_memory":"3986M","slot_bytes":"1890M"},
+{"at":4060.929,"repo":"82bbd8a85d92b4f1009f","env":"0fdf835e82e6fb97250658c08228ae01dcc105a1211aaaf82c366fd583b07cc5","duration":13.583,"cpu":0.05,"memory":"4096M","peak_memory":"144M","slot_bytes":"1890M"},
+{"at":4241.95,"repo":"936049f03c90b142f670","env":"153f92a1fb3876a55b080d476461963e2a5f9c8a52cb8b2b0546c7d1eec1d7ab","duration":162.928,"cpu":1.1,"memory":"4096M","peak_memory":"7245M","slot_bytes":"5078M","slot_growth":"622M"},
+{"at":4452.442,"repo":"936049f03c90b142f670","env":"153f92a1fb3876a55b080d476461963e2a5f9c8a52cb8b2b0546c7d1eec1d7ab","duration":7.222,"cpu":0.05,"memory":"10868M","peak_memory":"21M","slot_bytes":"0M"},
+{"at":4786.547,"repo":"936049f03c90b142f670","env":"0fdf835e82e6fb97250658c08228ae01dcc105a1211aaaf82c366fd583b07cc5","duration":111.81,"cpu":1.92,"memory":"14378M","peak_memory":"11520M","slot_bytes":"6550M","slot_growth":"1294M"},
+{"at":4899.988,"repo":"756a90c3dde0216d263c","env":"0fdf835e82e6fb97250658c08228ae01dcc105a1211aaaf82c366fd583b07cc5","duration":269.772,"cpu":2.69,"memory":"4096M","peak_memory":"6728M","slot_bytes":"8895M"},
+{"at":5005.062,"repo":"936049f03c90b142f670","env":"0fdf835e82e6fb97250658c08228ae01dcc105a1211aaaf82c366fd583b07cc5","duration":279.1,"cpu":2.76,"memory":"4096M","peak_memory":"10366M","slot_bytes":"14630M","slot_growth":"8080M"},
+{"at":5294.065,"repo":"936049f03c90b142f670","env":"0fdf835e82e6fb97250658c08228ae01dcc105a1211aaaf82c366fd583b07cc5","duration":353.603,"cpu":1.41,"memory":"4096M","peak_memory":"7837M","slot_bytes":"23917M","slot_growth":"9287M"},
+{"at":5354.409,"repo":"756a90c3dde0216d263c","env":"0fdf835e82e6fb97250658c08228ae01dcc105a1211aaaf82c366fd583b07cc5","duration":256.95,"cpu":1.7,"memory":"4096M","peak_memory":"8109M","slot_bytes":"8895M"},
+{"at":6043.203,"repo":"3fcfcaaf0a2be6a905af","env":"0fdf835e82e6fb97250658c08228ae01dcc105a1211aaaf82c366fd583b07cc5","duration":189.711,"cpu":2.79,"memory":"4096M","peak_memory":"7272M","slot_bytes":"2940M"},
+{"at":6313.181,"repo":"66d3c97485d939906ed9","env":"0fdf835e82e6fb97250658c08228ae01dcc105a1211aaaf82c366fd583b07cc5","duration":174.042,"cpu":2.15,"memory":"4096M","peak_memory":"6414M","slot_bytes":"2903M"},
+{"at":6458.966,"repo":"3fcfcaaf0a2be6a905af","env":"0fdf835e82e6fb97250658c08228ae01dcc105a1211aaaf82c366fd583b07cc5","duration":0.76,"cpu":0.09,"memory":"4096M","peak_memory":"31M","slot_bytes":"2940M"},
+{"at":6619.15,"repo":"66d3c97485d939906ed9","env":"0fdf835e82e6fb97250658c08228ae01dcc105a1211aaaf82c366fd583b07cc5","duration":221.81,"cpu":2.19,"memory":"4096M","peak_memory":"9625M","slot_bytes":"8629M","slot_growth":"5508M"},
+{"at":6791.038,"repo":"3fcfcaaf0a2be6a905af","env":"0fdf835e82e6fb97250658c08228ae01dcc105a1211aaaf82c366fd583b07cc5","duration":88.448,"cpu":1.89,"memory":"4096M","peak_memory":"3593M","slot_bytes":"1813M"},
+{"at":6976.762,"repo":"66d3c97485d939906ed9","env":"0fdf835e82e6fb97250658c08228ae01dcc105a1211aaaf82c366fd583b07cc5","duration":9.505,"cpu":0.05,"memory":"4096M","peak_memory":"23M","slot_bytes":"8629M"}
+]}

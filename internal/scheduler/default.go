@@ -24,6 +24,8 @@ const (
 	// placement, cheapest fitting size for the aggregate demand and no
 	// consolidation. Kept for comparison in the simulator.
 	VariantClassic = "classic"
+	// VariantNext is the option policy under evaluation (see options.go).
+	VariantNext = "next"
 )
 
 // Config tunes the default policy.
@@ -108,8 +110,11 @@ func (p Default) classic() bool { return p.Cfg.Variant == VariantClassic }
 
 // model reports whether the cost model decides (default variant).
 func (p Default) model() bool {
-	return p.Cfg.Variant == VariantDefault || p.Cfg.Variant == ""
+	return p.Cfg.Variant == VariantDefault || p.Cfg.Variant == "" || p.next()
 }
+
+// next reports whether the option policy decides (see options.go).
+func (p Default) next() bool { return p.Cfg.Variant == VariantNext }
 
 // Admissible capacity of a machine under overcommit.
 func (p Default) admissible(m Machine) Resources {

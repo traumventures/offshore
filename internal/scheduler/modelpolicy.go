@@ -24,7 +24,7 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 	}
 	assignable := false
 	for _, m := range f.Machines {
-		if !p.accepting(m, t.EnvHash, f.Now) || !p.Free(m).Fits(t.Request) {
+		if !p.accepting(m, t.EnvHash, f.Now) || !p.Free(m).Fits(t.Request) || !p.physical(f, m.Capacity, t) {
 			continue
 		}
 		for _, rc := range p.runChoices(f, m, t) {
@@ -37,9 +37,12 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 	if !assignable {
 		return Placement{Kind: Wait, Reason: "no machine with free capacity"}
 	}
-	// Waiting for a busy or starting machine of the environment.
+	// Waiting for a busy or starting machine of the environment, not
+	// longer than getting a machine would take (option policy).
+	active, per := poolCounts(f)
+	bound, bounded := p.hedgeBound(f, t, active, per, idleMachine(f))
 	for _, m := range f.Machines {
-		if m.EnvHash != t.EnvHash || m.Draining || !p.usable(m, f.Now) {
+		if m.EnvHash != t.EnvHash || m.Draining || !p.usable(m, f.Now) || !p.physical(f, m.Capacity, t) {
 			continue
 		}
 		if !(m.State == Starting || m.State == Running && !p.Free(m).Fits(t.Request)) {
@@ -53,6 +56,9 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 		if p.Cfg.QueueTimeout > 0 && f.Now.Sub(t.Since)+wait > p.Cfg.QueueTimeout*8/10 {
 			continue
 		}
+		if bounded && f.Now.Sub(t.Since)+wait > bound {
+			continue
+		}
 		mm := m
 		mm.Reserved = Resources{} // runs after the sessions it waits for
 		for _, rc := range p.runChoices(f, mm, t) {
@@ -60,7 +66,7 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 			consider(o, Placement{Kind: Wait, Machine: m.ID, Reason: fmt.Sprintf("waiting %s for %s on %s", wait.Round(time.Second), rc.reason, m.ID)})
 		}
 	}
-	pl := pls[p.pick(opts)]
+	pl := pls[p.choose(f, t.EnvHash, opts)]
 	if pl.Kind == Wait {
 		pl.Machine = ""
 	}
@@ -162,7 +168,7 @@ func (p Default) infWait() time.Duration {
 // machines and returns the total cost and time of the plan and whether
 // every task gets capacity within the queue timeout. New machines cost
 // their whole price from now until their last session ends plus tail.
-func (p Default) timeline(f Pool, ms []*tlMachine, tasks []Task, tail time.Duration) (cost float64, total time.Duration, feasible bool) {
+func (p Default) timeline(f Pool, ms []*tlMachine, tasks []Task, tail time.Duration, bounds map[string]time.Duration) (cost float64, total time.Duration, feasible bool) {
 	feasible = true
 	for _, tm := range ms {
 		tm.planned = 0
@@ -186,12 +192,17 @@ func (p Default) timeline(f Pool, ms []*tlMachine, tasks []Task, tail time.Durat
 		var bestAt time.Time
 		var bestRun time.Duration
 		for _, tm := range ms {
-			if !tm.m.Capacity.Scale(p.cfg().CPUOvercommit, p.cfg().MemoryOvercommit).Fits(t.Request) {
+			if !tm.m.Capacity.Scale(p.cfg().CPUOvercommit, p.cfg().MemoryOvercommit).Fits(t.Request) || !p.physical(f, tm.m.Capacity, t) {
 				continue
 			}
 			run := p.quickRun(f, tm, t)
 			at, ok := tm.earliest(t.Request, run)
 			if !ok {
+				continue
+			}
+			// Option policy: no waiting for existing capacity beyond the
+			// time a new machine takes (the hedge bound).
+			if b, ok := bounds[t.ID]; ok && !tm.created && f.Now.Sub(t.Since)+at.Sub(f.Now) > b {
 				continue
 			}
 			if bestTM == nil || at.Add(run).Before(bestAt.Add(bestRun)) {
@@ -269,6 +280,11 @@ func (p Default) scaleOutModel(st *planState, env string) {
 		tasks = tasks[:16]
 	}
 	tail := time.Duration(float64(c.IdleStop) * DefaultTail)
+	if p.next() {
+		// A started or created machine idles until idle_stop after its
+		// last session.
+		tail = c.IdleStop
+	}
 	var ms []*tlMachine
 	for _, m := range f.Machines {
 		if m.EnvHash != env || !p.usable(m, f.Now) || (m.State != Running && m.State != Starting) {
@@ -293,8 +309,14 @@ func (p Default) scaleOutModel(st *planState, env string) {
 		rv[m.ID] = Score(tasks[0].RepoID, m.ID)
 	}
 	sort.SliceStable(stopped, func(i, j int) bool { return rv[stopped[i].ID] > rv[stopped[j].ID] })
+	bounds := map[string]time.Duration{}
+	for _, t := range tasks {
+		if b, ok := p.hedgeBound(f, t, st.active, st.perProvider, p.freeSlotPossible(st, env)); ok {
+			bounds[t.ID] = b
+		}
+	}
 	for round := 0; round < min(len(tasks), 4); round++ {
-		cost, total, feasible := p.timeline(f, ms, tasks, tail)
+		cost, total, feasible := p.timeline(f, ms, tasks, tail, bounds)
 		var opts []option
 		var optC []*cand
 		if feasible {
@@ -302,7 +324,11 @@ func (p Default) scaleOutModel(st *planState, env string) {
 		}
 		var cands []cand
 		if st.active < c.MaxMachines || p.freeSlotPossible(st, env) {
-			for _, m := range stopped[:min(len(stopped), 3)] {
+			nstop := min(len(stopped), 3)
+			if p.next() {
+				nstop = len(stopped) // every stopped machine competes (price, latency, warm slots)
+			}
+			for _, m := range stopped[:nstop] {
 				tm := p.tlOf(f, m)
 				tm.m.State, tm.created, tm.price = Starting, true, priceOf(f, m)
 				tm.latency = p.startLatency(f, m.Provider)
@@ -336,14 +362,14 @@ func (p Default) scaleOutModel(st *planState, env string) {
 		}
 		for i := range cands {
 			cd := &cands[i]
-			cost, total, _ := p.timeline(f, append(ms, cd.tm), tasks, tail)
+			cost, total, _ := p.timeline(f, append(ms, cd.tm), tasks, tail, bounds)
 			if cd.tm.planned == 0 {
 				continue // takes none of the tasks
 			}
 			opts, optC = append(opts, option{cost: cost, time: total, tie: Score(env, cd.tm.m.ID)}), append(optC, cd)
 		}
 		var bestC *cand
-		if i := p.pick(opts); i >= 0 {
+		if i := p.choose(f, env, opts); i >= 0 {
 			bestC = optC[i]
 		}
 		if bestC == nil {

@@ -9,8 +9,12 @@ import (
 )
 
 // History is the default Estimator: it keeps the last observations per key
-// and reserves the p95 of the measured peak memory plus headroom. CPU is
-// the average number of busy cores, capped by the configured value.
+// and reserves the p90 of the measured peak memory plus headroom (a robust
+// quantile: one outlier among few runs does not inflate every later
+// reservation). Before MinSamples runs it reserves the fallback, raised to
+// the largest observed peak plus headroom (a key that needed 12G once must
+// not be packed with a 4G default). CPU is the average number of busy
+// cores, capped by the configured value.
 // Observations are persisted to a JSON file.
 type History struct {
 	Path       string  // persistence file; empty keeps history in memory
@@ -95,7 +99,13 @@ func (h *History) Estimate(key string, fallback Resources) Resources {
 		return Resources{CPU: fallback.CPU, Memory: int64(float64(base) * oomFactor)}
 	}
 	if len(rs) < minSamples {
-		return fallback
+		out := fallback
+		for _, u := range rs {
+			if m := int64(float64(u.PeakMemory) * (1 + headroom)); m > out.Memory {
+				out.Memory = m
+			}
+		}
+		return out
 	}
 	var peaks []int64
 	var cores []float64
@@ -110,8 +120,8 @@ func (h *History) Estimate(key string, fallback Resources) Resources {
 	out := fallback
 	if len(peaks) >= minSamples {
 		sort.Slice(peaks, func(i, j int) bool { return peaks[i] < peaks[j] })
-		p95 := peaks[int(math.Ceil(0.95*float64(len(peaks))))-1]
-		out.Memory = max(int64(float64(p95)*(1+headroom)), minMem)
+		p90 := peaks[int(math.Ceil(0.9*float64(len(peaks))))-1]
+		out.Memory = max(int64(float64(p90)*(1+headroom)), minMem)
 	}
 	if len(cores) >= minSamples && fallback.CPU > 0 {
 		sum := 0.0

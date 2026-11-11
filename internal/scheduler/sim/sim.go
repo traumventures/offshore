@@ -174,6 +174,8 @@ type Report struct {
 	Actions map[string]int `json:"actions"`
 	// Created counts machines created per size.
 	Created map[string]int `json:"created,omitempty"`
+	// HoursBy are the billed machine-hours per size.
+	HoursBy map[string]float64 `json:"hours_by,omitempty"`
 	// Thrashed counts builds whose working set exceeded their machine's
 	// local capacity; ThrashTime is the build time it added. PageInBytes
 	// are the bytes faulted in before builds proceeded (lazy restores and
@@ -190,7 +192,29 @@ type Report struct {
 	// thrashing builds (e.g. counts the thrash time twice), below 1 it
 	// underestimates them.
 	ThrashBias float64 `json:"thrash_bias,omitempty"`
+	// IdleHours are the machine-hours of running machines without a
+	// session (paid, unused).
+	IdleHours float64 `json:"idle_hours"`
+	// Cold counts builds that ran without a warm or restored slot;
+	// ColdRate is their share of all build starts.
+	Cold     int     `json:"cold"`
+	ColdRate float64 `json:"cold_rate"`
+	// Late counts jobs that waited longer than getting a machine would
+	// have taken when they arrived (the fastest start of a stopped machine
+	// of their environment, else the fastest create) plus LateMargin: the
+	// SLA of "never wait longer than the best start/create".
+	Late int `json:"late"`
+	// Regret is the hindsight latency regret of each job: its turnaround
+	// minus the best alternative at its arrival (start a stopped machine
+	// of its environment, warm when it held the slot, or create one and
+	// build cold), at least 0. RegretP95 and RegretSum summarise it.
+	RegretP95 time.Duration `json:"regret_p95"`
+	RegretSum time.Duration `json:"regret_sum"`
 }
+
+// LateMargin is the grace beyond the best provisioning latency before a
+// wait counts as Late.
+const LateMargin = 30 * time.Second
 
 type job struct {
 	Job
@@ -202,6 +226,10 @@ type job struct {
 	done     bool
 	swapped  bool
 	runFor   time.Duration
+	// bound is the fastest provisioning latency at arrival, alt the best
+	// alternative turnaround (Late, Regret); set on the first arrival.
+	bound, alt time.Duration
+	hasAlt     bool
 }
 
 type run struct {
@@ -294,7 +322,7 @@ func Run(trace Trace, o Options) Report {
 	s := &sim{o: o, now: trace.Start, recent: map[string]time.Time{}, fc: scheduler.NewForecast(),
 		snaps: map[string][]scheduler.Snapshot{}, calm: map[string]time.Time{}, cal: events.NewRefetch()}
 	s.start = trace.Start
-	s.r = Report{Name: o.Name, Jobs: len(trace.Jobs), Actions: map[string]int{}, Created: map[string]int{}}
+	s.r = Report{Name: o.Name, Jobs: len(trace.Jobs), Actions: map[string]int{}, Created: map[string]int{}, HoursBy: map[string]float64{}}
 	jobs := make([]*job, len(trace.Jobs))
 	last := 0.0
 	for i, tj := range trace.Jobs {
@@ -306,6 +334,7 @@ func Run(trace Trace, o Options) Report {
 	next := 0
 	tick := trace.Start
 	var waits, turns []time.Duration
+	var regrets []time.Duration
 	var predSum, actSum time.Duration // ThrashBias
 	var slow float64
 	for {
@@ -353,6 +382,15 @@ func Run(trace Trace, o Options) Report {
 					s.o.Debug(r.j.Job, r.j.wait)
 				}
 				turns = append(turns, s.now.Sub(r.j.arrival))
+				if r.j.hasAlt {
+					turn := s.now.Sub(r.j.arrival)
+					reg := max(turn-r.j.alt, 0)
+					regrets = append(regrets, reg)
+					s.r.RegretSum += reg
+					if r.j.wait > r.j.bound+LateMargin {
+						s.r.Late++
+					}
+				}
 				slow += r.j.runFor.Seconds() / math.Max(r.j.Duration, 1e-3)
 				if r.j.swapped {
 					s.r.Swapped++
@@ -400,6 +438,7 @@ func Run(trace Trace, o Options) Report {
 			next++
 			j.since = j.arrival
 			s.recent[j.Env] = s.now
+			s.alternative(j)
 			s.enqueue(j)
 		}
 		isTick := !tick.After(s.now)
@@ -420,6 +459,10 @@ func Run(trace Trace, o Options) Report {
 		s.r.TurnP50 = turns[(n-1)/2]
 		s.r.TurnP95 = turns[int(math.Ceil(0.95*float64(n)))-1]
 	}
+	if n := len(regrets); n > 0 {
+		sort.Slice(regrets, func(i, j int) bool { return regrets[i] < regrets[j] })
+		s.r.RegretP95 = regrets[int(math.Ceil(0.95*float64(n)))-1]
+	}
 	for _, j := range jobs {
 		if !j.done {
 			s.r.Failed++
@@ -431,6 +474,7 @@ func Run(trace Trace, o Options) Report {
 	}
 	if s.r.Completed > 0 {
 		s.r.WarmRate = float64(s.r.WarmHits) / float64(s.r.Completed+s.r.OOMs)
+		s.r.ColdRate = float64(s.r.Cold) / float64(s.r.Completed+s.r.OOMs)
 	}
 	s.r.Refetch = s.cal.Factors()[""]
 	if actSum > 0 {
@@ -446,6 +490,59 @@ func (s *sim) busy() bool {
 		}
 	}
 	return false
+}
+
+// alternative records for a newly arrived job the fastest provisioning
+// latency and the best turnaround it could have had by getting a machine
+// of its own: start a stopped machine of its environment (warm when the
+// machine holds its slot) or create one of a size that fits it on a
+// provider with capacity (cold).
+func (s *sim) alternative(j *job) {
+	if j.hasAlt {
+		return
+	}
+	warmRun := time.Duration(j.Duration * float64(time.Second))
+	coldRun := time.Duration(j.Duration * (1 + s.o.ColdPenalty) * float64(time.Second))
+	best, bound := time.Duration(-1), time.Duration(-1)
+	consider := func(lat, run time.Duration) {
+		if bound < 0 || lat < bound {
+			bound = lat
+		}
+		if best < 0 || lat+run < best {
+			best = lat + run
+		}
+	}
+	for _, m := range s.machines {
+		if m.env != j.Env || m.state != scheduler.Stopped || !m.size.Capacity.Fits(scheduler.Resources{CPU: math.Min(j.CPU, m.size.Capacity.CPU), Memory: int64(j.PeakMemory)}) {
+			continue
+		}
+		run := coldRun
+		if m.warm[j.Repo] {
+			run = warmRun
+		}
+		consider(latency(s.o.Start, m.prov, 20*time.Second), run)
+	}
+	for _, sz := range s.o.Sizes {
+		if s.down(sz.Provider) || sz.Capacity.Memory < int64(j.PeakMemory) || sz.Capacity.CPU < j.CPU && !s.largestCPU(sz) {
+			continue
+		}
+		consider(latency(s.o.Boot, sz.Provider, 60*time.Second), coldRun)
+	}
+	if best < 0 {
+		return
+	}
+	j.alt, j.bound, j.hasAlt = best, bound, true
+}
+
+// largestCPU reports whether sz has the most cores of all sizes (a job
+// using more cores than any size fits the largest).
+func (s *sim) largestCPU(sz scheduler.Size) bool {
+	for _, o := range s.o.Sizes {
+		if o.Capacity.CPU > sz.Capacity.CPU {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *sim) enqueue(j *job) {
@@ -491,6 +588,10 @@ func (s *sim) advance(d time.Duration) {
 		c := m.size.Capacity
 		s.r.MachineHours += sec / 3600
 		s.r.Cost += sec / 3600 * m.size.PricePerHour
+		s.r.HoursBy[m.size.Name] += sec / 3600
+		if m.state == scheduler.Running && len(m.runs) == 0 {
+			s.r.IdleHours += sec / 3600
+		}
 		s.cpuProv += c.CPU * sec
 		s.memProv += float64(c.Memory) * sec
 		var cpu float64
@@ -852,6 +953,7 @@ func (s *sim) assign(m *machine, j *job, pl scheduler.Placement, exp time.Durati
 		s.r.WarmHits++
 	} else if !restored {
 		work *= 1 + s.o.ColdPenalty
+		s.r.Cold++
 	}
 	work += prep
 	// The working set beyond the local capacity faults in again during
