@@ -74,6 +74,61 @@ bin/cloudsourced shim install cargo
 export PATH="$HOME/.cloudsourced/bin:$PATH"
 ```
 
+### Getting a repository ready: `init`, `doctor`
+
+`cloudsourced init` prints a `.cloudsourced.toml` for the current
+repository (git top level) and `cloudsourced init --write` writes it
+(`--force` replaces an existing one). It is derived from what the repository
+already declares, with a comment explaining every detected item:
+
+* the Cargo workspace (repository root or a subdirectory such as `app/`),
+  its `rust-toolchain(.toml)`, the build cache `<workspace>/target`;
+* from the GitHub Actions jobs that build the workspace (including local
+  composite actions under `.github/actions`): the container image (pinned
+  `rust:1.x-<distro>` becomes `rust:1-slim-<distro>`, the toolchain file pins
+  the version), `apt-get install` packages (runner-only packages such as
+  `sudo` or `e2fsprogs` are listed as not adopted), job `services:` and
+  PostgreSQL packages as `[services]` (`postgres:N`, `max_connections` when
+  CI mentions it), download-and-install blocks (`curl -o FILE`, checksum,
+  `tar`, `<tool> --version`) as setup steps, `taiki-e/install-action`
+  tools with known recipes (cargo-nextest), literal workflow/job
+  environment variables (CI cache paths are skipped), and the variables of
+  test steps as the `[tool.cargo] env` allowlist (`APP_TEST_*`);
+* without such a workflow, an obvious `FROM rust:` Dockerfile;
+* git dependencies on github.com in any `Cargo.toml`: `GH_TOKEN =
+  "cmd:gh auth token"` in `[secrets]`, a git credential helper setup step and
+  `CARGO_NET_GIT_FETCH_WITH_CLI`;
+* `[resources] cpu` from the CI runner size (`8vcpu` → 5), local cargo
+  subcommands, sccache and mold.
+
+For ~/app the result matches the hand-written configuration in
+every detectable item (tested with a fixture of its files).
+
+`cloudsourced doctor [--json]` checks and explains: `cloudsourced` in PATH
+and the shims first in PATH for their tools, the client configuration, the
+control plane (reachable, certificate fingerprint, API key accepted, clock
+skew from its `Date` header) or the embedded pool configuration, the daemon,
+the machines of the pool, the repository configuration, every secret (it is
+resolved, its value is never printed), the environment image (where it
+exists, whether it will be built, the last background build) and FUSE
+(`/dev/fuse`, `fusermount3`; required only with `[outputs] mode = "fuse"`).
+The exit status is 1 when a check failed.
+
+### Environment image prebuild
+
+When the environment of a repository changes (`.cloudsourced.toml`, the
+toolchain file, setup `inputs`, the Dockerfile directory: anything that
+changes `cloudsourced env hash`), the daemon builds the new image in the
+background right away: on the file watcher event (debounced 2 s) and, when no
+event was seen, at the next request. The build goes to every provider and
+platform of the pool, including pushes to remote registries (ECR, OCIR) that
+would otherwise wait for the first machine; with a shared control plane the
+daemon uploads the context and the control plane builds detached from the
+request. A run that needs the image meanwhile joins the running build.
+`cloudsourced env build [--wait]` starts it explicitly, `cloudsourced env
+status [--json]` shows where the image exists and the last background build;
+failures are in the daemon log and `env-build.log`.
+
 ### Configuration files
 
 There are three configuration files, each with one role:
@@ -600,6 +655,20 @@ Only tools with an installed shim are proxied; `CLOUDSOURCED_DISABLE=1`
 always runs locally.
 
 ## Operations
+
+**Machine loss.** If a session ends without an exit status because the
+connection to its machine broke (the machine stopped, was destroyed or became
+unreachable) and the machine does not answer a new connection, the proxy runs
+the command once more on another machine and prints one line saying so; the
+run log records `lost_machine`. Write-back stays exactly-once: local files
+only change in the write-back phase of the attempt that reported an exit
+status, so the lost attempt has applied nothing. There is no retry when the
+write-back had begun, standard input had been forwarded (it cannot be
+replayed), the user signalled the command, the session had not started yet
+(that falls back as before), the worker reported an error, the machine still
+answers, after a second loss, or with `CLOUDSOURCED_NO_RETRY=1`. Output the
+first attempt already printed stays on the terminal.
+
 
 **Metrics.** All components export Prometheus text format (no extra
 dependencies; `internal/metrics`):

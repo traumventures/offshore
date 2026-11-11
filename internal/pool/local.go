@@ -39,6 +39,10 @@ type Local struct {
 	pipe    image.Pipeline
 	waiters map[string]map[*syncWriter]bool // env hash -> progress of waiting acquires
 	logMu   sync.Mutex                      // env-build.log
+	// building counts running prebuilds per env hash; buildErr keeps the
+	// last prebuild failure.
+	building map[string]int
+	buildErr map[string]string
 }
 
 var _ Pool = (*Local)(nil)

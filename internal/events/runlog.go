@@ -43,6 +43,9 @@ type Run struct {
 	Lease string    `json:"lease,omitempty"` // pool lease id
 	Slot  string    `json:"slot,omitempty"`  // build slot on the machine
 	Warm  bool      `json:"warm,omitempty"`  // build slot was warm
+	// LostMachine is the machine of a first attempt that was lost while
+	// the command ran; the run was repeated once on Machine.
+	LostMachine string `json:"lost_machine,omitempty"`
 
 	Machine   string  `json:"machine,omitempty"`
 	Provider  string  `json:"provider,omitempty"`

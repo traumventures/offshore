@@ -239,6 +239,10 @@ func (s *Server) env(ctx context.Context, r *http.Request, progress io.Writer) (
 	if !envHashRe.MatchString(hash) || tag == "" || strings.ContainsAny(tag, " \n\t") {
 		return nil, fmt.Errorf("invalid environment %q %q", hash, tag)
 	}
+	if r.URL.Query().Get("state") == "1" {
+		// Read-only (cloudsourced doctor): no registration, no build.
+		return s.pool.EnvState(ctx, hash, tag)
+	}
 	file := filepath.Join(s.envDir(), hash+".tar.gz")
 	if r.ContentLength != 0 && r.Body != nil && r.Body != http.NoBody {
 		tmp, err := os.CreateTemp(s.envDir(), "upload-*")
@@ -277,5 +281,9 @@ func (s *Server) env(ctx context.Context, r *http.Request, progress io.Writer) (
 	s.pool.mu.Lock()
 	env := s.pool.envs[hash]
 	s.pool.mu.Unlock()
+	if r.URL.Query().Get("prebuild") == "1" {
+		s.prebuildEnv(env)
+		return envResult{}, nil
+	}
 	return envResult{}, s.pool.EnsureEnv(ctx, env, progress)
 }

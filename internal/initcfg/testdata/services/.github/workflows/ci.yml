@@ -1,0 +1,32 @@
+name: ci
+on: push
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+jobs:
+  test:
+    runs-on: ubuntu-latest-4-cores
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: secret
+          POSTGRES_USER: ${{ secrets.USER }}
+        ports: ["5432:5432"]
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: sudo apt-get install -y libsqlite3-dev
+      - run: cargo nextest run
+        env:
+          DATABASE_URL: postgres://postgres:secret@localhost/postgres
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm ci && npm run build
