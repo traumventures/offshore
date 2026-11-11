@@ -625,7 +625,9 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		o.statusHeadsLocked(r.id, m)
 		o.statusVMLocked(r.id, m)
 		o.statusVolumeLocked(m)
-		o.meter.Update(r.id, m.Provider, m.Status.Tiers)
+		if m.Status != nil { // nil: the probe failed (worker still starting)
+			o.meter.Update(r.id, m.Provider, m.Status.Tiers)
+		}
 		o.sampleLocked(r.id, m)
 	}
 	// The data is as old as the listing, not as the end of the probes:
