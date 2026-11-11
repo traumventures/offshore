@@ -64,8 +64,9 @@ max_lifetime   = "24h"     # destroy machines (and their caches) after this
 queue_timeout  = "2m"      # a request waiting longer for capacity fails
 
 [scheduler]                # see scheduling.md
-policy    = "default"
-estimator = "history"
+policy            = "default"   # cost model
+cost_optimization = 0.5         # 1 = cheapest, 0 = fastest result
+estimator         = "history"
 
 [[machine.setup]]          # runs once per machine before it accepts sessions
 run = "echo ready"
@@ -136,7 +137,7 @@ See the [AWS guide](guides/aws.md) for IAM, quotas and costs.
 | `profile` | default credential chain | `~/.aws/config` profile |
 | `region` | the profile's region, else `eu-central-1` | |
 | `stack` | `offshore` | name of the shared CloudFormation stack |
-| `allow_cidrs` | own public IP (checkip.amazonaws.com) | who may reach machines (UDP 7443) |
+| `allow_cidrs` | the orchestrator's public IP (checkip.amazonaws.com) | clients that may reach machines (UDP 7443); set it explicitly with a shared control plane |
 | `subnet` | default VPC | subnet of the machines |
 | `disk_gb` | 100 | gp3 root volume |
 | `docker_command` | `["docker"]` | builds and pushes environment images |
@@ -153,7 +154,7 @@ See the [OCI guide](guides/oci.md).
 | `config_file` | `~/.oci/config` | |
 | `region` | the profile's region | |
 | `compartment` | `offshore` | name below the tenancy root (created) or an OCID |
-| `allow_cidrs` | own public IP | who may reach machines (UDP 7443) |
+| `allow_cidrs` | the orchestrator's public IP | clients that may reach machines (UDP 7443) |
 | `subnet`, `availability_domain` | created VCN / first AD | |
 | `image`, `image_arm64` | newest Oracle Linux 9 platform image | |
 | `bucket` | `offshore` | Object Storage bucket (binaries, machine secrets) |
@@ -313,7 +314,7 @@ new image in the background (see [cli.md](cli.md#env)).
 | `toolchains.rust` | `rust-toolchain(.toml)` path; the image installs that toolchain |
 | `[[setup]]` | `run` (shell command, required), `inputs` (repository files whose content keys the layer) |
 | `env` | environment variables of every session |
-| `linker` | `mold` (pinned static release) or `lld` (distribution package); see [caches-and-storage.md](caches-and-storage.md#compiler-cache-and-linker) |
+| `linker` | `mold` (pinned static release) or `lld` (distribution package); see [caches-and-storage.md](caches-and-storage.md#linker) |
 
 ### `[source]`
 

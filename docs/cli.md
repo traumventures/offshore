@@ -111,6 +111,8 @@ See [operations.md](operations.md#prewarm).
 ```text
 offshore sim [flags] <trace.json|trace.csv>...
     replay traces against the pool configuration and compare policies
+offshore sim -sweep <trace>...
+    sweep [scheduler] cost_optimization from 0 (fastest) to 1 (cheapest), print the frontier
 offshore sim -generate out.json [-profile team|small] [-seed N] [-days N] [-tz ZONE]
     write a synthetic bursty workday trace
 offshore sim export [-since 7d] [-until T] [-o trace.json] [-cold-penalty 0.5] [-request-cpu]
@@ -119,9 +121,11 @@ offshore sim export [-since 7d] [-until T] [-o trace.json] [-cold-penalty 0.5] [
 
 `sim` flags: `-config` (pool file; default the active one), `-policy`
 (comma separated: `default`, `binpack`, `classic`; default
-`default,classic`), `-estimator static|history`, `-boot` and `-start`
+`default,binpack,classic`), `-estimator static|history`, `-boot` and `-start`
 (`DUR` or `provider=DUR,...`; defaults 60s and 20s), `-cold-penalty`
-(default 0.5), `-queue-timeout`, `-json`. See
+(default 0.5), `-queue-timeout`, `-cost-optimization 0,0.5,1` (compare
+values of the default policy), `-sweep`, `-resize` (machines can grow
+disks), `-json`. See
 [scheduling.md](scheduling.md#simulator).
 
 ## Internal commands

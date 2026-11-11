@@ -25,6 +25,10 @@ section 0 of [PLAN.md](PLAN.md).
   (automatic compartment/VCN/bucket/OCIR/IAM, flex shapes), static hosts.
 * Scheduler (bin packing, consolidation, warm pool windows, overcommit,
   history estimator), simulator and `sim export`.
+* Scheduling v2: one cost model for every decision with
+  `[scheduler] cost_optimization` (0 = fastest result, 1 = cheapest), disk
+  as a resource, egress prices, slot handling (prune, resize, snapshot and
+  restore), provider cooldowns, `sim -sweep`. See [scheduling.md](scheduling.md).
 * Shared control plane: HTTPS with API key, fingerprint pinning or
   `--hostname` with Let's Encrypt, optional mutual TLS, container image,
   `deploy/aws/controlplane.yaml`; machine identities derived from one
@@ -32,13 +36,6 @@ section 0 of [PLAN.md](PLAN.md).
 * Operations: Prometheus metrics, JSON logs, OpenTelemetry tracing, event
   log, `report`, `top`, `why`, `status`, `doctor`, `init`, labels for
   agents and worktrees, prewarm and git hook.
-
-## In progress
-
-* Scheduling v2: one cost model for every decision with
-  `[scheduler] cost_optimization` (0 = fastest result, 1 = cheapest),
-  disk-aware placement and slot moves (prune, resize, snapshot and
-  restore). See [scheduling.md](scheduling.md).
 
 ## Later
 

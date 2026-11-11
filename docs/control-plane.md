@@ -97,7 +97,7 @@ with `OFFSHORE_MASTER_KEY` (hex or base64) or
 `OFFSHORE_MASTER_KEY_FILE`.
 
 When `client-config` fetches the fingerprint from a remote URL (trust on first
-use) compare it with `offshore controlplane info` on the server.
+use) compare it with `offshore controlplane info` on the control plane host.
 
 ## From no domain to a domain
 
