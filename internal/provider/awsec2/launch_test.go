@@ -160,3 +160,16 @@ func TestGrowDisk(t *testing.T) {
 		t.Fatalf("no change: %v %v", err, calls)
 	}
 }
+
+func TestQUICSources(t *testing.T) {
+	perms := []ec2types.IpPermission{
+		{IpProtocol: aws.String("udp"), FromPort: aws.Int32(7443), ToPort: aws.Int32(7443),
+			IpRanges: []ec2types.IpRange{{CidrIp: aws.String("1.2.3.4/32")}, {CidrIp: aws.String("10.0.0.0/8")}}},
+		{IpProtocol: aws.String("tcp"), FromPort: aws.Int32(22), ToPort: aws.Int32(22),
+			IpRanges: []ec2types.IpRange{{CidrIp: aws.String("0.0.0.0/0")}}},
+	}
+	got := quicSources(perms)
+	if len(got) != 2 || got[0] != "1.2.3.4/32" || got[1] != "10.0.0.0/8" {
+		t.Fatalf("quicSources = %v", got)
+	}
+}

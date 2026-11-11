@@ -260,7 +260,7 @@ func serveControlplane(o *cpOptions) error {
 		tc.ClientAuth = tls.RequireAndVerifyClientCert
 		log.Info("client auth: mutual TLS", "ca", o.ClientCA)
 	}
-	local, err := pool.NewLocal(u, dir, log)
+	local, err := pool.NewControlPlane(u, dir, log)
 	if err != nil {
 		return err
 	}

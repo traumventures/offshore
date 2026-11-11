@@ -49,11 +49,23 @@ type Local struct {
 
 var _ Pool = (*Local)(nil)
 
-// NewLocal opens every configured provider and creates the orchestrator.
+// NewLocal opens every configured provider and creates an embedded
+// orchestrator (the daemon's own).
 func NewLocal(u *config.PoolConfig, stateDir string, log *slog.Logger) (*Local, error) {
+	return newLocal(u, stateDir, log, false)
+}
+
+// NewControlPlane is NewLocal for a shared control plane: cloud providers
+// require an explicit allow_cidrs, because the clients do not connect from
+// the orchestrator's address.
+func NewControlPlane(u *config.PoolConfig, stateDir string, log *slog.Logger) (*Local, error) {
+	return newLocal(u, stateDir, log, true)
+}
+
+func newLocal(u *config.PoolConfig, stateDir string, log *slog.Logger, shared bool) (*Local, error) {
 	provs := map[string]provider.Provider{}
 	for _, name := range u.ProviderNames() {
-		opts := map[string]any{"binary": os.Getenv("OFFSHORE_SERVER_BINARY"), "owner": u.Pool.ID}
+		opts := map[string]any{"binary": os.Getenv("OFFSHORE_SERVER_BINARY"), "owner": u.Pool.ID, provider.OptSharedControlPlane: shared}
 		for k, v := range u.Providers[name] {
 			opts[k] = v
 		}

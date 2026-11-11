@@ -96,7 +96,7 @@ cost_optimization = 0.5              # 1 = cheapest, 0 = fastest result
 type           = "aws-ec2"
 profile        = "offshore"          # from step 1
 region         = "eu-central-1"
-allow_cidrs    = ["203.0.113.4/32"]  # clients that may reach machines (UDP 7443); default: the orchestrator's public IP
+allow_cidrs    = ["203.0.113.4/32"]  # clients that may reach machines (UDP 7443); required with a shared control plane
 disk_gb        = 100                 # gp3 root volume
 docker_command = ["docker"]
 
@@ -225,7 +225,7 @@ on deletion.
 | `AccessDenied` / `UnauthorizedOperation` | the profile does not use the operator role, or the stack name does not match `StackPrefix*`; creating or updating the shared stack needs `offshore-operator-stack` |
 | `VcpuLimitExceeded` | vCPU quota (step 2); lower `max_machines` or request more |
 | `InsufficientInstanceCapacity`, `Unsupported` | list more `instance_types` for the size; the provider is put on cooldown when all fail |
-| run hangs at connect, then falls back locally | UDP 7443 blocked, or the client's address is not in `allow_cidrs`. The default is the orchestrator's own public IP, added when it starts: fine in embedded mode with a stable address, wrong for a shared control plane (list the clients' CIDRs). Ingress rules are only added, never removed |
+| run hangs at connect, then falls back locally | UDP 7443 blocked, or the client's address is not in `allow_cidrs`. A shared control plane requires `allow_cidrs` (it will not start without it) and reconciles the security group to exactly that list; an embedded orchestrator without it adds its own public IP when it starts and keeps other rules |
 | `ssm:PutParameter` denied | the machine secret channel needs SSM under `/offshore/`; use the operator role |
 | arm64 image build fails with `exec format error` | install QEMU binfmt handlers or build on an arm64 host |
 | stack in `ROLLBACK_COMPLETE` | delete it (`aws cloudformation delete-stack --stack-name offshore`) and retry; the events show the missing permission |

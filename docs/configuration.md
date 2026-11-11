@@ -137,7 +137,7 @@ See the [AWS guide](guides/aws.md) for IAM, quotas and costs.
 | `profile` | default credential chain | `~/.aws/config` profile |
 | `region` | the profile's region, else `eu-central-1` | |
 | `stack` | `offshore` | name of the shared CloudFormation stack |
-| `allow_cidrs` | the orchestrator's public IP (checkip.amazonaws.com) | clients that may reach machines (UDP 7443); set it explicitly with a shared control plane |
+| `allow_cidrs` | embedded: the orchestrator's public IP (checkip.amazonaws.com), added to the existing rules; shared control plane: required | CIDRs of the clients that may reach machines (UDP 7443). An explicit list is authoritative: UDP 7443 rules for other sources are revoked. `["0.0.0.0/0"]` admits any client (sessions still need a lease token) |
 | `subnet` | default VPC | subnet of the machines |
 | `disk_gb` | 100 | gp3 root volume |
 | `docker_command` | `["docker"]` | builds and pushes environment images |
@@ -154,7 +154,7 @@ See the [OCI guide](guides/oci.md).
 | `config_file` | `~/.oci/config` | |
 | `region` | the profile's region | |
 | `compartment` | `offshore` | name below the tenancy root (created) or an OCID |
-| `allow_cidrs` | the orchestrator's public IP | clients that may reach machines (UDP 7443) |
+| `allow_cidrs` | as for aws-ec2: required with a shared control plane, the orchestrator's public IP when embedded | clients that may reach machines (UDP 7443); an explicit list is reconciled on the security list (stale QUIC rules removed) |
 | `subnet`, `availability_domain` | created VCN / first AD | |
 | `image`, `image_arm64` | newest Oracle Linux 9 platform image | |
 | `bucket` | `offshore` | Object Storage bucket (binaries, machine secrets) |

@@ -71,7 +71,7 @@ type           = "oci"
 profile        = "DEFAULT"            # ~/.oci/config profile (config_file overrides the path)
 region         = "eu-frankfurt-1"     # default: the profile's region
 compartment    = "offshore"           # name below the tenancy root (created) or an OCID
-allow_cidrs    = ["203.0.113.4/32"]   # clients that may reach machines (UDP 7443)
+allow_cidrs    = ["203.0.113.4/32"]   # clients that may reach machines (UDP 7443); required with a shared control plane, reconciled (stale rules removed)
 disk_gb        = 100                  # boot volume (min 50)
 docker_command = ["docker"]
 
