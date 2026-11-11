@@ -31,6 +31,12 @@
 // writeback, reclaim, thrash; metrics: resident_bytes, dirty_bytes,
 // working_set_bytes, fault_rate, reclaim_bytes.
 //
+// The laptop's output overlay stacks local -> peer -> store: RemoteTree
+// keeps contents downloaded whole from the remote slot as pages in the
+// local tier and as Files, and when the machine is gone serves listings
+// and pages from the slot's committed layer chain in the store
+// (Backing).
+//
 // File systems. Files materializes the content of tree nodes as local
 // read-only files (the page cache of whole files). LowerFS serves a
 // Source (a Tree with its Files, a directory, a remote listing) as a
@@ -50,5 +56,11 @@
 // writes go to a dirty overlay that is written back to the laptop with
 // the base digest of each change (conflict detection). A kernel overlay
 // does not fit there: the lower tree changes all the time and the
-// laptop's version of a path must replace a local modification.
+// laptop's version of a path must replace a local modification. Clean
+// files are handed to the kernel with passthrough (their inode is keyed
+// by path and content digest, so a change on the laptop gets a new
+// inode); a write waits for passthrough readers of the inode and paths
+// written once stay out of passthrough. Faulted-in contents are a cache:
+// Files reclaims them least recently used beyond a limit, never while
+// open.
 package anyfs

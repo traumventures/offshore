@@ -22,10 +22,16 @@ A run goes through these steps:
 * **Projection.** `lookup`/`getattr`/`readdir` on the machine are answered
   from the manifest without a network round trip; kernel caches are kept for
   an hour and invalidated precisely when deltas arrive. Content is fetched
-  once per hash into a content addressed store.
+  once per hash into a content addressed store (a cache: reclaimed least
+  recently used beyond an eighth of the disk budget and under disk
+  pressure, never while open). Clean files are opened with FUSE
+  passthrough when the worker runs as root on Linux >= 6.9: reads and
+  mmaps go straight to the cached file, the daemon sees only the open.
 * **Writes** to sources (e.g. `Cargo.lock`, `cargo fmt`) go to an overlay
   and are written back after the run, unless the local file changed
-  meanwhile.
+  meanwhile. A write open waits up to 2 s for passthrough readers of the
+  same file to close (the kernel binds the inode to the clean content) and
+  fails with `ETXTBSY` otherwise; written paths stay out of passthrough.
 * **Outputs**: `[tool.X] eager` globs are copied back after every run;
   `offshore fetch <glob>...` copies others from the latest remote build
   (zstd compressed); the [output overlay](#output-overlay) shows the whole
@@ -156,11 +162,14 @@ offshore outputs unmount    # unmount and discard local writes
 - Kernel overlayfs is not used: an unprivileged user can only mount it in a
   user namespace, invisible to the shell that runs cargo.
 - Directories are listed on first access from the machine of the latest
-  build, file contents are downloaded whole on first open into a local
-  content cache (`$STATE/outputs/cas`, keyed by BLAKE3) and reused as long as
-  path, size and mtime are unchanged. Every remote run starts a new
-  generation: listings and kernel caches are dropped, unchanged contents are
-  kept. Exact mtimes (nanoseconds) are served, which cargo compares.
+  build, file contents are downloaded whole on first open and kept as
+  anyfs pages in a local page tier (`$STATE/outputs/pages`) plus
+  materialized files (`$STATE/outputs/files`), reused as long as path,
+  size and mtime are unchanged; both are reclaimed least recently used
+  beyond 8 GiB and fault in again from the local pages, the machine or the
+  store. Every remote run starts a new generation: listings and kernel
+  caches are dropped, unchanged contents are kept. Exact mtimes
+  (nanoseconds) are served, which cargo compares.
 - Layer rules: for a path present in both layers the newer mtime wins, ties
   go to upper. Writing a remote file copies it up with its remote mtime
   (`O_TRUNC` without download); deleting or replacing a remote entry writes
@@ -170,12 +179,19 @@ offshore outputs unmount    # unmount and discard local writes
   produced, and local rebuilds win over older remote outputs. Names starting
   with `.wh.` cannot be created in the mount. Directories with remote
   content cannot be renamed (`EXDEV`); `mv` falls back to copying.
-- Eager outputs inside a mounted directory are stored in the content cache
+- Eager outputs inside a mounted directory are spooled by the proxy
+  (`$STATE/outputs/incoming`) and moved into the page cache by the daemon
   instead of being written below the mount point.
 - When the machine is stopped or gone, cached listings and contents are
-  still served; uncached files fail with `EIO`, uncached directories look
-  empty, and the daemon log says which machine was unreachable. The machine
-  is not asked again for 20 s.
+  still served, and the rest comes from the object store: the daemon asks
+  the control plane for the repository's newest committed slot head and a
+  store grant for the repository's prefix (`/v1/outputs-store`, the same
+  grant its sessions' workers get), loads the head's layer chain and reads
+  the pages from the store (stack local -> machine -> store). Files whose
+  listed version the store does not hold (built after the last commit)
+  fail with `EIO`, unknown directories look empty, and the daemon log says
+  which machine was unreachable. Neither machine nor control plane is
+  asked again for 20 s.
 - The mount and its upper layer survive daemon restarts (state in
   `$STATE/outputs/state.json`).
 - Go API: `daemon.EnsureOutputs(ctx, root)` mounts the overlay of a

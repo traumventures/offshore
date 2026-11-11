@@ -31,6 +31,7 @@ type Files struct {
 	files    map[string]*mfile
 	lru      *list.List
 	resident int64
+	limit    int64 // reclaim to below this after a fault (0: unbounded)
 	inflight map[string]*fetch
 	faults   int64
 	faultB   int64
@@ -102,6 +103,38 @@ func (f *Files) SetBacked(digest string) {
 // "ab/abcd...": the files data-only layer of a slot overlay).
 func (f *Files) Dir() string { return f.dir }
 
+// MarkAllBacked marks every resident file as backed: a cache whose
+// contents can always be faulted in again (the source projection, where
+// the laptop holds every file of the tree).
+func (f *Files) MarkAllBacked() {
+	f.mu.Lock()
+	for _, m := range f.files {
+		m.backed = true
+	}
+	f.mu.Unlock()
+}
+
+// SetLimit caps the resident bytes: after each fault the least recently
+// used backed files that are not open are reclaimed down to 90% of max
+// (0: unbounded).
+func (f *Files) SetLimit(max int64) {
+	f.mu.Lock()
+	f.limit = max
+	f.mu.Unlock()
+	f.reclaimToLimit("")
+}
+
+// reclaimToLimit reclaims down to 90% of the limit, keeping the content
+// of keep (just faulted in for a caller about to open it).
+func (f *Files) reclaimToLimit(keep string) {
+	f.mu.Lock()
+	limit, res := f.limit, f.resident
+	f.mu.Unlock()
+	if limit > 0 && res > limit {
+		f.reclaim(limit/10*9, keep)
+	}
+}
+
 func (f *Files) path(digest string) string {
 	return filepath.Join(f.dir, digest[:2], digest)
 }
@@ -139,6 +172,26 @@ func (f *Files) Acquire(n *Node) {
 		m.open++
 	}
 	f.mu.Unlock()
+}
+
+// Open opens a node's resident content and marks it open (not reclaimed
+// until Release); false if it is not resident (e.g. reclaimed since the
+// fault).
+func (f *Files) Open(n *Node) (*os.File, bool) {
+	d := digestOf(n)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m := f.files[d]
+	if m == nil {
+		return nil, false
+	}
+	fh, err := os.Open(f.path(d))
+	if err != nil {
+		return nil, false
+	}
+	m.open++
+	f.lru.MoveToBack(m.elem)
+	return fh, true
 }
 
 // Release ends an Acquire.
@@ -241,6 +294,7 @@ func (f *Files) fault(ctx context.Context, n *Node, fill func(d string) error) (
 	}
 	f.rate.add(time.Now(), 1)
 	f.obs.emit(Event{Type: EvPageFault, Tier: "files", Path: n.Path, Pages: int64(len(n.Pages)), Bytes: n.Size, Seconds: time.Since(begin).Seconds()})
+	f.reclaimToLimit(d)
 	return f.path(d), nil
 }
 
@@ -425,14 +479,16 @@ func (f *Files) Prefetch(ctx context.Context, tier Tier, nodes []*Node, parallel
 // Reclaim drops least recently used backed materialized files that are
 // not open until at most target bytes are resident; it returns the bytes
 // freed.
-func (f *Files) Reclaim(target int64) int64 {
+func (f *Files) Reclaim(target int64) int64 { return f.reclaim(target, "") }
+
+func (f *Files) reclaim(target int64, keep string) int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var freed, n int64
 	for e := f.lru.Front(); e != nil && f.resident > target; {
 		next := e.Next()
 		m := e.Value.(*mfile)
-		if m.open == 0 && m.backed {
+		if m.open == 0 && m.backed && m.digest != keep {
 			os.Remove(f.path(m.digest))
 			f.lru.Remove(e)
 			delete(f.files, m.digest)

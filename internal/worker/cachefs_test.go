@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -18,6 +19,12 @@ import (
 // whose repository "repo" uses the directory store storeDir.
 func fsWorker(t *testing.T, mode fsMode, storeDir string, opt cacheFSOptions) (*Worker, *store.Grant) {
 	t.Helper()
+	return fsWorkerAt(t, mode, t.TempDir(), storeDir, opt)
+}
+
+// fsWorkerAt is fsWorker over an existing cache directory (a restart).
+func fsWorkerAt(t *testing.T, mode fsMode, cache, storeDir string, opt cacheFSOptions) (*Worker, *store.Grant) {
+	t.Helper()
 	if mode != fsPlain {
 		if _, err := os.Stat("/dev/fuse"); err != nil {
 			t.Skip("no FUSE")
@@ -26,7 +33,6 @@ func fsWorker(t *testing.T, mode fsMode, storeDir string, opt cacheFSOptions) (*
 	if mode == fsKernel && os.Geteuid() != 0 {
 		t.Skip("kernel overlay needs root")
 	}
-	cache := t.TempDir()
 	sl, err := newSlots(filepath.Join(cache, "build"))
 	if err != nil {
 		t.Fatal(err)
@@ -286,4 +292,48 @@ func testSlotRebase(t *testing.T, mode fsMode) {
 	if w.cfs.files.Stats().Faults != 0 {
 		t.Fatal("rebase refetched content")
 	}
+}
+
+// Commits after the first read only what changed since the last one:
+// the upper directory's entries newer than the watermark (overlay modes)
+// or the files with a newer ctime (plain).
+func TestSlotIncrementalCommit(t *testing.T) {
+	for _, mode := range []fsMode{fsPlain, fsUser, fsKernel} {
+		t.Run(mode.String(), func(t *testing.T) { testSlotIncrementalCommit(t, mode) })
+	}
+}
+
+func testSlotIncrementalCommit(t *testing.T, mode fsMode) {
+	ctx := context.Background()
+	w, _ := fsWorker(t, mode, t.TempDir(), cacheFSOptions{})
+	mt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	slot, _ := runSession(t, w, func(data string) {
+		for i := 0; i < 200; i++ {
+			put(t, filepath.Join(data, "target/debug/deps", fmt.Sprintf("d%d/f%d", i%10, i)), []byte(fmt.Sprint("f", i)), mt)
+		}
+	})
+	res, err := w.commitSlot(ctx, ref(t, w, slot))
+	if err != nil || res.scan.Hashed != 200 {
+		t.Fatalf("first commit hashed %d: %v", res.scan.Hashed, err)
+	}
+	runSession(t, w, func(data string) {
+		put(t, filepath.Join(data, "target/debug/deps/d3/f3"), []byte("F3"), mt) // same size and mtime
+		put(t, filepath.Join(data, "target/debug/new"), []byte("new"), mt)
+		os.Remove(filepath.Join(data, "target/debug/deps/d4/f4"))
+	})
+	res, err = w.commitSlot(ctx, ref(t, w, slot))
+	if err != nil || !res.changed {
+		t.Fatalf("second commit %+v %v", res, err)
+	}
+	if res.scan.Hashed != 2 {
+		t.Fatalf("second commit hashed %d files, want 2", res.scan.Hashed)
+	}
+	if mode != fsPlain && res.scan.Examined > 20 {
+		t.Fatalf("second commit examined %d entries", res.scan.Examined)
+	}
+	n, _ := res.tree.Get("target/debug/deps/d3/f3")
+	if _, gone := res.tree.Get("target/debug/deps/d4/f4"); gone || n == nil || n.Digest != string(anyfs.KeyOf([]byte("F3"))) || res.tree.Len() != 213 {
+		t.Fatalf("tree after incremental commit: %d nodes", res.tree.Len())
+	}
+	t.Logf("%s: hashed %d, examined %d of %d", mode, res.scan.Hashed, res.scan.Examined, res.tree.Len())
 }

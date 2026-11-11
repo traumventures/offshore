@@ -47,9 +47,7 @@ section 0 of [PLAN.md](PLAN.md).
 
 * **anyfs follow-ups**: apply the remaining access-class policies
   (placement, per-class writeback delay, no writeback for ephemeral files,
-  cross-slot dedupe), track reads per session, commit busy slots, laptop
-  output content in anyfs pages (local -> peer -> store), passthrough for
-  the source projection.
+  cross-slot dedupe), track reads per session, commit busy slots.
 
 * **Users and quotas**: per-user API keys, quotas and cost limits on the
   control plane (today one global API key per pool).

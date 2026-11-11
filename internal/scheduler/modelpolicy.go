@@ -128,7 +128,7 @@ func (tm *tlMachine) earliest(need Resources, run time.Duration) (time.Time, boo
 // thrashing when t's working set exceeds the machine's local tier (so new
 // machines of sizes with more local capacity win against thrashing ones).
 func (p Default) quickRun(f Pool, tm *tlMachine, t Task) time.Duration {
-	pen, _, _ := thrashOf(tm.m, t)
+	pen, _, _ := thrashOf(f, tm.m, t)
 	if tm.m.Warm(t.RepoID) {
 		return t.Profile.WarmRun() + pen
 	}

@@ -1,0 +1,50 @@
+# Pool configuration with tier stacks for the sample simulations (offshore sim -config):
+# the c7a sizes with local disks over the object store (thrashing, lazy restores,
+# resizes; combine with -resize, -working-set, -slot-bytes, -refetch).
+# Sizes and on-demand prices of AWS c7a instances (us-east-1).
+[pool]
+id = "sim"
+max_machines = 16
+min_machines = 0
+idle_stop = "20m"
+max_lifetime = "24h"
+
+[providers.aws]
+type = "aws-ec2"
+
+[scheduler]
+cpu_overcommit = 2
+memory_overcommit = 1
+estimator = "static"
+
+[[providers.aws.size]]
+name = "c7a.large"
+cpu = 2
+memory = "4G"
+price_per_hour = 0.1027
+disk = "30G"
+stack = ["local", "store"]
+
+[[providers.aws.size]]
+name = "c7a.xlarge"
+cpu = 4
+memory = "8G"
+price_per_hour = 0.2053
+disk = "30G"
+stack = ["local", "store"]
+
+[[providers.aws.size]]
+name = "c7a.2xlarge"
+cpu = 8
+memory = "16G"
+price_per_hour = 0.4106
+disk = "100G"
+stack = ["local", "store"]
+
+[[providers.aws.size]]
+name = "c7a.4xlarge"
+cpu = 16
+memory = "32G"
+price_per_hour = 0.8211
+disk = "200G"
+stack = ["local", "store"]

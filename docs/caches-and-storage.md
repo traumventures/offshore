@@ -127,15 +127,58 @@ pattern's own statistics override the prior once it was seen in 3
 sessions; unseen files fall back to their directory's statistics.
 
 On workers the slot file system feeds every commit into the repository's
-model (`<cache>/anyfs/repos/<repo>/access.json`; reads are not tracked
-yet, so read counts stay out of the classification). Two policies act
+model (`<cache>/anyfs/repos/<repo>/access.json`) together with the files
+sessions read since the last commit.
+
+**Reads and the working set.** Reads are tracked per session without
+atime: on the kernel overlay with fanotify on the slot's overlay super
+block (needs CAP_SYS_ADMIN, which the kernel overlay needs anyway; it also
+sees the session's bind mounts in its own mount namespace, whose paths are
+mapped back through the session's binds), on the userspace overlay through
+its open callback; the worker's own accesses are filtered out. Plain
+directory slots do not track reads (the read index of the prune policies
+falls back to atime there). Each session's reads also update the
+repository's **working set** (`workingset.json`: per path the last session
+that read it, how often, its size; entries unread for 16 sessions are
+dropped). It is carried in the meta of every committed layer (top 8000
+entries), so it travels with the head: a slot mounted fresh over a head
+(restore, move, a new slot) reads its working set ahead, most recently
+read first, then the class prefetch, within the prefetch budget.
+`working_set_bytes` (`Status.VM`, metric) is the size of the files read in
+the last 3 sessions; a session's `usage.working_set_bytes` the bytes it
+read plus what the slot grew (fault bytes without tracking). Two policies act
 today: reclaim drops materialized files of ephemeral, then churn files
 before the least recently used rest, and a slot mounted fresh over a
 committed head prefetches its immutable and write-once files (larger than
 the small files prefetched anyway, up to 2 GiB or a quarter of the
-capacity). Placement, per-class writeback delays and cross-slot dedupe
-are part of the policy table but not applied yet: a commit is a full
-snapshot of the slot.
+capacity).
+
+The commit also applies the rest of the table to the pages it creates:
+
+* **Writeback delay per class.** Each page carries its class's hint
+  (`anyfs.PageHint`); the repository's link to the store writes dirty
+  pages back in the background when their delay expires (immutable at the
+  next pass, write-once after 5 s, unknown after 30 s, churn after 10 min,
+  ephemeral never by itself). Pages of files deleted before that are
+  discarded unwritten at the next commit. An idle commit only moves the
+  store head (layer objects + `heads/slot`, cheap) once all pages of the
+  head are clean, or flushes the head whole after 10 min (the most
+  committed work that lives only on the machine); save, move, drain,
+  SIGTERM and a session over the dirty threshold flush right away.
+* **Placement.** Churn and ephemeral pages are local-only: an exclusive
+  link (local over a volume) never demotes them on reclaim; they reach the
+  store only as part of a committed layer.
+* **Dedupe.** Immutable and write-once files from 16 KiB get a page of
+  their own whose key is their content digest (smaller files stay packed),
+  so the same file in another slot or repository is the same page. The
+  repositories' local page tiers share a machine-wide pool
+  (`<cache>/anyfs/pool`) by hardlink: a page is on disk once
+  (`shared_bytes` is subtracted from the reported residency), and once per
+  store prefix (a store put skips young existing objects). Repositories do
+  not share a store prefix: the prefix is the grant's security scope.
+
+Page hints live in memory: after a worker restart dirty pages use the
+default 30 s delay.
 
 ## Object store (`[storage]`)
 
@@ -292,7 +335,7 @@ resident/capacity, dirty, working set, faults/s and `THRASH` per machine.
 | worker build slot | kernel overlayfs (`redirect_dir=on,metacopy=on`): upper on the cache disk over a local metadata layer (metacopy files redirecting to content digests) and two data-only layers: the file cache, then a read-only FUSE digest view (passthrough) for content that is not resident | `CAP_SYS_ADMIN` in the initial user namespace (machine containers run with `--cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor=unconfined`), FUSE passthrough needs Linux >= 6.9 (without it reads go through the daemon), upper/work and the file cache on a real file system (the cache volume, not the container's overlay root) |
 | worker build slot, unprivileged | userspace overlay (FUSE) over the same lower | `/dev/fuse` |
 | worker without FUSE | plain directory; commits scan it, a slot over a chain is extracted eagerly | nothing |
-| worker source projection | read-write anyfs FUSE (`WritableFS`) over the synced manifest, contents fetched per digest from the laptop; local writes are written back with conflict detection | `/dev/fuse` |
+| worker source projection | read-write anyfs FUSE (`WritableFS`) over the synced manifest, contents fetched per digest from the laptop (cached, LRU reclaim beyond budget/8, never open files); clean files by passthrough (inode per path + digest); local writes are written back with conflict detection | `/dev/fuse`; passthrough needs root and Linux >= 6.9 |
 | laptop output overlay (`target/`) | userspace overlay: upper in the client state, whiteouts, newest-mtime merge over the remote slot (lazy listings over QUIC, contents in the client CAS) | `/dev/fuse` (no privileges) |
 
 Why these choices (measured in `test/bench/tiers`): with passthrough no
@@ -339,9 +382,16 @@ whiteouts that rustc's output renames replace). Without CAP_SYS_ADMIN the usersp
 the same union (logged at start); without `/dev/fuse` slots are plain
 directories (commits scan them, a new slot over a chain is extracted).
 
-**Commit = writeback.** The merged view is scanned against the slot's head
-tree (unchanged files reuse their pages, changed files become dirty pages)
-and committed as a layer (changed nodes + whiteouts) on top of the chain;
+**Commit = writeback.** A commit reads only what changed since the last
+one (`anyfs.ScanChanges`): the entries of the overlay's upper directory
+whose ctime is newer than the head's watermark (`scanned_ns` in the slot
+metadata) are stat'ed in the merged view, their directories listed
+(deletions, renames), whiteouts and opaque or redirected directories
+rescanned; everything else is taken from the head tree unread. Plain
+directory slots are walked whole but only files with a newer ctime are
+read. In a test slot of 213 entries a second commit stats 5 entries and
+hashes the 2 changed files (plain: stats 213, hashes 2). Changed files
+become dirty pages and are committed as a layer (changed nodes + whiteouts) on top of the chain;
 the layer's pages are flushed to the store, the layer objects and then the
 head (`heads/slot`) written. Commits run when a slot has been idle for
 `[writeback] dirty_expire` (default 30 s), right after a session that grew
@@ -352,6 +402,18 @@ than 12 h, are compacted into a new base, which also rewrites pages older
 than 12 h (the store expires objects after 24 h; a chain's age is the age
 of its oldest data, the slot TTL). With reflinks, committed upper files are
 cloned into the file cache.
+
+**Every session is committed.** When a session on an overlay slot ends,
+before the slot is released, its changes are planned (stats only) and the
+changed files captured into `slot/snaps/<ns>/` by reflink (FICLONE,
+metadata only; a copy without reflinks, skipped above 256 MiB in favour
+of the idle commit); the plan is written last. The slot is released at
+once and the snapshot committed in the background (hashing, pages, layer,
+head; the captured files move into the file cache) while the next session
+may already run, so a busy slot's writeback flushes the previous session.
+A commit from the live slot commits pending snapshots first; on start the
+worker commits complete snapshots and drops incomplete ones before
+serving: a crash loses at most the session that was running.
 
 **Concurrent sessions** of a repository get another overlay over the same
 committed head (no copy). A **rebase** (fresh upper over the new head; the

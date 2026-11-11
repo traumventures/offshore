@@ -182,3 +182,92 @@ overlay layouts are slower relative to A than above). Raw lines:
 - The overlay-over-FUSE incremental overhead vs. plain ext4 (+2-3x here,
   +50 %/+21 % in the quieter first run) is the metadata round trip cost
   of the FUSE lower under load; it is the same for prototype and anyfs.
+
+## Incremental overhead of the slot overlay: profile and fix (Nov 11 2026)
+
+Goal: incremental builds on a warm slot within +20 % of the plain cache
+disk. Method: `run.sh alt ROUNDS A E M` (bench.sh `layout_alt`) keeps every
+variant mounted for the whole run and bind-mounts one at a time at `/t`, so
+all variants build the same source states back to back in one window
+(order alternating per round); `anyfsbench` now reports the FUSE op
+histogram of each lower (`LowerFS.Ops`: count and service time per op).
+`XFS=14G` puts `runs/` on an xfs loop image with reflink, like the
+workers' cache volume (`internal/supervisor/cache.go`); `-seed` adopts A's
+files into the file cache by reflink (as a commit does), `-local-cap`
+bounds the local page tier (disk). Variants:
+
+- A: plain directory (A's target, continuing from S1)
+- E: before: kernel overlay (`redirect_dir,metacopy`) over the read-only
+  FUSE lower serving the tree by path (passthrough, 1 h entry/attr/negative
+  timeouts)
+- M: after (`anyfs.MountSlot`, now the worker's kernel slot mount):
+  overlay `lowerdir=meta::files::lazy`, meta = local directory of sparse
+  metacopy files with `trusted.overlay.redirect=/ab/<digest>`, files = the
+  file cache (data-only), lazy = FUSE digest view (data-only, faults in
+  what is not resident)
+
+### Profile
+
+FUSE ops reaching the daemon per build step on E (steady state; kernel
+caches work: in a unit test 5 stats of a file and a missing name cost 4
+lookups and 0 getattrs in total):
+
+| step | lookup | open/release | readdirplus | service time in daemon |
+|---|---|---|---|---|
+| leaf | 179 | 2080 | 77 | ~30 ms |
+| core | 2414 | 4035 | 380-460 | ~70 ms |
+
+Lookups are new names (rustc's new incremental session dirs, new
+artifacts: genuine negative lookups, not cache defeats); every open of a
+lower file is a round trip (passthrough attaches the backing file at
+open; no FOPEN_KEEP_CACHE/entry timeout avoids that). The daemon's own
+service time is small; the cost is the round trip and wakeups under load.
+M has 0 FUSE ops on a warm slot (the digest view is only consulted for
+non-resident content).
+
+The other half of the 2-3x on this host was not FUSE at all: with M on the
+host's ext4, builds still slowed down round after round. `strace -T`
+showed single `rename()` calls of 0.9-2.5 s on the overlay vs 0.06 ms on
+A (`deps/cargo_nextest-<hash>.tmpXXX -> cargo_nextest-<hash>`, the rlib
+archive rename). rustc deletes an output before writing the new one by
+rename; in an overlay, deleting a name that exists in a lower layer leaves
+a whiteout, so the rename replaces an existing inode, and ext4
+(`auto_da_alloc`) then flushes the renamed file's data synchronously
+(1.5-2 s for 200 MB in a microbenchmark, both for a whiteout and an empty
+file as target). xfs does not do that (0.0 s), and workers' cache volumes
+are xfs. Raw: `results-alt-ext4-2026-11-11.jsonl` (5 rounds, ext4).
+
+### Results (xfs, 12 rounds, A/E/M alternating; `results-alt-xfs12-2026-11-11.jsonl`)
+
+Wall seconds, median over rounds (min), and the median of the per-round
+ratio to A (adjacent builds, robust against the host's load spikes):
+
+| variant | restore | no-op | leaf | leaf / A | core | core / A |
+|---|---|---|---|---|---|---|
+| A plain dir (xfs) | 0.35 | 0.22 | 1.14 (1.00) | 1 | 4.33 (3.82) | 1 |
+| E before: overlay over path FUSE lower | 0.56 | 0.27 | 2.07 (1.09) | 1.30 | 5.76 (4.42) | 1.29 |
+| M after: meta layer + data-only files + lazy FUSE | 0.31 | 0.22 | 1.16 (1.05) | 1.04 | 4.54 (4.01) | 1.06 |
+
+Earlier windows agree (`results-alt-xfs5/xfs10-*.jsonl`, per-round
+ratio medians M/A leaf 0.76/1.02, core 1.01/1.27 with heavy load spikes;
+minimum times M/A leaf +3 %, core +6 %). On ext4 (`results-alt-ext4-*`)
+M/A was leaf 1.30, core 1.38 (E: 1.44, 2.11): the remaining gap there is
+the rename flush above.
+
+Commit was not rerun (disk: the host had 14 GB free; the commit path is
+unchanged by this work). Writing the meta layer at mount takes 0.1 s for
+the 5775 nodes of this target (parallel creates); restore = mount + no-op
+build is faster than before (0.31 vs 0.56 s).
+
+### Notes
+
+- A file reclaimed from the cache while mounted falls through to the
+  digest view on its next lookup (unit test `TestMountSlotMetaLayer`, also
+  remount over a rebuilt meta layer: the upper's metacopy files keep their
+  absolute digest redirect).
+- Hosts whose cache directory is ext4 (local-docker on a dev box) pay the
+  rename flush; mounting it `noauto_da_alloc` (or using xfs) avoids it.
+- Ideas not pursued because M already removes FUSE from the warm path:
+  longer timeouts (already 1 h, kernel honours them), eager copy-up of
+  churn dirs (needs copies, defeats the 0.3 s restore; with metacopy the
+  copy-up is metadata only anyway), promoting files into the upper.

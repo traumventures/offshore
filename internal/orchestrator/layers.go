@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -269,4 +271,44 @@ func (o *Orchestrator) repoStore(ctx context.Context, stores *StoreSet, prov, re
 		return nil
 	}
 	return st
+}
+
+// OutputsStore is what the laptop needs to read a repository's latest
+// committed build slot from the object store when the machine of the
+// latest build is gone: the newest head and a grant for the
+// repository's prefix of its store.
+type OutputsStore struct {
+	Head  proto.LayerHead `json:"head"`
+	Grant store.Grant     `json:"grant"`
+}
+
+// ErrNoHead means no committed head of the repository is known.
+var ErrNoHead = errors.New("no committed build slot of the repository in a store")
+
+// OutputsStore returns the newest committed head of repo with a grant
+// for its store. The grant covers only the repository's prefix, which
+// the caller (holding the pool's API key) can already reach through any
+// session it leases; it expires with GrantTTL.
+func (o *Orchestrator) OutputsStore(ctx context.Context, repo string) (OutputsStore, error) {
+	o.mu.Lock()
+	var head scheduler.Snapshot
+	var chain []string
+	if rl := o.heads[repo]; rl != nil {
+		for _, h := range rl.Heads {
+			if h.Layer != "" {
+				head, chain = h, rl.Chains[h.Layer]
+				break
+			}
+		}
+	}
+	o.mu.Unlock()
+	if head.Layer == "" {
+		return OutputsStore{}, ErrNoHead
+	}
+	gr := o.storeGrant(ctx, head.Provider, repo, "")
+	if gr == nil {
+		return OutputsStore{}, fmt.Errorf("no store grant for provider %s", head.Provider)
+	}
+	return OutputsStore{Head: proto.LayerHead{Repo: repo, Store: head.Store, Provider: head.Provider, Layer: head.Layer,
+		Chain: chain, Bytes: head.Bytes, At: head.At.Unix()}, Grant: *gr}, nil
 }

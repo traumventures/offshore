@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/config"
 	"github.com/traumventures/offshore/internal/proto"
 )
@@ -61,7 +63,7 @@ func TestRecordRunTracksReadsAndRearmsAtime(t *testing.T) {
 	start := time.Now().Add(-time.Minute)
 	read(t, filepath.Join(data, "a"), time.Now())
 	write(t, filepath.Join(data, "c"), 4096, time.Now())
-	if n := recordRun(data, start, 2, idx); n < 3*4096 {
+	if n := recordRun(data, start, 2, idx, nil); n < 3*4096 {
 		t.Fatalf("size %d", n)
 	}
 	if idx["a"] != 2 || idx["b"] != 1 || idx["c"] != 2 {
@@ -192,3 +194,31 @@ func TestBudgetBytes(t *testing.T) {
 }
 
 func rmAll(p string) { os.RemoveAll(p) }
+
+func TestReclaimSourcesKeepsOpenFiles(t *testing.T) {
+	files, err := anyfs.OpenFiles(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nodes []anyfs.Node
+	for _, c := range []string{"aaaa", "bbbb", "cccc"} {
+		n := anyfs.Node{Path: c, Kind: anyfs.File, Size: 4, Digest: string(anyfs.KeyOf([]byte(c)))}
+		if _, err := files.EnsureWith(context.Background(), &n, func(_ context.Context, _ *anyfs.Node, w io.Writer) error {
+			_, err := io.WriteString(w, c)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		nodes = append(nodes, n)
+	}
+	f, _ := files.Open(&nodes[0])
+	defer f.Close()
+	w := &Worker{srcFiles: files, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	over := func() int64 { return files.Stats().ResidentBytes }
+	if left := w.reclaimSources(over); left != 4 {
+		t.Fatalf("left over %d, want the open file's 4 bytes", left)
+	}
+	if _, ok := files.Local(&nodes[0]); !ok {
+		t.Fatal("open source file reclaimed")
+	}
+}

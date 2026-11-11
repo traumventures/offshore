@@ -77,6 +77,10 @@ type slotMeta struct {
 	Head       string `json:"head,omitempty"`
 	Committed  int64  `json:"committed,omitempty"`
 	UpperBytes int64  `json:"upper_bytes,omitempty"`
+	// Scanned is the watermark of Head (unix ns): the merged view had
+	// Head's tree then, later changes have a newer ctime in the upper
+	// directory (incremental commits).
+	Scanned int64 `json:"scanned_ns,omitempty"`
 }
 
 // slotCache is a slot-scope cache path with its pruning settings.

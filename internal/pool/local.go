@@ -435,6 +435,10 @@ func (l *Local) Reconcile(ctx context.Context) error { return l.orch.Reconcile(c
 
 func (l *Local) DestroyAll(ctx context.Context) error { return l.orch.DestroyAll(ctx) }
 
+func (l *Local) OutputsStore(ctx context.Context, repo string) (orchestrator.OutputsStore, error) {
+	return l.orch.OutputsStore(ctx, repo)
+}
+
 // StorageConfig resolves the pool's [storage] section.
 func StorageConfig(u *config.PoolConfig) (store.Config, error) {
 	st := u.Storage

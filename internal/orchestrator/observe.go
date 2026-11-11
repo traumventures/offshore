@@ -19,6 +19,9 @@ import (
 // describe a finished task (under its own lock).
 type observer struct {
 	log *events.Log
+	// refetch calibrates the scheduler's refetch factor of thrashing
+	// builds from the cache file system events (Pool.Refetch).
+	refetch *events.Refetch
 
 	mu    sync.Mutex
 	tasks map[string]taskInfo // lease id -> placement
@@ -30,8 +33,21 @@ type taskInfo struct {
 }
 
 func newObserver(stateDir string, retention time.Duration) *observer {
-	return &observer{log: events.Open(stateDir, retention), tasks: map[string]taskInfo{}}
+	o := &observer{log: events.Open(stateDir, retention), tasks: map[string]taskInfo{}, refetch: events.NewRefetch()}
+	// Calibrate from the last day of events, then from every new one.
+	now := time.Now()
+	if evs, err := events.Read(stateDir, now.Add(-refetchHistory), now); err == nil {
+		for _, ev := range evs {
+			o.refetch.Observe(ev)
+		}
+	}
+	o.log.Tap(o.refetch.Observe)
+	return o
 }
+
+// refetchHistory is how far back the refetch calibration replays the
+// event log at start.
+const refetchHistory = 24 * time.Hour
 
 // Events returns the analysis event log.
 func (o *Orchestrator) Events() *events.Log { return o.obs.log }

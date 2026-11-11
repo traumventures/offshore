@@ -91,6 +91,9 @@ type cacheFSOptions struct {
 	Now         func() time.Time
 	// Observer receives the stacks' events (page-ins, writebacks).
 	Observer anyfs.Observer
+	// WritebackInterval is how often dirty pages are checked against
+	// their class's writeback delay (default 2s).
+	WritebackInterval time.Duration
 }
 
 // cacheFS mounts and commits the build slots of a machine.
@@ -109,6 +112,7 @@ type cacheFS struct {
 	repos  map[string]*repoFS
 	mounts map[string]*slotMount
 	heads  map[string]proto.LayerHead // repo -> last flushed head
+	snapMu map[string]*sync.Mutex     // slot -> snapshot/commit lock
 }
 
 // repoFS is a repository's tier stack and layer store.
@@ -127,6 +131,7 @@ type repoFS struct {
 	link    *anyfs.Link
 
 	access *access.Model // access classes of the repository's files
+	ws     *workingSet   // files read in recent sessions
 }
 
 // slotMount is a mounted slot.
@@ -136,8 +141,10 @@ type slotMount struct {
 	src   *anyfs.TreeSource
 	lower *anyfs.LowerFS // kernel mode: the lazy (digest view) layer
 	user  *anyfs.UserOverlay
-	// cancel stops the class prefetch (nil: none).
+	// cancel stops the readahead (nil: none).
 	cancel context.CancelFunc
+	// reads tracks the files sessions read (nil: not tracked).
+	reads *readTracker
 }
 
 func newCacheFS(dir string, opt cacheFSOptions) (*cacheFS, error) {
@@ -226,7 +233,8 @@ func (c *cacheFS) repo(id string) (*repoFS, error) {
 		return r, nil
 	}
 	base := filepath.Join(c.dir, "repos", id)
-	local, err := anyfs.OpenLocal(anyfs.LocalOptions{Dir: filepath.Join(base, "local"), Capacity: c.opt.Capacity, Now: c.opt.Now, Observer: c.obs})
+	local, err := anyfs.OpenLocal(anyfs.LocalOptions{Dir: filepath.Join(base, "local"), Capacity: c.opt.Capacity, Now: c.opt.Now, Observer: c.obs,
+		Pool: filepath.Join(c.dir, "pool")})
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +242,7 @@ func (c *cacheFS) repo(id string) (*repoFS, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &repoFS{id: id, c: c, local: local, layers: layers, access: loadAccess(base)}
+	r := &repoFS{id: id, c: c, local: local, layers: layers, access: loadAccess(base), ws: loadWorkingSet(filepath.Join(base, workingSetFile))}
 	r.tier = repoTier{r}
 	c.repos[id] = r
 	return r, nil
@@ -257,7 +265,15 @@ func (c *cacheFS) setGrant(repo string, g store.Grant) error {
 		return err
 	}
 	r.remote, r.storeNm, r.expires = st, g.Store, g.Expires
-	r.link = anyfs.NewLink(r.local, anyfs.NewStore(st, anyfs.StoreMedium()), anyfs.Policy{Write: anyfs.WriteBack, DirtyExpire: 24 * time.Hour}, r.c.obs)
+	if r.link != nil {
+		r.link.Close()
+	}
+	// Committed pages are written back in the background by their access
+	// class (PageHint): immutable early, churn late, ephemeral only by an
+	// explicit flush; the store head moves once a head's pages are clean.
+	r.link = anyfs.NewLink(r.local, anyfs.NewStore(st, anyfs.StoreMedium()), anyfs.Policy{Write: anyfs.WriteBack,
+		DirtyExpire: access.DefaultWritebackDelay, Interval: c.opt.WritebackInterval}, r.c.obs)
+	r.link.Start()
 	return nil
 }
 
@@ -395,7 +411,7 @@ func (c *cacheFS) mount(ctx context.Context, slot, repo, base string) error {
 		return err
 	}
 	src := anyfs.NewTreeSource(ch.Tree(), c.files, r.tier)
-	sm = &slotMount{repo: r, base: base, src: src}
+	sm = &slotMount{repo: r, base: base, src: src, reads: newReadTracker(data)}
 	upper, work := filepath.Join(slot, "upper"), filepath.Join(slot, "work")
 	mounted := false
 	if c.mode == fsKernel {
@@ -414,14 +430,25 @@ func (c *cacheFS) mount(ctx context.Context, slot, repo, base string) error {
 		}
 	}
 	if !mounted {
-		sm.user, err = anyfs.MountUserOverlay(data, upper, src, anyfs.UserOverlayOptions{FsName: "offshore-slot", AllowOther: c.allowOther, Timeout: time.Minute})
+		sm.user, err = anyfs.MountUserOverlay(data, upper, src, anyfs.UserOverlayOptions{FsName: "offshore-slot", AllowOther: c.allowOther, Timeout: time.Minute,
+			OnOpen: sm.reads.onOpen})
 		if err != nil {
 			return fmt.Errorf("mount build slot: %w", err)
 		}
 		go src.PrefetchSmall(context.Background(), prefetchSmall, 16)
 	}
+	if mounted {
+		if err := sm.reads.watchKernel(); err != nil {
+			c.log.Warn("build slot reads not tracked", "slot", slot, "err", err)
+			sm.reads = nil
+		}
+	}
 	if dirEmpty(upper) {
-		c.prefetchClasses(sm) // fresh over a head: warm what the build reads
+		var meta []byte
+		if top := ch.Top(); top != nil {
+			meta = top.Meta
+		}
+		c.readahead(sm, meta) // fresh over a head: warm what the next build reads
 	}
 	c.mu.Lock()
 	c.mounts[slot] = sm
@@ -443,6 +470,9 @@ func (c *cacheFS) unmount(slot string) {
 	data := filepath.Join(slot, "data")
 	if sm != nil && sm.cancel != nil {
 		sm.cancel()
+	}
+	if sm != nil && sm.reads != nil {
+		sm.reads.close()
 	}
 	if sm != nil && sm.user != nil {
 		sm.user.Unmount()
@@ -492,6 +522,7 @@ type commitResult struct {
 	refresh bool // compacted: rewrite old pages in the store
 	scan    anyfs.ScanStats
 	upper   int64 // upper bytes at the commit
+	scanned int64 // watermark of the commit (unix ns)
 }
 
 // commit scans a slot (the caller holds it) and commits its changes on
@@ -504,35 +535,98 @@ func (c *cacheFS) commit(ctx context.Context, slot, repo string, m slotMeta, liv
 	}
 	r.cmu.Lock()
 	defer r.cmu.Unlock()
-	res := commitResult{repo: r}
+	p, err := c.plan(ctx, slot, r, m)
+	if err != nil {
+		return commitResult{repo: r}, err
+	}
+	return c.finish(ctx, slot, r, m, p, filepath.Join(slot, "data"), false, live)
+}
+
+// slotPlan is a planned commit of a slot: what changed since its head
+// (files not read yet), the reads since the last commit and the
+// watermark. Snapshots persist it.
+type slotPlan struct {
+	Head       string           `json:"head"` // the layer the plan is relative to
+	Changes    *anyfs.ChangeSet `json:"changes"`
+	Reads      []string         `json:"reads,omitempty"`
+	ReadsKnown bool             `json:"reads_known,omitempty"`
+	Scanned    int64            `json:"scanned_ns"`
+	Upper      int64            `json:"upper_bytes,omitempty"`
+	Runs       int64            `json:"runs"` // the slot's runs at the plan
+}
+
+// plan stats a slot's changes since its head (the caller holds the slot
+// and r.cmu or the slot's snapshot lock).
+func (c *cacheFS) plan(ctx context.Context, slot string, r *repoFS, m slotMeta) (slotPlan, error) {
 	head := m.Head
 	if head == "" {
 		head = m.Base
 	}
+	p := slotPlan{Head: head, Runs: m.Runs}
 	ch, err := r.chain(ctx, head)
 	if err != nil {
-		return res, err
+		return p, err
 	}
-	if err := c.mount(ctx, slot, repo, m.Base); err != nil {
+	if err := c.mount(ctx, slot, r.id, m.Base); err != nil {
+		return p, err
+	}
+	opt := anyfs.ChangeOptions{ScanOptions: c.scanOptions(ctx, r, ch.Tree(), m.Scanned)}
+	if c.mode != fsPlain {
+		opt.Upper = filepath.Join(slot, "upper")
+		if opt.Since == 0 && head == m.Base {
+			opt.Since = 1 // the upper holds every change since the mount over the head
+		}
+		c.mu.Lock()
+		if sm := c.mounts[slot]; sm != nil && sm.user != nil {
+			opt.UpperFormat = anyfs.UpperUser
+		}
+		c.mu.Unlock()
+	}
+	// Changes from now on have a newer ctime (a second of slack for
+	// coarse file system timestamps).
+	p.Scanned = time.Now().Add(-time.Second).UnixNano()
+	if t := c.tracker(slot); t != nil {
+		p.Reads, p.ReadsKnown = t.takePending(), true
+	}
+	if p.Changes, err = anyfs.PlanChanges(filepath.Join(slot, "data"), opt); err != nil {
+		return p, fmt.Errorf("scan build slot: %w", err)
+	}
+	if c.mode != fsPlain {
+		p.Upper = treeSize(filepath.Join(slot, "upper"))
+	}
+	return p, nil
+}
+
+// scanOptions are the scan options of a repository's commits over prev.
+func (c *cacheFS) scanOptions(ctx context.Context, r *repoFS, prev *anyfs.Tree, since int64) anyfs.ScanOptions {
+	return anyfs.ScanOptions{Prev: prev, Since: since,
+		Sink:  func(k anyfs.Key, b []byte) error { return r.tier.Put(ctx, k, b, anyfs.Dirty) },
+		Alone: func(rel string, size int64) bool { return size >= dedupeMin && r.access.Policy(rel).Dedupe }}
+}
+
+// finish reads a plan's changed files from content (the slot's data
+// directory, or a snapshot of them with move: adopted by moving) and
+// commits the tree as a layer on top of the plan's head (r.cmu held).
+func (c *cacheFS) finish(ctx context.Context, slot string, r *repoFS, m slotMeta, p slotPlan, content string, move bool, live []string) (commitResult, error) {
+	res := commitResult{repo: r, scanned: p.Scanned, upper: p.Upper}
+	ch, err := r.chain(ctx, p.Head)
+	if err != nil {
 		return res, err
 	}
 	base := ch.Tree()
-	tree, st, err := anyfs.Scan(filepath.Join(slot, "data"), anyfs.ScanOptions{Prev: base,
-		Sink: func(k anyfs.Key, b []byte) error { return r.tier.Put(ctx, k, b, anyfs.Dirty) }})
+	tree, st, err := p.Changes.Tree(content, c.scanOptions(ctx, r, base, 0))
 	if err != nil {
-		return res, fmt.Errorf("scan build slot: %w", err)
+		return res, fmt.Errorf("read build slot changes: %w", err)
 	}
 	res.scan, res.tree, res.chain = st, tree, ch
-	if c.mode != fsPlain {
-		res.upper = treeSize(filepath.Join(slot, "upper"))
-	}
 	diff := anyfs.Diff(base, tree)
 	if len(diff) == 0 && (len(ch) > 0 || tree.Len() == 0) {
 		return res, nil
 	}
 	now := c.opt.Now()
-	c.observe(r, base, tree, now)
-	l := anyfs.Commit(ch, base, tree, now, nil)
+	c.observe(r, base, tree, p.Reads, p.ReadsKnown, now)
+	c.hintPages(r, diff)
+	l := anyfs.Commit(ch, base, tree, now, r.ws.marshal(wsMeta))
 	if len(ch) == 0 && m.Created > 0 {
 		l.Created = m.Created
 	}
@@ -551,17 +645,21 @@ func (c *cacheFS) commit(ctx context.Context, slot, repo string, m slotMeta, liv
 		return res, err
 	}
 	res.chain, res.changed = ch, true
-	if c.reflink && c.mode != fsPlain {
+	if move || (c.reflink && c.mode != fsPlain) {
 		// Committed files become resident content without a fetch (a
 		// rebase or another slot over the head reads them).
+		dir := filepath.Join(slot, "upper")
+		if move {
+			dir = content
+		}
 		for i := range diff {
 			n := &diff[i]
 			if n.Kind != anyfs.File {
 				continue
 			}
-			p := filepath.Join(slot, "upper", filepath.FromSlash(n.Path))
-			if fullUpperFile(p, n.Size) {
-				c.files.Adopt(n, p, true, false)
+			f := filepath.Join(dir, filepath.FromSlash(n.Path))
+			if fullUpperFile(f, n.Size) {
+				c.files.Adopt(n, f, true, move)
 			}
 		}
 	}
@@ -619,6 +717,25 @@ func (c *cacheFS) discard(ctx context.Context, r *repoFS, live []string) {
 }
 
 var errNoStore = errors.New("no store grant for the repository")
+
+// dirtyIn counts the pages of a tree still awaiting writeback.
+func (c *cacheFS) dirtyIn(r *repoFS, t *anyfs.Tree) int {
+	dirty := r.local.DirtyKeys()
+	if len(dirty) == 0 {
+		return 0
+	}
+	set := make(map[anyfs.Key]bool, len(dirty))
+	for _, d := range dirty {
+		set[d.Key] = true
+	}
+	n := 0
+	for _, k := range t.Keys() {
+		if set[k] {
+			n++
+		}
+	}
+	return n
+}
 
 // flush writes a committed chain back to the store: the dirty pages of
 // its tree, its layer objects, then the head.
@@ -789,7 +906,10 @@ func (c *cacheFS) vm() *proto.VMStats {
 		s = s.Add(st)
 	}
 	f := c.files.Stats()
-	return &proto.VMStats{Capacity: c.opt.Capacity, ResidentBytes: s.ResidentBytes + f.ResidentBytes, DirtyBytes: s.DirtyBytes,
+	if ws := c.workingSetBytes(); ws > 0 {
+		s.WorkingSetBytes = ws // files sessions read (tracked), not pages touched
+	}
+	return &proto.VMStats{Capacity: c.opt.Capacity, ResidentBytes: s.ResidentBytes - s.SharedBytes + f.ResidentBytes, DirtyBytes: s.DirtyBytes,
 		PinnedBytes: s.PinnedBytes, WorkingSetBytes: s.WorkingSetBytes, Faults: s.Faults + f.Faults, PageInBytes: s.PageInBytes + f.PageInBytes,
 		WritebackBytes: s.PageOutBytes, ReclaimBytes: s.ReclaimBytes + c.reclaimed.Load(), FaultRate: s.FaultRate + f.FaultRate,
 		Thrashing: s.Thrashing, Stack: stack}

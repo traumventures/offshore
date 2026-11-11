@@ -141,15 +141,16 @@ func (l *Link) Start() {
 		l.mu.Unlock()
 		return
 	}
-	l.stop, l.stopped = make(chan struct{}), make(chan struct{})
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	l.stop, l.stopped = stop, stopped
 	l.mu.Unlock()
 	go func() {
-		defer close(l.stopped)
+		defer close(stopped)
 		t := time.NewTicker(l.pol.Interval)
 		defer t.Stop()
 		for {
 			select {
-			case <-l.stop:
+			case <-stop:
 				return
 			case <-t.C:
 				l.writeback(context.Background(), false)
@@ -361,8 +362,22 @@ func (l *Link) writeback(ctx context.Context, all bool) error {
 		total += c.size
 	}
 	limit := l.limit()
+	hints, _ := l.upper.(interface{ PageHint(Key) (PageHint, bool) })
 	for _, c := range cs {
-		if all || now.Sub(c.since) >= l.pol.DirtyExpire || (limit > 0 && total > limit/2) {
+		expire := l.pol.DirtyExpire
+		if hints != nil && !all {
+			if h, ok := hints.PageHint(c.k); ok {
+				if h.NoWriteback {
+					continue // only an explicit flush writes it back
+				}
+				if h.Expire > 0 {
+					expire = h.Expire
+				} else if h.Expire < 0 {
+					expire = 0 // early
+				}
+			}
+		}
+		if all || now.Sub(c.since) >= expire || (limit > 0 && total > limit/2) {
 			keys = append(keys, c.k)
 			total -= c.size
 		}
