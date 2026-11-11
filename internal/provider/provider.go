@@ -51,7 +51,11 @@ type MachineSpec struct {
 	// Volume is the id of an available cache volume (Volumes part) the
 	// machine gets as its cache disk at creation; empty: the cache lives
 	// on the machine's own disk.
-	Volume    string
+	Volume string
+	// CacheTTL: a cache volume's content unused for longer is wiped when
+	// it is attached. Without Volume the cache lives on the root disk or,
+	// if the instance type has one, an instance-store NVMe disk.
+	CacheTTL  time.Duration
 	Swap      bool // allow sessions to swap
 	ExpiresAt time.Time
 	Finger    string        // expected server certificate fingerprint (public)

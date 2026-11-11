@@ -292,3 +292,13 @@ func TestPlacementFollowsVolume(t *testing.T) {
 		t.Fatalf("attached volume: %v", err)
 	}
 }
+
+func TestCacheSpec(t *testing.T) {
+	c := cacheSpec(provider.MachineSpec{Volume: "vol-0ab", CacheTTL: time.Hour})
+	if c.Medium != "volume" || c.Device != "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0ab" || c.TTLSeconds != 3600 {
+		t.Fatalf("%+v", c)
+	}
+	if c := cacheSpec(provider.MachineSpec{}); c.Medium != "local" || c.LocalDevices != instanceStore {
+		t.Fatalf("%+v", c)
+	}
+}

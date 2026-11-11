@@ -49,6 +49,7 @@ func hostSpec(spec provider.MachineSpec, region string, in *infra, image string)
 		},
 		ExpiresAt: spec.ExpiresAt.Unix(),
 		IdleStop:  int64(spec.IdleStop.Seconds()),
+		Cache:     cacheSpec(spec),
 		Params: map[string]string{
 			paramRegion:    region,
 			paramNamespace: in.namespace,
@@ -58,6 +59,19 @@ func hostSpec(spec provider.MachineSpec, region string, in *infra, image string)
 			// Compiler cache objects of the pool, shared by its machines.
 		},
 	}
+}
+
+// denseIO matches the local NVMe disks of DenseIO shapes (boot and block
+// volumes attach as SCSI/paravirtualized devices, never NVMe).
+const denseIO = "/dev/nvme[0-9]*n1"
+
+// cacheSpec places the cache: on the attached block volume, else on the
+// first local NVMe disk if the shape has one.
+func cacheSpec(spec provider.MachineSpec) *supervisor.CacheSpec {
+	if spec.Volume != "" {
+		return &supervisor.CacheSpec{Medium: supervisor.CacheVolume, Device: VolumeDevice, TTLSeconds: int64(spec.CacheTTL.Seconds())}
+	}
+	return &supervisor.CacheSpec{Medium: supervisor.CacheLocal, LocalDevices: denseIO}
 }
 
 // userData renders the first boot script: Docker, the server binary, the
