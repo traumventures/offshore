@@ -145,8 +145,12 @@ func (p Default) boot(f Pool, prov string) time.Duration {
 }
 
 func (p Default) startLatency(f Pool, prov string) time.Duration {
-	if ps, ok := f.Providers[prov]; ok && ps.Start > 0 {
+	ps := f.Providers[prov]
+	switch {
+	case ps.Start > 0:
 		return ps.Start
+	case ps.Boot > 0:
+		return ps.Boot / 2 // a start keeps the disk and image: faster than a create
 	}
 	return DefaultStart
 }
@@ -272,7 +276,7 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) (r
 	}
 	var opts []option
 	for _, c := range cs {
-		opts = append(opts, option{cost: c.cost + priceOf(f, m)*hours(c.run), time: extra(t, c.run)})
+		opts = append(opts, option{cost: c.cost + priceOf(f, m)*hours(c.run), time: c.run})
 	}
 	if i := p.pick(opts); i >= 0 {
 		return cs[i], true
@@ -334,16 +338,27 @@ func (p Default) bestSnapshot(f Pool, prov string, t Task) (Snapshot, bool) {
 	return best, found
 }
 
-// occupancy is the price of the share of m that t holds while it runs. An
-// idle machine pays its whole price for the run: using it postpones its
-// idle stop.
-func occupancy(f Pool, m Machine, t Task, run time.Duration) float64 {
+// machineCost is the marginal machine cost of running t on m from start
+// for run: the machine is paid until its sessions end anyway; a run beyond
+// that extends its uptime at the full price (an idle machine from now: the
+// time it already idled is sunk), and the part of the run within the paid
+// time costs the share of the machine it takes from others.
+func (p Default) machineCost(f Pool, m Machine, t Task, start time.Time, run time.Duration) float64 {
 	price := priceOf(f, m)
-	sh := math.Min(share(t.Request, m.Capacity), 1)
-	if m.Sessions == 0 && m.Reserved == (Resources{}) {
-		sh = 1
+	if price == 0 {
+		return 0
 	}
-	return price * sh * hours(run)
+	busyEnd := f.Now
+	for _, r := range m.Releases {
+		if e := r.Expected(f.Now); e.After(busyEnd) {
+			busyEnd = e
+		}
+	}
+	end := start.Add(run)
+	ext := max(end.Sub(busyEnd), 0)
+	overlap := max(run-ext, 0)
+	sh := math.Min(share(t.Request, m.Capacity), 1)
+	return price * (hours(ext) + sh*hours(overlap))
 }
 
 // freeAt returns when need fits on m after the expected releases of its

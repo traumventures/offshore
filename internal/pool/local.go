@@ -76,6 +76,7 @@ func NewLocal(u *config.PoolConfig, stateDir string, log *slog.Logger) (*Local, 
 		envs: map[string]Env{}, waiters: map[string]map[*syncWriter]bool{},
 	}
 	orch.PrepareImage = l.prepareImage
+	orch.Profile = est.Profile
 	orch.Stores = &orchestrator.StoreSet{Pool: u.Pool.ID, Provs: provs}
 	if u.Storage.Configured() {
 		sc, err := StorageConfig(u)

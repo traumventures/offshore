@@ -27,7 +27,7 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 		}
 		for _, rc := range p.runChoices(f, m, t) {
 			assignable = true
-			o := option{cost: occupancy(f, m, t, rc.run) + rc.cost, time: extra(t, rc.run), tie: Score(t.RepoID, m.ID),
+			o := option{cost: p.machineCost(f, m, t, f.Now, rc.run) + rc.cost, time: rc.run, tie: Score(t.RepoID, m.ID),
 				fit: leftover(p.Free(m), t.Request, p.admissible(m))}
 			consider(o, Placement{Kind: Assign, Machine: m.ID, Grant: p.Grant(t), Reason: rc.reason, Slot: rc.slot, Expected: t.Profile.High(rc.run)})
 		}
@@ -54,7 +54,7 @@ func (p Default) placeModel(f Pool, t Task) Placement {
 		mm := m
 		mm.Reserved = Resources{} // runs after the sessions it waits for
 		for _, rc := range p.runChoices(f, mm, t) {
-			o := option{cost: occupancy(f, mm, t, rc.run) + rc.cost, time: wait + extra(t, rc.run), tie: Score(t.RepoID, m.ID), fit: math.Inf(1)}
+			o := option{cost: p.machineCost(f, m, t, at, rc.run) + rc.cost, time: wait + rc.run, tie: Score(t.RepoID, m.ID), fit: math.Inf(1)}
 			consider(o, Placement{Kind: Wait, Machine: m.ID, Reason: fmt.Sprintf("waiting %s for %s on %s", wait.Round(time.Second), rc.reason, m.ID)})
 		}
 	}
@@ -137,10 +137,15 @@ func (p Default) quickRun(f Pool, tm *tlMachine, t Task) time.Duration {
 	return run
 }
 
-// extra is the time of a run beyond the warm run at full speed (cold
-// build, restore, preparation, overcommit slowdown).
-func extra(t Task, run time.Duration) time.Duration {
-	return max(run-t.Profile.WarmRun(), 0)
+// ownMachine is the cost of the cheapest size fitting t for its cold run.
+func (p Default) ownMachine(f Pool, t Task) float64 {
+	best := 0.0
+	for _, s := range f.ArchSizes(t.EnvHash) {
+		if p.sizeAdmissible(s).Fits(t.Request) && s.PricePerHour > 0 && (best == 0 || s.PricePerHour < best) {
+			best = s.PricePerHour
+		}
+	}
+	return best * hours(t.Profile.ColdRun("")+DefaultBoot)
 }
 
 // infWait stands in for a wait that never ends when scoring.
@@ -190,15 +195,18 @@ func (p Default) timeline(f Pool, ms []*tlMachine, tasks []Task, tail time.Durat
 		}
 		wait := time.Duration(0)
 		if bestTM == nil {
+			// Never served by these machines: it will need a machine of its
+			// own (the cheapest fitting size for its run) after a long wait.
 			feasible = false
 			total += p.infWait()
+			cost += p.ownMachine(f, t)
 			continue
 		}
 		wait = bestAt.Sub(f.Now)
 		if p.Cfg.QueueTimeout > 0 && f.Now.Sub(t.Since)+wait > p.Cfg.QueueTimeout*8/10 {
 			feasible = false
 		}
-		total += wait + extra(t, bestRun)
+		total += wait + bestRun
 		end := bestAt.Add(bestRun)
 		bestTM.deltas = append(bestTM.deltas, Release{At: bestAt, Res: Resources{}.Sub(t.Request)}, Release{At: end, Res: t.Request})
 		if end.After(bestTM.lastEnd) {
@@ -250,8 +258,10 @@ func (p Default) scaleOutModel(st *planState, env string) {
 	c, f := p.cfg(), st.f
 	tasks := append([]Task(nil), st.queued[env]...)
 	sort.SliceStable(tasks, func(i, j int) bool { return tasks[i].Since.Before(tasks[j].Since) })
-	if len(tasks) > 32 {
-		tasks = tasks[:32]
+	// Bounded work per plan: the oldest tasks, a few machines per plan
+	// (plans run every few seconds while tasks wait).
+	if len(tasks) > 16 {
+		tasks = tasks[:16]
 	}
 	tail := time.Duration(float64(c.IdleStop) * DefaultTail)
 	var ms []*tlMachine
@@ -278,7 +288,7 @@ func (p Default) scaleOutModel(st *planState, env string) {
 		rv[m.ID] = Score(tasks[0].RepoID, m.ID)
 	}
 	sort.SliceStable(stopped, func(i, j int) bool { return rv[stopped[i].ID] > rv[stopped[j].ID] })
-	for round := 0; round < len(tasks); round++ {
+	for round := 0; round < min(len(tasks), 4); round++ {
 		cost, total, feasible := p.timeline(f, ms, tasks, tail)
 		var opts []option
 		var optC []*cand

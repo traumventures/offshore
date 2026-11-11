@@ -55,6 +55,9 @@ const (
 	// SlotAction: the scheduler handled a full or growing build slot
 	// (Reason: resize, prune, move, cold; Repo, Machine, Bytes).
 	SlotAction = "slot_action"
+	// ProviderDown: a provider reported no capacity or quota; it gets no
+	// new machines for Seconds (cooldown with backoff).
+	ProviderDown = "provider_down"
 )
 
 // SampleInterval is how often a running machine is sampled.

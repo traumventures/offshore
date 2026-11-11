@@ -162,6 +162,7 @@ type machine struct {
 type sim struct {
 	o        Options
 	fc       *scheduler.Forecast
+	est      map[string]estimate // per repository until the next observation
 	now      time.Time
 	machines []*machine
 	queue    []*job
@@ -239,7 +240,7 @@ func Run(trace Trace, o Options) Report {
 					s.r.Swapped++
 				}
 				m.warm[r.j.Repo] = true
-				s.o.Estimator.Observe(r.j.Repo, scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), CPUSeconds: r.j.CPU * r.j.Duration,
+				s.observe(r.j.Repo, scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), CPUSeconds: r.j.CPU * r.j.Duration,
 					Wall: r.j.runFor, Warm: r.warm, Provider: m.prov})
 			}
 			m.runs = kept
@@ -361,10 +362,30 @@ func (s *sim) advance(d time.Duration) {
 	s.r.MaxRunning = max(s.r.MaxRunning, running)
 }
 
+type estimate struct {
+	fallback scheduler.Resources
+	need     scheduler.Resources
+	profile  scheduler.Profile
+}
+
+// observe records a finished run with the estimator.
+func (s *sim) observe(repo string, u scheduler.Usage) {
+	s.o.Estimator.Observe(repo, u)
+	delete(s.est, repo)
+}
+
 func (s *sim) task(j *job) scheduler.Task {
 	fallback := scheduler.Resources{CPU: j.CPU, Memory: int64(j.Memory)}
+	e, ok := s.est[j.Repo]
+	if !ok || e.fallback != fallback {
+		e = estimate{fallback, s.o.Estimator.Estimate(j.Repo, fallback), s.o.Estimator.Profile(j.Repo)}
+		if s.est == nil {
+			s.est = map[string]estimate{}
+		}
+		s.est[j.Repo] = e
+	}
 	return scheduler.Task{ID: fmt.Sprintf("j%d", j.n), EnvHash: j.Env, RepoID: j.Repo, Key: j.Repo,
-		Request: s.o.Estimator.Estimate(j.Repo, fallback), Since: j.since, Profile: s.o.Estimator.Profile(j.Repo)}
+		Request: e.need, Since: j.since, Profile: e.profile}
 }
 
 // pool is the policy's view, built like the orchestrator's poolLocked.
@@ -443,6 +464,9 @@ func (s *sim) settle(tick bool) {
 
 func (s *sim) placeQueued() {
 	for _, j := range append([]*job(nil), s.queue...) {
+		if s.o.QueueTimeout <= 0 && len(s.queue) > 0 && !s.anyFree(j) {
+			continue // no machine of its environment has room: Place would wait
+		}
 		if s.o.QueueTimeout > 0 && s.now.Sub(j.since) > s.o.QueueTimeout {
 			s.dequeue(j)
 			s.r.TimedOut++
@@ -463,6 +487,26 @@ func (s *sim) placeQueued() {
 			s.r.Rejected++
 		}
 	}
+}
+
+// anyFree reports whether a running machine of j's environment could
+// take any task (a cheap filter before building the pool).
+func (s *sim) anyFree(j *job) bool {
+	for _, m := range s.machines {
+		if m.env != j.Env || m.state != scheduler.Running || m.draining {
+			continue
+		}
+		var cpu float64
+		var mem int64
+		for _, r := range m.runs {
+			cpu += r.reserve.CPU
+			mem += r.reserve.Memory
+		}
+		if cpu < 2*m.size.Capacity.CPU && mem < m.size.Capacity.Memory {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *sim) dequeue(j *job) {
@@ -512,7 +556,7 @@ func (s *sim) oom(m *machine) {
 		r := m.runs[k]
 		m.runs = m.runs[:k]
 		s.r.OOMs++
-		s.o.Estimator.Observe(r.j.Repo, scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), OOM: true, Wall: s.now.Sub(r.start)})
+		s.observe(r.j.Repo, scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), OOM: true, Wall: s.now.Sub(r.start)})
 		if r.j.attempts <= s.o.Retries {
 			r.j.since = s.now
 			s.enqueue(r.j)

@@ -6,7 +6,7 @@ import (
 )
 
 // DefaultForecastWindow is how far back Forecast looks.
-const DefaultForecastWindow = 10 * time.Minute
+const DefaultForecastWindow = 2 * time.Minute
 
 // Forecast tracks recent demand per environment for consolidation and
 // scale-in decisions: the peak reservation of running and queued sessions

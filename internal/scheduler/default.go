@@ -99,7 +99,7 @@ func (p Default) cfg() Config {
 		c.ConsolidateTarget = 0.75
 	}
 	if c.ConsolidateHold <= 0 {
-		c.ConsolidateHold = 5 * time.Minute
+		c.ConsolidateHold = 2 * time.Minute
 	}
 	return c
 }
@@ -660,8 +660,14 @@ func (p Default) idleStop(st *planState) map[string]int {
 		}
 	}
 	for _, m := range f.Machines {
-		if m.State != Running || m.Sessions > 0 || m.Reserved.Memory > 0 || len(st.queued[m.EnvHash]) > 0 {
+		// Queued tasks keep idle machines of their environment, unless the
+		// cost model let them wait for other machines (then the idle one
+		// was the worse choice for them and may stop).
+		if m.State != Running || m.Sessions > 0 || m.Reserved.Memory > 0 || (len(st.queued[m.EnvHash]) > 0 && !p.model()) {
 			continue
+		}
+		if slices.ContainsFunc(st.acts, func(a Action) bool { return a.Machine == m.ID }) {
+			continue // already stopped or undrained by this plan
 		}
 		// A machine drained by consolidation stops as soon as it is empty.
 		consolidated := !p.classic() && m.Draining && p.usable(m, f.Now)
