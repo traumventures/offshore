@@ -43,6 +43,9 @@ func (f *fakeSource) put(rel, content string, mtime int64) {
 			break
 		}
 		f.dirs[d] = true
+		// Like a real directory: adding or replacing an entry (a rename
+		// of a fresh output) updates its mtime.
+		f.mtime[d+"/"] = max(f.mtime[d+"/"], mtime)
 	}
 }
 
@@ -69,7 +72,7 @@ func (f *fakeSource) List(ctx context.Context, dir string) ([]proto.OutEntry, er
 	for d := range f.dirs {
 		if d != "" && cleanDir(path.Dir(d)) == dir && !seen[d] {
 			seen[d] = true
-			out = append(out, proto.OutEntry{Name: path.Base(d), Kind: manifest.Dir, Mode: 0o755})
+			out = append(out, proto.OutEntry{Name: path.Base(d), Kind: manifest.Dir, Mode: 0o755, MtimeNs: f.mtime[d+"/"]})
 		}
 	}
 	return out, nil

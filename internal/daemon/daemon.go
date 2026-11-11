@@ -208,7 +208,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 
 // Request is a daemon RPC request.
 type Request struct {
-	Op    string   `json:"op"` // prepare | release | sync | status | metrics | down | reconcile | shutdown | ping | outputs-mount | outputs-unmount | outputs-status | outputs-hint
+	Op    string   `json:"op"` // prepare | release | sync | status | metrics | down | reconcile | shutdown | ping | outputs-mount | outputs-ensure | outputs-unmount | outputs-status | outputs-hint
 	Root  string   `json:"root,omitempty"`
 	Cwd   string   `json:"cwd,omitempty"`
 	Tool  string   `json:"tool,omitempty"`
@@ -334,6 +334,15 @@ func (d *Daemon) dispatch(ctx context.Context, req Request, progress io.Writer) 
 			return nil, err
 		}
 		return d.outputs.mount(repo.Root, repo)
+	case "outputs-ensure":
+		repo, err := config.LoadRepo(req.Root)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := d.outputs.mount(repo.Root, repo); err != nil {
+			return nil, err
+		}
+		return d.outputs.statusOf(repo.Root), nil
 	case "outputs-unmount":
 		return nil, d.outputs.unmount(req.Root, false)
 	case "outputs-status":

@@ -106,7 +106,9 @@ func (s *Worker) compilerCacheEnv(req proto.Exec, session string, has func(strin
 			out = append(out, [2]string{"CARGO_INCREMENTAL", "0"})
 		}
 	}
-	if l := req.Linker; l != "" {
+	if l := req.Linker; l != "" && req.Toolchain == nil {
+		// With a relocated toolchain the linker comes from a "cc" on PATH
+		// (linkerShim): cargo hashes this variable into fingerprints.
 		// A linker driver instead of RUSTFLAGS: it leaves RUSTFLAGS and
 		// rustflags from .cargo/config.toml untouched.
 		key := "CARGO_TARGET_" + hostTriple() + "_LINKER"

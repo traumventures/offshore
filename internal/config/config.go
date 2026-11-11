@@ -170,8 +170,12 @@ type Service struct {
 type Outputs struct {
 	// Mode "eager" (default) copies only the tools' eager outputs back
 	// after every run. "fuse" additionally mounts the build directories
-	// ([cache.build] paths) read-only at their local path, with content
-	// fetched from the machine of the latest build on first access.
+	// ([cache.build] paths) at their local path as a writable overlay
+	// (internal/outputfs): the latest remote build below, local writes in
+	// the client state above, content fetched from the machine of the
+	// latest build on first access. Cargo sessions then run with the
+	// client's CARGO_HOME/RUSTUP_HOME paths, so local cargo finds the
+	// remote build fresh.
 	Mode string `toml:"mode"`
 }
 

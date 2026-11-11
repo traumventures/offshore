@@ -6,15 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/traumventures/cloudsourced/internal/config"
 	"github.com/traumventures/cloudsourced/internal/daemon"
 )
 
-// outputsCmd manages the output FUSE: the remote build directories of the
-// current repository mounted read-only at their local path.
+// outputsCmd manages the output overlay: the remote build directories of
+// the current repository mounted writable at their local path.
 func outputsCmd(args []string) error {
 	sub := "status"
 	if len(args) > 0 {
@@ -41,7 +40,7 @@ func outputsCmd(args []string) error {
 				fmt.Println("mounted", mp)
 			}
 		} else {
-			fmt.Println("unmounted outputs of", root)
+			fmt.Println("unmounted outputs of", root, "(local writes into the mount discarded)")
 		}
 		return nil
 	case "status":
@@ -59,7 +58,7 @@ func outputsCmd(args []string) error {
 		for _, s := range st {
 			mounted := "not mounted"
 			if len(s.Mountpoints) > 0 {
-				mounted = "mounted at " + strings.Join(s.Mountpoints, ", ")
+				mounted = "mounted at " + strings.Join(s.Mountpoints, ", ") + " (local writes in " + strings.Join(s.Uppers, ", ") + ")"
 			}
 			machine := s.Machine
 			if machine == "" {
@@ -160,7 +159,7 @@ settings = { ["rust-analyzer"] = {
 	}
 	fmt.Print(`
 # lsp-remote: proc macros and build script outputs are read from the
-# remote build directory, mounted read-only at its local path (output FUSE).
+# remote build directory, mounted at its local path (output overlay).
 # Keep it mounted with [outputs] mode = "fuse" in .cloudsourced.toml.
 # The local toolchain must match the remote one (rust-toolchain.toml), or
 # rust-analyzer cannot load the proc-macro libraries.
@@ -181,9 +180,6 @@ settings = { ["rust-analyzer"] = {
 	json.Unmarshal(raw, &mps)
 	for _, mp := range mps {
 		fmt.Fprintln(os.Stderr, "cloudsourced: outputs mounted at", mp)
-	}
-	if len(mps) > 0 {
-		fmt.Fprintf(os.Stderr, "cloudsourced: the mount is read-only; local cargo builds need \"cloudsourced outputs unmount\" first (%s)\n", filepath.Base(mps[0]))
 	}
 	return nil
 }

@@ -376,7 +376,7 @@ cloudsourced status                 # machines, sessions, cost today (--json)
 cloudsourced why                    # last run: local/remote and why, machine,
                                     # placement, timings, usage (N, list, --json)
 cloudsourced fetch 'target/debug/deps/*.so'   # lazy outputs
-cloudsourced outputs mount          # or browse target/ of the remote build
+cloudsourced outputs mount          # remote target/ at its local path (writable overlay)
 cloudsourced down                   # destroy machines and caches
 ```
 
@@ -464,37 +464,106 @@ stopped: idle stop terminates them. Shapes are tried preemptible first, then
 limit and unavailable-shape errors move on to the next attempt. A live smoke
 test is in `internal/orchestrator/ocismoke_test.go` (build tag `ocismoke`).
 
-### Output FUSE
+### Output overlay (output FUSE)
 
 By default only `eager` outputs come back after a run; `cloudsourced fetch`
-copies others on request. With the output FUSE the remote build directories
-(`[cache.build] paths`, e.g. `target/`) appear at their local path:
+copies others on request. With the output overlay the remote build
+directories (`[cache.build] paths`, e.g. `target/`) appear at their local
+path as if they had been built locally: local `cargo run`, `cargo test`,
+`cargo nextest` use the remote artifacts without rebuilding and without
+`cloudsourced fetch`.
 
-```sh
-cloudsourced outputs mount      # or [outputs] mode = "fuse" in .cloudsourced.toml
-cloudsourced outputs status
-cloudsourced outputs unmount
+```toml
+[outputs]
+mode = "fuse"      # mounted by the daemon for this repository
 ```
 
-- The mount is a read-only overlay over the local `target/` (owned by the
-  daemon, mounted with `fusermount3`). Entries of the latest remote build win;
-  local files that do not exist remotely (earlier local builds, fetched
-  files) stay visible. Nothing below the mount point is modified, it is all
-  there again after `unmount`. Local `cargo` cannot write into the mount
-  (`EROFS`); unmount before building locally.
+```sh
+cloudsourced outputs mount      # mount by hand (also without mode = "fuse")
+cloudsourced outputs status     # mount points, upper layers, generation
+cloudsourced outputs unmount    # unmount and discard local writes
+```
+
+- The mount (owned by the daemon, `fusermount3`, file system type
+  `fuse.cloudsourced-outputs`) is a writable union implemented with go-fuse
+  (`internal/outputfs`). Lower layer: the build slot of the latest remote
+  build of the repository. Upper layer: `$STATE/outputs/upper/<hash>`, a
+  local directory next to the client state, never in the repository; every
+  write goes there (cargo's locks and fingerprints, local rebuilds, copied
+  up files). The local `target/` below the mount point is hidden while
+  mounted and untouched; it is all there again after `unmount`.
+- Kernel overlayfs is not used: an unprivileged user can only mount it in a
+  user namespace, invisible to the shell that runs cargo.
 - Directories are listed on first access from the machine of the latest
   build, file contents are downloaded whole on first open into a local content
   cache (`$STATE/outputs/cas`, keyed by BLAKE3) and reused as long as path,
   size and mtime are unchanged. Every remote run starts a new generation:
   listings and kernel caches are dropped, unchanged contents are kept.
+  Exact mtimes (nanoseconds) are served, which cargo compares.
+- Layer rules: for a path present in both layers the newer mtime wins, ties
+  go to upper (latest writer wins). Writing a remote file copies it up with
+  its remote mtime (`O_TRUNC` without download); deleting or replacing a
+  remote entry writes a whiteout marker `.wh.NAME` whose mtime hides remote
+  entries up to that time; a directory created over a deleted remote one
+  gets an opaque marker. So a newer remote build replaces older local state
+  at the paths it produced, and local rebuilds win over older remote
+  outputs. Names starting with `.wh.` cannot be created in the mount.
+  Directories with remote content cannot be renamed (`EXDEV`, as overlayfs
+  without `redirect_dir`); `mv` falls back to copying. cargo's uplift of a
+  fresh output (unlink `debug/x`, hard link `deps/x-HASH`) does not download
+  anything when the remote build has the same link.
 - Eager outputs inside a mounted directory are stored in the content cache
   instead of being written below the mount point, so they are served
   without the machine.
 - When the machine is stopped or gone, cached listings and contents are
-  still served; uncached files fail with `EIO`, uncached directories fall
-  back to the local directory, and the daemon log says which machine was
-  unreachable. The machine is not asked again for 20 s.
-- The mount survives daemon restarts (state in `$STATE/outputs/state.json`).
+  still served; uncached files fail with `EIO`, uncached directories look
+  empty, and the daemon log says which machine was unreachable. The machine
+  is not asked again for 20 s.
+- The mount and its upper layer survive daemon restarts (state in
+  `$STATE/outputs/state.json`).
+- Go API: `daemon.EnsureOutputs(ctx, root)` mounts the overlay of a
+  repository (starting the daemon) and returns its status; it is current as
+  soon as a remote run returned.
+
+**Cargo freshness.** Local cargo considers the remote build fresh when its
+fingerprints match. With `mode = "fuse"` every remote session of the
+repository aligns what cargo hashes:
+
+- Sources are projected at the local path (identical absolute paths, mtimes).
+- The image's `CARGO_HOME` and `RUSTUP_HOME` appear at the client's paths
+  (`$CARGO_HOME`/`$RUSTUP_HOME` or `~/.cargo`/`~/.rustup`), bind mounted in
+  the session's mount namespace; `PATH` and the variables point there.
+  Cargo hashes the absolute paths of registry sources
+  (`$CARGO_HOME/registry/src/...`), so `$CARGO_HOME/registry` caches
+  (`[cache.deps]`) also live at the client's path. The path of `rustc`
+  itself is not hashed, its version (`rustc -vV`) is: pin it with
+  `[environment.toolchains] rust` and use the same `rust-toolchain.toml`
+  locally.
+- The configured linker (`[environment] linker`) is selected through a `cc`
+  on the session's `PATH` instead of `CARGO_TARGET_<triple>_LINKER`, which
+  cargo hashes.
+- `build.rustflags` and `target.<host>.rustflags` from the client's
+  `$CARGO_HOME/config.toml` (not projected) are passed as
+  `CARGO_BUILD_RUSTFLAGS`/`CARGO_TARGET_<HOST>_RUSTFLAGS` unless the run
+  forwards `RUSTFLAGS` or those variables. They must work remotely (e.g. a
+  `-fuse-ld=mold` needs `linker = "mold"`).
+
+Measured with `test/bench/overlay-fresh.sh` (local-docker, a crate with a
+proc macro, `itoa` and `libc` with a build script, a test; local cargo with a
+global config setting `rustc-wrapper` and target rustflags): after a remote
+`cargo build` and `cargo test --no-run`, local `cargo build` and
+`cargo test --no-run` recompile 0 of 5 units, the test and binary run
+locally, and after an edit and a remote rebuild local cargo again
+recompiles 0 units; a local edit recompiles only the edited crate (into
+the upper layer).
+
+Known gaps (cargo rebuilds the affected units locally, which is correct but
+slower): environment variables that differ locally and are tracked by
+`env!`/`option_env!` or a build script's `rerun-if-env-changed` (e.g. `CC`
+from a local `[env]` section); `incremental = false` in `[cache.compiler]`
+(set `CARGO_INCREMENTAL=0` locally too); other settings of the local
+`$CARGO_HOME/config.toml` that cargo fingerprints (`target.<triple>.linker`,
+`[profile]` overrides); a different local toolchain version.
 
 ### Compiler cache and linker
 
@@ -531,7 +600,8 @@ also part of the session's exit message (`proto.Exit.Cache`: `sccache_requests`,
 (`lld` installs the distribution's `lld` package, Debian based images) and a
 driver `/usr/local/bin/cloudsourced-cc-<linker>` (`cc ... -fuse-ld=<linker>`, last so it beats
 rustc's own `-fuse-ld=lld` for its bundled rust-lld),
-which sessions use as `CARGO_TARGET_<host triple>_LINKER` unless set. This
+which sessions use as `CARGO_TARGET_<host triple>_LINKER` unless set (with
+`[outputs] mode = "fuse"` through a `cc` on `PATH` instead, see above). This
 leaves `RUSTFLAGS` and `rustflags` from `.cargo/config.toml` untouched; a
 `target.<triple>.linker` in `.cargo/config.toml` is overridden by it.
 
@@ -545,7 +615,7 @@ libraries and build script outputs must be available locally:
 - `--mode local` (default): via eager outputs
   (`target/debug/deps/*.so`, `target/debug/build/*/out/**`).
 - `--mode lsp-remote` (or `[editor] rust_analyzer = "lsp-remote"`): via the
-  output FUSE, which the command mounts. The paths rust-analyzer gets from
+  output overlay, which the command mounts. The paths rust-analyzer gets from
   the remote `cargo check --message-format=json` (proc-macro `.so`, `OUT_DIR`)
   resolve inside the mount. `cargo metadata` stays local (dependency sources
   must exist locally). The local toolchain must match the remote one

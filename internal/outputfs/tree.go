@@ -1,7 +1,12 @@
-// Package outputs makes the worker-local build directories (target/) of the
-// latest remote build visible on the laptop: a read-only FUSE overlay over
-// the local directory whose remote part is listed per directory and fetched
-// per file on first open into a content addressed cache.
+// Package outputfs makes the worker-local build directories (target/) of
+// the latest remote build appear on the laptop as if built locally: a
+// writable FUSE union (FS) of the remote build (Tree: listed per directory,
+// fetched per file on first open into a content addressed cache) and a
+// local upper directory that receives every write.
+//
+// The daemon owns the mounts ([outputs] mode = "fuse", "cloudsourced
+// outputs mount"); other processes use daemon.EnsureOutputs to have them
+// mounted and IsMounted/Mounts/Covering to inspect them.
 package outputfs
 
 import (
