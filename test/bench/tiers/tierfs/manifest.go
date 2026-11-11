@@ -17,7 +17,7 @@ import (
 
 // Entry is one node of a layer tree: path -> type, mode, size, mtime, digest.
 // This is the manifest shape a future internal/anyfs core would share
-// between sourcefs, outputfs and worker tiers.
+// between the source projection, outputfs and worker tiers.
 type Entry struct {
 	Path    string `json:"p"`           // slash separated, "" = root
 	Type    byte   `json:"t"`           // 'd', 'f', 'l'

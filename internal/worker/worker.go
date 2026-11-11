@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/auth"
 	"github.com/traumventures/offshore/internal/cas"
 	"github.com/traumventures/offshore/internal/config"
@@ -28,7 +29,6 @@ import (
 	"github.com/traumventures/offshore/internal/machine"
 	"github.com/traumventures/offshore/internal/manifest"
 	"github.com/traumventures/offshore/internal/proto"
-	"github.com/traumventures/offshore/internal/sourcefs"
 	"github.com/traumventures/offshore/internal/tracing"
 	"github.com/traumventures/offshore/internal/transport"
 )
@@ -161,8 +161,9 @@ type Worker struct {
 	snapshots  []proto.SnapshotInfo
 
 	mu       sync.Mutex
-	mounts   map[string]*sourcefs.Projection
-	sources  map[string]*quic.Conn // root -> client connection serving blobs
+	mounts   map[string]*anyfs.WritableFS // source projections by root
+	srcFiles *anyfs.Files                 // their faulted-in file contents
+	sources  map[string]*quic.Conn        // root -> client connection serving blobs
 	sessions map[string]*session
 	// cpuLast is the machine CPU time at cpuAt; Measured.CPU is the rate
 	// since then (cores busy), refreshed at most every cpuInterval.
@@ -176,9 +177,6 @@ type Worker struct {
 	// (expiry).
 	drainReason string
 
-	fetchMu  sync.Mutex
-	inflight map[string]*fetchCall
-
 	metrics *serverMetrics
 
 	// machineCacheBytes is the size of the machine caches, measured by
@@ -186,11 +184,6 @@ type Worker struct {
 	machineCacheBytes atomic.Int64
 	pruneMu           sync.Mutex // one prune at a time
 	machineBudgets    machineCacheBudgets
-}
-
-type fetchCall struct {
-	done chan struct{}
-	err  error
 }
 
 // New prepares a server.
@@ -208,6 +201,10 @@ func New(cfg Config, log *slog.Logger) (*Worker, error) {
 		return nil, err
 	}
 	sl.clock = cfg.Clock
+	srcFiles, err := anyfs.OpenFiles(filepath.Join(cfg.CacheDir, "sources"), nil)
+	if err != nil {
+		return nil, err
+	}
 	var env []string
 	for _, kv := range os.Environ() {
 		// Neither pool secrets nor the server's tracing setup (whose
@@ -218,8 +215,8 @@ func New(cfg Config, log *slog.Logger) (*Worker, error) {
 	}
 	s := &Worker{
 		cfg: cfg, log: log, store: store, slots: sl, self: self, env: env,
-		mounts: map[string]*sourcefs.Projection{}, sources: map[string]*quic.Conn{},
-		sessions: map[string]*session{}, idleSince: cfg.now(), lastProbe: cfg.now(), inflight: map[string]*fetchCall{},
+		mounts: map[string]*anyfs.WritableFS{}, srcFiles: srcFiles, sources: map[string]*quic.Conn{},
+		sessions: map[string]*session{}, idleSince: cfg.now(), lastProbe: cfg.now(),
 	}
 	s.metrics = newServerMetrics(s)
 	return s, nil
@@ -560,9 +557,6 @@ func (s *Worker) serveSync(ctx context.Context, conn *quic.Conn, pc *proto.Conn)
 	s.mu.Lock()
 	s.sources[root] = conn
 	s.mu.Unlock()
-	p.SetFetcher(func(ctx context.Context, rel, hash string) error {
-		return s.fetchBlob(ctx, root, rel, hash)
-	})
 	if err := pc.Send(proto.TAck, proto.Ack{Version: p.Version()}); err != nil {
 		return err
 	}
@@ -577,7 +571,7 @@ func (s *Worker) serveSync(ctx context.Context, conn *quic.Conn, pc *proto.Conn)
 			return err
 		}
 		t0 := time.Now()
-		p.Apply(d)
+		p.Apply(deltaLayer(d), d.Full, d.Version)
 		p.Settle()
 		if dt := time.Since(t0); dt > 5*time.Second {
 			s.log.Warn("slow manifest apply", "root", root, "version", d.Version, "duration", dt.Round(time.Millisecond))
@@ -588,53 +582,57 @@ func (s *Worker) serveSync(ctx context.Context, conn *quic.Conn, pc *proto.Conn)
 	}
 }
 
-func (s *Worker) projection(root string, workerLocal []string) (*sourcefs.Projection, error) {
+// projection returns the source projection of root, mounting it at root
+// on first use: a writable anyfs file system over the synced manifest
+// whose file contents are faulted in from the client (the peer tier).
+func (s *Worker) projection(root string, workerLocal []string) (*anyfs.WritableFS, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if p, ok := s.mounts[root]; ok {
-		p.SetWorkerLocal(workerLocal)
+		p.SetMountPoints(workerLocal)
 		return p, nil
 	}
 	upper := filepath.Join(s.cfg.CacheDir, "upper", strings.ReplaceAll(strings.Trim(root, "/"), "/", "_"))
-	os.RemoveAll(upper)
-	p, err := sourcefs.New(root, s.store, upper, workerLocal)
+	src := anyfs.NewPeerSource(nil, s.srcFiles, func(ctx context.Context, n *anyfs.Node, w io.Writer) error {
+		return s.fetchFile(ctx, root, n, w)
+	})
+	p, err := anyfs.NewWritable(src, upper, anyfs.WritableOptions{FsName: "offshore", AllowOther: true})
 	if err != nil {
 		return nil, err
 	}
-	if err := p.Mount(); err != nil {
+	p.SetMountPoints(workerLocal)
+	if err := p.Mount(root); err != nil {
 		return nil, fmt.Errorf("mount %s: %w", root, err)
 	}
 	s.mounts[root] = p
 	return p, nil
 }
 
-// fetchBlob asks the client for a file's content, deduplicating concurrent
-// requests for the same hash.
-func (s *Worker) fetchBlob(ctx context.Context, root, rel, hash string) error {
-	s.fetchMu.Lock()
-	if c, ok := s.inflight[hash]; ok {
-		s.fetchMu.Unlock()
-		select {
-		case <-c.done:
-			return c.err
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+// deltaLayer turns a manifest delta into an anyfs layer (deletions
+// before upserts: a path deleted and upserted again shows the upsert).
+func deltaLayer(d manifest.Delta) []anyfs.Node {
+	out := make([]anyfs.Node, 0, len(d.Deletes)+len(d.Upserts))
+	for _, p := range d.Deletes {
+		out = append(out, anyfs.Node{Path: p, Whiteout: true})
 	}
-	c := &fetchCall{done: make(chan struct{})}
-	s.inflight[hash] = c
-	s.fetchMu.Unlock()
-	c.err = s.doFetch(ctx, root, rel, hash)
-	s.fetchMu.Lock()
-	delete(s.inflight, hash)
-	s.fetchMu.Unlock()
-	close(c.done)
-	return c.err
+	for _, e := range d.Upserts {
+		out = append(out, anyfs.FromEntry(e))
+	}
+	return out
 }
 
-func (s *Worker) doFetch(ctx context.Context, root, rel, hash string) error {
-	if s.store.Has(hash) {
-		return nil
+// fetchFile writes a source file's content to w: from the local store if
+// it holds the content (e.g. written back from here), else from the
+// client serving the root. (Concurrent faults of one digest share a
+// fetch in anyfs.Files.)
+func (s *Worker) fetchFile(ctx context.Context, root string, n *anyfs.Node, w io.Writer) error {
+	if s.store.Has(n.Digest) {
+		f, err := os.Open(s.store.Path(n.Digest))
+		if err == nil {
+			defer f.Close()
+			_, err = io.Copy(w, f)
+			return err
+		}
 	}
 	s.mu.Lock()
 	conn := s.sources[root]
@@ -649,7 +647,7 @@ func (s *Worker) doFetch(ctx context.Context, root, rel, hash string) error {
 		return err
 	}
 	defer st.Close()
-	if err := pc.Send(proto.TBlobReq, proto.BlobReq{Root: root, Path: rel, Hash: hash}); err != nil {
+	if err := pc.Send(proto.TBlobReq, proto.BlobReq{Root: root, Path: n.Path, Hash: n.Digest}); err != nil {
 		return err
 	}
 	var resp proto.BlobResp
@@ -659,22 +657,19 @@ func (s *Worker) doFetch(ctx context.Context, root, rel, hash string) error {
 	if resp.Err != "" {
 		return errors.New(resp.Err)
 	}
-	pr, pw := io.Pipe()
-	cr := &countingReader{r: pr}
-	go func() { pw.CloseWithError(pc.ReadData(pw)) }()
-	_, err = s.store.Put(hash, cr)
-	pr.CloseWithError(err)
-	s.countBytes(float64(cr.n), transferFetch)
+	cw := &countingWriter{w: w}
+	err = pc.ReadData(cw)
+	s.countBytes(float64(cw.n), transferFetch)
 	return err
 }
 
-type countingReader struct {
-	r io.Reader
+type countingWriter struct {
+	w io.Writer
 	n int64
 }
 
-func (c *countingReader) Read(p []byte) (int, error) {
-	n, err := c.r.Read(p)
-	c.n += int64(n)
-	return n, err
+func (c *countingWriter) Write(p []byte) (int, error) {
+	k, err := c.w.Write(p)
+	c.n += int64(k)
+	return k, err
 }
