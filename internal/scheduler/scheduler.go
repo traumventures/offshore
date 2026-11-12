@@ -508,6 +508,12 @@ type Usage struct {
 	// (reported by the cache file system; 0 = unknown). The estimator
 	// learns it per key (Profile.WorkingSet).
 	WorkingSetBytes int64 `json:"working_set_bytes,omitempty"`
+	// ReadBytes is the part of the slot that existed when the session
+	// started and that it read (tracked reads of files not written
+	// since; 0 = unknown): what a lazily restored slot faults in before
+	// such a build proceeds. Unlike WorkingSetBytes it excludes the
+	// growth and the outputs the session wrote and read back.
+	ReadBytes int64 `json:"read_bytes,omitempty"`
 	// RefaultBytes are the slot pages faulted in again during the session
 	// after the local tier reclaimed them (thrashing; machine wide, an
 	// upper bound with concurrent sessions); LocalCapacity is the local

@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"github.com/traumventures/offshore/internal/medium"
 	"strings"
 	"testing"
 	"time"
@@ -341,5 +342,32 @@ func TestDisabledProviderNotUsed(t *testing.T) {
 	}
 	if !(Config{DisabledProviders: map[string]bool{"oci": true}}).Disabled("oci") || (Config{}).Disabled("oci") {
 		t.Fatal("Disabled")
+	}
+}
+
+// Production, Nov 11 (task 38554554): a 22 GB head in the machine's own
+// store lost to a cold build because the restore was planned as the
+// whole working set (reads plus what the run writes, 25 GB) faulted in
+// before the build. A lazy restore mounts in about a second and faults
+// in what warm runs read of the slot they start on (here 3 GB).
+func TestRestoreFaultsReadSetNotSlot(t *testing.T) {
+	m := machine("m", res(8, 16), Resources{})
+	m.Size = "m"
+	m.Stack = StackOf(0, medium.Default("aws-ec2", medium.Local), medium.Default("aws-ec2", medium.Store))
+	tk := profiled(30*time.Second, 2*time.Minute)
+	tk.Profile.WorkingSet = 25 * gib
+	f := Pool{Now: now, Sizes: priced, Machines: []Machine{m},
+		Snapshots: map[string][]Snapshot{"r": {{Repo: "r", Provider: "p", Store: "p", Bytes: 22 * gib, At: now.Add(-time.Hour)}}}}
+	pol := Default{Cfg: Config{CostOptimization: 0.2, CPUOvercommit: 1, MemoryOvercommit: 1}}
+	if pl := pol.Place(f, tk); pl.Slot.Kind == SlotRestore {
+		t.Fatalf("without a read set the whole slot faults in: want cold, got %+v", pl)
+	}
+	tk.Profile.ReadSet = 3 * gib
+	if pl := pol.Place(f, tk); pl.Kind != Assign || pl.Slot.Kind != SlotRestore {
+		t.Fatalf("read set 3G: want restore, got %+v", pl)
+	}
+	// Egress is priced on what moves (read set + readahead), not the slot.
+	if b := restoreTransfer(22*gib, tk.Profile); b != 3*gib+RestorePrefetch {
+		t.Fatalf("transfer %d", b)
 	}
 }
