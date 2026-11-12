@@ -133,9 +133,13 @@ func TestDeterministic(t *testing.T) {
 		{Provider: "p", Name: "s", Capacity: scheduler.Resources{CPU: 4, Memory: 8 * gib}, PricePerHour: 0.2},
 		{Provider: "p", Name: "l", Capacity: scheduler.Resources{CPU: 16, Memory: 32 * gib}, PricePerHour: 0.8},
 	}
-	for _, variant := range []string{scheduler.VariantDefault, scheduler.VariantClassic} {
+	for _, variant := range []string{"idle_stop 20m", "derived"} {
+		idle := 20 * time.Minute
+		if variant == "derived" {
+			idle = 0
+		}
 		o := func() Options {
-			return Options{Policy: scheduler.Default{Cfg: scheduler.Config{Variant: variant, CPUOvercommit: 2, MemoryOvercommit: 1, IdleStop: 20 * time.Minute, ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5}},
+			return Options{Policy: scheduler.Default{Cfg: scheduler.Config{CPUOvercommit: 2, MemoryOvercommit: 1, IdleStop: idle, ExpiryMargin: 15 * time.Minute}},
 				Sizes: sizes, Estimator: scheduler.NewHistory("")}
 		}
 		r1, r2 := Run(a, o()), Run(a, o())
@@ -186,7 +190,7 @@ at,repo,env,duration,cpu,memory,peak_memory
 
 // TestSampleTraces checks the cost/time frontier of cost_optimization on
 // the sample traces: 0 gives the fastest results, 1 the lowest cost, and
-// the default policy at 0 is faster than classic.
+// every run completes.
 func TestSampleTraces(t *testing.T) {
 	sizes := []scheduler.Size{
 		{Provider: "aws", Name: "c7a.large", Capacity: scheduler.Resources{CPU: 2, Memory: 4 * gib}, PricePerHour: 0.1027},
@@ -198,17 +202,14 @@ func TestSampleTraces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := func(variant string, r float64) Report {
-		return Run(tr, Options{Policy: scheduler.Default{Cfg: scheduler.Config{Variant: variant, CPUOvercommit: 2, MemoryOvercommit: 1, IdleStop: 20 * time.Minute, ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5,
+	run := func(r float64) Report {
+		return Run(tr, Options{Policy: scheduler.Default{Cfg: scheduler.Config{CPUOvercommit: 2, MemoryOvercommit: 1, ExpiryMargin: 15 * time.Minute,
 			CostOptimization: r, QueueTimeout: 10 * time.Minute}}, Sizes: sizes, Estimator: scheduler.NewHistory("")})
 	}
-	fast, cheap, classic := run(scheduler.VariantDefault, 0), run(scheduler.VariantDefault, 1), run(scheduler.VariantClassic, 0)
+	fast, cheap := run(0), run(1)
 	if cheap.Cost >= fast.Cost || fast.TurnP95 > cheap.TurnP95 || fast.Completed != fast.Jobs || cheap.Completed != cheap.Jobs {
 		t.Errorf("frontier: r=0 cost %.2f turn95 %v done %d, r=1 cost %.2f turn95 %v done %d",
 			fast.Cost, fast.TurnP95, fast.Completed, cheap.Cost, cheap.TurnP95, cheap.Completed)
-	}
-	if fast.TurnP95 > classic.TurnP95 || fast.Cost > classic.Cost {
-		t.Errorf("r=0 cost %.2f turn95 %v, classic cost %.2f turn95 %v", fast.Cost, fast.TurnP95, classic.Cost, classic.TurnP95)
 	}
 }
 

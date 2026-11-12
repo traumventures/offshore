@@ -339,7 +339,6 @@ type volume struct {
 
 type sim struct {
 	o        Options
-	fc       *scheduler.Forecast
 	est      map[string]estimate // per repository until the next observation
 	snaps    map[string][]scheduler.Snapshot
 	calm     map[string]time.Time // env -> last consolidation drain or stop
@@ -363,7 +362,7 @@ type sim struct {
 // Run simulates trace under o.
 func Run(trace Trace, o Options) Report {
 	o.defaults()
-	s := &sim{o: o, now: trace.Start, recent: map[string]time.Time{}, fc: scheduler.NewForecast(),
+	s := &sim{o: o, now: trace.Start, recent: map[string]time.Time{},
 		snaps: map[string][]scheduler.Snapshot{}, calm: map[string]time.Time{}, cal: learning.NewRefetch(),
 		arr: learning.NewArrivals()}
 	s.start = trace.Start
@@ -859,10 +858,7 @@ func (s *sim) settle(tick bool) {
 		return
 	}
 	f := s.pool()
-	s.fc.Observe(f)
-	s.fc.Apply(&f)
 	acts := s.o.Policy.Plan(f)
-	s.fc.Note(f, acts)
 	s.execute(acts)
 	s.placeQueued()
 }

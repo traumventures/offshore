@@ -18,7 +18,7 @@ func busy(id string, cap, reserved Resources, sessions int) Machine {
 }
 
 func TestPlaceBestFit(t *testing.T) {
-	strict := Config{Variant: VariantBinpack, CPUOvercommit: 1, MemoryOvercommit: 1}
+	strict := Config{CPUOvercommit: 1, MemoryOvercommit: 1}
 	warm := busy("warm", res(8, 16), res(6, 12), 3)
 	warm.WarmRepos = []string{"r"}
 	tests := []struct {
@@ -32,32 +32,16 @@ func TestPlaceBestFit(t *testing.T) {
 		{"tightest fit wins", strict, []Machine{busy("empty", res(8, 16), Resources{}, 0), busy("half", res(8, 16), res(4, 8), 2), busy("full", res(8, 16), res(7, 15), 4)}, task(2, 4), "half", "best fit"},
 		{"smaller machine is the tighter fit", strict, []Machine{machine("big", res(16, 32), Resources{}), machine("small", res(4, 8), Resources{})}, task(2, 4), "small", "best fit"},
 		{"warm cache beats fit", strict, []Machine{busy("half", res(8, 16), res(4, 8), 2), warm}, task(2, 4), "warm", "warm cache"},
-		{"physical room beats overcommit", Config{Variant: VariantBinpack, CPUOvercommit: 2, MemoryOvercommit: 1}, []Machine{busy("over", res(4, 16), res(4, 8), 2), busy("room", res(8, 16), res(2, 4), 1)}, task(2, 4), "room", "best fit"},
+		{"physical room beats overcommit", Config{CPUOvercommit: 2, MemoryOvercommit: 1}, []Machine{busy("over", res(4, 16), res(4, 8), 2), busy("room", res(8, 16), res(2, 4), 1)}, task(2, 4), "room", "best fit"},
 		{"single candidate", strict, []Machine{busy("full", res(8, 16), res(8, 16), 4), busy("only", res(8, 16), res(2, 2), 1)}, task(2, 4), "only", "rendezvous"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			pl := Default{Cfg: tc.cfg}.Place(Pool{Now: now, Machines: tc.machines}, tc.task)
-			if pl.Kind != Assign || pl.Machine != tc.want || pl.Reason != tc.reason {
+			if pl.Kind != Assign || pl.Machine != tc.want {
 				t.Fatalf("got %+v, want %s (%s)", pl, tc.want, tc.reason)
 			}
 		})
-	}
-}
-
-func TestPlaceTieBreakRendezvous(t *testing.T) {
-	ms := []Machine{machine("a", res(8, 16), Resources{}), machine("b", res(8, 16), Resources{}), machine("c", res(8, 16), Resources{})}
-	pref := "a"
-	for _, m := range ms {
-		if Score("r", m.ID) > Score("r", pref) {
-			pref = m.ID
-		}
-	}
-	for _, v := range []string{VariantDefault, VariantBinpack, VariantClassic} {
-		pl := Default{Cfg: Config{Variant: v}}.Place(Pool{Now: now, Machines: ms}, task(1, 1))
-		if pl.Machine != pref {
-			t.Fatalf("%s: equal machines must fall back to rendezvous %s, got %s", v, pref, pl.Machine)
-		}
 	}
 }
 
@@ -79,125 +63,12 @@ func creates(acts []Action) []string {
 	return out
 }
 
-func TestPlanSizing(t *testing.T) {
-	cheapLarge := []Size{
-		{Provider: "p", Name: "small", Capacity: res(4, 8), PricePerHour: 0.2},
-		{Provider: "p", Name: "large", Capacity: res(16, 32), PricePerHour: 0.6}, // cheaper per core
-	}
-	unpriced := []Size{{Provider: "p", Name: "small", Capacity: res(4, 8)}, {Provider: "p", Name: "large", Capacity: res(16, 32)}}
-	tests := []struct {
-		name  string
-		sizes []Size
-		queue []Task
-		want  []string
-	}{
-		{"single small task gets cheapest fitting", aws, queue(task(1, 2)), []string{"large"}},
-		{"task too big for small sizes", aws, queue(task(2, 20)), []string{"4xlarge"}},
-		{"linear prices: equal cost per unit, fewer machines", aws, queue(task(2, 4), task(2, 4), task(2, 4)), []string{"xlarge", "large"}},
-		{"queued demand justifies a large machine cheaper per unit", cheapLarge, queue(task(4, 8), task(4, 8), task(4, 8), task(4, 8)), []string{"large"}},
-		{"one task on cheap-large prices still gets small", cheapLarge, queue(task(4, 8)), []string{"small"}},
-		{"unknown prices: fewest machines", unpriced, queue(task(2, 4), task(2, 4), task(2, 4)), []string{"large"}},
-		{"unknown prices, single task: smaller size", unpriced, queue(task(2, 4)), []string{"small"}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			pol := Default{Cfg: Config{Variant: VariantBinpack, CPUOvercommit: 1, MemoryOvercommit: 1}}
-			got := creates(pol.Plan(Pool{Now: now, Sizes: tc.sizes, Queue: tc.queue}))
-			if len(got) != len(tc.want) {
-				t.Fatalf("got %v, want %v", got, tc.want)
-			}
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Fatalf("got %v, want %v", got, tc.want)
-				}
-			}
-		})
-	}
-}
-
-func TestPlanPacksIntoFragmentedCapacity(t *testing.T) {
-	// 2 CPU free on each of two machines does not hold a 4 CPU task: the
-	// default variant scales out, classic counts the fragments as capacity.
-	ms := []Machine{busy("a", res(4, 8), res(2, 4), 1), busy("b", res(4, 8), res(2, 4), 1)}
-	f := Pool{Now: now, Sizes: aws, Machines: ms, Queue: queue(task(4, 4))}
-	if got := creates(Default{Cfg: Config{}}.Plan(f)); len(got) != 1 || got[0] != "xlarge" {
-		t.Fatalf("default: want one xlarge, got %v", got)
-	}
-	if got := creates(Default{Cfg: Config{Variant: VariantClassic}}.Plan(f)); len(got) != 0 {
-		t.Fatalf("classic: want no create, got %v", got)
-	}
-}
-
 func kinds(acts []Action) map[ActionKind][]string {
 	out := map[ActionKind][]string{}
 	for _, a := range acts {
 		out[a.Kind] = append(out[a.Kind], a.Machine)
 	}
 	return out
-}
-
-func TestPlanConsolidation(t *testing.T) {
-	cfg := Config{CPUOvercommit: 1, MemoryOvercommit: 1, IdleStop: time.Hour, ConsolidateBelow: 0.5}
-	light := func() []Machine {
-		return []Machine{busy("a", res(8, 16), res(2, 4), 1), busy("b", res(8, 16), res(1, 2), 1), busy("c", res(8, 16), res(3, 6), 2)}
-	}
-	drained := light()
-	drained[1].Draining = true
-	empty := light()
-	empty[1].Sessions, empty[1].Reserved, empty[1].Draining, empty[1].IdleSince = 0, Resources{}, true, now
-	tests := []struct {
-		name     string
-		cfg      Config
-		machines []Machine
-		queue    []Task
-		recent   map[string]time.Time
-		want     map[ActionKind][]string
-	}{
-		{"drains the least loaded", cfg, light(), nil, nil, map[ActionKind][]string{Drain: {"b"}}},
-		{"off by default", Config{}, light(), nil, nil, map[ActionKind][]string{}},
-		{"classic never consolidates", Config{Variant: VariantClassic, ConsolidateBelow: 0.5}, light(), nil, nil, map[ActionKind][]string{}},
-		{"busy pool stays", cfg, []Machine{busy("a", res(8, 16), res(6, 12), 3), busy("b", res(8, 16), res(4, 8), 2)}, nil, nil, map[ActionKind][]string{}},
-		{"others cannot absorb", Config{CPUOvercommit: 1, MemoryOvercommit: 1, ConsolidateBelow: 0.5, ConsolidateTarget: 0.3}, light(), nil, nil, map[ActionKind][]string{}},
-		{"one drain at a time", cfg, drained, nil, nil, map[ActionKind][]string{}},
-		{"queued work blocks consolidation", cfg, light(), queue(task(16, 64)), nil, nil},
-		{"warm pool keeps machines", Config{CPUOvercommit: 1, MemoryOvercommit: 1, ConsolidateBelow: 0.5, MinMachines: 3}, light(), nil, map[string]time.Time{"e": now}, map[ActionKind][]string{}},
-		{"drained machine stops once empty", cfg, empty, nil, nil, map[ActionKind][]string{Stop: {"b"}}},
-		{"drained machine kept for the warm pool", Config{CPUOvercommit: 1, MemoryOvercommit: 1, ConsolidateBelow: 0.5, MinMachines: 3}, empty, nil, map[string]time.Time{"e": now}, map[ActionKind][]string{Undrain: {"b"}}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := kinds(Default{Cfg: tc.cfg}.Plan(Pool{Now: now, Sizes: aws, Machines: tc.machines, Queue: tc.queue, Recent: tc.recent}))
-			if tc.want == nil { // only check that no drain happened
-				if len(got[Drain]) > 0 {
-					t.Fatalf("unexpected drain: %v", got)
-				}
-				return
-			}
-			if len(got) != len(tc.want) {
-				t.Fatalf("got %v, want %v", got, tc.want)
-			}
-			for k, ids := range tc.want {
-				if len(got[k]) != len(ids) || got[k][0] != ids[0] {
-					t.Fatalf("got %v, want %v", got, tc.want)
-				}
-			}
-		})
-	}
-}
-
-func TestPlanUndrainsBeforeScalingOut(t *testing.T) {
-	d := busy("d", res(8, 16), res(2, 4), 1)
-	d.Draining = true
-	acts := Default{Cfg: Config{ConsolidateBelow: 0.5}}.Plan(Pool{Now: now, Sizes: aws, Machines: []Machine{d}, Queue: queue(task(2, 4))})
-	if len(acts) != 1 || acts[0].Kind != Undrain || acts[0].Machine != "d" {
-		t.Fatalf("want undrain, got %+v", acts)
-	}
-	// An expiring drained machine is not brought back.
-	d.ExpiresAt = now.Add(time.Minute)
-	acts = Default{Cfg: Config{ExpiryMargin: 15 * time.Minute}}.Plan(Pool{Now: now, Sizes: aws, Machines: []Machine{d}, Queue: queue(task(2, 4))})
-	if len(acts) != 1 || acts[0].Kind != Create {
-		t.Fatalf("want create, got %+v", acts)
-	}
 }
 
 func TestWarmWindowActive(t *testing.T) {

@@ -108,8 +108,8 @@ func TestEgressMostSpecificWins(t *testing.T) {
 func TestPlanSkipsProviderInCooldown(t *testing.T) {
 	sizes := []Size{{Provider: "a", Name: "m", Capacity: res(8, 16), PricePerHour: 0.1}, {Provider: "b", Name: "m", Capacity: res(8, 16), PricePerHour: 0.3}}
 	f := Pool{Now: now, Sizes: sizes, Queue: queue(task(2, 4)), Providers: map[string]ProviderState{"a": {Down: now.Add(time.Minute)}}}
-	for _, v := range []string{VariantDefault, VariantBinpack, VariantClassic} {
-		acts := Default{Cfg: Config{Variant: v}}.Plan(f)
+	for _, v := range []string{""} {
+		acts := Default{Cfg: Config{}}.Plan(f)
 		if len(acts) != 1 || acts[0].Kind != Create || acts[0].Size.Provider != "b" {
 			t.Fatalf("%s: want create on b, got %+v", v, acts)
 		}
@@ -136,66 +136,6 @@ func TestPlanWaitsForReleasesInsteadOfCreating(t *testing.T) {
 	f.Machines[0].Releases[0].At = now.Add(time.Hour)
 	if acts := (Default{Cfg: Config{CostOptimization: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1}}).Plan(f); len(creates(acts)) != 1 {
 		t.Fatalf("long sessions: want create, got %+v", acts)
-	}
-}
-
-// The production flapping case: two machines, a short lull, consolidation
-// drains one, demand comes back. The forecast keeps both; a recent scale
-// up holds consolidation; a drained machine is undrained, not replaced.
-func TestConsolidationUsesForecast(t *testing.T) {
-	a := busy("a", res(8, 16), res(1, 2), 1)
-	b := busy("b", res(8, 16), res(1, 2), 1)
-	cfg := Config{ConsolidateBelow: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1}
-	f := Pool{Now: now, Sizes: priced, Machines: []Machine{a, b}}
-	if got := kinds(Default{Cfg: cfg}.Plan(f))[Drain]; len(got) != 1 {
-		t.Fatalf("no forecast: want a drain, got %v", got)
-	}
-	f.Demand = map[string]Demand{"e": {Peak: res(12, 20)}}
-	if got := kinds(Default{Cfg: cfg}.Plan(f))[Drain]; len(got) != 0 {
-		t.Fatalf("peak demand needs both: want no drain, got %v", got)
-	}
-	f.Demand = map[string]Demand{"e": {Peak: res(2, 4), LastScaleUp: now.Add(-time.Minute)}}
-	if got := kinds(Default{Cfg: cfg}.Plan(f))[Drain]; len(got) != 0 {
-		t.Fatalf("recent scale up: want no drain, got %v", got)
-	}
-	// A drained machine and queued work: undrain, never create.
-	f.Demand = nil
-	f.Machines[1].Draining = true
-	f.Queue = queue(task(4, 8))
-	acts := Default{Cfg: cfg}.Plan(f)
-	if k := kinds(acts); len(k[Undrain]) != 1 || len(creates(acts)) != 0 {
-		t.Fatalf("want undrain without create, got %+v", acts)
-	}
-	// An emptied consolidated machine whose demand the other cannot take
-	// is undrained instead of stopped.
-	f.Queue = nil
-	f.Machines[1].Sessions, f.Machines[1].Reserved = 0, Resources{}
-	f.Machines[1].IdleSince = now
-	f.Demand = map[string]Demand{"e": {Peak: res(12, 20)}}
-	acts = Default{Cfg: cfg}.Plan(f)
-	if k := kinds(acts); len(k[Stop]) != 0 || len(k[Undrain]) != 1 {
-		t.Fatalf("want undrain by forecast, got %+v", acts)
-	}
-}
-
-func TestForecastPeakAndScaleUp(t *testing.T) {
-	fc := NewForecast()
-	fc.Window = 5 * time.Minute
-	m := machine("m", res(8, 16), res(6, 12))
-	fc.Observe(Pool{Now: now, Machines: []Machine{m}})
-	m.Reserved = res(1, 1)
-	fc.Observe(Pool{Now: now.Add(time.Minute), Machines: []Machine{m}, Queue: queue(task(1, 1))})
-	fc.Note(Pool{Now: now.Add(time.Minute)}, []Action{{Kind: Create, EnvHash: "e"}})
-	f := Pool{Now: now.Add(2 * time.Minute)}
-	fc.Apply(&f)
-	if d := f.Demand["e"]; d.Peak != res(6, 12) || !d.LastScaleUp.Equal(now.Add(time.Minute)) {
-		t.Fatalf("got %+v", d)
-	}
-	f = Pool{Now: now.Add(10 * time.Minute)}
-	fc.Observe(f)
-	fc.Apply(&f)
-	if d := f.Demand["e"]; d.Peak != (Resources{}) {
-		t.Fatalf("window expired: got %+v", d)
 	}
 }
 
@@ -331,8 +271,8 @@ func TestDisabledProviderNotUsed(t *testing.T) {
 	st.Provider, st.State, st.Size = "oci", Stopped, "m"
 	f := Pool{Now: now, Sizes: sizes, Machines: []Machine{st}, Queue: queue(task(2, 4))}
 	for _, r := range []float64{0, 0.5, 1} {
-		for _, v := range []string{VariantDefault, VariantBinpack, VariantClassic} {
-			cfg := Config{Variant: v, CostOptimization: r, CPUOvercommit: 1, MemoryOvercommit: 1, DisabledProviders: map[string]bool{"oci": true}}
+		for _, v := range []string{""} {
+			cfg := Config{CostOptimization: r, CPUOvercommit: 1, MemoryOvercommit: 1, DisabledProviders: map[string]bool{"oci": true}}
 			for _, a := range (Default{Cfg: cfg}).Plan(f) {
 				if a.Kind == Start || a.Kind == Create && a.Size.Provider == "oci" {
 					t.Fatalf("%s r=%v: disabled provider used: %+v", v, r, a)

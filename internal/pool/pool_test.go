@@ -186,12 +186,11 @@ func TestUnpackRejectsTraversal(t *testing.T) {
 }
 
 func TestConfigMapsSchedulingKeys(t *testing.T) {
-	below := 0.4
 	u := &config.PoolConfig{Pool: config.Pool{MaxLifetime: "24h", IdleStop: "1m", QueueTimeout: "1s",
-		Scheduler: config.Scheduler{Policy: "classic", ConsolidateBelow: &below, ConsolidateTarget: 0.7,
+		Scheduler: config.Scheduler{
 			WarmPool: []config.WarmPool{{Days: []string{"mon"}, From: "08:00", To: "18:00", Machines: 1, Timezone: "UTC"}}}}}
 	p := Config(u).Policy
-	if p.Variant != "classic" || p.ConsolidateBelow != 0.4 || p.ConsolidateTarget != 0.7 || len(p.WarmPool) != 1 ||
+	if p.IdleStop != time.Minute || len(p.WarmPool) != 1 ||
 		p.WarmPool[0].From != 8*time.Hour || p.WarmPool[0].To != 18*time.Hour || p.WarmPool[0].Days[0] != time.Monday || p.WarmPool[0].Machines != 1 {
 		t.Fatalf("%+v", p)
 	}

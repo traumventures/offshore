@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"math"
-	"strings"
 	"testing"
 	"time"
 )
@@ -108,36 +107,6 @@ func TestPhysicalFit(t *testing.T) {
 	}
 	if pl := p.Place(f, task(2, 9)); pl.Kind == Assign {
 		t.Fatalf("9G on an 8G machine: %+v", pl)
-	}
-}
-
-// Waiting for a busy machine is bounded by the fastest start or create
-// plus 30s/(1-r); at cost_optimization 1 only the queue timeout bounds it.
-func TestHedgeBound(t *testing.T) {
-	b := busy("busy", res(8, 16), res(8, 16), 1)
-	b.Size, b.WarmRepos = "m", []string{"r"}
-	b.Releases = []Release{{At: now.Add(3 * time.Minute), Start: now.Add(-time.Minute), Run: 4 * time.Minute, Res: res(8, 16)}}
-	idle := machine("idle", res(8, 16), res(4, 8)) // free, cold
-	idle.Size = "m"
-	tk := task(4, 8)
-	tk.Profile = Profile{Warm: time.Minute, Cold: 10 * time.Minute, Spread: 1}
-	f := Pool{Now: now, Sizes: priced, Machines: []Machine{b, idle}, Providers: map[string]ProviderState{"p": {Boot: time.Minute}}}
-	cfg := Config{CPUOvercommit: 1, MemoryOvercommit: 1, QueueTimeout: 10 * time.Minute}
-	for _, c := range []struct {
-		r    float64
-		wait bool
-	}{{0.5, false}, {0.8, true}, {1, true}} { // bound 60s+60s, 60s+150s, none
-		cfg.CostOptimization = c.r
-		pl := Default{Cfg: cfg}.Place(f, tk)
-		if (pl.Kind == Wait) != c.wait {
-			t.Fatalf("r=%v: wait for the warm slot in 3m = %v, got %+v", c.r, c.wait, pl)
-		}
-	}
-	// No machine can be created (spend circuit breaker): the bound does
-	// not apply.
-	cfg.CostOptimization, cfg.MaxSpendPerHour = 0.5, 0.01
-	if pl := (Default{Cfg: cfg}).Place(f, tk); pl.Kind != Wait || !strings.Contains(pl.Reason, "warm slot") {
-		t.Fatalf("pool full: waiting for the warm slot is allowed, got %+v", pl)
 	}
 }
 

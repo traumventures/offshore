@@ -198,15 +198,22 @@ func TestRestoreAndResizeJointly(t *testing.T) {
 	f.Machines = []Machine{m}
 	for _, r := range []float64{0, 0.5, 1} {
 		pl := Default{Cfg: Config{CostOptimization: r, CPUOvercommit: 1, MemoryOvercommit: 1}}.Place(f, tk)
+		if pl.Kind == Wait { // a new machine (fresh disk) restores instead
+			if c, ok := pl.Decision.ChosenOption(); ok && c.Kind == OptCreate && c.Slot == "restore" {
+				continue
+			}
+		}
 		if pl.Kind != Assign || pl.Slot.Kind != SlotRestore || pl.Slot.Grow < 20*gib+15*gib-14*gib {
 			t.Fatalf("r=%v: want the restore with the disk grown, got %+v", r, pl)
 		}
 	}
-	// Without a resize the restore does not fit: cold.
+	// Without a resize the restore does not fit here: never a restore on
+	// this machine (a cold build here, or the restore on a new machine,
+	// whichever scores better; the cold build takes an hour).
 	m.CanResize = false
 	f.Machines = []Machine{m}
-	if pl := (Default{Cfg: Config{CostOptimization: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1}}).Place(f, tk); pl.Kind != Assign || pl.Slot.Kind == SlotRestore {
-		t.Fatalf("want a cold build, got %+v", pl)
+	if pl := (Default{Cfg: Config{CostOptimization: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1}}).Place(f, tk); pl.Kind == Assign && pl.Slot.Kind == SlotRestore {
+		t.Fatalf("want no restore on the full disk, got %+v", pl)
 	}
 }
 

@@ -437,7 +437,6 @@ type Orchestrator struct {
 	startBlocked   map[string]time.Time     // machine -> no start before
 	createFail     map[string]createBackoff // env/provider -> create backoff
 	downing        map[string]bool          // machines with a stop or destroy running
-	forecast       *scheduler.Forecast
 
 	// Slots performs build slot operations on workers (prune, snapshot
 	// save and restore); nil disables slot moves and prunes.
@@ -481,7 +480,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 		recentEnvs: map[string]time.Time{}, images: map[string]string{}, services: map[string][]provider.Service{}, changed: make(chan struct{}),
 		ProbeFunc: Probe, Clock: clk,
 		health: map[string]provHealth{}, leases: map[string]leaseInfo{}, heads: map[string]*repoLayers{},
-		volumes: map[string]*VolumeState{}, startBlocked: map[string]time.Time{}, createFail: map[string]createBackoff{}, downing: map[string]bool{}, forecast: scheduler.NewForecast(),
+		volumes: map[string]*VolumeState{}, startBlocked: map[string]time.Time{}, createFail: map[string]createBackoff{}, downing: map[string]bool{},
 		meter: medium.NewMeter(),
 	}
 	medium.SetMeasured(o.meter.Profile)
@@ -1544,7 +1543,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 		Arch: size.ArchOf(), InstanceTypes: size.InstanceTypes,
 		CPU: size.Capacity.CPU, Memory: size.Capacity.Memory, Swap: cfg.Swap,
 		ExpiresAt: expires, Finger: ident.Fingerprint, DepsTTL: params.DepsTTL,
-		IdleStop: cfg.Policy.IdleStop, Services: services,
+		IdleStop: selfStop(cfg.Policy.IdleStop), Services: services,
 		Env: map[string]string{
 			"OFFSHORE_MACHINE_ID": id,
 			"OFFSHORE_ENV_HASH":   envHash,
@@ -2050,4 +2049,18 @@ func (o *Orchestrator) Queue() []QueuedTask {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Since.Before(out[j].Since) })
 	return out
+}
+
+// SelfStopFallback is when a machine stops itself while idle and not
+// observed by an orchestrator, when idle_stop is unset (the lifecycle
+// policy stops idle machines while the orchestrator runs).
+const SelfStopFallback = 20 * time.Minute
+
+// selfStop is the idle time after which an unobserved machine stops
+// itself: idle_stop, else SelfStopFallback.
+func selfStop(idleStop time.Duration) time.Duration {
+	if idleStop > 0 {
+		return idleStop
+	}
+	return SelfStopFallback
 }

@@ -317,7 +317,7 @@ func (o *Orchestrator) createBlockedLocked(env string) []createBackoff {
 
 // schedPoolLocked adds the cost model's inputs to a pool snapshot:
 // provider latencies and health, snapshots, expected releases, readiness,
-// disk resizability and the demand forecast.
+// and disk resizability.
 func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 	f.Providers = map[string]scheduler.ProviderState{}
 	for name := range o.provs {
@@ -384,8 +384,6 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 		}
 	}
 	o.poolVolumesLocked(f)
-	o.forecast.Observe(*f)
-	o.forecast.Apply(f)
 }
 
 // planLocked runs the policy's Plan on the current pool. Creates the
@@ -402,14 +400,9 @@ func (o *Orchestrator) planLocked() []scheduler.Action {
 		if m := o.machines[a.Machine]; (a.Kind == scheduler.Start || a.Kind == scheduler.Undrain) && m != nil && o.cfg.Policy.Disabled(m.Provider) {
 			continue
 		}
-		if strings.Contains(a.Reason, "capacity exception") {
-			o.log.Warn("capacity exception: scaling out beyond the runaway guard", "action", a.Kind, "provider", a.Size.Provider, "machine", a.Machine, "reason", a.Reason)
-		}
 		kept = append(kept, a)
 	}
-	acts = kept
-	o.forecast.Note(f, acts)
-	return acts
+	return kept
 }
 
 // slotTarget addresses a machine for slot operations.

@@ -162,12 +162,9 @@ func (p EvalPool) Run(name string, tr Trace, variant string, r float64, down []O
 // Spec is the simulation Run does, for a batch (RunAll).
 func (p EvalPool) Spec(name string, tr Trace, variant string, r float64, down []Outage, resize bool) Spec {
 	cfg := p.Cfg
-	cfg.Variant, cfg.CostOptimization = variant, r
-	switch variant {
-	case scheduler.VariantV2:
+	cfg.CostOptimization = r
+	if variant != "idle_stop" { // "idle_stop": the pool's configured idle_stop
 		cfg.IdleStop = 0 // derived by the lifecycle policy (idle_stop unset)
-	case "v2-idle": // v2 with the pool's configured idle_stop
-		cfg.Variant = scheduler.VariantV2
 	}
 	var est scheduler.Estimator = scheduler.Static{}
 	if p.History {
@@ -201,7 +198,7 @@ func EvalPools() []EvalPool {
 		return out
 	}
 	base := scheduler.Config{CPUOvercommit: 2, MemoryOvercommit: 1, IdleStop: 20 * time.Minute,
-		ExpiryMargin: 15 * time.Minute, ConsolidateBelow: 0.5, ConsolidateTarget: 0.75, QueueTimeout: 10 * time.Minute}
+		ExpiryMargin: 15 * time.Minute, QueueTimeout: 10 * time.Minute}
 	lat := func(d time.Duration) map[string]time.Duration { return map[string]time.Duration{"": d} }
 	prod := base
 	// OCI is disabled (enabled = false: free-tier tenancy).

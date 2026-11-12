@@ -1,8 +1,8 @@
 package scheduler
 
 import (
+	"fmt"
 	"math"
-	"sort"
 	"time"
 )
 
@@ -13,9 +13,7 @@ import (
 // starts and creates the scale-out decision that triggered them; the
 // orchestrator writes them to the event log (field "decision").
 type Decision struct {
-	// Policy is "options" (absolute score: cost + time_value x hours) or
-	// "costmodel" (cost and time normalised against the decision's
-	// cheapest and fastest option).
+	// Policy is "v2" (score: cost + time_value x hours).
 	Policy           string  `json:"policy"`
 	CostOptimization float64 `json:"cost_optimization"`
 	// TimeValue is what an hour of turnaround is worth in money for the
@@ -24,19 +22,24 @@ type Decision struct {
 	// Chosen is the index of the chosen option in Options (-1: none).
 	Chosen  int      `json:"chosen"`
 	Options []Option `json:"options"`
-	// Queue is the queue-confidence verdict: wait only when waiting
-	// finishes sooner with probability >= queue_confidence (default
-	// policy; see queueconf.go).
-	Queue *QueueVerdict `json:"queue,omitempty"`
 }
 
-// QueueShort is the decision's queue verdict for `offshore top` ("" when
-// none): "wait: p=0.86".
+// QueueShort is the chosen option of a waiting request for `offshore
+// top` ("" when none): "wait 2m on m-1", "start m-2", "create aws/x8".
 func (d *Decision) QueueShort() string {
-	if d == nil {
+	o, ok := d.ChosenOption()
+	if !ok {
 		return ""
 	}
-	return d.Queue.Short()
+	switch o.Kind {
+	case OptWaitMachine:
+		return fmt.Sprintf("wait %s on %s", (time.Duration(o.WaitSeconds) * time.Second).String(), o.Machine)
+	case OptStart:
+		return "start " + o.Machine
+	case OptCreate:
+		return "create " + o.Provider + "/" + o.Size
+	}
+	return o.Kind
 }
 
 // Option kinds.
@@ -84,61 +87,6 @@ func (d *Decision) ChosenOption() (Option, bool) {
 		return Option{}, false
 	}
 	return d.Options[d.Chosen], true
-}
-
-// scorer returns the score the decision's policy ranks opts by (lower is
-// better): the option policy's absolute cost + timeValue x hours (choose),
-// else the cost model's normalised score (pick).
-func (p Default) scorer(f Pool, env string, opts []option) (score func(option) float64, policy string, lam float64) {
-	if p.next() {
-		if l, ok := p.timeValue(f, env); ok {
-			return absScore(l), "options", l
-		}
-	}
-	return p.pickScore(opts), "costmodel", 0
-}
-
-// absScore is the option policy's score with time value lam.
-func absScore(lam float64) func(option) float64 {
-	return func(o option) float64 {
-		if math.IsInf(lam, 1) {
-			return o.time.Seconds()
-		}
-		return o.cost + lam*hours(o.time)
-	}
-}
-
-// decision builds the Decision of opts (scored, chosen: index or -1) and
-// rejected (not scored), ordered by score with the rejected last.
-func (p Default) decision(f Pool, env string, opts []option, chosen int, rejected []Option) *Decision {
-	score, policy, lam := p.scorer(f, env, opts)
-	d := &Decision{Policy: policy, CostOptimization: p.costOptimization(), Chosen: -1}
-	if policy == "options" {
-		d.TimeValue = lam
-		if math.IsInf(lam, 1) {
-			d.TimeValue = -1
-		}
-	}
-	for i, o := range opts {
-		var op Option
-		if o.info != nil {
-			op = *o.info
-		}
-		op.TimeSeconds, op.Cost, op.Score, op.Chosen = secs(o.time), round6(o.cost), round6(score(o)), i == chosen
-		d.Options = append(d.Options, op)
-	}
-	sort.SliceStable(d.Options, func(i, j int) bool {
-		a, b := d.Options[i], d.Options[j]
-		if a.Chosen != b.Chosen {
-			return a.Chosen
-		}
-		return a.Score < b.Score
-	})
-	if chosen >= 0 {
-		d.Chosen = 0
-	}
-	d.Options = append(d.Options, rejected...)
-	return d
 }
 
 func secs(d time.Duration) float64 { return math.Round(d.Seconds()*10) / 10 }

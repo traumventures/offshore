@@ -28,13 +28,13 @@ import (
 
 const simUsage = `Usage:
   offshore sim [flags] <source>...
-      replay traces against the pool configuration and compare policies;
+      replay traces against the pool configuration (per -cost-optimization);
       a source is a trace (.json, .csv), an event log (events-DAY.jsonl,
       converted like sim export), gen:team or gen:small (a synthetic trace
       per -seeds), scenarios or scenario:NAME (the adversarial scenarios
       per -seeds). Runs go in parallel (-parallel); -table prints one
       compact row per run plus means over seeds, e.g.
-      offshore sim -seeds 1-8 -policy default,classic -table gen:team scenarios
+      offshore sim -seeds 1-8 -cost-optimization 0.2,0.8 -table gen:team scenarios
   offshore sim -sweep <trace>...
       sweep [scheduler] cost_optimization from 0 (fastest) to 1 (cheapest)
       and print the cost/time frontier of the default policy
@@ -53,7 +53,6 @@ func simCmd(args []string) error {
 	fs := flag.NewFlagSet("sim", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(fs.Output(), simUsage); fs.PrintDefaults() }
 	cfgPath := fs.String("config", "", "pool configuration (TOML, [pool] section); default: the active pool configuration")
-	policies := fs.String("policy", "default,binpack,classic", "comma separated policies to compare (default, option, costmodel, binpack, classic)")
 	costOpt := fs.String("cost-optimization", "", "comma separated cost_optimization values for the default policy (default: the pool's)")
 	sweep := fs.Bool("sweep", false, "sweep cost_optimization 0..1 in steps of 0.1 and print the cost/time frontier")
 	resize := fs.Bool("resize", false, "machines can grow their disks (slot handling)")
@@ -155,11 +154,6 @@ func simCmd(args []string) error {
 	if *estimator != "" {
 		est = *estimator
 	}
-	type variant struct {
-		name string
-		r    float64
-	}
-	var variants []variant
 	ratios := []float64{oc.Policy.CostOptimization}
 	if *costOpt != "" {
 		ratios = nil
@@ -175,20 +169,6 @@ func simCmd(args []string) error {
 		ratios = nil
 		for i := 0; i <= 10; i++ {
 			ratios = append(ratios, float64(i)/10)
-		}
-		*policies = scheduler.VariantDefault
-	}
-	for _, name := range strings.Split(*policies, ",") {
-		name = strings.TrimSpace(name)
-		switch name {
-		case scheduler.VariantDefault, scheduler.VariantOption, scheduler.VariantCostModel:
-			for _, r := range ratios {
-				variants = append(variants, variant{name, r})
-			}
-		case scheduler.VariantBinpack, scheduler.VariantClassic:
-			variants = append(variants, variant{name, 0})
-		default:
-			return fmt.Errorf("unknown policy %q (default, option, costmodel, binpack, classic)", name)
 		}
 	}
 	seeds := []uint64{*seed}
@@ -229,19 +209,13 @@ func simCmd(args []string) error {
 				j.SlotBytes, j.SlotGrowth = sim.Bytes(slot), sim.Bytes(slot/20)
 			}
 		}
-		for _, v := range variants {
+		for _, r := range ratios {
 			pc := oc.Policy
-			pc.Variant, pc.CostOptimization = v.name, v.r
+			pc.CostOptimization = r
 			if pc.ExpiryMargin == 0 {
 				pc.ExpiryMargin = 15 * time.Minute
 			}
-			if v.name == scheduler.VariantClassic {
-				pc.ConsolidateBelow = 0
-			}
-			policy := v.name
-			if v.name != scheduler.VariantBinpack && v.name != scheduler.VariantClassic {
-				policy += fmt.Sprintf(" r=%.2g", v.r)
-			}
+			policy := fmt.Sprintf("r=%.2g", r)
 			var e scheduler.Estimator = scheduler.Static{}
 			if est == "history" {
 				e = scheduler.NewHistory("")
@@ -274,7 +248,7 @@ func simCmd(args []string) error {
 		printTable(os.Stdout, rows)
 	case *sweep:
 		for k, in := range inputs {
-			printFrontier(os.Stdout, in.label(), ratios, reports[k*len(variants):(k+1)*len(variants)])
+			printFrontier(os.Stdout, in.label(), ratios, reports[k*len(ratios):(k+1)*len(ratios)])
 		}
 	default:
 		printReports(os.Stdout, reports)

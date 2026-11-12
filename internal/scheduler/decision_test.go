@@ -20,8 +20,8 @@ func TestPlacementDecisionListsOptions(t *testing.T) {
 	f := Pool{Now: now, Sizes: priced, Machines: []Machine{warm, idle},
 		Snapshots: map[string][]Snapshot{"r": {{Repo: "r", Provider: "p", Store: "p", Bytes: 2 * gib, At: now.Add(-time.Hour)}}}}
 	tk := profiled(5*time.Minute, 10*time.Minute)
-	for _, variant := range []string{"", "costmodel"} {
-		pol := Default{Cfg: Config{CostOptimization: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1, Variant: variant}}
+	for _, variant := range []string{""} {
+		pol := Default{Cfg: Config{CostOptimization: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1}}
 		pl := pol.Place(f, tk)
 		d := pl.Decision
 		if d == nil || d.Chosen != 0 || !d.Options[0].Chosen {
@@ -43,7 +43,7 @@ func TestPlacementDecisionListsOptions(t *testing.T) {
 		if (pl.Kind == Assign) != (c.Kind == OptAssign) || c.TimeSeconds <= 0 {
 			t.Fatalf("%q: chosen %+v for placement %+v", variant, c, pl)
 		}
-		if (variant == "") != (d.Policy == "options") {
+		if (variant == "") != (d.Policy == "v2") {
 			t.Fatalf("%q: policy %s", variant, d.Policy)
 		}
 	}

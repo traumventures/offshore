@@ -11,8 +11,8 @@ func TestPlanCreatesOnlyMatchingArch(t *testing.T) {
 		{Provider: "aws", Name: "c7g", Capacity: res(4, 8), PricePerHour: 0.15, Arch: "arm64"},
 	}
 	q := []Task{task(2, 4)}
-	for _, v := range []string{VariantDefault, VariantClassic} {
-		pol := Default{Cfg: Config{Variant: v}}
+	for _, v := range []string{""} {
+		pol := Default{Cfg: Config{}}
 		// The cheaper arm64 size is never used for an amd64 environment
 		// (unknown environments are amd64).
 		if got := creates(pol.Plan(Pool{Now: now, Sizes: sizes, Queue: q})); len(got) != 1 || got[0] != "c7a" {

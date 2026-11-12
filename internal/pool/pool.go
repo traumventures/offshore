@@ -111,7 +111,7 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 			MaxCPUPressure: f.MaxCPUPressure, MaxMemoryPressure: f.MaxMemoryPressure,
 			SoftLimit: f.SoftLimit, Swap: f.Swap, LimitJobs: f.LimitJobs,
 			MinMachines: f.MinMachines, MaxSpendPerHour: f.MaxSpendPerHour, IdleStop: idle,
-			DisabledProviders: map[string]bool{}, Variant: f.Policy, ConsolidateTarget: f.ConsolidateTarget,
+			DisabledProviders: map[string]bool{},
 		},
 	}
 	c.DirtyRatio = u.Writeback.DirtyRatio
@@ -121,9 +121,6 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 	}
 	if d := u.Telemetry.EventsRetentionDays; d > 0 {
 		c.EventRetention = time.Duration(d) * 24 * time.Hour
-	}
-	if f.ConsolidateBelow != nil {
-		c.Policy.ConsolidateBelow = *f.ConsolidateBelow
 	}
 	if f.CostOptimization != nil {
 		c.Policy.CostOptimization = *f.CostOptimization

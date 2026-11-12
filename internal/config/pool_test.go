@@ -85,8 +85,7 @@ func TestUserSchedulingKeys(t *testing.T) {
 min_machines = 1
 
 [scheduler]
-policy = "binpack"
-consolidate_target = 0.6
+policy = "default"
 
 [[scheduler.warm_pool]]
 days = ["mon", "Tuesday", "fri"]
@@ -98,16 +97,13 @@ timezone = "Europe/Berlin"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.Pool.ConsolidateBelow == nil || *u.Pool.ConsolidateBelow != 0.5 || u.Pool.ConsolidateTarget != 0.6 {
-		t.Fatalf("consolidation defaults: %+v", u.Pool)
-	}
 	days, from, to, loc, err := u.Pool.WarmPool[0].Parse()
 	if err != nil || len(days) != 3 || days[1] != time.Tuesday || from != 8*time.Hour || to != 19*time.Hour+30*time.Minute || loc.String() != "Europe/Berlin" {
 		t.Fatalf("warm pool: %v %v %v %v %v", days, from, to, loc, err)
 	}
-	off, err := loadUserFrom(t, "[scheduler]\nconsolidate_below = 0\npolicy = \"classic\"\n")
-	if err != nil || *off.Pool.ConsolidateBelow != 0 {
-		t.Fatalf("consolidate_below = 0 must turn consolidation off: %v", err)
+	// idle_stop unset: derived by the scheduler (no default duration).
+	if u.Pool.IdleStop != "" {
+		t.Fatalf("idle_stop default: %q", u.Pool.IdleStop)
 	}
 	for _, bad := range []string{
 		"[scheduler]\npolicy = \"fifo\"\n",
@@ -133,7 +129,7 @@ id = "team"
 max_spend_per_hour = 3
 
 [scheduler]
-policy = "classic"
+policy = "default"
 cpu_overcommit = 1.5
 
 [[scheduler.warm_pool]]
@@ -157,7 +153,7 @@ memory = "8G"
 		t.Fatal(err)
 	}
 	p := f.Pool
-	if p.ID != "team" || p.Policy != "classic" || p.CPUOvercommit != 1.5 || len(p.WarmPool) != 1 ||
+	if p.ID != "team" || p.Policy != "default" || p.CPUOvercommit != 1.5 || len(p.WarmPool) != 1 ||
 		len(p.Provision) != 1 || len(p.Sizes) != 1 || p.Sizes[0].Provider != "aws" || f.ProviderType("aws") != "aws-ec2" {
 		t.Fatalf("pool %+v", p)
 	}
@@ -168,6 +164,8 @@ memory = "8G"
 		"[fleet]\nid = \"x\"\n",
 		"[pool]\nowner = \"x\"\n",
 		"[pool]\npolicy = \"classic\"\n",
+		"[scheduler]\npolicy = \"classic\"\n",
+		"[scheduler]\nconsolidate_below = 0.5\n",
 		"[[pool.size]]\nname = \"s\"\ncpu = 1\nmemory = \"1G\"\n",
 		"[[pool.provision]]\nrun = \"x\"\n",
 		"[docker]\ncommand = [\"docker\"]\n",

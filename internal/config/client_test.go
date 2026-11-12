@@ -107,7 +107,7 @@ func TestPoolDefaults(t *testing.T) {
 		t.Fatalf("id %q warnings %v", f.Pool.ID, f.Warnings)
 	}
 	// An absent file means defaults.
-	if f, err := LoadPool(t.TempDir() + "/missing.toml"); err != nil || f.Pool.IdleStop != "20m" {
+	if f, err := LoadPool(t.TempDir() + "/missing.toml"); err != nil || f.Pool.IdleStop != "" || f.Pool.MaxLifetime != "24h" {
 		t.Fatalf("%v", err)
 	}
 }

@@ -187,10 +187,7 @@ func (p Default) coreChoose(ss *solveState, t Task, explain bool) coreChoice {
 	for _, cm := range ss.ms[t.EnvHash] {
 		tm := cm.tl
 		m := tm.m
-		if !p.admissible(m).Fits(t.Request) {
-			continue
-		}
-		if !p.physical(f, m.Capacity, t) {
+		if !p.admissible(m).Fits(t.Request) || !p.physical(f, m.Capacity, t) {
 			if explain {
 				rejected = append(rejected, rejectOption(OptAssign, m, 0, RejSmaller))
 			}
@@ -253,6 +250,7 @@ func (p Default) coreChoose(ss *solveState, t Task, explain bool) coreChoice {
 				}
 			}
 			info.Reason = act.Reason + ": " + rc.reason
+			info.Tasks = 1
 			o := option{cost: cost, time: lat + rc.run, tie: Score(t.EnvHash, m.ID), fit: math.Inf(1), info: info}
 			a := act
 			consider(cand{o: o, rc: rc, cm: &cmach{tl: tm, act: &a}, at: tm.ready, late: tooLate(lat)})
@@ -448,7 +446,11 @@ func (p Default) placeCore(f Pool, t Task) Placement {
 				return Placement{Kind: Wait, Reason: "no capacity can be had (limits, outages)", Decision: ch.decision}
 			}
 			if !ch.assign {
-				return Placement{Kind: Wait, Reason: ch.o.info.Reason, Decision: ch.decision}
+				reason := ch.o.info.Reason
+				if ch.cm.act == nil {
+					reason = fmt.Sprintf("waiting %s for %s on %s", ch.at.Sub(f.Now).Round(time.Second), ch.rc.reason, ch.cm.tl.m.ID)
+				}
+				return Placement{Kind: Wait, Reason: reason, Decision: ch.decision}
 			}
 			return Placement{Kind: Assign, Machine: ch.cm.tl.m.ID, Grant: p.Grant(t), Reason: ch.rc.reason, Slot: ch.rc.slot,
 				Expected: t.Profile.High(ch.rc.run), Run: ch.rc.run, Decision: ch.decision}

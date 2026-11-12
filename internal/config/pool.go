@@ -87,20 +87,21 @@ type Pool struct {
 	Scheduler `toml:"-"`
 }
 
-// Scheduler configures how sessions are placed on machines and when the
-// pool consolidates. Overcommitting CPU only slows tasks down;
+// Scheduler configures how sessions are placed on machines
+// (docs/design-scheduler-v2.md). Overcommitting CPU only slows tasks down;
 // overcommitting memory needs soft limits and swap, otherwise tasks may be
 // OOM killed.
 type Scheduler struct {
-	Policy string `toml:"policy"` // "default" (batch option policy) | "option" | "costmodel" | "binpack" | "classic"
-	// CostOptimization is the cost model's knob, 0..1 (default 0.5): 1
+	// Policy is "default" (the only scheduler; the earlier policies kept
+	// for comparison are gone).
+	Policy string `toml:"policy"`
+	// CostOptimization is the scheduler's knob, 0..1 (default 0.5): 1
 	// optimises purely for cost, 0 purely for time to result.
 	CostOptimization *float64 `toml:"cost_optimization"`
-	// QueueConfidence is how sure the scheduler must be that waiting for
-	// capacity (a busy or starting machine) finishes a request sooner than
-	// running it now (a cold or restored slot elsewhere, a start or create)
-	// before it queues it: P(finish_wait < finish_now) >= queue_confidence
-	// (default 0.8, 0 < x <= 1).
+	// QueueConfidence is the quantile of the running sessions' remaining
+	// times at which a wait for their capacity is scored: waiting wins
+	// only when it finishes sooner with this probability (default 0.8,
+	// 0 < x <= 1).
 	QueueConfidence *float64 `toml:"queue_confidence"`
 	// Egress are transfer prices and bandwidths from object stores to
 	// providers ([[scheduler.egress]] from = "aws", to = "oci",
@@ -124,11 +125,6 @@ type Scheduler struct {
 	SoftLimit         float64 `toml:"soft_limit"`          // memory.high = need * soft_limit; 0 = off
 	Swap              bool    `toml:"swap"`
 	LimitJobs         bool    `toml:"limit_jobs"` // pass reserved CPU as build parallelism
-	// ConsolidateBelow drains the least loaded machine of an environment
-	// when its machines are reserved below this fraction (default 0.5,
-	// 0 = off). ConsolidateTarget caps the share the others may reach.
-	ConsolidateBelow  *float64 `toml:"consolidate_below"`
-	ConsolidateTarget float64  `toml:"consolidate_target"` // default 0.75
 	// WarmPool keeps machines running at scheduled times, in addition to
 	// min_machines: [[scheduler.warm_pool]] days = ["mon", "tue"], from = "08:00",
 	// to = "19:00", machines = 1, timezone = "Europe/Berlin".
@@ -427,9 +423,6 @@ func (u *PoolConfig) applyDefaults() {
 	if f.MachineMemory == "" {
 		f.MachineMemory = "16G"
 	}
-	if f.IdleStop == "" {
-		f.IdleStop = "20m"
-	}
 	if f.MaxLifetime == "" {
 		f.MaxLifetime = "24h"
 	}
@@ -441,13 +434,6 @@ func (u *PoolConfig) applyDefaults() {
 	}
 	if f.MemoryOvercommit == 0 {
 		f.MemoryOvercommit = 1
-	}
-	if f.Policy == "" {
-		f.Policy = "default"
-	}
-	if f.ConsolidateBelow == nil {
-		v := 0.5
-		f.ConsolidateBelow = &v
 	}
 	if f.Estimator == "" {
 		f.Estimator = "history"
@@ -523,15 +509,12 @@ func (u *PoolConfig) Validate() error {
 		errs = append(errs, "pool.machine_memory: "+err.Error())
 	}
 	for name, v := range map[string]string{"idle_stop": f.IdleStop, "max_lifetime": f.MaxLifetime, "queue_timeout": f.QueueTimeout} {
+		if v == "" && name == "idle_stop" {
+			continue // unset: derived by the scheduler's lifecycle policy
+		}
 		if _, err := ParseDuration(v); err != nil {
 			errs = append(errs, "pool."+name+": "+err.Error())
 		}
-	}
-	if f.Policy != "default" && f.Policy != "option" && f.Policy != "costmodel" && f.Policy != "binpack" && f.Policy != "classic" {
-		errs = append(errs, fmt.Sprintf("pool.policy: unsupported %q (default, option, costmodel, binpack, classic)", f.Policy))
-	}
-	if f.ConsolidateBelow != nil && (*f.ConsolidateBelow < 0 || *f.ConsolidateBelow > 1) {
-		errs = append(errs, "pool.consolidate_below: must be between 0 (off) and 1")
 	}
 	if f.CostOptimization != nil && (*f.CostOptimization < 0 || *f.CostOptimization > 1) {
 		errs = append(errs, "scheduler.cost_optimization: must be between 0 (fastest result) and 1 (cheapest)")
@@ -566,9 +549,6 @@ func (u *PoolConfig) Validate() error {
 		if d, err := ParseDuration(e); err != nil || d <= 0 {
 			errs = append(errs, fmt.Sprintf("writeback.dirty_expire: invalid duration %q", e))
 		}
-	}
-	if f.ConsolidateTarget < 0 || f.ConsolidateTarget > 1 {
-		errs = append(errs, "pool.consolidate_target: must be between 0 and 1")
 	}
 	for i, w := range f.WarmPool {
 		if _, _, _, _, err := w.Parse(); err != nil {
@@ -643,6 +623,9 @@ func (u *PoolConfig) Validate() error {
 			}
 		}
 	}
+	if f.Policy != "" && f.Policy != "default" {
+		errs = append(errs, fmt.Sprintf("scheduler.policy: %q is no longer supported (only \"default\"; see docs/design-scheduler-v2.md)", f.Policy))
+	}
 	if f.MinMachines < 0 {
 		errs = append(errs, "pool.min_machines: need >= 0")
 	}
@@ -677,7 +660,9 @@ func (u *PoolConfig) Validate() error {
 
 // Durations returns the parsed pool durations.
 func (f Pool) Durations() (idle, lifetime, queue time.Duration) {
-	idle, _ = ParseDuration(f.IdleStop)
+	if f.IdleStop != "" {
+		idle, _ = ParseDuration(f.IdleStop)
+	}
 	lifetime, _ = ParseDuration(f.MaxLifetime)
 	queue, _ = ParseDuration(f.QueueTimeout)
 	return

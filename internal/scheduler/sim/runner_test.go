@@ -41,9 +41,9 @@ func determinismSpecs(t *testing.T) []Spec {
 	var specs []Spec
 	for _, c := range cases {
 		p := pools[c.pool]
-		for _, v := range []evalRun{{scheduler.VariantDefault, 0.2}, {scheduler.VariantDefault, 1}, {scheduler.VariantBinpack, 0}, {scheduler.VariantClassic, 0}} {
+		for _, v := range []evalRun{{"v2", 0.2}, {"v2", 1}} {
 			cfg := p.Cfg
-			cfg.Variant, cfg.CostOptimization = v.variant, v.r
+			cfg.CostOptimization = v.r
 			var est scheduler.Estimator = scheduler.Static{}
 			if p.History {
 				est = scheduler.NewHistory("")
