@@ -221,8 +221,8 @@ func diskOpts(cfg scheduler.Config, disk int64, resize bool) Options {
 }
 
 // Two repositories whose slots do not fit the disk together: the model
-// prunes (or resizes when the provider can) instead of letting the worker
-// evict at random.
+// prunes, resizes when the provider can, or keeps a machine per
+// repository, instead of letting the worker evict at random.
 func TestSimDiskFull(t *testing.T) {
 	var js []Job
 	for i := 0; i < 12; i++ {
@@ -232,8 +232,8 @@ func TestSimDiskFull(t *testing.T) {
 	}
 	tr := Trace{Start: DefaultStart, End: 6000, Jobs: js}
 	r := Run(tr, diskOpts(scheduler.Config{}, 50*gib, false))
-	if r.Completed != len(js) || r.Prunes == 0 {
-		t.Fatalf("no resize: want prunes, got %+v", r)
+	if r.Completed != len(js) || r.Evictions > 1 || r.Prunes == 0 && r.Machines < 2 {
+		t.Fatalf("no resize: want prunes or a machine per repository, got %+v", r)
 	}
 	r = Run(tr, diskOpts(scheduler.Config{}, 50*gib, true))
 	if r.Completed != len(js) || r.Resizes == 0 || r.Evictions > 1 || r.WarmHits < 8 {

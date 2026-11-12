@@ -93,9 +93,13 @@ func (p Default) coreTimeline(f Pool, m Machine, q float64) *tlMachine {
 	covered := Resources{}
 	for _, r := range m.Releases {
 		at, ok := releaseQ(r, q, f.Now)
-		if !ok {
+		switch {
+		case !ok:
 			at = never
-		} else if at.After(f.Now) {
+		case !at.After(f.Now.Add(time.Second)):
+			// Overrunning its distribution: as long again as it ran.
+			at = r.Expected(f.Now)
+		default:
 			at = f.Now.Add(time.Duration(float64(at.Sub(f.Now)) * stretch))
 		}
 		tm.deltas = append(tm.deltas, Release{At: at, Res: r.Res})
@@ -253,7 +257,7 @@ func (p Default) coreChoose(ss *solveState, t Task, explain bool) coreChoice {
 			info.Tasks = 1
 			o := option{cost: cost, time: lat + rc.run, tie: Score(t.EnvHash, m.ID), fit: math.Inf(1), info: info}
 			a := act
-			consider(cand{o: o, rc: rc, cm: &cmach{tl: tm, act: &a}, at: tm.ready, late: tooLate(lat)})
+			consider(cand{o: o, rc: rc, cm: &cmach{tl: tm, act: &a}, at: tm.ready})
 		}
 	}
 	for _, m := range ss.stopped[t.EnvHash] {
@@ -294,7 +298,8 @@ func (p Default) coreChoose(ss *solveState, t Task, explain bool) coreChoice {
 	if explain && len(f.SizesFor(t.EnvHash)) > 0 {
 		rejected = append(rejected, p.sizeRejections(ss.st, t.EnvHash, f.SizesFor(t.EnvHash))...)
 	}
-	// Waits beyond the queue timeout only when nothing else is left.
+	// Waits beyond 80 % of the queue timeout only when nothing else is
+	// left (a start or create is always something else).
 	inTime := false
 	for _, cd := range cands {
 		inTime = inTime || !cd.late

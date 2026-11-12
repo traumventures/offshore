@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -46,16 +47,32 @@ func gateCases(t testing.TB) []evalCase {
 }
 
 // TestGate compares the scheduler before and after the v2 rewrite on
-// every gate case at cost_optimization 0.2 and 0.8 (OFFSHORE_GATE=old,new
-// variants, default "default,v2"; OFFSHORE_GATE_CASE filters cases) and
-// prints the table. Low-load cases are those where the first variant
-// never ran more than two machines.
+// every gate case at cost_optimization 0.2 and 0.8 and prints the table.
+// OFFSHORE_GATE lists the variants (labels; "idle_stop" keeps the pool's
+// configured idle_stop, anything else derives it), OFFSHORE_GATE_CASE
+// filters cases, OFFSHORE_GATE_R sets the cost_optimization values.
+// The scheduler before the rewrite no longer exists in the tree: its
+// reports come from a JSON file (OFFSHORE_GATE_BASE, written by the gate
+// of commit 8336677 with OFFSHORE_GATE_JSON) as the first variant, "old".
+// Low-load cases are those where the first variant never ran more than
+// two machines.
 func TestGate(t *testing.T) {
 	vs := os.Getenv("OFFSHORE_GATE")
 	if vs == "" {
 		t.Skip("set OFFSHORE_GATE=old,new (e.g. default,v2) to run the gate")
 	}
 	variants := strings.Split(vs, ",")
+	base := map[string]Report{}
+	if p := os.Getenv("OFFSHORE_GATE_BASE"); p != "" {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(b, &base); err != nil {
+			t.Fatal(err)
+		}
+		variants = append([]string{"old"}, variants...)
+	}
 	rs := []float64{0.2, 0.8}
 	if v := os.Getenv("OFFSHORE_GATE_R"); v != "" {
 		rs = nil
@@ -78,12 +95,42 @@ func TestGate(t *testing.T) {
 	for _, c := range cases {
 		for _, r := range rs {
 			for _, v := range variants {
+				if v == "old" {
+					continue
+				}
 				specs = append(specs, c.pool.Spec(fmt.Sprintf("%s r=%.1f", v, r), c.trace, v, r, c.down, c.resize))
 			}
 		}
 	}
 	start := time.Now()
-	all := RunAll(specs, 0)
+	ran := RunAll(specs, 0)
+	var all []Report
+	out := map[string]Report{}
+	k := 0
+	for _, c := range cases {
+		for _, r := range rs {
+			for _, v := range variants {
+				key := fmt.Sprintf("%s|%.1f", c.name, r)
+				if v == "old" {
+					rep, ok := base[key]
+					if !ok {
+						t.Fatalf("no baseline report for %s", key)
+					}
+					all = append(all, rep)
+					continue
+				}
+				all = append(all, ran[k])
+				out[key+"|"+v] = ran[k]
+				k++
+			}
+		}
+	}
+	if p := os.Getenv("OFFSHORE_GATE_JSON"); p != "" { // per case|r|variant
+		b, _ := json.Marshal(out)
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	nv := len(variants)
 	type agg struct {
 		cost, builds, p95, first, obj float64
