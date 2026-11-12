@@ -3,7 +3,6 @@ package scheduler
 import (
 	"fmt"
 	"math"
-	"os"
 	"sort"
 	"time"
 )
@@ -188,11 +187,6 @@ func (p Default) coreChoose(ss *solveState, t Task, explain bool) coreChoice {
 	for _, cm := range ss.ms[t.EnvHash] {
 		tm := cm.tl
 		m := tm.m
-		if dbgCore && explain {
-			at, ok := tm.earliest(t.Request, p.quickRun(f, tm, t))
-			fmt.Printf("DBG rc %d disk %d used %d budget %d slots %v warm %v acc %v\n", len(p.runChoices(f, m, t)), m.DiskTotal, m.DiskUsed, m.DiskBudget, len(m.SlotBytes), m.WarmRepos, p.accepting(m, t.EnvHash, f.Now))
-			fmt.Printf("DBG %s %s on %s adm %v req %v phys %v at %v ok %v free %v deltas %v\n", f.Now.Format("15:04:05"), t.ID, m.ID, p.admissible(m), t.Request, p.physical(f, m.Capacity, t), at.Sub(f.Now), ok, tm.free, len(tm.deltas))
-		}
 		if !p.admissible(m).Fits(t.Request) {
 			continue
 		}
@@ -219,14 +213,8 @@ func (p Default) coreChoose(ss *solveState, t Task, explain bool) coreChoice {
 			mm.Reserved = p.admissible(m).Sub(tm.freeAt(at))
 		}
 		wait := max(at.Sub(f.Now), 0)
-		ext := p.slowdownExternality(f, tm, t, at)
 		for _, rc := range p.runChoices(f, mm, t) {
 			cost := p.machineCost(f, tm.m, t, at, rc.run) + rc.cost
-			if math.IsInf(lam, 1) {
-				rc.run += ext // only time counts: the others' delay is time
-			} else {
-				cost += lam * hours(ext)
-			}
 			kind := OptWaitMachine
 			if now {
 				kind = OptAssign
@@ -537,8 +525,6 @@ func (tm *tlMachine) freeAt(t time.Time) Resources {
 	return r
 }
 
-var dbgCore = os.Getenv("DBG_CORE") != ""
-
 // packCreates revisits the creates of one solve per environment: the
 // requests booked on two or more new machines may be served cheaper by
 // fewer machines of a larger size (each request chose the cheapest
@@ -639,28 +625,4 @@ func (p Default) packCreates(ss *solveState) {
 				Reason: fmt.Sprintf("queued demand: %d requests on %d %s", len(chs), bestN, bestSize.Name)})
 		}
 	}
-}
-
-// slowdownExternality is the time a request starting on tm at would add
-// to the sessions already there by sharing overcommitted cores: each of
-// them runs slower by the ratio of the CPU contention with and without
-// it, for the part of its remaining time that overlaps.
-func (p Default) slowdownExternality(f Pool, tm *tlMachine, t Task, at time.Time) time.Duration {
-	c := tm.m.Capacity.CPU
-	if c <= 0 {
-		return 0
-	}
-	res := p.admissible(tm.m).Sub(tm.freeAt(at)).CPU
-	before := math.Max(1, res/c)
-	after := math.Max(1, (res+t.Request.CPU)/c)
-	if after <= before {
-		return 0
-	}
-	var extra time.Duration
-	for _, d := range tm.deltas {
-		if d.Res.CPU > 0 && d.At.After(at) {
-			extra += time.Duration(float64(min(d.At.Sub(at), 2*time.Hour)) * (after/before - 1))
-		}
-	}
-	return extra
 }
