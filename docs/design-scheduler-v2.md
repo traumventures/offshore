@@ -31,8 +31,10 @@ starting or that this solve starts or creates. That is the whole
 counting mechanism: there is no runaway guard, no per-request exception,
 no cap on queued demand and no projected-start gate. Two bounds remain
 because they express the objective's own edges, not tuning: a wait longer
-than the fastest start/create plus 30 s/(1−r) is not an option (the time
-already waited is sunk, so a starting machine stays an option), and a
+than the fastest start/create plus 30 s/(1−r), counting the time already
+waited, is not an option (ski rental: a release that keeps overrunning
+keeps looking a minute away, so past the bound the request takes new
+capacity), and a
 wait past 80 % of `queue_timeout` only when nothing else is left. After
 the solve, creates of one environment are merged into fewer larger
 machines when that scores better (each request picked the cheapest
@@ -61,7 +63,8 @@ time of day when there are enough), are the distribution of when.
   deterministic break-even (penalty / price) applies. `idle_stop`, when
   set, overrides this with a fixed time (and disables destroys).
 - stopped → destroy: keep the disk (EBS $/GB-h) vs. a later create instead
-  of a start ((time_value + price) × (boot − start) + 30 s of restore).
+  of a start ((time_value + price) × (boot − start) + 10 min of cold
+  builds while the warm slots restore).
   The first machine of an environment is never destroyed early.
 - renew: when the last machine of an environment reaches max_lifetime and
   the environment was used in the last day, a replacement is created (it
@@ -91,7 +94,8 @@ factors, arrivals). The event log is observability only.
 ## Evaluation
 
 `TestGate` against the scheduler before the rewrite, 31 cases × r ∈
-{0.2, 0.5, 0.8}: cost −22..−26 % at high load, −1..−4 % at low load;
-objective (cost + time_value × Σ turnaround) lower everywhere; p95
-turnaround ≤ at r = 0.2 and at low load, +2 % at high load for r ≥ 0.5.
+{0.2, 0.5, 0.8}: cost −23..−25 % at high load, −0.5..−3 % at low load;
+objective (cost + time_value × Σ turnaround) lower or equal everywhere;
+p95 turnaround −4.0 % / −0.8 % at high load for r = 0.2 / 0.8 (+1.3 % at
+0.5), equal at low load.
 Details in [scheduling.md](scheduling.md#v2-gate-nov-2026).

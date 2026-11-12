@@ -183,9 +183,12 @@ func (p Default) coreChoose(ss *solveState, t Task, explain bool) coreChoice {
 	tooLate := func(wait time.Duration) bool {
 		return c.QueueTimeout > 0 && waited+wait > c.QueueTimeout*8/10
 	}
-	// Regret bound: a wait (at the queue_confidence quantile) is an option
-	// only when it is not longer than the fastest new machine takes plus
-	// the hedge margin (the time already waited is sunk).
+	// Regret bound (ski rental): a wait (at the queue_confidence quantile)
+	// is an option only while the time already waited plus the wait is not
+	// longer than the fastest new machine takes plus the hedge margin. The
+	// time waited on a busy machine counts because a release that keeps
+	// overrunning keeps looking a minute away; past the bound the request
+	// takes new capacity.
 	bound, bounded := p.regretBound(ss, t)
 	// Existing machines and those this solve already brings.
 	for _, cm := range ss.ms[t.EnvHash] {
@@ -226,7 +229,13 @@ func (p Default) coreChoose(ss *solveState, t Task, explain bool) coreChoice {
 			} else {
 				o.fit = math.Inf(1)
 			}
-			if !now && bounded && wait > bound {
+			// The time waited counts against busy machines only: a machine
+			// on its way is the new capacity the bound stands for.
+			sunk := time.Duration(0)
+			if m.State == Running && cm.act == nil {
+				sunk = waited
+			}
+			if !now && bounded && sunk+wait > bound {
 				if explain {
 					rejected = append(rejected, rejectOption(OptWaitMachine, m, wait, fmt.Sprintf("%s (%s)", RejHedge, bound.Round(time.Second))))
 				}

@@ -19,8 +19,6 @@ import (
 // exactly as long as the expected cost of keeping it, given the time
 // since the last such arrival, is below the cost of letting it go now.
 
-var destroyEnabled = true
-
 // MinIdle is the least time an idle machine is kept running.
 const MinIdle = time.Minute
 
@@ -28,9 +26,11 @@ const MinIdle = time.Minute
 // deciding whether a second, third ... machine is needed.
 const ConcurrencyWindow = 5 * time.Minute
 
-// RestorePenalty is the time a machine that lost its warm slots (destroyed
-// and created again) spends restoring them lazily from the store.
-const RestorePenalty = 30 * time.Second
+// RestorePenalty is the time the builds after a destroy lose because the
+// recreated machine lost its warm slots: they restore lazily from the
+// store and run cold until then (several builds, not one restore; the
+// sim gate's prod traces put it near 10 minutes).
+const RestorePenalty = 10 * time.Minute
 
 // stopPenalty is the cost of having to start a stopped machine for a
 // request: the start latency valued at time_value plus the price paid
@@ -276,7 +276,7 @@ func (p Default) lifecycle(st *planState, booked map[string]bool) map[string]int
 		k[m.EnvHash]++
 		// The environment's first machine stays (until max_lifetime): a
 		// create instead of its start is the next first session's wait.
-		if destroyEnabled && k[m.EnvHash] >= 2 && p.Cfg.IdleStop == 0 && p.usable(m, f.Now) && p.destroyStopped(f, m, k[m.EnvHash]) {
+		if k[m.EnvHash] >= 2 && p.Cfg.IdleStop == 0 && p.usable(m, f.Now) && p.destroyStopped(f, m, k[m.EnvHash]) {
 			st.acts = append(st.acts, Action{Kind: Destroy, Machine: m.ID, Reason: "not needed soon enough to keep its disk"})
 		}
 	}

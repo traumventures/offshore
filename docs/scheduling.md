@@ -105,7 +105,7 @@ Every decision is recorded (`Decision` on placements, starts and creates
 in the event log, field `decision`): each option with its time, cost and
 score, the chosen one, and the options rejected before scoring with the
 reason (machine smaller than the request, wait longer than the fastest
-start/create plus 30s/(1-r), past 80 % of `queue_timeout`, provider down,
+start/create plus 30s/(1-r) counting the time already waited, past 80 % of `queue_timeout`, provider down,
 create backoff, hard limit).
 
 ## Inputs: disk, slots and snapshots
@@ -203,39 +203,42 @@ scheduler never ran more than two machines.
 | group | policy | cost $ | $/build | turn p95 vs first (geo) | first wait p95 (mean) | objective $ |
 |---|---|---:|---:|---:|---:|---:|
 | high r=0.2 | old | 345.10 | 0.026 | 1.000 | 74s | 1477 |
-| high r=0.2 | v2 | 258.41 | 0.019 | 0.974 | 65s | 1320 |
+| high r=0.2 | v2 | 261.59 | 0.020 | 0.960 | 65s | 1306 |
 | high r=0.5 | old | 352.80 | 0.026 | 1.000 | 72s | 652 |
-| high r=0.5 | v2 | 261.64 | 0.019 | 1.020 | 65s | 561 |
+| high r=0.5 | v2 | 262.31 | 0.019 | 1.013 | 67s | 557 |
 | high r=0.8 | old | 324.52 | 0.024 | 1.000 | 78s | 400 |
-| high r=0.8 | v2 | 248.09 | 0.019 | 1.023 | 65s | 322 |
+| high r=0.8 | v2 | 248.87 | 0.019 | 0.992 | 64s | 323 |
 | low r=0.2 | old | 29.26 | 0.031 | 1.000 | 52s | 120 |
-| low r=0.2 | v2 | 28.50 | 0.030 | 1.000 | 52s | 119 |
+| low r=0.2 | v2 | 28.76 | 0.030 | 1.000 | 52s | 120 |
 | low r=0.5 | old | 18.14 | 0.028 | 1.000 | 58s | 31 |
 | low r=0.5 | v2 | 18.05 | 0.028 | 0.999 | 58s | 31 |
 | low r=0.8 | old | 29.15 | 0.031 | 1.000 | 52s | 35 |
-| low r=0.8 | v2 | 28.02 | 0.029 | 1.004 | 52s | 34 |
+| low r=0.8 | v2 | 28.28 | 0.030 | 1.001 | 52s | 34 |
 
 Selected cases (cost $, turnaround p95, first-session wait p95), old → v2:
 
 | case | r | cost | turn p95 | first wait p95 |
 |---|---|---|---|---|
-| solo/c7a (default idle_stop 20m) | 0.2 | 13.83 → 4.06 | 5m29s → 5m24s | 1m0s → 20s |
-| sparse/c7a | 0.2 | 4.05 → 1.04 | 7m5s → 7m8s | 1m0s → 1m0s |
-| solo/prod (idle_stop 1m) | 0.2 | 11.13 → 10.40 | 6m25s → 6m1s | 16s → 16s |
-| team-week/prod | 0.2 | 82.42 → 80.72 | 11m46s → 8m42s | 16s → 16s |
-| prod-nov12/prod | 0.2 | 5.36 → 4.19 | 5m50s → 5m24s | 1m40s → 1m40s |
+| solo/c7a (default idle_stop 20m) | 0.2 | 13.83 → 4.10 | 5m29s → 5m30s | 1m0s → 20s |
+| sparse/c7a | 0.2 | 4.05 → 1.07 | 7m5s → 7m8s | 1m0s → 1m0s |
+| solo/prod (idle_stop 1m) | 0.2 | 11.13 → 10.62 | 6m25s → 6m25s | 16s → 16s |
+| team-week/prod | 0.2 | 82.42 → 80.69 | 11m46s → 10m47s | 16s → 16s |
+| prod-nov12/prod | 0.2 | 5.36 → 4.39 | 5m50s → 5m0s | 1m40s → 1m40s |
 | burst/c7a | 0.8 | 4.22 → 1.28 | 5m54s → 6m25s | 1m0s → 1m0s |
-| disk/tiers | 0.8 | 3.64 → 3.81 | 12m55s → 15m49s | 1m0s → 2m0s |
+| stopped/c7a | 0.8 | 2.10 → 0.89 | 7m53s → 8m39s | 1m0s → 20s |
+| disk/tiers | 0.8 | 3.64 → 3.82 | 12m55s → 15m49s | 1m0s → 2m0s |
 
-Result: v2 is cheaper in every group (−22 to −26 % at high load, −1 to
-−4 % at low load) and has the lower objective everywhere. Turnaround p95
-is better or equal at r = 0.2 and at low load (≤ +0.4 %), and +2.0 % /
-+2.3 % at high load for r = 0.5 / 0.8 (the c7a pool's overcommitted small
-sizes and the disk scenario). In the 0–1 machine regime the derived
-lifecycle cuts cost per build by 60–75 % against the default
-`idle_stop = 20m` with a first session that starts a stopped machine
-(20 s) instead of creating one; against production's hand-tuned
-`idle_stop = 1m` it is equal on first-session wait and 1–7 % cheaper.
+Result: v2 is cheaper in every group (−23 to −25 % at high load, −0.5 to
+−3 % at low load) and has the lower or equal objective everywhere.
+Turnaround p95 is better at r = 0.2 and 0.8 at high load (−4.0 %, −0.8 %),
++1.3 % at r = 0.5, and equal at low load (the +0.1 % at r = 0.8 is one
+second on one case, prod-nov10/prod 3m45s → 3m46s). The worst single case
+is disk/tiers (local-disk sizes): p95 +22 % at r = 0.8. In the 0–1
+machine regime the derived lifecycle cuts cost per build by 60–75 %
+against the default `idle_stop = 20m` with a first session that starts a
+stopped machine (20 s) instead of creating one; against production's
+hand-tuned `idle_stop = 1m` it is equal on first-session wait and 1–8 %
+cheaper.
 
 objective = cost + time_value x the sum of all turnarounds, the quantity
 both schedulers minimise at that cost_optimization. Run it with
@@ -329,11 +332,10 @@ overcommit factors and cost_optimization values on the same trace.
   day (on Monday morning after a quiet weekend no machine is pre-started).
 - EBS/AMI warm-up effects after a start are not modelled (EC2's 60 s
   minimum billing per start is).
-- At cost_optimization 0.8 on small sizes with CPU overcommit (the c7a
-  sample pool) the scheduler packs builds onto overcommitted cores
-  (cheaper, slower): turnaround p95 +7 % against the policy before v2 at
-  -20 % cost (see *v2 gate*). By its objective (cost + time_value x time)
-  it is better; whether that is the intended point of the knob is open.
+- disk/tiers (sizes with local disks) is the one gate case clearly slower
+  than before v2: turnaround p95 +7 to +35 % at about equal cost. The
+  local-tier capacity and its eviction are priced only through prune and
+  restore options.
 - The simulator assumes peak memory for the whole run and constant CPU use;
   real builds have phases.
 - `sim export` cannot tell a build that was slowed by CPU contention from

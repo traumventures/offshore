@@ -267,7 +267,13 @@ func prioritize(now time.Time, ts []Task) []Task {
 				if key(a) < key(b) {
 					best = i
 				}
-			case a.Since.Before(b.Since):
+			case !a.Since.Equal(b.Since):
+				if a.Since.Before(b.Since) {
+					best = i
+				}
+			case a.ID < b.ID:
+				// A total order: every request sees the same requests
+				// ahead of it, whichever one is being placed.
 				best = i
 			}
 		}
