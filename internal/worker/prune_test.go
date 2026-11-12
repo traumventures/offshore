@@ -181,7 +181,7 @@ func TestPruneRepoBoundedByRunningPrune(t *testing.T) {
 	defer func() { pruneLockWait = old }()
 	w.pruneMu.Lock()
 	begin := time.Now()
-	res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotPrune, Repo: "repo"})
+	res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotReclaim, Repo: "repo"})
 	if res.Err == "" || time.Since(begin) > 5*time.Second {
 		t.Fatalf("prune behind a running prune: %+v after %s", res, time.Since(begin))
 	}
@@ -190,7 +190,7 @@ func TestPruneRepoBoundedByRunningPrune(t *testing.T) {
 		t.Fatalf("unknown repo waited for the lock: %+v after %s", res, time.Since(begin))
 	}
 	w.pruneMu.Unlock()
-	if res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotPrune, Repo: "repo"}); res.Err != "" {
+	if res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotReclaim, Repo: "repo"}); res.Err != "" {
 		t.Fatalf("prune after the lock is free: %+v", res)
 	}
 }
