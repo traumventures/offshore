@@ -269,3 +269,28 @@ func TestSimProviderOutage(t *testing.T) {
 		t.Fatalf("want a create on b only, got %+v", r)
 	}
 }
+
+// Production 2026-11-12 13:23: three queued sessions, slow boots, eight
+// creates (one per plan tick per overdue request). The policy creates at
+// most one machine per request, fewer when they fit together (an x4 takes
+// two of them).
+func TestRegressionSlowBootNoOverProvisioning(t *testing.T) {
+	x := []scheduler.Size{
+		{Provider: "aws", Name: "x4", Capacity: scheduler.Resources{CPU: 4, Memory: 7 * gib}, PricePerHour: 0.23},
+		{Provider: "aws", Name: "x8", Capacity: scheduler.Resources{CPU: 8, Memory: 15 * gib}, PricePerHour: 0.46},
+	}
+	j := Job{Repo: "r", Env: "e", Duration: 300, CPU: 2, Memory: Bytes(3 * gib), PeakMemory: Bytes(2 * gib)}
+	for _, r := range []float64{0, 0.2, 0.5} {
+		o := Options{Policy: scheduler.Default{Cfg: scheduler.Config{CostOptimization: r, CPUOvercommit: 2, MemoryOvercommit: 1,
+			QueueTimeout: 10 * time.Minute, IdleStop: time.Minute}}, Sizes: x,
+			Boot: map[string]time.Duration{"": 70 * time.Second}, Start: map[string]time.Duration{"": 15 * time.Second},
+			BootOverrun: 2 * time.Minute, Reconcile: 2 * time.Second, ColdPenalty: -1, QueueTimeout: 10 * time.Minute}
+		a, b, c := j, j, j
+		b.At, c.At = 1, 2
+		rep := Run(jobs(a, b, c), o)
+		if rep.Completed != 3 || rep.Machines > 2 {
+			t.Fatalf("r=%v: want 3 completed on at most 2 machines, got %d machines: %+v", r, rep.Machines, rep)
+		}
+		t.Logf("r=%v: %d machines, wait max %s", r, rep.Machines, rep.WaitMax)
+	}
+}

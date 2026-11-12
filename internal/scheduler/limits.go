@@ -3,6 +3,7 @@ package scheduler
 import (
 	"fmt"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -39,9 +40,14 @@ func (p Default) newPlanState(f Pool) *planState {
 		st.queued[t.EnvHash] = append(st.queued[t.EnvHash], t)
 	}
 	st.guard = p.guard(f, st)
+	st.excess = map[string]int{}
 	for _, env := range st.envs {
-		if r := p.exceptionFor(f, st.queued[env]); r != "" {
-			st.exception[env] = r
+		r, n := p.exceptionFor(f, st.queued[env])
+		// One extra machine per overdue request, and none while machines
+		// already on their way cover them: the exception fires once per
+		// request, not on every plan tick while its machine boots.
+		if n -= p.onWay(f, env, st.queued[env]); r != "" && n > 0 {
+			st.exception[env], st.excess[env] = r, n
 		}
 	}
 	return st
@@ -98,13 +104,64 @@ func (p Default) guard(f Pool, st *planState) int {
 	return int(math.Ceil(r+p.guardBeta()*math.Sqrt(r)-1e-9)) + n + warm
 }
 
+// onWay counts the machines of env on their way (starting or being
+// created) that fit one of the queued tasks ts: each serves at least one
+// of them, so a queued request needs no further machine for it.
+func (p Default) onWay(f Pool, env string, ts []Task) int {
+	n := 0
+	for _, m := range f.Machines {
+		if m.EnvHash != env || m.State != Starting || m.Draining || !p.usable(m, f.Now) || p.hung(f, m) {
+			continue
+		}
+		free := p.admissible(m).Sub(m.Reserved)
+		for _, t := range ts {
+			if free.Fits(t.Request) {
+				n++
+				break
+			}
+		}
+	}
+	return n
+}
+
+// capQueuedDemand drops the plan's scale-out for queued demand beyond one
+// machine per queued request of an environment, counting the machines
+// already on their way: whatever a policy step decided, a request never
+// gets a second machine started or created for it.
+func (p Default) capQueuedDemand(st *planState) {
+	f := st.f
+	envOf := map[string]string{}
+	for _, m := range f.Machines {
+		envOf[m.ID] = m.EnvHash
+	}
+	budget := map[string]int{}
+	for _, env := range st.envs {
+		budget[env] = len(st.queued[env]) - p.onWay(f, env, st.queued[env])
+	}
+	kept := st.acts[:0]
+	for _, a := range st.acts {
+		if (a.Kind == Create || a.Kind == Start) && strings.HasPrefix(a.Reason, "queued demand") {
+			env := a.EnvHash
+			if a.Kind == Start {
+				env = envOf[a.Machine]
+			}
+			if budget[env] <= 0 {
+				continue
+			}
+			budget[env]--
+		}
+		kept = append(kept, a)
+	}
+	st.acts = kept
+}
+
 // exceptionFor returns why queued requests of an environment may lift the
-// runaway guard ("": they may not): one of them has waited longer than
-// the fastest create plus the hedge margin (at cost_optimization 1: 80 %
-// of the queue timeout, else 30 minutes).
-func (p Default) exceptionFor(f Pool, ts []Task) string {
+// runaway guard ("": they may not) and how many of them do: those that
+// have waited longer than the fastest create plus the hedge margin (at
+// cost_optimization 1: 80 % of the queue timeout, else 30 minutes).
+func (p Default) exceptionFor(f Pool, ts []Task) (string, int) {
 	if len(ts) == 0 {
-		return ""
+		return "", 0
 	}
 	margin, ok := p.hedgeMargin()
 	if !ok {
@@ -120,34 +177,36 @@ func (p Default) exceptionFor(f Pool, ts []Task) string {
 		}
 	}
 	if boot < 0 {
-		return ""
+		return "", 0
 	}
+	reason, n := "", 0
 	for _, t := range ts {
 		if w := f.Now.Sub(t.Since); w > boot+margin {
-			return fmt.Sprintf("%s waited %s > create %s + margin %s", t.ID, w.Round(time.Second), boot.Round(time.Second), margin.Round(time.Second))
+			if n++; reason == "" {
+				reason = fmt.Sprintf("%s waited %s > create %s + margin %s", t.ID, w.Round(time.Second), boot.Round(time.Second), margin.Round(time.Second))
+			}
 		}
 	}
-	return ""
+	return reason, n
 }
 
 // room reports whether the runaway guard lets env get one more machine.
 func (p Default) room(st *planState, env string) bool {
-	return st.active < st.guard || st.exception[env] != ""
+	return st.active < st.guard || st.excess[env] > 0
 }
 
 // slots is how many machines env may still add under the runaway guard.
 func (p Default) slots(st *planState, env string) int {
-	if st.exception[env] != "" {
-		return math.MaxInt32
-	}
-	return st.guard - st.active
+	return max(st.guard-st.active, 0) + st.excess[env]
 }
 
 // note marks a scale-out action beyond the runaway guard as a capacity
-// exception (logged by the orchestrator).
+// exception (logged by the orchestrator) and uses up one overdue
+// request's exception.
 func (p Default) note(st *planState, env string, a Action) Action {
-	if st.active >= st.guard && st.exception[env] != "" {
+	if st.active >= st.guard && st.excess[env] > 0 {
 		a.Reason += fmt.Sprintf("; capacity exception (guard %d): %s", st.guard, st.exception[env])
+		st.excess[env]--
 	}
 	return a
 }

@@ -35,6 +35,9 @@ type Options struct {
 	// Boot and Start are the latencies until a created or a started machine
 	// accepts sessions, per provider ("" = default for all providers).
 	Boot, Start map[string]time.Duration
+	// BootOverrun makes creates take this much longer than Boot, which the
+	// policy still sees (slow boots, as in production 2026-11-12).
+	BootOverrun time.Duration
 	MaxLifetime time.Duration // machine lifetime (default 24h)
 	Reconcile   time.Duration // periodic Plan (default 15s, like the daemon)
 	// ColdPenalty extends a build without a warm cache on its machine:
@@ -281,6 +284,7 @@ type machine struct {
 	size     scheduler.Size
 	state    scheduler.State
 	readyAt  time.Time
+	overrun  time.Duration // readyAt is this much later than the policy expects
 	created  time.Time
 	expires  time.Time
 	draining bool
@@ -693,7 +697,7 @@ func (s *sim) pool() scheduler.Pool {
 		sm := scheduler.Machine{ID: m.id, Provider: m.prov, EnvHash: m.env, Size: m.size.Name, State: m.state,
 			Draining: m.draining, Capacity: m.size.Capacity, CreatedAt: m.created, ExpiresAt: m.expires}
 		if m.state == scheduler.Starting {
-			sm.ReadyAt = m.readyAt
+			sm.ReadyAt = m.readyAt.Add(-m.overrun)
 		}
 		if m.state == scheduler.Running {
 			var cpu float64
@@ -1154,7 +1158,8 @@ func (s *sim) execute(acts []scheduler.Action) {
 			}
 			s.ids++
 			m := &machine{id: fmt.Sprintf("m%04d", s.ids), prov: a.Size.Provider, env: a.EnvHash, size: a.Size,
-				state: scheduler.Starting, readyAt: s.now.Add(latency(s.o.Boot, a.Size.Provider, 60*time.Second)),
+				state: scheduler.Starting, readyAt: s.now.Add(latency(s.o.Boot, a.Size.Provider, 60*time.Second) + s.o.BootOverrun),
+				overrun: s.o.BootOverrun,
 				created: s.now, expires: s.now.Add(s.o.MaxLifetime), warm: map[string]bool{}, up: s.now,
 				disk: a.Size.Capacity.Disk, slots: map[string]int64{}}
 			if a.Size.Medium == medium.Volume {
@@ -1176,7 +1181,7 @@ func (s *sim) execute(acts []scheduler.Action) {
 			}
 			if m.state == scheduler.Stopped {
 				m.state = scheduler.Starting
-				m.readyAt = s.now.Add(latency(s.o.Start, m.prov, 20*time.Second))
+				m.readyAt, m.overrun = s.now.Add(latency(s.o.Start, m.prov, 20*time.Second)), 0
 				m.draining = false
 				m.up = s.now
 			}
