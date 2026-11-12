@@ -156,11 +156,11 @@ func TestPruneRepoRPC(t *testing.T) {
 	m.Bytes = treeSize(filepath.Join(slot, "data"))
 	writeMeta(slot, m)
 	w := &Worker{slots: sl, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotPrune, Repo: "repo", TargetBytes: m.Bytes})
+	res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotReclaim, Repo: "repo", FreeBytes: m.Bytes})
 	if res.Err != "" || res.Freed < 64<<10 || exists(old) || !exists(slot) {
 		t.Fatalf("prune to the newest slot's size: %+v", res)
 	}
-	if res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotPrune, Repo: "nope"}); res.Err == "" {
+	if res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotReclaim, Repo: "nope"}); res.Err == "" {
 		t.Fatal("unknown repo accepted")
 	}
 	if res := w.slotOp(t.Context(), proto.SlotOp{Op: "explode"}); res.Err == "" {
@@ -186,7 +186,7 @@ func TestPruneRepoBoundedByRunningPrune(t *testing.T) {
 		t.Fatalf("prune behind a running prune: %+v after %s", res, time.Since(begin))
 	}
 	begin = time.Now()
-	if res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotPrune, Repo: "nope"}); !strings.Contains(res.Err, "no build slot") || time.Since(begin) > 50*time.Millisecond {
+	if res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotReclaim, Repo: "nope"}); !strings.Contains(res.Err, "no build slot") || time.Since(begin) > 50*time.Millisecond {
 		t.Fatalf("unknown repo waited for the lock: %+v after %s", res, time.Since(begin))
 	}
 	w.pruneMu.Unlock()

@@ -85,17 +85,20 @@ const (
 
 // Build slot operations (SlotOp.Op).
 const (
-	SlotPrune   = "prune"
+	// SlotReclaim makes FreeBytes (plus the worker's reserve) free on the
+	// cache disk in the worker's one reclaim order (docs/design-storage-v2.md).
+	SlotReclaim = "reclaim"
 	SlotSave    = "save"
 	SlotRestore = "restore"
 )
 
-// SlotOp asks a worker to prune, save or restore a repository's build slot.
+// SlotOp asks a worker to reclaim disk, save or restore a repository's build slot.
 type SlotOp struct {
 	Op   string `json:"op"`
-	Repo string `json:"repo"` // repository id
-	// TargetBytes is the prune target (0: the caches' prune policy).
-	TargetBytes int64 `json:"target_bytes,omitempty"`
+	Repo string `json:"repo"` // repository id (reclaim: the repository the room is for; its slots are kept)
+	// FreeBytes is the physical free space a reclaim makes beyond the
+	// worker's reserve.
+	FreeBytes int64 `json:"free_bytes,omitempty"`
 	// Head is the committed layer to mount (restore).
 	Head *LayerHead `json:"head,omitempty"`
 	// Store grants access to the repository's store prefix (save and
@@ -110,7 +113,7 @@ type SlotOp struct {
 
 // SlotResult answers a SlotOp.
 type SlotResult struct {
-	Freed int64      `json:"freed,omitempty"` // prune
+	Freed int64      `json:"freed,omitempty"` // reclaim: physical bytes freed (statfs)
 	Head  *LayerHead `json:"head,omitempty"`  // save: the flushed head
 	// Pages and PageBytes are the pages a save wrote back; Seconds the
 	// duration of the operation.
@@ -185,10 +188,14 @@ type Exec struct {
 	// machine (server side safety net for the scheduler).
 	MemoryOvercommit float64 `json:"memory_overcommit"`
 	// Caches are the repository's [cache.<name>] tables.
-	Caches  []Cache  `json:"caches,omitempty"`
-	SlotTTL string   `json:"slot_ttl"` // effective slot TTL, e.g. "24h"
-	Eager   []string `json:"eager"`    // output globs relative to Repo
-	Lease   string   `json:"lease,omitempty"`
+	Caches []Cache `json:"caches,omitempty"`
+	// SlotGrowth is the forecast (p90) of the bytes the session adds to
+	// its build slot (learning store; 0: unknown): the worker keeps it free
+	// in its reserve while the session runs.
+	SlotGrowth int64    `json:"slot_growth,omitempty"`
+	SlotTTL    string   `json:"slot_ttl"` // effective slot TTL, e.g. "24h"
+	Eager      []string `json:"eager"`    // output globs relative to Repo
+	Lease      string   `json:"lease,omitempty"`
 	// Store grants access to the store prefixes of the repository and the
 	// environment (lease's store grant; nil: no store).
 	Store *store.Grant `json:"store,omitempty"`
@@ -393,11 +400,65 @@ type DiskStatus struct {
 	// SlotBytes is the size of each repository's build slot (repo id ->
 	// bytes).
 	SlotBytes map[string]int64 `json:"slot_bytes,omitempty"`
+	// Ledger is the physical account of the disk the scheduler plans
+	// with (nil: an older worker).
+	Ledger *DiskLedger `json:"ledger,omitempty"`
 	// Items break the disk down: build slots, each repository's local
 	// page tier, materialized files, source contents, machine and global
 	// caches, and the rest of the file system ("other").
 	Items []StorageItem `json:"items,omitempty"`
 }
+
+// DiskLedger is the physical account of a cache disk
+// (docs/design-storage-v2.md): Used = Pinned + Σ Reclaim[i].Bytes, and a
+// new session may take Room() bytes.
+type DiskLedger struct {
+	Total int64 `json:"total"`
+	Free  int64 `json:"free"`
+	// Pinned cannot be freed now: leased slots, data not yet in the
+	// store, images, system and unaccounted files.
+	Pinned int64 `json:"pinned"`
+	// Reserve is the headroom kept free: a floor plus the forecast growth
+	// of the running sessions.
+	Reserve int64 `json:"reserve"`
+	// Reclaim lists what can be freed, in the worker's reclaim order
+	// (ascending cost per byte).
+	Reclaim []Reclaimable `json:"reclaim,omitempty"`
+}
+
+// Reclaim classes (Reclaimable.Class).
+const (
+	ReclaimGarbage   = "garbage"   // stale build units in a slot (trim)
+	ReclaimResident  = "resident"  // clean pages and materialized files (refetched)
+	ReclaimWriteback = "writeback" // written-back blobs
+	ReclaimDormant   = "dormant"   // local tiers of repositories without slots
+	ReclaimSource    = "source"    // faulted-in source contents
+	ReclaimMachine   = "machine"   // machine caches over their max_size
+	ReclaimSlot      = "slot"      // an idle, flushed slot (demoted to its store head)
+)
+
+// Reclaimable is one entry of the ledger: Bytes freed physically by
+// reclaiming it and Cost, the build seconds that is expected to lose
+// (rebuild time x probability of reuse).
+type Reclaimable struct {
+	Class string  `json:"class"`
+	Repo  string  `json:"repo,omitempty"`
+	Bytes int64   `json:"bytes"`
+	Cost  float64 `json:"cost,omitempty"`
+}
+
+// Reclaimable returns the bytes the ledger can free.
+func (l DiskLedger) Reclaimable() int64 {
+	var n int64
+	for _, r := range l.Reclaim {
+		n += r.Bytes
+	}
+	return n
+}
+
+// Room is the bytes a new session may take: free plus reclaimable,
+// less the reserve.
+func (l DiskLedger) Room() int64 { return l.Free + l.Reclaimable() - l.Reserve }
 
 // Storage item kinds.
 const (
