@@ -18,4 +18,3 @@ func TestSetOOMScoreAdj(t *testing.T) {
 		t.Fatalf("got %q", b)
 	}
 }
-

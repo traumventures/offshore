@@ -41,20 +41,20 @@ const (
 // values: SecretKeys only names the secret variables, whose values are
 // supplied when the containers are created.
 type Layout struct {
-	ID          string             `json:"id"`
-	Image       string             `json:"image"`
-	Binary      string             `json:"binary"`  // host path of the static server binary
-	Publish     string             `json:"publish"` // docker -p value for the server port
-	CacheVolume string             `json:"cache_volume"`
-	DepsVolume  string             `json:"deps_volume"`
-	StoreVolume string             `json:"store_volume,omitempty"`   // shared directory store (empty: none)
-	StatusDir   string             `json:"status_dir,omitempty"`     // host directory for the status file (empty: none)
-	CPU         float64            `json:"cpu,omitempty"`            // container CPU limit (0: none)
-	Memory      int64              `json:"memory,omitempty"`         // container memory limit (0: none)
-	Swap        bool               `json:"swap,omitempty"`           // sessions may swap beyond Memory
+	ID          string  `json:"id"`
+	Image       string  `json:"image"`
+	Binary      string  `json:"binary"`  // host path of the static server binary
+	Publish     string  `json:"publish"` // docker -p value for the server port
+	CacheVolume string  `json:"cache_volume"`
+	DepsVolume  string  `json:"deps_volume"`
+	StoreVolume string  `json:"store_volume,omitempty"` // shared directory store (empty: none)
+	StatusDir   string  `json:"status_dir,omitempty"`   // host directory for the status file (empty: none)
+	CPU         float64 `json:"cpu,omitempty"`          // container CPU limit (0: none)
+	Memory      int64   `json:"memory,omitempty"`       // container memory limit (0: none)
+	Swap        bool    `json:"swap,omitempty"`         // sessions may swap beyond Memory
 	// OOMScoreAdj is the worker container's oom_score_adj (0: Docker's
 	// default); the supervisor sets -1000 on VM hosts.
-	OOMScoreAdj int `json:"oom_score_adj,omitempty"`
+	OOMScoreAdj int                `json:"oom_score_adj,omitempty"`
 	Labels      map[string]string  `json:"labels,omitempty"`         // machine container labels
 	SvcLabels   map[string]string  `json:"service_labels,omitempty"` // service container labels
 	Env         map[string]string  `json:"env,omitempty"`
