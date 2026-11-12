@@ -60,6 +60,11 @@ const (
 	bakeKeep = 2
 	// bakeCacheTTL is how long a lookup of baked images is reused.
 	bakeCacheTTL = time.Minute
+	// bakeBackoff is the pause after a failed bake of a key, doubled per
+	// consecutive failure up to bakeBackoffMax (creates keep booting the
+	// stock or an older baked AMI meanwhile).
+	bakeBackoff    = 30 * time.Minute
+	bakeBackoffMax = 24 * time.Hour
 	// bakedMarker on a baked disk tells the boot script it runs on one.
 	bakedMarker = supervisor.StateDir + "/baked"
 )
@@ -88,6 +93,7 @@ type baker struct {
 	mu     sync.Mutex
 	denied bool                 // the credentials may not bake (logged once)
 	active map[string]bool      // bake keys being baked
+	failed map[string]bakeFail  // bake key -> recent failures
 	cache  map[string]bakeCache // image tag -> lookup
 	// waits bound the builder and image waits (tests shorten them).
 	buildTimeout, imageTimeout time.Duration
@@ -99,8 +105,14 @@ type bakeCache struct {
 	images []ec2types.Image
 }
 
+// bakeFail records consecutive failed bakes of a key.
+type bakeFail struct {
+	n     int
+	until time.Time // no new bake before
+}
+
 func newBaker(api bakeAPI, off bool) *baker {
-	return &baker{api: api, off: off, active: map[string]bool{}, cache: map[string]bakeCache{},
+	return &baker{api: api, off: off, active: map[string]bool{}, failed: map[string]bakeFail{}, cache: map[string]bakeCache{},
 		buildTimeout: bakeBuildTimeout, imageTimeout: bakeImageTimeout}
 }
 
@@ -201,10 +213,11 @@ func (b *baker) machineAMI(ctx context.Context, j bakeJob) (ami string, baked bo
 	return ami, true
 }
 
-// start bakes j in the background unless it is being baked.
+// start bakes j in the background unless it is being baked or its last
+// bake failed recently.
 func (b *baker) start(j bakeJob) {
 	b.mu.Lock()
-	if b.active[j.key()] || b.denied {
+	if b.active[j.key()] || b.denied || time.Now().Before(b.failed[j.key()].until) {
 		b.mu.Unlock()
 		return
 	}
@@ -218,6 +231,16 @@ func (b *baker) start(j bakeJob) {
 		b.mu.Lock()
 		delete(b.active, j.key())
 		delete(b.cache, imageTag(j.image, j.arch))
+		var retry time.Duration
+		if err == nil {
+			delete(b.failed, j.key())
+		} else {
+			f := b.failed[j.key()]
+			f.n++
+			retry = min(bakeBackoff<<min(f.n-1, 10), bakeBackoffMax)
+			f.until = time.Now().Add(retry)
+			b.failed[j.key()] = f
+		}
 		b.mu.Unlock()
 		if err != nil && denied(err) {
 			b.deny(err)
@@ -226,7 +249,7 @@ func (b *baker) start(j bakeJob) {
 		case err == nil:
 			slog.Info("aws-ec2: baked machine image", "ami", ami, "image", j.image, "base", j.base, "duration", time.Since(t0).Round(time.Second))
 		case !denied(err):
-			slog.Error("aws-ec2: baking machine image", "image", j.image, "err", err)
+			slog.Error("aws-ec2: baking machine image", "image", j.image, "err", err, "retry_in", retry)
 		}
 	}()
 }
@@ -343,10 +366,7 @@ func (b *baker) bake(ctx context.Context, j bakeJob) (string, error) {
 	}
 	iid := aws.ToString(out.Instances[0].InstanceId)
 	defer b.api.TerminateInstances(context.WithoutCancel(ctx), &ec2.TerminateInstancesInput{InstanceIds: []string{iid}})
-	stopped := ec2.NewInstanceStoppedWaiter(b.api, func(o *ec2.InstanceStoppedWaiterOptions) {
-		o.MinDelay, o.MaxDelay = b.waitDelay(5*time.Second), b.waitDelay(15*time.Second)
-	})
-	if err := stopped.Wait(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{iid}}, b.buildTimeout); err != nil {
+	if err := b.waitBuilt(ctx, iid); err != nil {
 		return "", fmt.Errorf("aws-ec2: bake builder %s did not finish: %w", iid, err)
 	}
 	itags := tags[:7] // without the builder's times
@@ -378,6 +398,47 @@ func (b *baker) waitDelay(d time.Duration) time.Duration {
 		return b.delay
 	}
 	return d
+}
+
+// waitBuilt waits until the builder powered itself off (stopped). The
+// SDK's InstanceStopped waiter cannot be used: it fails on "pending",
+// the state a freshly launched builder is in.
+func (b *baker) waitBuilt(ctx context.Context, iid string) error {
+	ctx, cancel := context.WithTimeout(ctx, b.buildTimeout)
+	defer cancel()
+	for {
+		out, err := b.api.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{iid}})
+		var ae smithy.APIError
+		switch {
+		case err == nil:
+			for _, r := range out.Reservations {
+				for _, i := range r.Instances {
+					if i.State == nil {
+						continue
+					}
+					switch i.State.Name {
+					case ec2types.InstanceStateNameStopped:
+						return nil
+					case ec2types.InstanceStateNameShuttingDown, ec2types.InstanceStateNameTerminated:
+						reason := ""
+						if i.StateReason != nil {
+							reason = aws.ToString(i.StateReason.Message)
+						}
+						return fmt.Errorf("builder %s: %s", i.State.Name, reason)
+					}
+				}
+			}
+		case errors.As(err, &ae) && ae.ErrorCode() == "InvalidInstanceID.NotFound":
+			// not visible yet (eventual consistency)
+		case ctx.Err() == nil:
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("not stopped after %s", b.buildTimeout)
+		case <-time.After(b.waitDelay(10 * time.Second)):
+		}
+	}
 }
 
 // prune deregisters all but the newest bakeKeep images of an environment
