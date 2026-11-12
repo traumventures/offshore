@@ -77,11 +77,22 @@ func fsUsage(dir string) (total, used int64, ok bool) {
 	return total, used, true
 }
 
-// measureMachineCaches records the size of the machine cache directory.
+// measureMachineCaches records the size of the machine caches: the
+// machine cache directory, the written back blobs and the local tiers of
+// dormant repositories (the open ones are counted live, residentBytes),
+// so that the disk sample accounts for everything the worker keeps.
 func (s *Worker) measureMachineCaches() {
+	var n int64
 	if s.cfg.DepsDir != "" {
-		s.machineCacheBytes.Store(treeSize(s.cfg.DepsDir))
+		n += treeSize(s.cfg.DepsDir)
 	}
+	if d := s.writebackDir(); d != "" {
+		n += treeSize(d)
+	}
+	if s.cfs != nil {
+		n += s.cfs.dormantBytes()
+	}
+	s.machineCacheBytes.Store(n)
 	s.measureStorage(context.Background())
 }
 

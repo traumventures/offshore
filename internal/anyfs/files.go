@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/zeebo/blake3"
@@ -287,7 +288,25 @@ const maxFetchRestarts = 3
 // EnsureWith materializes a node's content with fetch (a page fault of
 // the whole file) and returns its path. The content is verified against
 // the node's digest; concurrent calls share one fetch.
+//
+// A full cache disk must not fail the read of a source file (in
+// production cargo reported "failed to load manifest for workspace
+// member" with ENOSPC, a misleading errno for a read): the fault reclaims
+// the unopened contents of this cache once and retries; only then the
+// read fails, with EIO.
 func (f *Files) EnsureWith(ctx context.Context, n *Node, fetch FileFetcher) (string, error) {
+	p, err := f.ensureWith(ctx, n, fetch)
+	if err != nil && errors.Is(err, syscall.ENOSPC) && ctx.Err() == nil {
+		f.Reclaim(0)
+		p, err = f.ensureWith(ctx, n, fetch)
+	}
+	if err != nil && errors.Is(err, syscall.ENOSPC) {
+		err = fmt.Errorf("%w (cache disk full: %v)", syscall.EIO, err)
+	}
+	return p, err
+}
+
+func (f *Files) ensureWith(ctx context.Context, n *Node, fetch FileFetcher) (string, error) {
 	return f.fault(ctx, n, func(d string) error {
 		p := f.path(d)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {

@@ -20,6 +20,7 @@ type storageMeasure struct {
 	dirs    map[string]int64 // cache name -> bytes (see cacheDirs)
 	classes map[string]map[string]int64
 	topDirs map[string][]proto.DirSize
+	dormant []dormantRepo // repositories without an open stack
 }
 
 // topDirsN is the number of largest directories reported per repository.
@@ -41,6 +42,9 @@ func (s *Worker) cacheDirs() map[string][2]string {
 	if s.cfg.SccacheDir != "" {
 		out["sccache"] = [2]string{s.cfg.SccacheDir, proto.StorageGlobal}
 	}
+	if d := s.writebackDir(); d != "" {
+		out["written back files"] = [2]string{d, proto.StorageWriteback}
+	}
 	if s.cfg.CacheDir != "" {
 		for _, n := range []string{"ccache", "gocache"} {
 			out[n] = [2]string{filepath.Join(s.cfg.CacheDir, n), proto.StorageGlobal}
@@ -58,15 +62,17 @@ func (s *Worker) measureStorage(ctx context.Context) {
 			dirs[name] = treeSize(d[0])
 		}
 	}
+	var dormant []dormantRepo
 	classes := map[string]map[string]int64{}
 	tops := map[string][]proto.DirSize{}
 	if s.cfs != nil {
+		dormant = s.cfs.dormantRepos(true)
 		for repo, cl := range s.cfs.headBreakdown(ctx) {
 			classes[repo], tops[repo] = cl.classes, cl.top
 		}
 	}
 	s.storage.mu.Lock()
-	s.storage.dirs, s.storage.classes, s.storage.topDirs = dirs, classes, tops
+	s.storage.dirs, s.storage.classes, s.storage.topDirs, s.storage.dormant = dirs, classes, tops, dormant
 	s.storage.mu.Unlock()
 }
 
@@ -140,8 +146,12 @@ func (s *Worker) storageItems(used int64) []proto.StorageItem {
 		sum += r.Meta.UpperBytes
 	}
 	s.storage.mu.Lock()
-	classes, tops, dirs := s.storage.classes, s.storage.topDirs, s.storage.dirs
+	classes, tops, dirs, dormant := s.storage.classes, s.storage.topDirs, s.storage.dirs, s.storage.dormant
 	s.storage.mu.Unlock()
+	for _, d := range dormant {
+		items = append(items, proto.StorageItem{Kind: proto.StorageDormant, Name: d.id, Repo: d.id, Bytes: d.bytes, LastUsed: d.used.Unix()})
+		sum += d.bytes
+	}
 	if s.cfs != nil {
 		for _, p := range s.cfs.repoPages() {
 			h := heads[p.Repo]
