@@ -303,6 +303,26 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	}
 	binds = append(binds, cb...)
 	s.cfs.sessionStarted(slot, binds)
+	// Present the sources as the slot's outputs saw them (mtimebase.go);
+	// after the command, record the view this session built against
+	// (before the slot is captured).
+	s.mu.Lock()
+	proj := s.mounts[req.Repo]
+	s.mu.Unlock()
+	var ran bool
+	if proj != nil {
+		if b := loadSourcesBase(data); b != nil {
+			proj.AddMtimeBase(se.id, b)
+		}
+		defer func() {
+			if ran {
+				if _, err := saveSourcesBase(data, proj.PresentedBase()); err != nil {
+					s.log.Warn("build slot source view", "slot", slot, "err", err)
+				}
+			}
+			proj.RemoveMtimeBase(se.id)
+		}()
+	}
 	cgDir, err := s.cg.create(se.id, req.Grant)
 	if err != nil {
 		s.log.Warn("session cgroup", "err", err)
@@ -371,6 +391,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		}
 		close(outDone)
 	}
+	ran = true
 	se.pgid = cmd.Process.Pid
 	_, pspan := tracing.Start(ctx, "worker.process")
 	span.SetAttributes(attribute.String("offshore.session", se.id), attribute.String("offshore.slot", filepath.Base(slot)), attribute.Bool("offshore.warm", warm))

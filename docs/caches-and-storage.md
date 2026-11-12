@@ -542,6 +542,35 @@ URLs) from AWS; the cross-provider egress is priced on the whole head.
 The worker reports `usage.read_bytes` with every session: what it read of
 the slot it started on, the measure of a lazy restore.
 
+### Source mtimes
+
+mtime-based tools (cargo) compare source mtimes with their outputs, so a
+build directory used by another worktree (a seed) or restored elsewhere
+rebuilt every source whose checkout was newer than the outputs, although
+the content was the same, and called an older checkout with other content
+fresh. Each slot therefore carries its **source view**,
+`data/.offshore/sources.gz`: the presented content digest (64-bit prefix)
+and mtime of every clean source file of the repository root, and when it
+was captured. It is written after every session's command (unless the
+files are unchanged) before the slot is captured, so it travels with
+snapshots, heads, seeds and restores (`internal/worker/mtimebase.go`).
+While a session runs, the repository's projection presents
+(`anyfs.MtimeBase`, `WritableFS.AddMtimeBase`):
+
+- the view's mtime for a file whose content equals the view's and that
+  has not changed in the projection since the session started;
+- otherwise the client's mtime, but at least the capture time + 1 ns, so
+  outputs built from other content rebuild.
+
+Concurrent sessions over different slots share the projection: the newest
+of their presentations shows (a newer mtime only causes a rebuild).
+Outside sessions the client's mtimes show. Measured with
+`TestSeededCargoBuildStaysFresh` (a 2-crate workspace through a FUSE
+projection, its target directory copied to a newer worktree): client
+mtimes recompile both crates, the view none; an edit recompiles the
+dependents; an older checkout with other content compiles nothing with
+client mtimes (stale) and the changed crate with the view.
+
 ## Media: local, volume, store
 
 Independently of a cache's scope, a machine's caches live on one of three

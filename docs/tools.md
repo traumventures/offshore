@@ -221,7 +221,10 @@ the cargo adapter, including `[prewarm] run`) aligns what cargo hashes; the
 cargo adapter supplies the tool homes and rustflags (`Plan.AlignOutputs`),
 other adapters need none:
 
-- Sources are projected at the local path (identical absolute paths, mtimes).
+- Sources are projected at the local path (identical absolute paths; the
+  client's mtimes, except that during a session unchanged sources show the
+  mtimes the slot was built against, see
+  [caches-and-storage.md](caches-and-storage.md#source-mtimes)).
 - The image's `CARGO_HOME` and `RUSTUP_HOME` appear at the client's paths
   (`$CARGO_HOME`/`$RUSTUP_HOME` or `~/.cargo`/`~/.rustup`), bind mounted in
   the session's mount namespace; `PATH` and the variables point there.
