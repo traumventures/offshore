@@ -13,6 +13,7 @@ providers compete.
 [scheduler]
 policy              = "default"   # default (option policy) | costmodel | binpack | classic
 cost_optimization   = 0.5         # 1 = cheapest, 0 = fastest result
+queue_confidence    = 0.8         # wait only when P(waiting finishes sooner) >= this
 disk_price_per_gb_month = 0.08    # prices disk resizes
 disk_budget    = "90%"            # cache disk machines fill before pruning ("150G": bytes)
 source_cache   = "12.5%"          # fetched source contents kept, share of the disk budget ("20G": bytes)
@@ -48,6 +49,7 @@ enabled = false                                  # no machines here (default tru
 | key | default | |
 |---|---|---|
 | `policy` | `"default"` | `default` (option policy with the projected-start gate and stop decay of round 2); `option` (the option policy of round 1), `costmodel`, `binpack` and `classic` are earlier policies kept for comparison |
+| `queue_confidence` | 0.8 | a request waits for capacity (a busy or starting machine, capacity on its way) only when P(finish_wait < finish_now) is at least this; otherwise it runs now on any machine with room (cold or restored) or a machine is started/created. See *Queue confidence* |
 | `cost_optimization` | 0.5 | 0..1, the single trade-off knob: an hour of turnaround is worth (1-r)/r hours of the cheapest size; 1 = cheapest, 0 = fastest result |
 | `[[egress]]` | free within a provider, 0.09/GB at 50 MB/s across | `from` (provider or `storage`), `to` (provider), `price_per_gb`, `bandwidth` |
 | `disk_price_per_gb_month` | 0.08 | price of extra disk, for resize decisions |
@@ -211,8 +213,10 @@ the composite profile (`scheduler.Size.Stack`, a `medium.Stack`; anyfs.Profile i
   build key from the sessions' `task_end.usage` (`refault_bytes` /
   (`working_set_bytes` - `local_capacity`), median of the thrashing runs,
   `Profile.Refetch`, from 2 runs on). Without that it is calibrated
-  from the event log (`events.Refetch`, fed live by the orchestrator and
-  replayed from the last 24 h at start): while a machine thrashes
+  per provider (`learning.Refetch`, fed by the orchestrator with the
+  workers' cache observations as it receives them, persisted in the
+  learning store; nothing is replayed from the event log, see *Learning
+  store*): while a machine thrashes
   (`thrash` event, or a `machine_sample` whose VM thrashes), its refaults
   are `min(page_in, reclaim)` bytes; each episode (closed by the build's
   `task_end`, a sample below capacity, stop or destroy) divided by the
@@ -762,6 +766,95 @@ their parent key (`learned_parent`).
   family and availability domain): the scheduler's limit is one vCPU
   figure per provider while OCI limits are per shape family, so only the
   limit-error cap applies there.
+
+## Queue confidence (Nov 2026)
+
+`internal/scheduler/queueconf.go`, default policy. A request is only
+queued (waits for a busy warm machine, a starting machine or the
+capacity already on its way) when the scheduler is highly confident that
+waiting gives it an earlier finish than running now:
+
+    P(finish_wait < finish_now + slack) >= queue_confidence (0.8)
+
+- **finish_wait** = wait + the request's run there. The wait comes from
+  the remaining run times of the sessions it waits for: log-normal with
+  the key's median (`Release.Run`) and 80th percentile (`Release.At`),
+  conditioned on having run until now, comonotone across sessions, at 16
+  quantiles. When no machine has room, the queue of the environment is
+  list-scheduled (as in the projected-start gate) at each quantile.
+- **finish_now** = latency of the alternative (0 on a machine with room;
+  the learned start or boot latency for a start or create) + the run
+  there (cold, restore, warm volume, thrash).
+- The request's own run time is log-normal (`Profile.Spread`, 1.5 when
+  unknown) and the same draw for both (one build).
+- **Unknown remaining time** (a session without a lease estimate,
+  `Release.Unknown`; a reservation without a release; a point ETA the
+  session already overran) is never counted on: that wait is "never",
+  p = 0, so the request runs now or a machine is added.
+- **cost_optimization** biases the test by `slack = (cost_now -
+  cost_wait) / time_value`: at 0 only time counts; at 0.2 a create's
+  latency and idle tail buy about 25 s of slack; at 1 a cheaper wait is
+  always taken. A new machine's extra cost is its price for latency plus
+  `idle_stop`.
+
+Placement (`Place`): the best-scoring wait among those that pass the
+test, else the best way to run now. Scale-out (`Plan`): a start or
+create is added unless every queued task it could serve is confidently
+better off waiting and the capacity there serves every task in time;
+when one passes, waiting is no longer an option of that decision. A
+request still never waits beyond the hedge bound, and at the 90th
+percentile not beyond half the queue timeout.
+
+The verdict is logged in the decision (`task_placed.decision.queue`:
+`verdict`, `p`, `confidence`, `wait_finish_seconds`,
+`now_finish_seconds` (medians, -1 = never), `slack_seconds`), appended to
+the reason ("cold; run now: p=0.41 (finish 6m waiting vs 4m now)"), on
+start/create actions ("queued demand; create now: p=0.00") and their
+rejections, and shown in `offshore top`'s queue rows ("queued (wait:
+p=0.86)"). `OFFSHORE_ABLATE=queueconf` turns it off in the simulator.
+
+**Production before the change** (events 2026-11-11..12, 475 assigned
+requests): wait p50 0 s, p90 141 s, p95 365 s, max 31 min; 110 waited
+over 5 s, 51 over 2 min. Of the waits over 5 s that ended on a warm slot
+and whose key had both warm and cold history, 4 were worth it (wait <
+median cold - median warm) and 19 were not (e.g. 1226 s waited to save
+210 s); 55 had no cold history to compare. 32 waits over 5 s ended cold
+or restored anyway (pure capacity waits).
+
+**Simulator** (`offshore sim -config testdata/pool.toml -policy default`,
+prod-flap, prod-nov10, prod-nov11, small-week, team-week; before =
+`OFFSHORE_ABLATE=queueconf`):
+
+| r | cost | turn p95 | late |
+|---|---|---|---|
+| 0.2 | prod traces and team-week unchanged, small-week $22.80 → $22.85 | team-week 10m18s → 10m24s, small-week 6m43s → 6m46s, prod unchanged | 173 → 155 |
+| 0.5 | small-week ±0, team-week $62.43 → $62.84 | team-week 10m26s → 10m40s, small-week 7m9s → 7m4s | 259 → 294 |
+| 0.8 | prod-flap $1.36 → $1.41, small-week $19.78 → $20.34, team-week $56.46 → $54.70 | prod-flap 3m28s → 3m9s, nov10 3m46s → 3m38s, small-week 7m27s → 7m4s, team-week 11m20s → 11m7s | 781 → 433 |
+
+Neutral at production's r = 0.2 (the hedge bound already capped waits),
+fewer late requests and a lower p95 when money weighs more (r = 0.8):
+the old score let cost-optimised requests wait for busy machines on a
+pessimistic point ETA; now they wait only when the distribution says so.
+
+## Learning store
+
+What the scheduler learns from the past lives in a dedicated store,
+`internal/learning` (`learning.json` in the state directory, schema
+`version` 1, other versions are ignored and relearned): the estimator's
+per-key usage window (run time, warm/cold/restore, peak memory, slot
+growth, working set, refaults; 20 runs per key, at most 4096 keys, least
+recently updated dropped) and the refetch factor per provider. The
+orchestrator writes it as sessions end (`History.Observe`) and as workers
+report cache observations (`Refetch`); the estimator and the policy read
+it (`Profile`, `Pool.Refetch`, run-time distributions of `Release`). The
+estimator's former `usage-history.json` is imported once.
+
+The event log (`events-*.jsonl`) is for observability only (humans,
+agents, `offshore report`, simulator traces via `offshore sim export`);
+the scheduler never reads it. Earlier the refetch calibration replayed
+the last 24 h of event files at start and tapped the log; both are gone
+(`events.Log.Tap` removed): the orchestrator's `emit` sends each
+observation to the two sinks independently.
 
 ## Calibrating the simulator from real runs
 

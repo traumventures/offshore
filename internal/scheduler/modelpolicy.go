@@ -543,7 +543,9 @@ func (p Default) scaleOutModel(st *planState, env string) {
 		}
 		verdicts := map[*cand]QueueVerdict{}
 		helpsQ := func(cd *cand) bool {
-			hit := false
+			// The capacity there does not serve every task in time (the
+			// timeline): no confidence in waiting.
+			hit := !feasible
 			for _, t := range tasks {
 				if !p.admissible(cd.tm.m).Fits(t.Request) || !p.physical(f, cd.tm.m.Capacity, t) {
 					continue
