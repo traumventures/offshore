@@ -369,15 +369,6 @@ func slotBudget(m slotMeta) int64 {
 	return b
 }
 
-// diskBudget returns the bytes the cache disk may use (0: unknown).
-func (s *Worker) diskBudget() int64 {
-	total, _, ok := fsUsage(s.cfg.CacheDir)
-	if !ok {
-		total = 0
-	}
-	return budgetBytes(s.cfg.DiskBudget, total)
-}
-
 // budgetBytes applies a budget (zero: config.DefaultDiskBudget) to a file
 // system of total bytes (0: unknown).
 func budgetBytes(b config.DiskBudget, total int64) int64 {
@@ -387,19 +378,11 @@ func budgetBytes(b config.DiskBudget, total int64) int64 {
 	return b.Of(total)
 }
 
-// enforceBudgets prunes a released slot over its budget and then the
-// machine's slots while the disk exceeds its budget.
+// enforceBudgets fits a released slot into its budget, then the disk.
 func (s *Worker) enforceBudgets(slot string) {
 	s.pruneMu.Lock()
 	defer s.pruneMu.Unlock()
-	if m, err := readMeta(slot); err == nil {
-		if b := slotBudget(m); b > 0 && m.Bytes > b && s.slots.acquire(slot) {
-			r := pruneSlot(slot, m, b, defaultUnreadRuns, false, s.slots.removeDir)
-			s.slots.releaseMaint(slot, r.BytesLeft)
-			s.log.Info("pruned build slot over its budget", "slot", slot, "freed", r.Freed, "left", r.BytesLeft)
-		}
-	}
-	s.enforceDiskBudget()
+	s.manageDisk(diskPass{slot: slot})
 }
 
 // Disk watermarks: reclaim of resident data (refetched on use, never
@@ -416,34 +399,19 @@ const (
 // diskTarget is the low watermark of a budget.
 func diskTarget(budget int64) int64 { return int64(float64(budget) * diskLowWater) }
 
-// checkBudgets runs every lifecycle tick: one statfs (no tree walk) and
-// the cache counters; the reclaim and prune walks run only when usage is
-// above the low watermark. Usage is the whole file system's, so images and
-// other data on the cache disk count against the budget.
+// checkBudgets runs every lifecycle tick (statfs and counters are
+// cheap; the walks only run above the low watermark). It skips the tick
+// while a prune runs: that prune ends with the same pass.
 func (s *Worker) checkBudgets() {
 	if !s.budgetMu.TryLock() {
 		return
 	}
 	defer s.budgetMu.Unlock()
-	if s.cfs != nil {
-		if n := s.cfs.enforceCapacity(context.Background()); n > 0 {
-			s.log.Info("reclaimed resident slot data above the cache capacity", "freed", n)
-		}
-	}
-	total, used, ok := fsUsage(s.cfg.CacheDir)
-	if !ok || total <= 0 {
-		return
-	}
-	s.setDiskFull(float64(used) / float64(total))
-	budget := s.diskBudget()
-	if budget <= 0 || used <= diskTarget(budget) {
-		return
-	}
 	if !s.pruneMu.TryLock() {
 		return
 	}
 	defer s.pruneMu.Unlock()
-	s.enforceDiskBudget()
+	s.manageDisk(diskPass{})
 }
 
 // setDiskFull updates the emergency state from the used share of the disk.
@@ -460,25 +428,6 @@ func (s *Worker) setDiskFull(share float64) {
 	}
 }
 
-// reclaimDisk runs the reclaim steps of the disk budget (no slot prune)
-// while usage is above its low watermark; the caller holds pruneMu.
-func (s *Worker) reclaimDisk() {
-	budget := s.diskBudget()
-	if budget <= 0 {
-		return
-	}
-	target := diskTarget(budget)
-	over := func() int64 {
-		_, used, _ := fsUsage(s.cfg.CacheDir)
-		return used - target
-	}
-	for _, step := range s.reclaimSteps() {
-		if step(over) <= 0 {
-			return
-		}
-	}
-}
-
 // reclaimSteps are the reclaims of data that is not build state, in
 // order: dormant repositories, written back blobs, resident slot data,
 // source contents. Each returns the bytes still over.
@@ -486,16 +435,53 @@ func (s *Worker) reclaimSteps() []func(func() int64) int64 {
 	return []func(func() int64) int64{s.reclaimDormant, s.reclaimWriteback, s.reclaimSlots, s.reclaimSources}
 }
 
-// enforceDiskBudget frees disk above the low watermark of the budget:
-// the local tiers of repositories without build slots (dormant), written
-// back blobs, reclaim of resident slot data (clean pages and materialized
-// files, also of leased slots: refetched on use) and of faulted-in source
-// contents (refetched from the laptop); above the budget itself also the
-// policy prune of the least recently used slots, then cold slots. Every
-// step measures the file system (statfs), not the slot metadata: data the
-// slots do not account for is reclaimed too.
-func (s *Worker) enforceDiskBudget() {
-	budget := s.diskBudget()
+// diskPass is what one manageDisk pass may do beyond the reclaim.
+type diskPass struct {
+	slot          string // a released slot: fit it into its own budget first
+	machineCaches bool   // prune plain machine caches over their max_size (while idle)
+	noPrune       bool   // never prune build state (the prune before a placement)
+}
+
+// manageDisk is the worker's one disk function. Store heads are the
+// source of truth; everything on the cache disk is a reclaimable tier,
+// freed in one order against one watermark pair of the disk budget:
+//
+//  1. a released slot over its own budget is pruned (pass.slot);
+//  2. the local tier of the cache file system is bounded by its capacity;
+//  3. plain machine caches over max_size (pass.machineCaches, while idle);
+//  4. above the low watermark: dormant repositories, written back blobs,
+//     resident slot data (refetched on use), fetched source contents;
+//  5. above the budget itself: idle slots least recently used first,
+//     policy prune, then cold (they restore lazily from their heads),
+//     down to the low watermark (not with pass.noPrune).
+//
+// Every step measures the file system (statfs), so data no slot accounts
+// for counts too; usage also drives the emergency stop of admissions.
+// The caller holds pruneMu.
+func (s *Worker) manageDisk(pass diskPass) {
+	if pass.slot != "" {
+		if m, err := readMeta(pass.slot); err == nil {
+			if b := slotBudget(m); b > 0 && m.Bytes > b && s.slots.acquire(pass.slot) {
+				r := pruneSlot(pass.slot, m, b, defaultUnreadRuns, false, s.slots.removeDir)
+				s.slots.releaseMaint(pass.slot, r.BytesLeft)
+				s.log.Info("pruned build slot over its budget", "slot", pass.slot, "freed", r.Freed, "left", r.BytesLeft)
+			}
+		}
+	}
+	if s.cfs != nil {
+		if n := s.cfs.enforceCapacity(context.Background()); n > 0 {
+			s.log.Info("reclaimed resident slot data above the cache capacity", "freed", n)
+		}
+	}
+	if pass.machineCaches {
+		s.pruneMachineCaches()
+	}
+	total, used, ok := fsUsage(s.cfg.CacheDir)
+	if !ok || total <= 0 {
+		return
+	}
+	s.setDiskFull(float64(used) / float64(total))
+	budget := budgetBytes(s.cfg.DiskBudget, total)
 	if budget <= 0 {
 		return
 	}
@@ -511,6 +497,9 @@ func (s *Worker) enforceDiskBudget() {
 		if step(over) <= 0 {
 			return
 		}
+	}
+	if pass.noPrune {
+		return
 	}
 	if _, used, _ := fsUsage(s.cfg.CacheDir); used <= budget {
 		return // below the budget: build state stays
@@ -577,7 +566,7 @@ func (s *Worker) pruneRepo(ctx context.Context, repo string, target int64) (int6
 		go func() {
 			if s.pruneMu.TryLock() {
 				defer s.pruneMu.Unlock()
-				s.reclaimDisk()
+				s.manageDisk(diskPass{noPrune: true})
 			}
 		}()
 		return 0, fmt.Errorf("no build slot for repository %s", repo)
@@ -588,7 +577,7 @@ func (s *Worker) pruneRepo(ctx context.Context, repo string, target int64) (int6
 		return 0, fmt.Errorf("prune of %s: %w (another prune is running)", repo, ctx.Err())
 	}
 	defer s.pruneMu.Unlock()
-	defer s.reclaimDisk()
+	defer s.manageDisk(diskPass{noPrune: true})
 	var refs []slotRef
 	for _, r := range s.slots.list() {
 		if r.Repo == repo {

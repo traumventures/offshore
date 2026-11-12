@@ -448,6 +448,9 @@ type Orchestrator struct {
 	metrics *orchMetrics
 	obs     *observer
 	learn   *learning.Store // what the scheduler learns from (never the event log)
+	// arrivals are the request arrivals per environment (learning store):
+	// the lifecycle policy keeps, stops or destroys idle machines by them.
+	arrivals *learning.Arrivals
 }
 
 // New creates an orchestrator.
@@ -487,6 +490,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 	o.loadVolumes()
 	o.metrics = newOrchMetrics(o)
 	o.learn = learning.Open(stateDir)
+	o.arrivals = o.learn.Arrivals()
 	o.obs = newObserver(stateDir, cfg.EventRetention, o.learn)
 	o.obs.log.SetWarn(func(msg string, err error) { log.Warn(msg, "err", err) })
 	o.loadUptime()
@@ -976,7 +980,7 @@ func (o *Orchestrator) measuredSizes() []scheduler.Size {
 // poolLocked builds the scheduler's view of the pool.
 func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
 	f := scheduler.Pool{Now: now, Sizes: o.measuredSizes(), Recent: map[string]time.Time{}, EnvArch: map[string]string{},
-		Refetch: o.obs.refetch.Factors()}
+		Refetch: o.obs.refetch.Factors(), Arrivals: o.arrivals.Times()}
 	for env, t := range o.recentEnvs {
 		f.Recent[env] = t
 	}
@@ -1115,6 +1119,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 	if o.Profile != nil && req.Key != "" {
 		task.Profile = o.Profile(req.Key)
 	}
+	o.arrivals.Observe(req.EnvHash, now)
 	o.mu.Lock()
 	o.recentEnvs[req.EnvHash] = now
 	o.noteFamilyLocked(req.Family, req.RepoID)

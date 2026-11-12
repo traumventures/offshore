@@ -422,8 +422,7 @@ func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
 			go func() {
 				s.pruneMu.Lock()
 				defer s.pruneMu.Unlock()
-				s.pruneMachineCaches()
-				s.enforceDiskBudget()
+				s.manageDisk(diskPass{machineCaches: true})
 			}()
 			lastGC = time.Now()
 		}

@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +57,16 @@ func TestGate(t *testing.T) {
 	}
 	variants := strings.Split(vs, ",")
 	rs := []float64{0.2, 0.8}
+	if v := os.Getenv("OFFSHORE_GATE_R"); v != "" {
+		rs = nil
+		for _, x := range strings.Split(v, ",") {
+			f, err := strconv.ParseFloat(x, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rs = append(rs, f)
+		}
+	}
 	filter := os.Getenv("OFFSHORE_GATE_CASE")
 	var cases []evalCase
 	for _, c := range gateCases(t) {
@@ -75,8 +86,8 @@ func TestGate(t *testing.T) {
 	all := RunAll(specs, 0)
 	nv := len(variants)
 	type agg struct {
-		cost, builds, p95, first float64
-		n, firstN                int
+		cost, builds, p95, first, obj float64
+		n, firstN                     int
 	}
 	sums := map[string]*agg{}
 	var b strings.Builder
@@ -102,6 +113,15 @@ func TestGate(t *testing.T) {
 					sums[key] = a
 				}
 				a.cost += rep.Cost
+				// The objective at r: cost + time_value x turnaround hours,
+				// time_value = cheapest size price x (1-r)/r.
+				pmin := math.Inf(1)
+				for _, sz := range c.pool.Sizes {
+					if sz.PricePerHour > 0 && !c.pool.Cfg.DisabledProviders[sz.Provider] {
+						pmin = math.Min(pmin, sz.PricePerHour)
+					}
+				}
+				a.obj += rep.Cost + pmin*(1-r)/r*rep.TurnHours
 				a.builds += float64(rep.Completed)
 				// p95 relative to the first variant (geometric mean of ratios).
 				a.p95 += math.Log(math.Max(rep.TurnP95.Seconds(), 1) / math.Max(reps[0].TurnP95.Seconds(), 1))
@@ -113,8 +133,8 @@ func TestGate(t *testing.T) {
 			}
 		}
 	}
-	fmt.Fprintln(&b, "\n| group | policy | cost $ | $/build | turn p95 vs first (geo) | first wait p95 (mean) |")
-	fmt.Fprintln(&b, "|---|---|---:|---:|---:|---:|")
+	fmt.Fprintln(&b, "\n| group | policy | cost $ | $/build | turn p95 vs first (geo) | first wait p95 (mean) | objective $ |")
+	fmt.Fprintln(&b, "|---|---|---:|---:|---:|---:|---:|")
 	for _, load := range []string{"high", "low"} {
 		for _, r := range rs {
 			for _, v := range variants {
@@ -122,8 +142,8 @@ func TestGate(t *testing.T) {
 				if a == nil {
 					continue
 				}
-				fmt.Fprintf(&b, "| %s r=%.1f | %s | %.2f | %.3f | %.3f | %.0fs |\n", load, r, v, a.cost, a.cost/math.Max(a.builds, 1),
-					math.Exp(a.p95/float64(a.n)), a.first/math.Max(float64(a.firstN), 1))
+				fmt.Fprintf(&b, "| %s r=%.1f | %s | %.2f | %.3f | %.3f | %.0fs | %.0f |\n", load, r, v, a.cost, a.cost/math.Max(a.builds, 1),
+					math.Exp(a.p95/float64(a.n)), a.first/math.Max(float64(a.firstN), 1), a.obj)
 			}
 		}
 	}

@@ -238,6 +238,9 @@ type Report struct {
 	// First counts jobs that arrived while no machine of their
 	// environment was running or starting; FirstWaitP50/P95 is their
 	// wait (time to first session in the 0-1 machine regime).
+	// TurnHours is the sum of all turnarounds (the time term of the
+	// policies' objective cost + time_value x time).
+	TurnHours    float64       `json:"turn_hours"`
 	First        int           `json:"first"`
 	FirstWaitP50 time.Duration `json:"first_wait_p50"`
 	FirstWaitP95 time.Duration `json:"first_wait_p95"`
@@ -343,7 +346,7 @@ type sim struct {
 	cal      *learning.Refetch    // refetch calibration from cache events
 	arr      *learning.Arrivals   // request arrivals per environment (learning store)
 	arrSnap  map[string][]time.Time
-	vols     []*volume            // detached cache volumes
+	vols     []*volume // detached cache volumes
 	volIDs   int
 	now      time.Time
 	machines []*machine
@@ -427,6 +430,7 @@ func Run(trace Trace, o Options) Report {
 					s.o.Debug(r.j.Job, r.j.wait)
 				}
 				turns = append(turns, s.now.Sub(r.j.arrival))
+				s.r.TurnHours += s.now.Sub(r.j.arrival).Hours()
 				if r.j.hasAlt {
 					turn := s.now.Sub(r.j.arrival)
 					reg := max(turn-r.j.alt, 0)
