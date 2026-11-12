@@ -341,6 +341,8 @@ type sim struct {
 	snaps    map[string][]scheduler.Snapshot
 	calm     map[string]time.Time // env -> last consolidation drain or stop
 	cal      *learning.Refetch    // refetch calibration from cache events
+	arr      *learning.Arrivals   // request arrivals per environment (learning store)
+	arrSnap  map[string][]time.Time
 	vols     []*volume            // detached cache volumes
 	volIDs   int
 	now      time.Time
@@ -359,7 +361,8 @@ type sim struct {
 func Run(trace Trace, o Options) Report {
 	o.defaults()
 	s := &sim{o: o, now: trace.Start, recent: map[string]time.Time{}, fc: scheduler.NewForecast(),
-		snaps: map[string][]scheduler.Snapshot{}, calm: map[string]time.Time{}, cal: learning.NewRefetch()}
+		snaps: map[string][]scheduler.Snapshot{}, calm: map[string]time.Time{}, cal: learning.NewRefetch(),
+		arr: learning.NewArrivals()}
 	s.start = trace.Start
 	s.r = Report{Name: o.Name, Jobs: len(trace.Jobs), Actions: map[string]int{}, Created: map[string]int{}, HoursBy: map[string]float64{}}
 	jobs := make([]*job, len(trace.Jobs))
@@ -487,6 +490,8 @@ func Run(trace Trace, o Options) Report {
 				return m.env == j.Env && (m.state == scheduler.Running || m.state == scheduler.Starting)
 			})
 			s.recent[j.Env] = s.now
+			s.arr.Observe(j.Env, s.now)
+			s.arrSnap = nil
 			s.alternative(j)
 			s.enqueue(j)
 		}
@@ -712,6 +717,10 @@ func (s *sim) task(j *job) scheduler.Task {
 func (s *sim) pool() scheduler.Pool {
 	f := scheduler.Pool{Now: s.now, Sizes: s.o.Sizes, Recent: map[string]time.Time{}, Providers: map[string]scheduler.ProviderState{}, ProviderLimit: s.o.Limits,
 		Refetch: s.cal.Factors()}
+	if s.arrSnap == nil {
+		s.arrSnap = s.arr.Times()
+	}
+	f.Arrivals = s.arrSnap
 	for env, t := range s.recent {
 		f.Recent[env] = t
 	}

@@ -19,8 +19,17 @@ func gateCases(t testing.TB) []evalCase {
 		pools[p.Name] = p
 	}
 	cs := evalCases(t)
+	// Production runs the history estimator: the static one never learns
+	// from OOM kills, so with the exported traces (a third of the builds
+	// peak above their request) the size choice alone decides how many
+	// builds are OOM killed.
+	for i := range cs {
+		cs[i].pool.History = true
+	}
+	c7a := pools["c7a"]
+	c7a.History = true
 	add := func(name string, tr Trace) {
-		cs = append(cs, evalCase{name: name + "/c7a", pool: pools["c7a"], trace: tr},
+		cs = append(cs, evalCase{name: name + "/c7a", pool: c7a, trace: tr},
 			evalCase{name: name + "/prod", pool: pools["prod"], trace: withSlots(tr)})
 	}
 	for _, name := range []string{"prod-nov11-day", "prod-nov12"} {

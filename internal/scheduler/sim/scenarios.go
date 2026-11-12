@@ -163,6 +163,12 @@ func (p EvalPool) Run(name string, tr Trace, variant string, r float64, down []O
 func (p EvalPool) Spec(name string, tr Trace, variant string, r float64, down []Outage, resize bool) Spec {
 	cfg := p.Cfg
 	cfg.Variant, cfg.CostOptimization = variant, r
+	switch variant {
+	case scheduler.VariantV2:
+		cfg.IdleStop = 0 // derived by the lifecycle policy (idle_stop unset)
+	case "v2-idle": // v2 with the pool's configured idle_stop
+		cfg.Variant = scheduler.VariantV2
+	}
 	var est scheduler.Estimator = scheduler.Static{}
 	if p.History {
 		est = scheduler.NewHistory("")

@@ -80,13 +80,16 @@ func (p Profile) WarmRun() time.Duration {
 	return DefaultRun
 }
 
-// ColdRun is the expected duration without a slot on a machine of prov.
+// ColdRun is the expected duration without a slot on a machine of prov:
+// never shorter than the warm run (the learned medians of few runs of
+// different sizes can say otherwise; then a cold machine would always
+// beat the warm one).
 func (p Profile) ColdRun(prov string) time.Duration {
 	if d, ok := p.ColdBy[prov]; ok && d > 0 {
-		return d
+		return max(d, p.WarmRun())
 	}
 	if p.Cold > 0 {
-		return p.Cold
+		return max(p.Cold, p.WarmRun())
 	}
 	return time.Duration(float64(p.WarmRun()) * (1 + DefaultColdPenalty))
 }

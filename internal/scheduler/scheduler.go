@@ -304,6 +304,10 @@ type Pool struct {
 	// ProviderLimit holds the hard limits of the providers' accounts
 	// (quota discovery, observed limit errors; missing: none known).
 	ProviderLimit map[string]Limit
+	// Arrivals are the recent request arrivals per environment, oldest
+	// first (learning store): the lifecycle policy derives when the next
+	// request will need an idle or stopped machine from them.
+	Arrivals map[string][]time.Time
 }
 
 // Limit is a hard limit of a provider account.

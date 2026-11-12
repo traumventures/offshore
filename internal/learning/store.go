@@ -1,7 +1,7 @@
 // Package learning is the scheduler's self-improvement store: compact
 // statistics the estimator and the policy learn from (per-key run time,
 // memory and slot usage; the refetch factor of thrashing builds per
-// provider). The orchestrator writes it as sessions end and workers
+// provider; request arrivals per environment). The orchestrator writes it as sessions end and workers
 // report; the estimator and the policy read it. It is persisted under the
 // state directory (learning.json), bounded in size and versioned.
 //
@@ -51,6 +51,9 @@ type data struct {
 	Touched map[string]time.Time `json:"touched"`
 	// Refetch is the refetch factor per provider ("" = all providers).
 	Refetch map[string]Factor `json:"refetch,omitempty"`
+	// Arrivals are the last request arrivals per environment (lifecycle
+	// policy: keep, stop or destroy idle machines).
+	Arrivals map[string][]time.Time `json:"arrivals,omitempty"`
 }
 
 // Store is the learning store. It is safe for concurrent use.
@@ -129,6 +132,26 @@ func (s *Store) Refetch() *Refetch {
 	s.mu.Unlock()
 	r.save = s.setRefetch
 	return r
+}
+
+// Arrivals returns an arrival recorder starting from the stored arrivals
+// and persisting every new one.
+func (s *Store) Arrivals() *Arrivals {
+	a := NewArrivals()
+	s.mu.Lock()
+	for env, ts := range s.d.Arrivals {
+		a.byEnv[env] = append([]time.Time(nil), ts...)
+	}
+	s.mu.Unlock()
+	a.save = s.setArrivals
+	return a
+}
+
+func (s *Store) setArrivals(byEnv map[string][]time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.d.Arrivals = byEnv
+	s.saveLocked()
 }
 
 // Keys returns how many keys have usage statistics.

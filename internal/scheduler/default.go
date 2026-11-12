@@ -34,6 +34,8 @@ const (
 	// placement, cheapest fitting size for the aggregate demand and no
 	// consolidation. Kept for comparison in the simulator.
 	VariantClassic = "classic"
+	// VariantV2 is the v2 core (core.go, lifecycle.go).
+	VariantV2 = "v2"
 )
 
 // Config tunes the default policy.
@@ -252,6 +254,9 @@ func (p Default) Grant(t Task) Grant {
 
 // Place implements Policy.
 func (p Default) Place(f Pool, t Task) Placement {
+	if p.Cfg.Variant == VariantV2 {
+		return p.placeCore(f, t)
+	}
 	if p.model() {
 		return p.placeModel(f, t)
 	}
@@ -418,6 +423,9 @@ func (p Default) usable(m Machine, now time.Time) bool {
 
 // Plan implements Policy.
 func (p Default) Plan(f Pool) []Action {
+	if p.Cfg.Variant == VariantV2 {
+		return p.planCore(f)
+	}
 	st := p.newPlanState(f)
 	for _, env := range st.envs {
 		switch {
