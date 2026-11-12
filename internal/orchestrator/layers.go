@@ -159,7 +159,7 @@ func (o *Orchestrator) statusHeadsLocked(id string, m *Machine) {
 		}
 		ev := o.machineEventLocked(events.Writeback, id)
 		ev.Repo, ev.Store, ev.Pages, ev.Bytes, ev.Seconds = h.Repo, h.Store, h.Pages, h.PageBytes, h.Seconds
-		o.obs.log.Append(ev)
+		o.obs.emit(ev)
 	}
 }
 

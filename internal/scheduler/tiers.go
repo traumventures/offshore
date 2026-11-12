@@ -21,7 +21,7 @@ import (
 //     from the sessions' refaulted bytes (Profile.Refetch), else
 //     calibrated from the cache file systems' page_in/reclaim/thrash
 //     events per provider and globally (Pool.Refetch, see
-//     events.Refetch), else DefaultRefetch.
+//     learning.Refetch), else DefaultRefetch.
 //     Learned run times exclude the thrash time the runs observed
 //     (Usage.ThrashSeconds, see profileOf): the penalty predicted for
 //     the candidate machine is added once.

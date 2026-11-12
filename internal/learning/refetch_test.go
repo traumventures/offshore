@@ -1,9 +1,10 @@
-package events
+package learning
 
 import (
 	"math"
 	"testing"
 
+	"github.com/traumventures/offshore/internal/events"
 	"github.com/traumventures/offshore/internal/scheduler"
 )
 
@@ -13,11 +14,11 @@ const gib = 1 << 30
 // sample over capacity, page-ins and reclaims, then its task_end.
 func thrashBuild(r *Refetch, m, prov string, ws, capacity, pageIn, reclaim int64) {
 	vm := scheduler.VM{Capacity: capacity, WorkingSet: ws}
-	r.Observe(Event{Type: MachineSample, Machine: m, Provider: prov, VM: &vm})
-	r.Observe(Event{Type: PageIn, Machine: m, Provider: prov, Bytes: pageIn / 2})
-	r.Observe(Event{Type: Reclaim, Machine: m, Provider: prov, Bytes: reclaim})
-	r.Observe(Event{Type: PageIn, Machine: m, Provider: prov, Bytes: pageIn - pageIn/2})
-	r.Observe(Event{Type: TaskEnd, Machine: m, Provider: prov})
+	r.Observe(events.Event{Type: events.MachineSample, Machine: m, Provider: prov, VM: &vm})
+	r.Observe(events.Event{Type: events.PageIn, Machine: m, Provider: prov, Bytes: pageIn / 2})
+	r.Observe(events.Event{Type: events.Reclaim, Machine: m, Provider: prov, Bytes: reclaim})
+	r.Observe(events.Event{Type: events.PageIn, Machine: m, Provider: prov, Bytes: pageIn - pageIn/2})
+	r.Observe(events.Event{Type: events.TaskEnd, Machine: m, Provider: prov})
 }
 
 func TestRefetchCalibration(t *testing.T) {
@@ -26,8 +27,8 @@ func TestRefetchCalibration(t *testing.T) {
 		t.Fatal("no data: nil (scheduler default)")
 	}
 	// Page-ins outside a thrash episode (lazy restores) do not count.
-	r.Observe(Event{Type: PageIn, Machine: "a", Provider: "aws", Bytes: 100 * gib})
-	r.Observe(Event{Type: TaskEnd, Machine: "a", Provider: "aws"})
+	r.Observe(events.Event{Type: events.PageIn, Machine: "a", Provider: "aws", Bytes: 100 * gib})
+	r.Observe(events.Event{Type: events.TaskEnd, Machine: "a", Provider: "aws"})
 	if r.Factors() != nil {
 		t.Fatal("page-ins without thrashing are no refaults")
 	}
@@ -55,33 +56,23 @@ func TestRefetchCalibration(t *testing.T) {
 func TestRefetchEpisodeBoundaries(t *testing.T) {
 	r := NewRefetch()
 	vm := scheduler.VM{Capacity: 10 * gib, WorkingSet: 20 * gib, Thrashing: true}
-	r.Observe(Event{Type: Thrash, Machine: "m", Provider: "aws", VM: &vm, Bytes: vm.WorkingSet})
-	r.Observe(Event{Type: PageIn, Machine: "m", Bytes: 30 * gib})
-	r.Observe(Event{Type: Reclaim, Machine: "m", Bytes: 30 * gib})
+	r.Observe(events.Event{Type: events.Thrash, Machine: "m", Provider: "aws", VM: &vm, Bytes: vm.WorkingSet})
+	r.Observe(events.Event{Type: events.PageIn, Machine: "m", Bytes: 30 * gib})
+	r.Observe(events.Event{Type: events.Reclaim, Machine: "m", Bytes: 30 * gib})
 	ok := scheduler.VM{Capacity: 10 * gib, WorkingSet: 5 * gib}
-	r.Observe(Event{Type: MachineSample, Machine: "m", VM: &ok})
+	r.Observe(events.Event{Type: events.MachineSample, Machine: "m", VM: &ok})
 	if f := r.Factors()["aws"]; f != 3 {
 		t.Fatalf("closed by a sample: %v", f)
 	}
-	r.Observe(Event{Type: PageIn, Machine: "m", Bytes: 30 * gib}) // not thrashing any more
-	r.Observe(Event{Type: Thrash, Machine: "m", VM: &vm})
-	r.Observe(Event{Type: PageIn, Machine: "m", Bytes: 1000 * gib})
-	r.Observe(Event{Type: Reclaim, Machine: "m", Bytes: 1000 * gib})
-	r.Observe(Event{Type: MachineDestroy, Machine: "m"})
+	r.Observe(events.Event{Type: events.PageIn, Machine: "m", Bytes: 30 * gib}) // not thrashing any more
+	r.Observe(events.Event{Type: events.Thrash, Machine: "m", VM: &vm})
+	r.Observe(events.Event{Type: events.PageIn, Machine: "m", Bytes: 1000 * gib})
+	r.Observe(events.Event{Type: events.Reclaim, Machine: "m", Bytes: 1000 * gib})
+	r.Observe(events.Event{Type: events.MachineDestroy, Machine: "m"})
 	if f := r.Factors()["aws"]; f != 3+0.3*(maxRefetch-3) || r.Samples("aws") != 2 {
 		t.Fatalf("closed by destroy, clamped: %v", f)
 	}
 	if len(r.episodes) != 0 {
 		t.Fatal("destroyed machine forgotten")
-	}
-}
-
-func TestLogTap(t *testing.T) {
-	l := Open(t.TempDir(), 0)
-	var got []Event
-	l.Tap(func(ev Event) { got = append(got, ev) })
-	l.Append(Event{Type: Thrash, Machine: "m"})
-	if len(got) != 1 || got[0].Time.IsZero() {
-		t.Fatalf("%+v", got)
 	}
 }

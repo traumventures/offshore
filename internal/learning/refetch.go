@@ -1,9 +1,16 @@
-package events
+package learning
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/traumventures/offshore/internal/events"
+)
 
 // Refetch calibrates the scheduler's refetch factor of thrashing builds
-// (scheduler.Pool.Refetch) from the cache file system events: while a
+// (scheduler.Pool.Refetch) from the cache file system observations the
+// orchestrator receives from workers (passed as events.Event values, the
+// same observations it also records in the event log; the log itself is
+// never read): while a
 // machine thrashes (a thrash event, or a machine_sample whose VM reports
 // thrashing or a working set beyond its capacity), the bytes it pages in
 // that it reclaimed before are refaults. When the episode ends (a
@@ -21,6 +28,8 @@ type Refetch struct {
 	est      map[string]float64 // provider ("" = all) -> factor
 	n        map[string]int     // samples per key
 	episodes map[string]*episode
+	// save persists the estimates (the learning store); nil: memory only.
+	save func(map[string]Factor)
 }
 
 // episode is a machine's current thrashing period.
@@ -43,12 +52,12 @@ func NewRefetch() *Refetch {
 }
 
 // Observe feeds one event (other types are ignored).
-func (r *Refetch) Observe(ev Event) {
+func (r *Refetch) Observe(ev events.Event) {
 	if r == nil || ev.Machine == "" {
 		return
 	}
 	switch ev.Type {
-	case Thrash, MachineSample, PageIn, Reclaim, TaskEnd, MachineStop, MachineDestroy:
+	case events.Thrash, events.MachineSample, events.PageIn, events.Reclaim, events.TaskEnd, events.MachineStop, events.MachineDestroy:
 	default:
 		return
 	}
@@ -63,13 +72,13 @@ func (r *Refetch) Observe(ev Event) {
 		e.provider = ev.Provider
 	}
 	switch ev.Type {
-	case Thrash:
+	case events.Thrash:
 		e.thrashing = true
 		if ev.VM != nil {
 			e.note(ev.VM.WorkingSet, ev.VM.Capacity)
 		}
 		e.ws = max(e.ws, ev.Bytes)
-	case MachineSample:
+	case events.MachineSample:
 		if ev.VM == nil {
 			return
 		}
@@ -81,19 +90,19 @@ func (r *Refetch) Observe(ev Event) {
 			r.closeLocked(e)
 			e.thrashing = false
 		}
-	case PageIn:
+	case events.PageIn:
 		if e.thrashing {
 			e.pageIn += ev.Bytes
 		}
-	case Reclaim:
+	case events.Reclaim:
 		if e.thrashing {
 			e.reclaim += ev.Bytes
 		}
-	case TaskEnd:
+	case events.TaskEnd:
 		if e.thrashing {
 			r.closeLocked(e) // one sample per build; the machine may thrash on
 		}
-	case MachineStop, MachineDestroy:
+	case events.MachineStop, events.MachineDestroy:
 		if e.thrashing {
 			r.closeLocked(e)
 		}
@@ -150,6 +159,13 @@ func (r *Refetch) addLocked(key string, x float64) {
 		r.est[key] += a * (x - r.est[key])
 	}
 	r.n[key]++
+	if r.save != nil {
+		fs := make(map[string]Factor, len(r.est))
+		for k, v := range r.est {
+			fs[k] = Factor{Value: v, Samples: r.n[k]}
+		}
+		r.save(fs)
+	}
 }
 
 // Factors returns the calibrated factor per provider ("" = all

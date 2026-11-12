@@ -342,6 +342,15 @@ func (p Default) admits(f Pool, m Machine, t Task) bool {
 // counted on to end: a request starts soon only if that is known. Each task takes the slot with the earliest
 // completion (warm, restore or cold run on that machine).
 func (p Default) project(f Pool, ms []*tlMachine, tasks []Task) map[string]time.Time {
+	out := map[string]time.Time{}
+	for id, pr := range p.projectRuns(f, ms, tasks) {
+		out[id] = pr.at
+	}
+	return out
+}
+
+// projectRuns is project with each task's run on the machine it takes.
+func (p Default) projectRuns(f Pool, ms []*tlMachine, tasks []Task) map[string]projection {
 	saved := make([][]Release, len(ms))
 	for i, tm := range ms {
 		saved[i] = tm.deltas
@@ -355,7 +364,7 @@ func (p Default) project(f Pool, ms []*tlMachine, tasks []Task) map[string]time.
 			}
 		}
 	}
-	starts := map[string]time.Time{}
+	starts := map[string]projection{}
 	for _, t := range tasks {
 		var bestTM *tlMachine
 		var bestAt time.Time
@@ -373,7 +382,7 @@ func (p Default) project(f Pool, ms []*tlMachine, tasks []Task) map[string]time.
 		if bestTM == nil {
 			continue
 		}
-		starts[t.ID] = bestAt
+		starts[t.ID] = projection{bestAt, bestRun}
 		bestTM.deltas = append(bestTM.deltas, Release{At: bestAt, Res: Resources{}.Sub(t.Request)}, Release{At: bestAt.Add(bestRun), Res: t.Request})
 	}
 	for i, tm := range ms {

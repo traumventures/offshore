@@ -26,8 +26,22 @@ type History struct {
 	MinMemory  int64   // lower bound for memory estimates (default 256 MiB)
 	OOMBackoff float64 // memory factor after an OOM kill (default 1.5)
 
+	// Persist, when set, receives a key's runs after every observation
+	// instead of the file at Path (the learning store, see
+	// internal/learning).
+	Persist func(key string, runs []Usage)
+
 	mu   sync.Mutex
 	runs map[string][]Usage
+}
+
+// NewHistoryWith returns a History starting from runs that hands every
+// key's updated runs to persist (the learning store).
+func NewHistoryWith(runs map[string][]Usage, persist func(key string, runs []Usage)) *History {
+	if runs == nil {
+		runs = map[string][]Usage{}
+	}
+	return &History{runs: runs, Persist: persist}
 }
 
 // NewHistory loads history from path (if it exists).
@@ -75,6 +89,10 @@ func (h *History) Observe(key string, u Usage) {
 		rs = rs[len(rs)-window:]
 	}
 	h.runs[key] = rs
+	if h.Persist != nil {
+		h.Persist(key, append([]Usage(nil), rs...))
+		return
+	}
 	if h.Path != "" {
 		if b, err := json.Marshal(h.runs); err == nil {
 			tmp := h.Path + ".tmp"

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"github.com/traumventures/offshore/internal/labels"
+	"github.com/traumventures/offshore/internal/learning"
 	"math"
 	"sync"
 	"time"
@@ -22,8 +23,10 @@ import (
 type observer struct {
 	log *events.Log
 	// refetch calibrates the scheduler's refetch factor of thrashing
-	// builds from the cache file system events (Pool.Refetch).
-	refetch *events.Refetch
+	// builds (Pool.Refetch) from the cache observations of the workers;
+	// its estimates persist in the learning store. It is fed alongside the
+	// event log (emit), never from it.
+	refetch *learning.Refetch
 
 	mu    sync.Mutex
 	tasks map[string]taskInfo // lease id -> placement
@@ -36,22 +39,17 @@ type taskInfo struct {
 	ev events.Event // the task_placed event
 }
 
-func newObserver(stateDir string, retention time.Duration) *observer {
-	o := &observer{log: events.Open(stateDir, retention), tasks: map[string]taskInfo{}, series: map[string]*sessionSeries{}, refetch: events.NewRefetch()}
-	// Calibrate from the last day of events, then from every new one.
-	now := time.Now()
-	if evs, err := events.Read(stateDir, now.Add(-refetchHistory), now); err == nil {
-		for _, ev := range evs {
-			o.refetch.Observe(ev)
-		}
-	}
-	o.log.Tap(o.refetch.Observe)
-	return o
+func newObserver(stateDir string, retention time.Duration, learn *learning.Store) *observer {
+	return &observer{log: events.Open(stateDir, retention), tasks: map[string]taskInfo{}, series: map[string]*sessionSeries{}, refetch: learn.Refetch()}
 }
 
-// refetchHistory is how far back the refetch calibration replays the
-// event log at start.
-const refetchHistory = 24 * time.Hour
+// emit records ev: in the event log (observability) and, for what the
+// scheduler learns from, in the learning store. The two are independent
+// sinks; the scheduler never reads the event log.
+func (o *observer) emit(ev events.Event) {
+	o.refetch.Observe(ev)
+	o.log.Append(ev)
+}
 
 // Events returns the analysis event log.
 func (o *Orchestrator) Events() *events.Log { return o.obs.log }
@@ -122,14 +120,14 @@ func (o *Orchestrator) traced(ctx context.Context, a scheduler.Action, fn func(c
 	start := time.Now()
 	if a.Kind == scheduler.Create || a.Kind == scheduler.Start {
 		ev.Time = start
-		o.obs.log.Append(ev)
+		o.obs.emit(ev)
 	}
 	fn(ctx)
 	ms := time.Since(start).Milliseconds()
 	span.SetAttributes(attribute.Int64("offshore.action_ms", ms))
 	if a.Kind == scheduler.Stop || a.Kind == scheduler.Destroy {
 		ev.Time, ev.LatencyMs = time.Time{}, ms
-		o.obs.log.Append(ev)
+		o.obs.emit(ev)
 	}
 	span.End()
 }
@@ -144,7 +142,7 @@ func (o *Orchestrator) readyEvent(ctx context.Context, id string) {
 	}
 	o.mu.Unlock()
 	ev.TraceID = tracing.TraceID(ctx)
-	o.obs.log.Append(ev)
+	o.obs.emit(ev)
 	trace.SpanFromContext(ctx).AddEvent("machine ready", trace.WithAttributes(attribute.Int64("offshore.ready_ms", ev.LatencyMs)))
 }
 
@@ -161,14 +159,14 @@ func (o *Orchestrator) markEventsLocked(a scheduler.Action) {
 	}
 	ev := o.machineEventLocked(typ, a.Machine)
 	ev.Reason = a.Reason
-	o.obs.log.Append(ev)
+	o.obs.emit(ev)
 }
 
 // stateEventLocked records a state change observed from the provider.
 func (o *Orchestrator) stateEventLocked(id string, state provider.State) {
 	ev := o.machineEventLocked(events.MachineState, id)
 	ev.State = string(state)
-	o.obs.log.Append(ev)
+	o.obs.emit(ev)
 }
 
 // startAcquire starts the span of a capacity request.
@@ -213,7 +211,7 @@ func (o *Orchestrator) endAcquire(ctx context.Context, span trace.Span, req Requ
 		}
 		o.mu.Unlock()
 	}
-	o.obs.log.Append(ev)
+	o.obs.emit(ev)
 	if err == nil {
 		o.obs.mu.Lock()
 		now := time.Now()
@@ -274,11 +272,11 @@ func (o *Orchestrator) Finish(ctx context.Context, leaseID, key string, u *sched
 	if tid := tracing.TraceID(ctx); tid != "" {
 		ev.TraceID = tid
 	}
-	o.obs.log.Append(ev)
+	o.obs.emit(ev)
 	if usage.OOM || usage.Killer == "worker_shutdown" {
 		k := ev
 		k.Type, k.Predicted = events.TaskKilled, nil
-		o.obs.log.Append(k)
+		o.obs.emit(k)
 		o.log.Warn("session killed", "task", leaseID, "key", ev.Key, "machine", ev.Machine, "killer", usage.Killer,
 			"oom", usage.OOM, "peak_memory", usage.PeakMemory, "reserve_memory", ev.Reserve)
 	}
@@ -372,7 +370,7 @@ func (o *Orchestrator) waitingLocked(env string, pl scheduler.Placement) events.
 // waitingEvent records that a queued task still waits (task_waiting).
 func (o *Orchestrator) waitingEvent(ctx context.Context, t scheduler.Task, req Request, arrival time.Time, reason string, w events.Waiting) {
 	need := t.Request
-	o.obs.log.Append(events.Event{Type: events.TaskWaiting, Task: t.ID, Repo: t.RepoID, Env: t.EnvHash, Key: t.Key,
+	o.obs.emit(events.Event{Type: events.TaskWaiting, Task: t.ID, Repo: t.RepoID, Env: t.EnvHash, Key: t.Key,
 		Arrival: arrival.UTC(), WaitMs: o.now().Sub(arrival).Milliseconds(), Need: &need, Reason: reason, Waiting: &w,
 		Labels: labels.Clean(req.Labels), TraceID: tracing.TraceID(ctx)})
 }
@@ -380,3 +378,6 @@ func (o *Orchestrator) waitingEvent(ctx context.Context, t scheduler.Task, req R
 // waitingInterval is how often a queued task emits task_waiting (a var
 // for tests).
 var waitingInterval = events.WaitingInterval
+
+// Learning returns the scheduler's learning store (see internal/learning).
+func (o *Orchestrator) Learning() *learning.Store { return o.learn }

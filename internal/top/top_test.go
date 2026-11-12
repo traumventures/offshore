@@ -39,7 +39,7 @@ func fakeSnapshot(cpuSec float64, at time.Time) Snapshot {
 	gone := orchestrator.Machine{Machine: provider.Machine{ID: "m-old"}, Removed: at.Add(-time.Hour)}
 	return Snapshot{Time: at, Machines: []orchestrator.Machine{m, stopped, gone}, QueueKnown: true,
 		Queue: []orchestrator.QueuedTask{{ID: "q1", Since: at.Add(-5 * time.Second), RepoID: "r", Key: "r/cargo/check",
-			Need: scheduler.Resources{CPU: 2, Memory: 4 * gib}, Labels: map[string]string{"agent": "codex", "worktree": "/home/u/cs-wt/b"}}},
+			Need: scheduler.Resources{CPU: 2, Memory: 4 * gib}, Labels: map[string]string{"agent": "codex", "worktree": "/home/u/cs-wt/b"}, Queue: "wait: p=0.86"}},
 		Cost: orchestrator.CostReport{PerHour: 1.5, Total: 7.25}}
 }
 
@@ -72,7 +72,7 @@ func TestOnceFrame(t *testing.T) {
 		"MACHINE", "PROVIDER/SIZE", "STATE", "SESS", "$/H",
 		"m-aws-1", "aws/c7a.8xlarge", "10.0/32", "20.0G/64.0G", "busy", "m-aws-2", "stopped",
 		"USER@HOST", "u@box", "~/cs-wt/feature-a", "wp/a", "4.0/8.0", "12.0G/16.0G", "cargo build", "1m30s",
-		"queued", "q1", "~/cs-wt/b", "cargo check", "need 2.0",
+		"queued (wait: p=0.86)", "q1", "~/cs-wt/b", "cargo check", "need 2.0",
 		"█", "window 10m",
 	} {
 		if !strings.Contains(out, want) {

@@ -81,7 +81,7 @@ func newLocal(u *config.PoolConfig, stateDir string, log *slog.Logger, shared bo
 	}
 	var est scheduler.Estimator = scheduler.Static{}
 	if u.Pool.Estimator == "history" {
-		est = scheduler.NewHistory(filepath.Join(stateDir, "usage-history.json"))
+		est = orch.Learning().History()
 	}
 	l := &Local{
 		log: log, stateDir: stateDir, orch: orch, provs: provs, est: est, cfg: u,
