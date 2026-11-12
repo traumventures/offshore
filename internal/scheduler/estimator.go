@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // History is the default Estimator: it keeps the last observations per key
@@ -228,11 +229,124 @@ func (h *History) explain(key string, fallback Resources) Estimate {
 }
 
 // Profile implements Estimator.
+//
+// What the key's own runs leave unknown is filled from related keys, so
+// the first build of a new worktree or package scope is not planned with
+// the 2-minute default (in production cold builds of keys without
+// history were planned at 3 minutes and took 4.5-6): run times and the
+// read set from the parent keys of the same repository (ParentKeys),
+// then from the same command in other repositories (UsageKey without
+// the repository id: other worktrees of a repository build the same
+// workspace). (A pool-wide learned cold/warm ratio was tried on the
+// production log of Nov 11-12 and predicted worse than
+// DefaultColdPenalty: warm medians mix no-op runs of seconds with real
+// builds.)
 func (h *History) Profile(key string) Profile {
 	h.mu.Lock()
-	rs := append([]Usage{}, h.runs[key]...)
-	h.mu.Unlock()
-	return profileOf(rs)
+	defer h.mu.Unlock()
+	p := profileOf(h.runs[key])
+	if p.Warm > 0 && p.Cold > 0 {
+		return p
+	}
+	fill := func(q Profile) {
+		if p.Warm == 0 {
+			p.Warm = q.Warm
+		}
+		if p.Cold == 0 && len(p.ColdBy) == 0 {
+			p.Cold, p.ColdBy = q.Cold, q.ColdBy
+		}
+		if p.ReadSet == 0 {
+			p.ReadSet = q.ReadSet
+		}
+		if p.WorkingSet == 0 {
+			p.WorkingSet = q.WorkingSet
+		}
+		if p.SlotBytes == 0 {
+			p.SlotBytes = q.SlotBytes
+		}
+	}
+	coldKnown := func() bool { return p.Cold > 0 || len(p.ColdBy) > 0 }
+	for _, k := range ParentKeys(key) {
+		if p.Warm > 0 && coldKnown() {
+			break
+		}
+		fill(profileOf(h.runs[k]))
+	}
+	if p.Warm == 0 || !coldKnown() {
+		fill(h.peersLocked(key))
+	}
+	return p
+}
+
+// keySuffix is a usage key without its repository id ("<repo>/<tool>...").
+func keySuffix(key string) string {
+	if i := strings.IndexByte(key, '/'); i >= 0 {
+		return key[i+1:]
+	}
+	return key
+}
+
+// peersLocked profiles the runs of the same command in other
+// repositories (keys with the same suffix), else of its parent keys'
+// suffixes.
+func (h *History) peersLocked(key string) Profile {
+	for _, suf := range append([]string{keySuffix(key)}, suffixes(ParentKeys(key))...) {
+		// One profile per peer key, then the median of each field: a
+		// repository with many runs does not outweigh the others.
+		var ps []Profile
+		for k, r := range h.runs {
+			if k != key && keySuffix(k) == suf {
+				ps = append(ps, profileOf(r))
+			}
+		}
+		if len(ps) > 0 {
+			return medianProfile(ps)
+		}
+	}
+	return Profile{}
+}
+
+// medianProfile is the field-wise median of the known run times, read
+// sets, working sets and slot sizes of ps.
+func medianProfile(ps []Profile) Profile {
+	var warm, cold []time.Duration
+	var rs, ws, sb []int64
+	coldBy := map[string][]time.Duration{}
+	for _, p := range ps {
+		if p.Warm > 0 {
+			warm = append(warm, p.Warm)
+		}
+		if p.Cold > 0 {
+			cold = append(cold, p.Cold)
+		}
+		for prov, d := range p.ColdBy {
+			coldBy[prov] = append(coldBy[prov], d)
+		}
+		for _, x := range []struct {
+			v   int64
+			out *[]int64
+		}{{p.ReadSet, &rs}, {p.WorkingSet, &ws}, {p.SlotBytes, &sb}} {
+			if x.v > 0 {
+				*x.out = append(*x.out, x.v)
+			}
+		}
+	}
+	out := Profile{Warm: medianDur(warm), Cold: medianDur(cold), ReadSet: medianInt(rs), WorkingSet: medianInt(ws), SlotBytes: medianInt(sb)}
+	for prov, ds := range coldBy {
+		if out.ColdBy == nil {
+			out.ColdBy = map[string]time.Duration{}
+		}
+		out.ColdBy[prov] = medianDur(ds)
+	}
+	return out
+}
+
+func suffixes(keys []string) []string {
+	out := make([]string, len(keys))
+	for i, k := range keys {
+		out[i] = keySuffix(k)
+	}
+	return out
 }
 
 // Static is an Estimator that always returns the configured value.

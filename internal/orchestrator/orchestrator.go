@@ -98,6 +98,10 @@ type Request struct {
 	// and free labels, see internal/labels). They are recorded in the
 	// event log and shown in the queue; they never affect placement.
 	Labels map[string]string `json:",omitempty"`
+	// Family identifies the repository across its worktrees (empty:
+	// unknown, e.g. not a git repository): a worktree without a head is
+	// seeded from a sibling's head (scheduler.Task.Family).
+	Family string `json:",omitempty"`
 }
 
 // QueuedTask is a request waiting for capacity (`offshore top`).
@@ -426,6 +430,7 @@ type Orchestrator struct {
 	health         map[string]provHealth  // provider instance -> health and latencies
 	leases         map[string]leaseInfo   // lease id -> expected session end
 	heads          map[string]*repoLayers // build slot heads and layers (layers.go)
+	families       map[string][]string    // repository ids per family (worktrees of a repository, families.go)
 	layersGC       time.Time
 	volumes        map[string]*VolumeState // managed cache volumes by id
 	localDisksOnce sync.Once
@@ -478,6 +483,7 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 	}
 	medium.SetMeasured(o.meter.Profile)
 	o.loadHeads()
+	o.loadFamilies()
 	o.loadVolumes()
 	o.metrics = newOrchMetrics(o)
 	o.learn = learning.Open(stateDir)
@@ -1098,7 +1104,8 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 		}
 	}()
 	now := o.now()
-	task := scheduler.Task{ID: newID(8), EnvHash: req.EnvHash, RepoID: req.RepoID, Key: req.Key, Request: req.Need, Limit: req.Limit, Since: now}
+	task := scheduler.Task{ID: newID(8), EnvHash: req.EnvHash, RepoID: req.RepoID, Key: req.Key, Request: req.Need, Limit: req.Limit, Since: now,
+		Family: req.Family}
 	// Fair queueing serves owners round robin: the agent's conversation,
 	// else the user (empty: the repository).
 	task.Owner = req.Labels[labels.AgentSession]
@@ -1110,6 +1117,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 	}
 	o.mu.Lock()
 	o.recentEnvs[req.EnvHash] = now
+	o.noteFamilyLocked(req.Family, req.RepoID)
 	o.images[req.EnvHash] = req.Image
 	o.services[req.EnvHash] = req.Services
 	o.envParams[req.EnvHash] = req.params()

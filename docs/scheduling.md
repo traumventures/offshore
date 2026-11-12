@@ -199,13 +199,42 @@ Rendezvous hashing breaks ties. Waits are bounded by `queue_timeout`.
 the composite profile (`scheduler.Size.Stack`, a `medium.Stack`; anyfs.Profile is the same type):
 
 - *lazy restore*: a restored or moved slot is mounted lazily, so a build
-  waits only for its working set to fault in
-  (`Profile.FaultTime(working set)`: per page latency of the backing tier
+  waits only for the mount (`RestoreMount`, 1 s; production: a 13.7 GB
+  head mounted in 0.55 s) and its **read set** to fault in
+  (`Profile.FaultTime(read set)`: per page latency of the backing tier
   plus the slowest transfer, at least the store bandwidth); the rest pages
-  in in the background. A move uploads only the source's dirty pages when
-  it reports a cache file system (`VM.Dirty`). The working set is learned
-  per key from `task_end.usage.working_set_bytes` (80th percentile;
-  unknown: the whole slot, as before).
+  in on use. The read set is learned per key from
+  `task_end.usage.read_bytes` (what a warm run read of the slot it started
+  on: tracked reads of files not written since the session began; median
+  of warm runs; older runs: `working_set_bytes` minus the slot growth),
+  else the working set (which also counts what a run writes, so it
+  overstated restores up to the whole slot), else the whole slot. Egress
+  is priced on what moves: the read set plus the readahead budget (2 GiB),
+  at most the slot; from another provider's store the whole head (the
+  first flush copies it into the machine's own store). A move uploads only
+  the source's dirty pages when it reports a cache file system
+  (`VM.Dirty`).
+- *run times of new keys*: a key without runs of its own takes its warm
+  and cold times, read set and slot size from its parent keys
+  (`ParentKeys`), then from the same command in other repositories
+  (other worktrees build the same workspace; field-wise median of their
+  profiles). Failed runs do not count as run times while successful ones
+  exist (a compile error after seconds is no cold build). On the
+  production log of Nov 11-12 this cut underestimated cold builds from 14
+  to 11 of 26 (a pool-wide cold/warm ratio was tried and predicted worse
+  than the 1.5x default: warm medians mix no-op runs with real builds).
+- *seeding new worktrees*: a repository without a head of its own (a new
+  worktree) gets the newest head of its **family** (the worktrees of one
+  repository: client user + git common directory, `Request.Family`) with
+  the same environment as a restore candidate (reason `seed from sibling
+  worktree <repo>`). Only build outputs are seeded; sources always come
+  from the session's own worktree. Cargo keeps registry dependencies
+  fresh across worktree paths (stable `-C metadata`, `$CARGO_HOME` at the
+  client path, moved build-script `OUT_DIR`s rewritten via `root-output`);
+  the workspace's own crates rebuild because a fresh checkout's sources
+  are newer than the seeded fingerprints, so the model charges a seeded
+  run `SeedRebuild` (0.3) of the cold-warm difference on top of the warm
+  run. See [caches-and-storage.md](caches-and-storage.md#seeds-and-other-stores).
 - *thrashing*: when the working set exceeds the local capacity (the top
   tier: `VM.Capacity`, else the size's, else the disk budget), the build
   is charged `refetch x FaultTime(excess)` from the tier below the top.

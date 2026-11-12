@@ -522,6 +522,26 @@ pages expire with the store TTL. Machine caches per digest are shared
 through the environment's store prefix as a single layer
 (`digests/<name>/<digest>/`).
 
+### Seeds and other stores
+
+A restore may mount a head outside the repository's own prefix of the
+machine's store: a sibling worktree's head (seed, see
+[scheduling.md](scheduling.md)) or a head in another provider's store. The
+orchestrator then sends a second, read grant with the restore
+(`proto.SlotOp.Source`, minted by the head's store for the head's
+repository prefix; `Orchestrator.SourceGrant`). The worker puts that
+prefix below the repository's own store as a read-only fallback: layer
+objects and pages the own prefix lacks are read from the source, writes
+and existence checks stay on the own prefix. The repository's first flush
+after the seed rewrites every page and layer of its head the own prefix
+lacks, then drops the source, so a head in a store never references
+another prefix or store. An aws-ec2 store grant (STS credentials of the
+stack's `StoreRole`, no source IP or VPC condition) is usable from an OCI
+machine over the internet, and an OCI grant (pre-authenticated request
+URLs) from AWS; the cross-provider egress is priced on the whole head.
+The worker reports `usage.read_bytes` with every session: what it read of
+the slot it started on, the measure of a lazy restore.
+
 ## Media: local, volume, store
 
 Independently of a cache's scope, a machine's caches live on one of three

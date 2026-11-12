@@ -154,7 +154,9 @@ func (o *Orchestrator) statusHeadsLocked(id string, m *Machine) {
 		if h.Provider == "" {
 			h.Provider = m.Provider
 		}
-		if !o.addHeadLocked(SnapshotFromHead(h), h.Chain, time.Unix(h.Created, 0)) {
+		snap := SnapshotFromHead(h)
+		snap.Env = m.EnvHash
+		if !o.addHeadLocked(snap, h.Chain, time.Unix(h.Created, 0)) {
 			continue
 		}
 		ev := o.machineEventLocked(events.Writeback, id)

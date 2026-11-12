@@ -112,3 +112,25 @@ func (o *Orchestrator) SlotGrant(ctx context.Context, machineID, repo string) *s
 	}
 	return o.storeGrant(ctx, prov, repo, env)
 }
+
+// SourceGrant mints a grant of repo's prefix in the store named storeName
+// for a restore on a machine whose own store or repository differs (a
+// sibling worktree's head, a head in another provider's store). Native
+// stores are named after their provider instance; a store of no known
+// provider is the machine's own (the pool's [storage]). The grant
+// carries no environment scope.
+func (o *Orchestrator) SourceGrant(ctx context.Context, machineID, storeName, repo string) *store.Grant {
+	o.mu.Lock()
+	prov := ""
+	if m := o.machines[machineID]; m != nil {
+		prov = m.Provider
+	}
+	if _, ok := o.provs[storeName]; ok {
+		prov = storeName
+	}
+	o.mu.Unlock()
+	if prov == "" {
+		return nil
+	}
+	return o.storeGrant(ctx, prov, repo, "")
+}

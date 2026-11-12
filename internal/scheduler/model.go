@@ -189,7 +189,42 @@ func storagePrice(st medium.Stack, bytes int64) float64 {
 // restored lazily from a store with bandwidth bw into m's stack: its
 // working set faulted in (see LazyRestore).
 func restoreTime(m Machine, t Task, bytes, bw int64) time.Duration {
-	return LazyRestore(m.Stack, bytes, t.Profile.WorkingSet, bw)
+	return RestoreMount + LazyRestore(m.Stack, bytes, readSet(t.Profile), bw)
+}
+
+// SeedRebuild is the share of the cold-warm difference a build seeded
+// from a sibling worktree still spends (the workspace's own units
+// rebuild; dependencies are fresh). An assumption until seeded runs are
+// measured.
+const SeedRebuild = 0.3
+
+// RestoreMount is the time to mount a committed head lazily (metadata
+// layer of the chain; production: a 13.7 GB head in 0.55 s).
+const RestoreMount = time.Second
+
+// RestorePrefetch bounds what a fresh mount reads ahead beyond the
+// working set (the worker's class prefetch budget, prefetchClassMax).
+const RestorePrefetch = 2 << 30
+
+// readSet is what a lazy restore faults in before the build proceeds:
+// the key's read set, else its working set (which also counts what a
+// run writes), 0 = unknown (the whole slot).
+func readSet(p Profile) int64 {
+	if p.ReadSet > 0 {
+		return p.ReadSet
+	}
+	return p.WorkingSet
+}
+
+// restoreTransfer is what a lazy restore of a slot of bytes moves from
+// the store at all: the read set plus the readahead budget (pages nobody
+// reads are never fetched), at most the slot. Egress is priced on it.
+func restoreTransfer(bytes int64, p Profile) int64 {
+	rs := readSet(p)
+	if rs <= 0 {
+		return bytes
+	}
+	return min(bytes, rs+RestorePrefetch)
 }
 
 func hours(d time.Duration) float64 { return d.Hours() }
@@ -477,12 +512,30 @@ func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 	}
 	if s, ok := p.bestSnapshot(f, m.Provider, t); ok {
 		price, bw := p.egress(f, s.Store, m.Provider)
-		restore := t.Profile.Restore
-		if restore <= 0 || s.Store != storeOf(f, m.Provider) {
-			restore = restoreTime(m, t, s.Bytes, bw)
+		// A lazy restore is the mount (learned: the restore's own
+		// seconds) plus the read set faulted in; never the whole slot.
+		restore := restoreTime(m, t, s.Bytes, bw)
+		if t.Profile.Restore > 0 && s.Store == storeOf(f, m.Provider) {
+			restore += t.Profile.Restore - RestoreMount
 		}
-		rc := runChoice{run: restore + scale(t.Profile.WarmRun()), prep: restore, cost: float64(s.Bytes) / 1e9 * price,
-			slot: SlotAction{Kind: SlotRestore, Repo: t.RepoID, Snapshot: s}, reason: "restore snapshot from " + s.Store}
+		// Egress: what the lazy restore moves; from another store the
+		// first flush also copies the whole head into the machine's own
+		// store (heads never reference another store).
+		moved := restoreTransfer(s.Bytes, t.Profile)
+		if s.Store != storeOf(f, m.Provider) {
+			moved = s.Bytes
+		}
+		run := t.Profile.WarmRun()
+		reason := "restore snapshot from " + s.Store
+		if s.Repo != t.RepoID {
+			// A sibling worktree's outputs: dependencies are fresh, the
+			// workspace's own crates rebuild (their sources have the new
+			// worktree's mtimes), with incremental state.
+			run += time.Duration(SeedRebuild * float64(max(t.Profile.ColdRun(m.Provider)-run, 0)))
+			reason = "seed from sibling worktree " + s.Repo + " in " + s.Store
+		}
+		rc := runChoice{run: restore + scale(run), prep: restore, cost: float64(moved) / 1e9 * price,
+			slot: SlotAction{Kind: SlotRestore, Repo: t.RepoID, Snapshot: s}, reason: reason}
 		rc.cost += p.copyCost(f, m, t, s.Bytes) // a second warm copy while the warm machine keeps its own
 		add(rc, slotNeed(m, t, s.Bytes))
 	}
@@ -492,7 +545,7 @@ func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 		_, upBW := p.egress(f, st, src.Provider)
 		price, downBW := p.egress(f, st, m.Provider)
 		move := saveTime(src, b, upBW) + restoreTime(m, t, b, downBW)
-		rc := runChoice{run: move + scale(t.Profile.WarmRun()), prep: move, cost: float64(b) / 1e9 * price,
+		rc := runChoice{run: move + scale(t.Profile.WarmRun()), prep: move, cost: float64(restoreTransfer(b, t.Profile)) / 1e9 * price,
 			slot: SlotAction{Kind: SlotMove, Repo: t.RepoID, Bytes: b, From: src.ID,
 				Snapshot: Snapshot{Repo: t.RepoID, Provider: src.Provider, Store: st, Bytes: b, At: f.Now}},
 			reason: "move warm slot from " + src.ID}
@@ -537,13 +590,33 @@ func (p Default) moveSource(f Pool, m Machine, t Task) (Machine, bool) {
 }
 
 // bestSnapshot returns the newest snapshot of t's repository, preferring
-// one in the store of prov.
+// one in the store of prov. A repository without one (a new worktree)
+// gets its family's newest head of the same environment: a seed of its
+// build outputs (Snapshot.Repo is then the sibling; sources are never
+// shared, they come from the session's own worktree).
 func (p Default) bestSnapshot(f Pool, prov string, t Task) (Snapshot, bool) {
+	if s, ok := newestSnapshot(f.Snapshots[t.RepoID], storeOf(f, prov), ""); ok {
+		return s, true
+	}
+	if t.Family == "" {
+		return Snapshot{}, false
+	}
+	var cands []Snapshot
+	for _, repo := range f.Families[t.Family] {
+		if repo != t.RepoID {
+			cands = append(cands, f.Snapshots[repo]...)
+		}
+	}
+	return newestSnapshot(cands, storeOf(f, prov), t.EnvHash)
+}
+
+// newestSnapshot is the newest of ss, preferring the store local; with
+// env only snapshots of that environment.
+func newestSnapshot(ss []Snapshot, local, env string) (Snapshot, bool) {
 	var best Snapshot
 	found := false
-	local := storeOf(f, prov)
-	for _, s := range f.Snapshots[t.RepoID] {
-		if s.Bytes <= 0 {
+	for _, s := range ss {
+		if s.Bytes <= 0 || env != "" && s.Env != env {
 			continue
 		}
 		sl, bl := s.Store == local, best.Store == local

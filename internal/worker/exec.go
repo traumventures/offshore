@@ -452,7 +452,7 @@ loop:
 	exit.Usage.CPUStall, exit.Usage.MemoryStall = s.cg.stall(cgDir)
 	exit.Usage.Warm = warm
 	exit.Usage.Units, exit.Usage.UnitsSample, exit.Usage.DirtyReasons = units.result()
-	reads, readBytes, tracked := s.cfs.sessionEnded(slot, req.RepoID)
+	reads, readBytes, priorBytes, tracked := s.cfs.sessionEndedSince(slot, req.RepoID, se.started)
 	if !tracked {
 		reads = nil // the read index falls back to atime
 	}
@@ -463,6 +463,7 @@ loop:
 	// concurrent sessions), plus what it grew.
 	if tracked {
 		exit.Usage.WorkingSetBytes = readBytes + max(0, slotAfter-slotBefore)
+		exit.Usage.ReadBytes = priorBytes
 	} else {
 		exit.Usage.WorkingSetBytes = s.cfs.faultBytes() - faultsBefore + max(0, slotAfter-slotBefore)
 	}

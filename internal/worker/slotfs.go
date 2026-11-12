@@ -152,12 +152,38 @@ func (s *Worker) saveSlot(ctx context.Context, repo string, g *store.Grant) (pro
 // restoreSlot makes a store head this machine's head of the repository
 // and mounts it as a new slot (contents are faulted in on use).
 func (s *Worker) restoreSlot(ctx context.Context, repo string, head proto.LayerHead, g *store.Grant) (proto.SlotResult, error) {
+	return s.restoreSlotFrom(ctx, repo, head, g, nil)
+}
+
+// restoreSlotFrom is restoreSlot of a head that may live in another
+// prefix: src grants the prefix of head.Repo (a sibling worktree) or
+// another store (seed.go); without src the head is in the repository's
+// own prefix.
+func (s *Worker) restoreSlotFrom(ctx context.Context, repo string, head proto.LayerHead, g, src *store.Grant) (proto.SlotResult, error) {
 	begin := time.Now()
 	if head.Layer == "" {
 		return proto.SlotResult{}, errors.New("restore: no head layer")
 	}
 	if err := s.connectStore(repo, g); err != nil {
 		return proto.SlotResult{}, err
+	}
+	if from := head.Repo; src != nil || from != "" && from != repo {
+		if from == "" {
+			from = repo
+		}
+		gr := g
+		if src != nil {
+			gr = src
+		}
+		if gr == nil {
+			return proto.SlotResult{}, errors.New("restore from another prefix: no grant")
+		}
+		if !gr.Allows(store.RepoScope(from)) {
+			return proto.SlotResult{}, fmt.Errorf("restore: grant does not cover repository %s", from)
+		}
+		if err := s.cfs.setSeed(repo, from, *gr); err != nil {
+			return proto.SlotResult{}, err
+		}
 	}
 	ch, err := s.cfs.restore(ctx, repo, head.Layer, s.cfg.BuildTTL)
 	if err != nil {

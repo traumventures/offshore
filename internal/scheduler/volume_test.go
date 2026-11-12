@@ -71,17 +71,23 @@ func TestRestoreBoundedByHotMedium(t *testing.T) {
 	fast := Machine{Stack: StackOf(0, medium.Default("aws-ec2", medium.LocalNVMe))}
 	slow := Machine{Stack: StackOf(0, medium.Default("oci", medium.Volume))}
 	b := int64(4800) << 20
-	if d := restoreTime(fast, Task{}, b, 200<<20); d != 24*time.Second {
+	if d := restoreTime(fast, Task{}, b, 200<<20); d != 24*time.Second+RestoreMount {
 		t.Fatalf("fast medium: %v", d)
 	}
 	// 100 s transfer plus 600 pages of 1 ms latency.
-	if d := restoreTime(slow, Task{}, b, 200<<20); d != 100600*time.Millisecond {
+	if d := restoreTime(slow, Task{}, b, 200<<20); d != 100600*time.Millisecond+RestoreMount {
 		t.Fatalf("slow medium: %v", d)
 	}
 	// Lazy restore: a build with a known working set waits only for it.
 	lazy := Task{Profile: Profile{WorkingSet: b / 10}}
-	if d := restoreTime(fast, lazy, b, 200<<20); d != 2400*time.Millisecond {
+	if d := restoreTime(fast, lazy, b, 200<<20); d != 2400*time.Millisecond+RestoreMount {
 		t.Fatalf("lazy restore: %v", d)
+	}
+	// The read set (what runs read of the slot they start on) beats the
+	// working set, which also counts what they write.
+	lazy.Profile.ReadSet = b / 100
+	if d := restoreTime(fast, lazy, b, 200<<20); d != 240*time.Millisecond+RestoreMount {
+		t.Fatalf("read set: %v", d)
 	}
 }
 

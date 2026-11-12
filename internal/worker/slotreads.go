@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/sandbox"
@@ -354,13 +355,22 @@ func (c *cacheFS) sessionStarted(slot string, binds []sandbox.Bind) {
 // sessionEnded folds a session's reads into the repository's working set
 // and returns them with the bytes read (ok false: reads not tracked).
 func (c *cacheFS) sessionEnded(slot, repo string) (map[string]bool, int64, bool) {
+	reads, total, _, ok := c.sessionEndedSince(slot, repo, time.Time{})
+	return reads, total, ok
+}
+
+// sessionEndedSince is sessionEnded that also returns the bytes of the
+// read files that were not written since since (the session's start):
+// what the session read of the slot it started on, i.e. what a lazily
+// restored slot would have to fault in before such a build proceeds.
+func (c *cacheFS) sessionEndedSince(slot, repo string, since time.Time) (map[string]bool, int64, int64, bool) {
 	t := c.tracker(slot)
 	if t == nil {
-		return nil, 0, false
+		return nil, 0, 0, false
 	}
 	reads := t.endSession()
 	sizes := make(map[string]int64, len(reads))
-	var total int64
+	var total, prior int64
 	for p := range reads {
 		fi, err := os.Lstat(filepath.Join(t.data, filepath.FromSlash(p)))
 		if err != nil || !fi.Mode().IsRegular() {
@@ -368,6 +378,9 @@ func (c *cacheFS) sessionEnded(slot, repo string) (map[string]bool, int64, bool)
 		}
 		sizes[p] = fi.Size()
 		total += fi.Size()
+		if !since.IsZero() && fi.ModTime().Before(since) {
+			prior += fi.Size()
+		}
 	}
 	if r, err := c.repo(repo); err == nil {
 		r.ws.touch(sizes)
@@ -375,7 +388,7 @@ func (c *cacheFS) sessionEnded(slot, repo string) (map[string]bool, int64, bool)
 			c.log.Warn("save working set", "repo", repo, "err", err)
 		}
 	}
-	return reads, total, true
+	return reads, total, prior, true
 }
 
 // workingSetBytes is the tracked working set of all repositories (0:

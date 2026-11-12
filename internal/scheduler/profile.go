@@ -35,6 +35,12 @@ type Profile struct {
 	// runs that reported it): what a lazy restore faults in before the
 	// build proceeds and what must fit the local tier to avoid thrashing.
 	WorkingSet int64 `json:"working_set,omitempty"`
+	// ReadSet is the part of an existing slot a warm run reads (the
+	// median over warm runs of Usage.ReadBytes, else of their working
+	// set minus their growth): what a lazy restore must fault in before
+	// the build proceeds. The working set also counts what a run writes,
+	// which a restore never transfers.
+	ReadSet int64 `json:"read_set,omitempty"`
 	// Thrash is the median thrash time of the runs that thrashed (what
 	// was subtracted from their durations; informational).
 	Thrash time.Duration `json:"thrash,omitempty"`
@@ -114,14 +120,21 @@ func medianInt(xs []int64) int64 {
 func profileOf(rs []Usage) Profile {
 	var warm, cold, restore, thrash []time.Duration
 	coldBy := map[string][]time.Duration{}
-	var slots, growth, ws []int64
+	var slots, growth, ws, reads []int64
 	var refetch []float64
 	var peaks []float64
 	p := Profile{}
+	// Failed runs often stop early (a compile error after seconds): with
+	// successful runs to learn from, their durations are not run times.
+	ok := false
+	for _, u := range rs {
+		ok = ok || !u.OOM && u.Wall > 0 && u.ExitCode == 0
+	}
 	for _, u := range rs {
 		if u.OOM || u.Wall <= 0 {
 			continue
 		}
+		timed := !ok || u.ExitCode == 0
 		p.Runs++
 		if u.PeakMemory > 0 {
 			peaks = append(peaks, float64(u.PeakMemory))
@@ -138,9 +151,11 @@ func profileOf(rs []Usage) Profile {
 		// (restore, thrashing); at least a tenth of the wall time against
 		// overstated reports.
 		base := func(d time.Duration) time.Duration { return max(d-th, u.Wall/10) }
-		if u.Warm || u.Restored {
+		switch {
+		case !timed:
+		case u.Warm || u.Restored:
 			warm = append(warm, base(u.Wall-time.Duration(u.RestoreSeconds*float64(time.Second))))
-		} else {
+		default:
 			cold = append(cold, base(u.Wall))
 			if u.Provider != "" {
 				coldBy[u.Provider] = append(coldBy[u.Provider], base(u.Wall))
@@ -151,6 +166,18 @@ func profileOf(rs []Usage) Profile {
 		}
 		if u.WorkingSetBytes > 0 {
 			ws = append(ws, u.WorkingSetBytes)
+		}
+		if u.Warm || u.Restored {
+			switch {
+			case u.ReadBytes > 0:
+				reads = append(reads, u.ReadBytes)
+			case u.WorkingSetBytes > 0:
+				g := int64(0)
+				if u.SlotBytesBefore > 0 && u.SlotBytesAfter > u.SlotBytesBefore {
+					g = u.SlotBytesAfter - u.SlotBytesBefore
+				}
+				reads = append(reads, max(u.WorkingSetBytes-g, 0))
+			}
 		}
 		if u.SlotBytesAfter > 0 {
 			slots = append(slots, u.SlotBytesAfter)
@@ -187,6 +214,7 @@ func profileOf(rs []Usage) Profile {
 		p.ColdBy[prov] = medianDur(ds)
 	}
 	p.SlotBytes, p.SlotGrowth = medianInt(slots), medianInt(growth)
+	p.ReadSet = medianInt(reads)
 	if len(peaks) >= MinPeakRuns {
 		mean, v := 0.0, 0.0
 		for _, x := range peaks {
