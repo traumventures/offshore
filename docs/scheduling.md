@@ -258,7 +258,12 @@ provider's own store and cost 0.09/GB at 50 MB/s across. A full slot is
 handled by the cheaper/faster of: prune other slots (their next builds
 become cold, which the model charges), grow the disk
 (`provider.DiskResizer`, aws-ec2), or run elsewhere (cold, or restore a
-snapshot). Capacity and quota errors take a provider out of scale-out for a
+snapshot). When none of them covers the shortfall (the disk is used by
+data outside the slots, which no prune frees) a run on the repository's
+warm slot stays possible with a 5-minute penalty (reason `disk tight`): without it
+such a task had no option at all and timed out in the queue while
+machines were started and idle-stopped around it; the worker guards the
+disk itself (budget prune, no admission at 97%). Capacity and quota errors take a provider out of scale-out for a
 cooldown (2 min, doubling up to 30 min, reset on the next ready machine); a
 failed start backs off for 2 minutes instead of retrying in a loop.
 
