@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -33,6 +34,24 @@ type Spec struct {
 	Cwd    string   `json:"cwd"`
 	Binds  []Bind   `json:"binds"`
 	Cgroup string   `json:"cgroup,omitempty"` // cgroup directory to join
+	// OOMScoreAdj is the session's oom_score_adj (0: inherited). The
+	// worker and supervisor run at -1000 (never OOM killed); sessions
+	// raise theirs so that the kernel picks a session process.
+	OOMScoreAdj int `json:"oom_score_adj,omitempty"`
+}
+
+// SessionOOMScoreAdj is the oom_score_adj of session processes: they are
+// preferred victims of any OOM kill on the machine.
+const SessionOOMScoreAdj = 500
+
+// oomScoreAdjPath is the file setting the process's OOM score (a var for
+// tests).
+var oomScoreAdjPath = "/proc/self/oom_score_adj"
+
+// setOOMScoreAdj sets the calling process's oom_score_adj. Raising it
+// needs no privilege, so a session leaves the worker's -1000 behind.
+func setOOMScoreAdj(v int) error {
+	return os.WriteFile(oomScoreAdjPath, []byte(strconv.Itoa(v)), 0o644)
 }
 
 // Command builds the exec.Cmd that starts spec in a new mount namespace.
@@ -81,6 +100,11 @@ func Init() error {
 	if spec.Cgroup != "" {
 		if err := os.WriteFile(filepath.Join(spec.Cgroup, "cgroup.procs"), []byte("0"), 0o644); err != nil {
 			return fmt.Errorf("sandbox: join cgroup: %w", err)
+		}
+	}
+	if spec.OOMScoreAdj != 0 {
+		if err := setOOMScoreAdj(spec.OOMScoreAdj); err != nil {
+			return fmt.Errorf("sandbox: oom_score_adj: %w", err)
 		}
 	}
 	if err := os.Chdir(spec.Cwd); err != nil {

@@ -228,3 +228,34 @@ func TestCheckTerminatesSelfAtExpiry(t *testing.T) {
 		t.Fatalf("fallback: %v terminations=%d shutdowns=%d", d, tp.terminations, shutdowns)
 	}
 }
+
+func TestProtectWorkerFromOOMKiller(t *testing.T) {
+	a, _, _ := testAgent(t)
+	dir := t.TempDir()
+	old := procDir
+	procDir = dir
+	defer func() { procDir = old }()
+	os.MkdirAll(filepath.Join(dir, "4242"), 0o755)
+	os.WriteFile(filepath.Join(dir, "4242", "oom_score_adj"), []byte("0\n"), 0o644)
+	var inspected string
+	a.Docker = func(_ context.Context, _ []string, _ []byte, args ...string) ([]byte, error) {
+		inspected = strings.Join(args, " ")
+		return []byte("4242\n"), nil
+	}
+	if err := a.protectWorker(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(inspected, "cs-m1") {
+		t.Fatalf("inspected %q", inspected)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "4242", "oom_score_adj")); string(b) != "-1000" {
+		t.Fatalf("oom_score_adj %q", b)
+	}
+	a.Docker = func(context.Context, []string, []byte, ...string) ([]byte, error) { return []byte("0\n"), nil }
+	if err := a.protectWorker(context.Background()); err == nil {
+		t.Fatal("stopped container: want error")
+	}
+	if !slices.Contains(a.Spec.WorkerLayout().Containers(nil, machine.SecretsInline)[0].Create, "--oom-score-adj") {
+		t.Fatal("worker container created without --oom-score-adj")
+	}
+}

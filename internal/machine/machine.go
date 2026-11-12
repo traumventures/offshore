@@ -52,6 +52,9 @@ type Layout struct {
 	CPU         float64            `json:"cpu,omitempty"`            // container CPU limit (0: none)
 	Memory      int64              `json:"memory,omitempty"`         // container memory limit (0: none)
 	Swap        bool               `json:"swap,omitempty"`           // sessions may swap beyond Memory
+	// OOMScoreAdj is the worker container's oom_score_adj (0: Docker's
+	// default); the supervisor sets -1000 on VM hosts.
+	OOMScoreAdj int `json:"oom_score_adj,omitempty"`
 	Labels      map[string]string  `json:"labels,omitempty"`         // machine container labels
 	SvcLabels   map[string]string  `json:"service_labels,omitempty"` // service container labels
 	Env         map[string]string  `json:"env,omitempty"`
@@ -143,6 +146,9 @@ func (l Layout) Containers(secret map[string]string, mode Secrets) []Container {
 		if l.Swap {
 			args = append(args, "--memory-swap", "-1")
 		}
+	}
+	if l.OOMScoreAdj != 0 {
+		args = append(args, "--oom-score-adj", strconv.Itoa(l.OOMScoreAdj))
 	}
 	args = append(args, l.Image, "worker")
 	out := []Container{{Name: name, Image: l.Image, Create: args}}

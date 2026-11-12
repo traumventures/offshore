@@ -78,6 +78,7 @@ func (s Spec) WorkerLayout() machine.Layout {
 		env[machine.CacheFSEnv] = string(p)
 	}
 	l.Env = env
+	l.OOMScoreAdj = ProtectedOOMScoreAdj
 	return l
 }
 
@@ -387,6 +388,9 @@ func (a *Supervisor) EnsureContainers(ctx context.Context) error {
 		}
 	}
 	a.phase(machine.PhaseContainers, 0)
+	if err := a.protectWorker(ctx); err != nil {
+		a.Log.Warn("cannot protect the worker from the OOM killer", "err", err)
+	}
 	a.Log.Info("machine containers started", "machine", l.ID)
 	return nil
 }
@@ -467,6 +471,7 @@ func (a *Supervisor) Run(ctx context.Context) error {
 		return nil
 	}
 	a.startBoot()
+	a.protectSelf()
 	if a.updateBinary(ctx) {
 		return nil // Exec replaced the process; only a failed exec returns
 	}
@@ -503,6 +508,9 @@ func (a *Supervisor) Run(ctx context.Context) error {
 		}
 		if a.now().Before(backoff) {
 			continue
+		}
+		if err := a.protectWorker(ctx); err != nil {
+			a.Log.Warn("cannot protect the worker from the OOM killer", "err", err)
 		}
 		if d := a.Check(ctx); d != machine.Keep {
 			backoff = a.now().Add(time.Minute) // the machine is going down

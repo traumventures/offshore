@@ -410,15 +410,19 @@ func (l *Local) Estimate(_ context.Context, key string, fallback scheduler.Resou
 		return e, nil
 	}
 	var maxCPU float64
-	var maxMem int64
+	var maxMem, maxPhys int64
 	for _, sz := range u.Pool.Sizes {
 		mem, _ := config.ParseBytes(sz.Memory)
+		maxPhys = max(maxPhys, mem)
 		maxCPU = max(maxCPU, sz.CPU*max(u.Pool.CPUOvercommit, 1))
 		maxMem = max(maxMem, int64(float64(mem)*max(u.Pool.MemoryOvercommit, 1)))
 	}
 	if maxMem > 0 && need.Memory > maxMem && fallback.Memory <= maxMem {
 		need.Memory = maxMem
 		e.Statistic += "; memory capped at the largest size"
+	}
+	if maxPhys > 0 && e.LearnedPeak > maxPhys {
+		e.LearnedPeak = maxPhys // it ran before: its peak fitted somewhere
 	}
 	if maxCPU > 0 && need.CPU > maxCPU && fallback.CPU <= maxCPU {
 		need.CPU = maxCPU

@@ -325,6 +325,30 @@ reproduces the report's cost and queue wait roughly (adjust `-boot`,
 `-start` and `-cold-penalty` until it does), then compare candidate sizes,
 overcommit factors and cost_optimization values on the same trace.
 
+## Memory safety (incident 2026-11-12)
+
+Three clippy sessions of new worktrees reserved the configured 3G each on
+a 15G x8s machine, peaked at 4.5-6.5G each and the host ran out of
+memory; the machine stayed unreachable and requests queued behind it.
+
+- **Admission by learned peak.** `Estimate.LearnedPeak` is the key's p90
+  peak, and while a key has fewer than `MinSamples` runs also the largest
+  peak of its own runs, its parent keys and the same command in other
+  repositories (worktrees). The control plane raises the task's memory
+  reservation to `LearnedPeak x memory_overcommit` (capped by
+  `max_memory`), so the learned peaks of a machine's sessions never sum
+  above its memory.
+- **Sessions cannot take the host down.** Session cgroups live in
+  `offshore-sessions`, capped at machine memory minus 1.5G; the OOM killer
+  acts there (reported as the session's OOM, the retry reserves more).
+  Worker and supervisor run at `oom_score_adj -1000`, sessions at 500.
+- **Unreachable machines.** A machine whose worker was ready and has not
+  answered a probe for 2 minutes is no capacity (`Gone` for the
+  scheduler; `unreachable` in top and status). While requests wait for
+  its environment it is rebooted at the provider (aws-ec2), and replaced
+  when it still does not answer 3 minutes later, also as the only machine
+  of its provider.
+
 ## Open issues
 
 - The orchestrator drops environments from its recent list after 24 hours,

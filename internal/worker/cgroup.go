@@ -17,14 +17,60 @@ import (
 
 const cgroupRoot = "/sys/fs/cgroup"
 
+// sessionsGroup is the cgroup all session cgroups live in. Its memory.max
+// is the machine's memory minus SessionHeadroom: when sessions together
+// outgrow the machine, the kernel's OOM killer acts inside this group (a
+// rustc of a session, reported as that session's OOM) instead of taking
+// the host down (worker, supervisor, Docker, sshd).
+const sessionsGroup = "offshore-sessions"
+
+// SessionHeadroom is the memory kept free of sessions for the worker,
+// the supervisor, Docker and the host.
+const SessionHeadroom int64 = 1536 << 20
+
+// sessionMemoryLimit is the memory.max of the sessions group on a machine
+// with total bytes of memory: total minus SessionHeadroom, at least half
+// of total (small machines).
+func sessionMemoryLimit(total int64) int64 {
+	if total <= 0 {
+		return 0
+	}
+	return max(total-SessionHeadroom, total/2)
+}
+
+// machineMemory is the memory the worker's container may use: the
+// smaller of the host's MemTotal and the container's memory.max
+// (0: unknown).
+func machineMemory(root, meminfo string) int64 {
+	var total int64
+	if b, err := os.ReadFile(meminfo); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			f := strings.Fields(line)
+			if len(f) >= 2 && f[0] == "MemTotal:" {
+				kb, _ := strconv.ParseInt(f[1], 10, 64)
+				total = kb << 10
+			}
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(root, "memory.max")); err == nil {
+		if n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil && n > 0 && (total == 0 || n < total) {
+			total = n
+		}
+	}
+	return total
+}
+
 // cgroups manages per-session cgroups (cgroup v2). It is best effort: when
 // cgroups are not writable sessions run without limits.
 type cgroups struct {
 	enabled bool
+	// parent is the directory session cgroups are created in (the
+	// sessions group, else the cgroup root).
+	parent string
 }
 
 func setupCgroups(log *slog.Logger) *cgroups {
-	cg := &cgroups{}
+	cg := &cgroups{parent: cgroupRoot}
 	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {
 		log.Warn("cgroup v2 not available, sessions run without resource limits")
 		return cg
@@ -61,7 +107,35 @@ func setupCgroups(log *slog.Logger) *cgroups {
 	}
 	cg.enabled = true
 	log.Info("cgroups enabled", "controllers", enable)
+	limit := sessionMemoryLimit(machineMemory(cgroupRoot, "/proc/meminfo"))
+	if dir, err := setupSessionsGroup(cgroupRoot, enable, limit); err != nil {
+		// Sessions still run in their own cgroups, but a machine-wide OOM
+		// may hit the worker.
+		log.Error("cannot create the sessions cgroup, sessions are not capped below machine memory", "err", err)
+	} else {
+		cg.parent = dir
+		log.Info("sessions cgroup", "dir", dir, "memory_max", limit, "headroom", SessionHeadroom)
+	}
 	return cg
+}
+
+// setupSessionsGroup creates the sessions group under root with the
+// controllers enable delegated to session cgroups and memory.max limit
+// (0: none). An existing group (worker restart) is reused.
+func setupSessionsGroup(root string, enable []string, limit int64) (string, error) {
+	dir := filepath.Join(root, sessionsGroup)
+	if err := os.Mkdir(dir, 0o755); err != nil && !os.IsExist(err) {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.subtree_control"), []byte(strings.Join(enable, " ")), 0o644); err != nil {
+		return "", fmt.Errorf("subtree_control: %w", err)
+	}
+	if limit > 0 {
+		if err := os.WriteFile(filepath.Join(dir, "memory.max"), []byte(strconv.FormatInt(limit, 10)), 0o644); err != nil {
+			return "", fmt.Errorf("memory.max: %w", err)
+		}
+	}
+	return dir, nil
 }
 
 func writable(dir string) bool {
@@ -80,7 +154,11 @@ func (c *cgroups) create(id string, g scheduler.Grant) (string, error) {
 	if !c.enabled {
 		return "", nil
 	}
-	dir := filepath.Join(cgroupRoot, "session-"+id)
+	parent := c.parent
+	if parent == "" {
+		parent = cgroupRoot
+	}
+	dir := filepath.Join(parent, "session-"+id)
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		return "", err
 	}

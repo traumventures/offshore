@@ -807,6 +807,20 @@ func (e *EC2) Stop(ctx context.Context, id string) error {
 	return err
 }
 
+var _ provider.Rebooter = (*EC2)(nil)
+
+// Reboot implements provider.Rebooter: an in-place reboot of the
+// instance (an OS-level hang or OOM; the supervisor starts the
+// containers again on boot).
+func (e *EC2) Reboot(ctx context.Context, id string) error {
+	iid, err := e.instanceID(ctx, id)
+	if err != nil {
+		return err
+	}
+	_, err = e.ec2.RebootInstances(ctx, &ec2.RebootInstancesInput{InstanceIds: []string{iid}})
+	return err
+}
+
 // Destroy terminates the instance; its disk is deleted with it.
 func (e *EC2) Destroy(ctx context.Context, id string) error {
 	is, err := e.instances(ctx, "", id)

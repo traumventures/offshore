@@ -131,6 +131,7 @@ Wants=network-online.target
 Requires=docker.service
 [Service]
 ExecStart=%s supervisor
+OOMScoreAdjust=-1000
 Restart=always
 RestartSec=5
 [Install]

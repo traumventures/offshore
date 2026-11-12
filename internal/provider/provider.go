@@ -156,6 +156,14 @@ type Provider interface {
 	List(ctx context.Context, owner string) ([]Machine, error)
 }
 
+// Rebooter is implemented by providers that can reboot a running machine
+// in place (its disk and address are kept). The orchestrator reboots a
+// machine whose worker stopped answering (e.g. after the host ran out of
+// memory) before it replaces it.
+type Rebooter interface {
+	Reboot(ctx context.Context, id string) error
+}
+
 // Quota is implemented by providers that can read the account limits that
 // bound how many machines the pool may run (e.g. the EC2 vCPU quota).
 type Quota interface {

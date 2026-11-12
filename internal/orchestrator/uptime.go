@@ -61,6 +61,12 @@ func replayUptime(evs []events.Event) (gone []*Machine, seen map[string]*Machine
 			m.State = provider.Failed
 		}
 		last[ev.Machine] = ev.Time
+		if ev.Type == events.MachineReady || ev.Type == events.MachineSample {
+			// Samples are written for ready workers only: a machine that
+			// stopped answering before the restart shows as unreachable,
+			// not as booting.
+			m.LastReady = ev.Time
+		}
 		switch ev.Type {
 		case events.MachineReady, events.MachineSample, events.MachineStart, events.MachineStop:
 			alive[ev.Machine] = true
@@ -137,6 +143,9 @@ func (o *Orchestrator) mergeUptimeLocked(m *Machine, id string, st provider.Stat
 	}
 	delete(o.seedUptime, id)
 	m.Uptime, m.observed = s.Uptime, true
+	if s.LastReady.After(m.LastReady) {
+		m.LastReady = s.LastReady
+	}
 	if m.price <= 0 {
 		m.price = s.price
 	}

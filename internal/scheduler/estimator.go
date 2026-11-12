@@ -127,6 +127,10 @@ func (h *History) Explain(key string, fallback Resources) Estimate {
 		}
 	}
 	own := append([]Usage{}, h.runs[key]...)
+	related := int64(0)
+	if n < minSamples {
+		related = h.relatedPeakLocked(key)
+	}
 	h.mu.Unlock()
 	if parent != "" && (n == 0 || !own[n-1].OOM) {
 		_, _, headroom, _, _ := h.defaults()
@@ -143,10 +147,12 @@ func (h *History) Explain(key string, fallback Resources) Estimate {
 		if e.CPUSource == SourceLearned {
 			e.CPUSource = SourceLearnedParent
 		}
+		e.LearnedPeak = learnedPeak(e, own, related)
 		return e
 	}
 	e := h.explain(key, fallback)
 	e.Requested = key
+	e.LearnedPeak = learnedPeak(e, own, related)
 	return e
 }
 
@@ -397,4 +403,72 @@ type Estimate struct {
 	// headroom) and mean busy cores of a run (task_end compares them).
 	PeakMemory int64   `json:"peak_memory,omitempty"`
 	Cores      float64 `json:"cores,omitempty"`
+	// LearnedPeak is the memory peak memory admission counts for a run
+	// (see learnedPeak; 0: nothing learned). The reservation is raised to
+	// it (Config.PeakReservation), so the learned peaks of a machine's
+	// sessions never exceed its capacity.
+	LearnedPeak int64 `json:"learned_peak,omitempty"`
+}
+
+// PeakReservation is the memory a task reserves given its estimated need
+// and learned peak: at least the peak scaled by memory_overcommit, so the
+// sum of the learned peaks on a machine stays within its physical
+// memory (reservations within capacity x overcommit). A hard limit caps
+// the peak (the session cannot grow beyond it).
+func (c Config) PeakReservation(need Resources, peak, limit int64) Resources {
+	if limit > 0 && peak > limit {
+		peak = limit
+	}
+	oc := c.MemoryOvercommit
+	if oc < 1 {
+		oc = 1
+	}
+	if m := int64(math.Ceil(float64(peak) * oc)); m > need.Memory {
+		need.Memory = m
+	}
+	return need
+}
+
+// learnedPeak is the memory peak admission plans a run of e with: the
+// estimate's peak statistic when it was learned (not the configured
+// fallback), and while the key has too few runs of its own also the
+// largest peak of its own runs and of related keys (relatedPeakLocked).
+// Reservations of new worktrees fell back to the configured 3G while
+// the same clippy peaked at 4.5-6.5G elsewhere (incident 2026-11-12).
+func learnedPeak(e Estimate, own []Usage, related int64) int64 {
+	peak := related
+	if e.MemorySource != SourceFallback {
+		peak = max(peak, e.PeakMemory)
+	}
+	if len(own) < e.MinSamples {
+		for _, u := range own {
+			peak = max(peak, u.PeakMemory)
+		}
+	}
+	return peak
+}
+
+// relatedPeakLocked is the largest observed memory peak of the runs of
+// key's parent keys and of the same command (or its parents) in other
+// repositories (0: none known).
+func (h *History) relatedPeakLocked(key string) int64 {
+	var peak int64
+	for _, pk := range ParentKeys(key) {
+		for _, u := range h.runs[pk] {
+			peak = max(peak, u.PeakMemory)
+		}
+	}
+	sufs := map[string]bool{keySuffix(key): true}
+	for _, s := range suffixes(ParentKeys(key)) {
+		sufs[s] = true
+	}
+	for k, rs := range h.runs {
+		if k == key || !sufs[keySuffix(k)] {
+			continue
+		}
+		for _, u := range rs {
+			peak = max(peak, u.PeakMemory)
+		}
+	}
+	return peak
 }

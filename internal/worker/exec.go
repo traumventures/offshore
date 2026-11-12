@@ -334,7 +334,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		go se.sample(se.done)
 	}
 
-	cmd, err := sandbox.Command(s.self, sandbox.Spec{Argv: req.Argv, Env: env, Cwd: req.Cwd, Binds: binds, Cgroup: cgDir})
+	cmd, err := sandbox.Command(s.self, sandbox.Spec{Argv: req.Argv, Env: env, Cwd: req.Cwd, Binds: binds, Cgroup: cgDir, OOMScoreAdj: sandbox.SessionOOMScoreAdj})
 	if err != nil {
 		return prepErr(err)
 	}
@@ -504,7 +504,9 @@ loop:
 	exit.Usage.MemoryMaxEvents, exit.Usage.MemoryHighEvents = mev.Max, mev.High
 	if exit.Usage.OOM {
 		msg := fmt.Sprintf("offshore: session exceeded its memory limit (%d bytes); the next run reserves more\n", req.Grant.MemoryMax)
-		if exit.Usage.Killer == killerMachineOOM {
+		if exit.Usage.Killer == killerMachineOOM || mev.Max == 0 && (req.Grant.MemoryMax == 0 || exit.Usage.PeakMemory < req.Grant.MemoryMax) {
+			// Not its own limit: the sessions together outgrew the
+			// machine (the sessions cgroup) or the kernel killed it.
 			msg = "offshore: the machine ran out of memory and the kernel killed the session; the next run reserves more\n"
 		}
 		pc.Write(proto.TStderr, []byte(msg))

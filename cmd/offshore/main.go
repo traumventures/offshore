@@ -388,6 +388,14 @@ func status(args []string) error {
 				state += fmt.Sprintf(" (idle %s)", time.Since(time.Unix(m.Status.IdleSince, 0)).Round(time.Second))
 			}
 			sessions = fmt.Sprint(len(m.Status.Sessions))
+		} else if m.State == provider.Running && m.Removed.IsZero() {
+			// The worker does not answer: unreachable when it was ready in
+			// this uptime period, else still booting.
+			if m.EverReady() {
+				state += fmt.Sprintf(" (unreachable %s)", time.Since(m.LastReady).Round(time.Second))
+			} else {
+				state += " (booting)"
+			}
 		}
 		env := m.EnvHash
 		if len(env) > 12 {

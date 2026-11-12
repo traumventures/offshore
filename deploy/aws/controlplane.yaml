@@ -266,7 +266,7 @@ Resources:
                     aws:RequestTag/project: offshore
               - Sid: ManageMachines
                 Effect: Allow
-                Action: [ec2:StartInstances, ec2:StopInstances, ec2:TerminateInstances]
+                Action: [ec2:StartInstances, ec2:StopInstances, ec2:RebootInstances, ec2:TerminateInstances]
                 Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
                 Condition:
                   StringEquals:

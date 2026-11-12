@@ -132,6 +132,7 @@ Requires=docker.service
 ExecStartPre=/bin/sh -c 'iptables -C DOCKER-USER -d 169.254.0.0/16 -j REJECT 2>/dev/null || iptables -I DOCKER-USER -d 169.254.0.0/16 -j REJECT'
 ExecStartPre=/bin/sh -c 'for p in udp tcp; do iptables -C DOCKER-USER -d 169.254.169.254/32 -p $p --dport 53 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -d 169.254.169.254/32 -p $p --dport 53 -j ACCEPT; done'
 ExecStart=%s supervisor
+OOMScoreAdjust=-1000
 Restart=always
 RestartSec=5
 [Install]

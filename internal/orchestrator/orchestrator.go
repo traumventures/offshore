@@ -110,6 +110,7 @@ type QueuedTask struct {
 	Since  time.Time           `json:"since"`
 	RepoID string              `json:"repo_id,omitempty"`
 	Key    string              `json:"key,omitempty"`
+	Env    string              `json:"env,omitempty"` // environment hash
 	Need   scheduler.Resources `json:"need"`
 	Labels map[string]string   `json:"labels,omitempty"`
 	// Waiting is what the task waits for (updated every placement round).
@@ -231,6 +232,9 @@ type Machine struct {
 	// undrains counts undrain decisions (a stop that began before one is
 	// cancelled).
 	undrains int
+	// rebootedAt is when the orchestrator last rebooted the machine
+	// because it was unreachable (zero: never).
+	rebootedAt time.Time
 	// listed is when the provider view in Machine was taken (the start of
 	// the listing) or last changed locally. Older listings are stale: a
 	// slow readiness poll must not overwrite a newer state or expiry.
@@ -241,6 +245,31 @@ type Machine struct {
 // without a ready worker (booting, or after it was ready) before it is
 // replaced.
 const UnhealthyAfter = 10 * time.Minute
+
+// UnreachableAfter is how long a machine whose worker was ready may go
+// without a successful probe before it is unreachable: it stops counting
+// as capacity for queued requests, and while requests wait for its
+// environment it is rebooted, then replaced (RebootGrace).
+const UnreachableAfter = 2 * time.Minute
+
+// RebootGrace is how long an unreachable machine gets after a reboot to
+// answer again before it is replaced.
+const RebootGrace = 3 * time.Minute
+
+// UnreachableFor is how long a machine whose worker was ready in its
+// current uptime period has not answered a probe (0: reachable, booting
+// or not running).
+func (m *Machine) UnreachableFor(now time.Time) time.Duration {
+	if !m.EverReady() {
+		return 0
+	}
+	return m.NotReadyFor(now)
+}
+
+// Unreachable reports whether m is unreachable (UnreachableAfter).
+func (m *Machine) Unreachable(now time.Time) bool {
+	return m.UnreachableFor(now) > UnreachableAfter
+}
 
 // UpSince is the start of the machine's current uptime period (zero:
 // not up).
@@ -1002,6 +1031,11 @@ func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
 		}
 		_, inFlight := o.creating[id]
 		switch {
+		case m.State == provider.Running && m.Unreachable(now):
+			// It answered before and stopped: no capacity on its way
+			// (queued requests must not wait for it); reconcile reboots
+			// or replaces it.
+			sm.State = scheduler.Gone
 		case m.State == provider.Running && m.Status != nil && m.Status.Ready && m.Addr != "":
 			sm.State = scheduler.Running
 		case m.State == provider.Running || m.State == provider.Starting || inFlight:
@@ -1120,13 +1154,18 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 	}
 	o.arrivals.Observe(req.EnvHash, now)
 	o.mu.Lock()
+	if e := req.Estimate; e != nil && e.LearnedPeak > 0 {
+		// Admission counts the learned peak, not only the estimate: the
+		// sessions of a machine must fit its memory at their peaks.
+		task.Request = o.cfg.Policy.PeakReservation(task.Request, e.LearnedPeak, req.Limit.Memory)
+	}
 	o.recentEnvs[req.EnvHash] = now
 	o.noteFamilyLocked(req.Family, req.RepoID)
 	o.images[req.EnvHash] = req.Image
 	o.services[req.EnvHash] = req.Services
 	o.envParams[req.EnvHash] = req.params()
 	o.queued[task.ID] = req.params()
-	o.waiting[task.ID] = QueuedTask{ID: task.ID, Since: time.Now(), RepoID: req.RepoID, Key: req.Key, Need: req.Need, Labels: labels.Clean(req.Labels)}
+	o.waiting[task.ID] = QueuedTask{ID: task.ID, Since: time.Now(), RepoID: req.RepoID, Key: req.Key, Env: req.EnvHash, Need: task.Request, Labels: labels.Clean(req.Labels)}
 	o.saveRecentLocked()
 	stale := time.Since(o.refreshed) > 30*time.Second
 	o.mu.Unlock()
@@ -1180,7 +1219,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			return lease, nil
 		case scheduler.Reject:
 			o.mu.Unlock()
-			return Lease{}, fmt.Errorf("%w: %s (needs %.1f CPU, %d bytes memory)", ErrUnschedulable, pl.Reason, req.Need.CPU, req.Need.Memory)
+			return Lease{}, fmt.Errorf("%w: %s (needs %.1f CPU, %d bytes memory)", ErrUnschedulable, pl.Reason, task.Request.CPU, task.Request.Memory)
 		}
 		if !refreshed {
 			// Placement failed on cached state: retry once with fresh state.
@@ -1882,6 +1921,11 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 			reachable[m.Provider] = true
 		}
 	}
+	queued := map[string]bool{}
+	for _, q := range o.waiting {
+		queued[q.Env] = true
+	}
+	var reboot []string
 	for _, m := range o.machines {
 		expired := !m.ExpiresAt.IsZero() && !now.Before(m.ExpiresAt)
 		busy := m.Status != nil && len(m.Status.Sessions) > 0
@@ -1897,6 +1941,26 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 			m.Draining = true
 		case expired && m.State != provider.Starting:
 			invariant = append(invariant, scheduler.Action{Kind: scheduler.Destroy, Machine: m.ID, Reason: "expired"})
+		case !inFlight && o.replaceable(m) && m.Unreachable(now) && queued[m.EnvHash]:
+			// Its worker answered before and stopped (incident 2026-11-12:
+			// the host ran out of memory) while requests wait for its
+			// environment: reboot it, and replace it when it still does
+			// not answer RebootGrace later. Also the only machine of its
+			// provider (the queued requests need it, whatever the cause).
+			_, canReboot := o.provs[m.Provider].(provider.Rebooter)
+			rebooted := m.rebootedAt.After(m.LastReady)
+			switch {
+			case canReboot && !rebooted:
+				m.rebootedAt = now
+				reboot = append(reboot, m.ID)
+			case !rebooted || now.Sub(m.rebootedAt) > RebootGrace:
+				reason := "unreachable for " + m.UnreachableFor(now).Round(time.Second).String()
+				if rebooted {
+					reason += ", " + now.Sub(m.rebootedAt).Round(time.Second).String() + " after a reboot"
+				}
+				o.log.Warn("replacing unreachable machine", "id", m.ID, "reason", reason)
+				invariant = append(invariant, scheduler.Action{Kind: scheduler.Destroy, Machine: m.ID, Reason: reason})
+			}
 		case !inFlight && len(m.pending) == 0 && o.replaceable(m) && m.NotReadyFor(now) > UnhealthyAfter && reachable[m.Provider]:
 			// Up at the provider, but its worker has not reported ready
 			// for long (a boot that never finished, a dead or wedged
@@ -1913,6 +1977,9 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	}
 	o.markLocked(invariant)
 	o.mu.Unlock()
+	for _, id := range reboot {
+		o.rebootMachine(context.WithoutCancel(ctx), id)
+	}
 	o.execute(context.WithoutCancel(ctx), invariant, reconcileWait)
 
 	o.mu.Lock()
@@ -1921,6 +1988,28 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	o.mu.Unlock()
 	o.execute(context.WithoutCancel(ctx), acts, reconcileWait)
 	return o.reapVolumes(ctx)
+}
+
+// rebootMachine reboots an unreachable machine at its provider.
+func (o *Orchestrator) rebootMachine(ctx context.Context, id string) {
+	o.mu.Lock()
+	m := o.machines[id]
+	var p provider.Provider
+	if m != nil {
+		p = o.provs[m.Provider]
+	}
+	o.mu.Unlock()
+	r, ok := p.(provider.Rebooter)
+	if !ok {
+		return
+	}
+	o.log.Warn("rebooting unreachable machine", "id", id)
+	rctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	if err := r.Reboot(rctx, id); err != nil {
+		// Replaced RebootGrace later (rebootedAt is set).
+		o.log.Error("reboot failed", "id", id, "err", err)
+	}
 }
 
 // reapVolumes deletes expired and orphaned volumes on every provider.

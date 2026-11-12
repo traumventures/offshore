@@ -6,6 +6,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/traumventures/offshore/internal/scheduler"
 )
 
 func TestParseMemoryEvents(t *testing.T) {
@@ -85,5 +87,63 @@ func TestSamplerReadsCgroup(t *testing.T) {
 	}
 	if len(se.recentSamples()) != maxSessionSamples {
 		t.Fatal(len(se.recentSamples()))
+	}
+}
+
+func TestSessionMemoryLimit(t *testing.T) {
+	const g = int64(1) << 30
+	// x8s c8a.2xlarge: 15G, 1.5G headroom.
+	if got := sessionMemoryLimit(15 * g); got != 15*g-SessionHeadroom {
+		t.Fatalf("15G: %d", got)
+	}
+	if got := sessionMemoryLimit(2 * g); got != g {
+		t.Fatalf("small machine keeps half: %d", got)
+	}
+	if got := sessionMemoryLimit(0); got != 0 {
+		t.Fatalf("unknown: %d", got)
+	}
+}
+
+func TestMachineMemory(t *testing.T) {
+	root := t.TempDir()
+	meminfo := filepath.Join(root, "meminfo")
+	os.WriteFile(meminfo, []byte("MemTotal:       15728640 kB\nMemFree: 1 kB\n"), 0o644)
+	if got := machineMemory(root, meminfo); got != 15728640<<10 {
+		t.Fatalf("meminfo: %d", got)
+	}
+	os.WriteFile(filepath.Join(root, "memory.max"), []byte("max\n"), 0o644)
+	if got := machineMemory(root, meminfo); got != 15728640<<10 {
+		t.Fatalf("unlimited container: %d", got)
+	}
+	os.WriteFile(filepath.Join(root, "memory.max"), []byte("8589934592\n"), 0o644)
+	if got := machineMemory(root, meminfo); got != 8<<30 {
+		t.Fatalf("container limit: %d", got)
+	}
+}
+
+// Session cgroups are created inside the capped sessions group, so the
+// kernel's OOM killer picks a session process, not the worker.
+func TestSessionsGroup(t *testing.T) {
+	root := t.TempDir()
+	dir, err := setupSessionsGroup(root, []string{"+cpu", "+memory"}, 13<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "memory.max")); string(b) != "13958643712" {
+		t.Fatalf("memory.max %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "cgroup.subtree_control")); string(b) != "+cpu +memory" {
+		t.Fatalf("subtree_control %q", b)
+	}
+	if _, err := setupSessionsGroup(root, nil, 0); err != nil {
+		t.Fatalf("reuse: %v", err)
+	}
+	cg := &cgroups{enabled: true, parent: dir}
+	s, err := cg.create("abc", scheduler.Grant{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(s) != dir {
+		t.Fatalf("session cgroup %s outside %s", s, dir)
 	}
 }
