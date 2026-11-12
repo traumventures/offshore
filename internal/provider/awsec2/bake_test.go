@@ -22,14 +22,21 @@ type fakeBake struct {
 	deleted    []string // deregistered images and deleted snapshots
 	createErr  error
 	describes  int
+	states     []ec2types.InstanceStateName // builder states in turn, then stopped
 }
 
 func (f *fakeBake) DescribeInstances(ctx context.Context, in *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
 	if len(in.InstanceIds) == 0 { // stale builder lookup
 		return &ec2.DescribeInstancesOutput{}, nil
 	}
+	f.mu.Lock()
+	state := ec2types.InstanceStateNameStopped
+	if len(f.states) > 0 {
+		state, f.states = f.states[0], f.states[1:]
+	}
+	f.mu.Unlock()
 	return &ec2.DescribeInstancesOutput{Reservations: []ec2types.Reservation{{Instances: []ec2types.Instance{{
-		InstanceId: aws.String(in.InstanceIds[0]), State: &ec2types.InstanceState{Name: ec2types.InstanceStateNameStopped}}}}}}, nil
+		InstanceId: aws.String(in.InstanceIds[0]), State: &ec2types.InstanceState{Name: state}}}}}}, nil
 }
 
 func (f *fakeBake) DescribeImages(ctx context.Context, in *ec2.DescribeImagesInput, _ ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error) {
@@ -161,7 +168,9 @@ func TestBakeAndUse(t *testing.T) {
 	f := &fakeBake{images: []ec2types.Image{
 		bakedImage("ami-a", "2026-11-01", "k-a", tag),
 		bakedImage("ami-b", "2026-11-05", "k-b", tag),
-	}}
+	},
+		// A launched builder is pending, then running, before it stops.
+		states: []ec2types.InstanceStateName{ec2types.InstanceStateNamePending, ec2types.InstanceStateNameRunning, ec2types.InstanceStateNameStopping}}
 	b := newBaker(f, false)
 	b.delay = time.Millisecond
 	ctx := context.Background()
@@ -236,5 +245,42 @@ func TestBakeOff(t *testing.T) {
 	f := &fakeBake{}
 	if ami, baked := newBaker(f, true).machineAMI(context.Background(), testJob()); ami != "ami-base" || baked || f.describes != 0 {
 		t.Fatalf("%s %v %d", ami, baked, f.describes)
+	}
+}
+
+func TestBakeFailureBacksOff(t *testing.T) {
+	f := &fakeBake{states: []ec2types.InstanceStateName{ec2types.InstanceStateNamePending, ec2types.InstanceStateNameTerminated}}
+	b := newBaker(f, false)
+	b.delay = time.Millisecond
+	ctx := context.Background()
+	b.machineAMI(ctx, testJob())
+	waitIdle(t, b)
+	b.machineAMI(ctx, testJob())
+	waitIdle(t, b)
+	f.mu.Lock()
+	if len(f.run) != 1 || len(f.images) != 0 {
+		f.mu.Unlock()
+		t.Fatalf("failed bake retried at once: %d builders, %d images", len(f.run), len(f.images))
+	}
+	f.mu.Unlock()
+	// After the backoff the next create bakes again; a second failure doubles it.
+	k := testJob().key()
+	b.mu.Lock()
+	if d := time.Until(b.failed[k].until); d < bakeBackoff-time.Minute || d > bakeBackoff {
+		b.mu.Unlock()
+		t.Fatalf("backoff %s", d)
+	}
+	b.failed[k] = bakeFail{n: 1}
+	b.mu.Unlock()
+	f.mu.Lock()
+	f.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameShuttingDown}
+	f.mu.Unlock()
+	b.machineAMI(ctx, testJob())
+	waitIdle(t, b)
+	b.mu.Lock()
+	d := time.Until(b.failed[k].until)
+	b.mu.Unlock()
+	if d < 2*bakeBackoff-time.Minute || len(f.run) != 2 {
+		t.Fatalf("second failure: backoff %s, %d builders", d, len(f.run))
 	}
 }
