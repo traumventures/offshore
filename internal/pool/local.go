@@ -97,7 +97,7 @@ func newLocal(u *config.PoolConfig, stateDir string, log *slog.Logger, shared bo
 		}
 		orch.Stores.Override = &sc
 	}
-	orch.Slots = orchestrator.WorkerSlotOps{Grant: orch.SlotGrant}
+	orch.Slots = orchestrator.WorkerSlotOps{Grant: orch.SlotGrant, Source: orch.SourceGrant}
 	return l, nil
 }
 

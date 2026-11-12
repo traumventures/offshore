@@ -117,6 +117,11 @@ type Task struct {
 	// Owner is who asked (agent session or user; empty: the repository):
 	// the default policy serves owners round robin.
 	Owner string
+	// Family identifies the repository across its worktrees (user and
+	// git common directory; empty: unknown): a worktree without a head of
+	// its own is seeded from the newest head of a sibling with the same
+	// environment (Pool.Families).
+	Family string
 }
 
 // State of a machine as seen by the scheduler.
@@ -280,6 +285,9 @@ type Pool struct {
 	Demand map[string]Demand
 	// Snapshots are the saved build slots per repository.
 	Snapshots map[string][]Snapshot
+	// Families are the repository ids per family (Task.Family): the
+	// worktrees of one repository, whose heads seed each other.
+	Families map[string][]string
 	// Volumes are detached cache volumes kept for reuse (keep_detached):
 	// a new machine of a volume size in their zone gets their warm slots
 	// for the attach time.
@@ -550,6 +558,9 @@ type Snapshot struct {
 	// Layer is the head layer of the committed chain (internal/anyfs):
 	// restoring mounts it lazily.
 	Layer string `json:"layer,omitempty"`
+	// Env is the environment of the machine that committed it (empty:
+	// unknown): seeds come only from heads of the same environment.
+	Env string `json:"env,omitempty"`
 }
 
 // Estimator predicts the resource need of tasks from past runs.

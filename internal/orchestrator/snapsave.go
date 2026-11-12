@@ -35,6 +35,9 @@ func (o *Orchestrator) saveSlotLogged(ctx context.Context, slots SlotOps, t Slot
 	ev.Store, ev.Bytes, ev.Pages = snap.Store, snap.Bytes, h.Pages
 	o.obs.emit(ev)
 	o.mu.Lock()
+	if m := o.machines[t.Machine]; m != nil {
+		snap.Env = m.EnvHash
+	}
 	o.addHeadLocked(snap, h.Chain, time.Unix(h.Created, 0))
 	o.mu.Unlock()
 	return snap, nil

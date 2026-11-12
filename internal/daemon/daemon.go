@@ -483,6 +483,52 @@ func RepoID(user, root string) string {
 	return manifest.HashBytes([]byte(user + "\x00" + root))[:20]
 }
 
+// RepoFamily identifies a repository across its worktrees: the client's
+// user and the repository's git common directory (the main worktree's
+// .git, which every linked worktree shares). Empty outside git.
+func RepoFamily(user, root string) string {
+	common := gitCommonDir(root)
+	if common == "" {
+		return ""
+	}
+	return manifest.HashBytes([]byte(user + "\x00family\x00" + common))[:20]
+}
+
+// gitCommonDir returns the git common directory of the worktree at root
+// ("" if root is not a git worktree): root/.git when it is a directory,
+// else the commondir of the gitdir a .git file points to.
+func gitCommonDir(root string) string {
+	dot := filepath.Join(root, ".git")
+	fi, err := os.Stat(dot)
+	if err != nil {
+		return ""
+	}
+	if fi.IsDir() {
+		return filepath.Clean(dot)
+	}
+	b, err := os.ReadFile(dot)
+	if err != nil {
+		return ""
+	}
+	gitdir, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "gitdir:")
+	if !ok {
+		return ""
+	}
+	gitdir = strings.TrimSpace(gitdir)
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(root, gitdir)
+	}
+	c, err := os.ReadFile(filepath.Join(gitdir, "commondir"))
+	if err != nil {
+		return filepath.Clean(gitdir) // a submodule or plain gitdir link
+	}
+	common := strings.TrimSpace(string(c))
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(gitdir, common)
+	}
+	return filepath.Clean(common)
+}
+
 func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (_ *Prepared, err error) {
 	ctx, span := tracing.Start(ctx, "daemon.prepare", trace.WithSpanKind(trace.SpanKindServer))
 	defer func() { tracing.End(span, err) }()
@@ -566,7 +612,7 @@ func (d *Daemon) prepare(ctx context.Context, req Request, progress io.Writer) (
 		lease, err = d.pool.Acquire(ctx, orchestrator.Request{
 			EnvHash: plan.Hash, Image: plan.Tag, Services: plan.Services, RepoID: repoID,
 			Key: key, Need: need, Estimate: &est, Limit: scheduler.Resources{Memory: repo.MaxMemoryBytes()}, Arch: repo.Resources.Arch,
-			BuildTTL: buildTTL, DepsTTL: depsTTL, Labels: lbl,
+			BuildTTL: buildTTL, DepsTTL: depsTTL, Labels: lbl, Family: RepoFamily(c.User, repo.Root),
 		}, progress)
 		if err != nil {
 			return nil, err

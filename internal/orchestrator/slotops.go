@@ -20,6 +20,12 @@ type WorkerSlotOps struct {
 	// (Orchestrator.SlotGrant; nil: the worker uses the last grant it got
 	// with a session of the repository).
 	Grant func(ctx context.Context, machineID, repo string) *store.Grant
+	// Source mints a grant of repo's prefix in the named store for a
+	// restore of a head outside the repository's own prefix of the
+	// machine's store: a sibling worktree's head (seed) or a head in
+	// another provider's store (Orchestrator.SourceGrant; nil: such
+	// restores fail).
+	Source func(ctx context.Context, machineID, store, repo string) *store.Grant
 	// Timeout bounds one operation (0: 30 minutes; saves and restores
 	// move gigabytes).
 	Timeout time.Duration
@@ -85,7 +91,19 @@ func (w WorkerSlotOps) SaveSlot(ctx context.Context, t SlotTarget, repo string) 
 // RestoreSlot implements SlotOps.
 func (w WorkerSlotOps) RestoreSlot(ctx context.Context, t SlotTarget, repo string, s scheduler.Snapshot) error {
 	h := proto.LayerHead{Repo: s.Repo, Store: s.Store, Provider: s.Provider, Layer: s.Layer, Bytes: s.Bytes, At: s.At.Unix()}
-	_, err := w.call(ctx, t, proto.SlotOp{Op: proto.SlotRestore, Repo: repo, Head: &h, Store: w.grant(ctx, t, repo)})
+	op := proto.SlotOp{Op: proto.SlotRestore, Repo: repo, Head: &h, Store: w.grant(ctx, t, repo)}
+	if h.Repo == "" {
+		h.Repo = repo
+	}
+	if h.Repo != repo || op.Store != nil && s.Store != "" && op.Store.Store != s.Store {
+		if w.Source != nil {
+			op.Source = w.Source(ctx, t.Machine, s.Store, h.Repo)
+		}
+		if op.Source == nil {
+			return fmt.Errorf("restore of %s from %s/%s: no grant of the source", repo, s.Store, h.Repo)
+		}
+	}
+	_, err := w.call(ctx, t, op)
 	return err
 }
 

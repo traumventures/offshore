@@ -338,6 +338,10 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 	for repo, rl := range o.heads {
 		f.Snapshots[repo] = append([]scheduler.Snapshot(nil), rl.Heads...)
 	}
+	f.Families = map[string][]string{}
+	for fam, repos := range o.families {
+		f.Families[fam] = append([]string(nil), repos...)
+	}
 	for i := range f.Machines {
 		sm := &f.Machines[i]
 		if p, ok := o.provs[sm.Provider]; ok {
@@ -485,6 +489,9 @@ func (o *Orchestrator) prepareSlot(ctx context.Context, machineID string, a sche
 			break
 		}
 		ev.Store, ev.Bytes = a.Snapshot.Store, a.Snapshot.Bytes
+		if a.Snapshot.Repo != "" && a.Snapshot.Repo != a.Repo {
+			ev.Reason += " (seed from " + a.Snapshot.Repo + ")"
+		}
 		err = slots.RestoreSlot(ctx, t, a.Repo, a.Snapshot)
 	case scheduler.SlotMove:
 		if slots == nil {
