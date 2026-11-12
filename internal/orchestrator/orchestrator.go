@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/traumventures/offshore/internal/clock"
+	"github.com/traumventures/offshore/internal/learning"
 	"io"
 	"log/slog"
 	"os"
@@ -110,6 +111,9 @@ type QueuedTask struct {
 	// Waiting is what the task waits for (updated every placement round).
 	Waiting *events.Waiting `json:"waiting,omitempty"`
 	Reason  string          `json:"reason,omitempty"`
+	// Queue is the queue-confidence verdict of its last placement
+	// ("wait: p=0.86", "create now: p=0.41").
+	Queue string `json:"queue,omitempty"`
 }
 
 // buildTTL returns the effective build TTL of a request.
@@ -438,6 +442,7 @@ type Orchestrator struct {
 
 	metrics *orchMetrics
 	obs     *observer
+	learn   *learning.Store // what the scheduler learns from (never the event log)
 }
 
 // New creates an orchestrator.
@@ -475,7 +480,8 @@ func New(cfg Config, provs map[string]provider.Provider, stateDir string, log *s
 	o.loadHeads()
 	o.loadVolumes()
 	o.metrics = newOrchMetrics(o)
-	o.obs = newObserver(stateDir, cfg.EventRetention)
+	o.learn = learning.Open(stateDir)
+	o.obs = newObserver(stateDir, cfg.EventRetention, o.learn)
 	o.obs.log.SetWarn(func(msg string, err error) { log.Warn(msg, "err", err) })
 	o.loadUptime()
 	o.loadRecent()
@@ -752,7 +758,7 @@ func (o *Orchestrator) sampleLocked(id string, m *Machine) {
 		vm := vmOf(st.VM)
 		ev.VM = &vm
 	}
-	o.obs.log.Append(ev)
+	o.obs.emit(ev)
 	o.vmEventsLocked(id, m)
 }
 
@@ -776,7 +782,7 @@ func (o *Orchestrator) vmEventsLocked(id string, m *Machine) {
 			ev := o.machineEventLocked(typ, id)
 			ev.Pages, ev.Bytes = pages, bytes
 			ev.Seconds = events.SampleInterval.Seconds()
-			o.obs.log.Append(ev)
+			o.obs.emit(ev)
 		}
 	}
 	emit(events.PageFault, cur.Faults-prev.Faults, 0)
@@ -800,7 +806,7 @@ func (o *Orchestrator) statusVMLocked(id string, m *Machine) {
 		vm := vmOf(m.Status.VM)
 		ev := o.machineEventLocked(events.Thrash, id)
 		ev.VM, ev.Bytes = &vm, vm.WorkingSet
-		o.obs.log.Append(ev)
+		o.obs.emit(ev)
 	}
 	m.thrashing = t
 }
@@ -1181,7 +1187,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 		o.markLocked(acts)
 		w := o.waitingLocked(task.EnvHash, pl)
 		if qt, ok := o.waiting[task.ID]; ok {
-			qt.Waiting, qt.Reason = &w, pl.Reason
+			qt.Waiting, qt.Reason, qt.Queue = &w, pl.Reason, pl.Decision.QueueShort()
 			o.waiting[task.ID] = qt
 		}
 		ch := o.changed
@@ -1478,7 +1484,7 @@ func (o *Orchestrator) createMachine(ctx context.Context, id, envHash, image str
 		ev := o.machineEventLocked(events.MachineDestroy, id)
 		ev.Env, ev.Provider, ev.Size = envHash, size.Provider, size.Name
 		ev.Reason, ev.Error, ev.ErrorClass = "create_failed", err.Error(), string(provider.Classify(err))
-		o.obs.log.Append(ev)
+		o.obs.emit(ev)
 	}
 	o.mu.Unlock()
 	o.log.Error("create machine", "id", id, "provider", size.Provider, "err", err, "retry_in", delay)

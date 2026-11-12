@@ -460,11 +460,40 @@ func (s *Worker) setDiskFull(share float64) {
 	}
 }
 
+// reclaimDisk runs the reclaim steps of the disk budget (no slot prune)
+// while usage is above its low watermark; the caller holds pruneMu.
+func (s *Worker) reclaimDisk() {
+	budget := s.diskBudget()
+	if budget <= 0 {
+		return
+	}
+	target := diskTarget(budget)
+	over := func() int64 {
+		_, used, _ := fsUsage(s.cfg.CacheDir)
+		return used - target
+	}
+	for _, step := range s.reclaimSteps() {
+		if step(over) <= 0 {
+			return
+		}
+	}
+}
+
+// reclaimSteps are the reclaims of data that is not build state, in
+// order: dormant repositories, written back blobs, resident slot data,
+// source contents. Each returns the bytes still over.
+func (s *Worker) reclaimSteps() []func(func() int64) int64 {
+	return []func(func() int64) int64{s.reclaimDormant, s.reclaimWriteback, s.reclaimSlots, s.reclaimSources}
+}
+
 // enforceDiskBudget frees disk above the low watermark of the budget:
-// reclaim of resident slot data (clean pages and materialized files, also
-// of leased slots: refetched on use) and of faulted-in source contents
-// (refetched from the laptop); above the budget itself also the policy
-// prune of the least recently used slots, then cold slots.
+// the local tiers of repositories without build slots (dormant), written
+// back blobs, reclaim of resident slot data (clean pages and materialized
+// files, also of leased slots: refetched on use) and of faulted-in source
+// contents (refetched from the laptop); above the budget itself also the
+// policy prune of the least recently used slots, then cold slots. Every
+// step measures the file system (statfs), not the slot metadata: data the
+// slots do not account for is reclaimed too.
 func (s *Worker) enforceDiskBudget() {
 	budget := s.diskBudget()
 	if budget <= 0 {
@@ -475,8 +504,13 @@ func (s *Worker) enforceDiskBudget() {
 		_, used, _ := fsUsage(s.cfg.CacheDir)
 		return used - target
 	}
-	if over() <= 0 || s.reclaimSlots(over) <= 0 || s.reclaimSources(over) <= 0 {
+	if over() <= 0 {
 		return
+	}
+	for _, step := range s.reclaimSteps() {
+		if step(over) <= 0 {
+			return
+		}
 	}
 	if _, used, _ := fsUsage(s.cfg.CacheDir); used <= budget {
 		return // below the budget: build state stays
@@ -530,8 +564,22 @@ func (s *Worker) reclaimSources(over func() int64) int64 {
 // it for up to 20 minutes while a session hung, and every placement with
 // a prune waited for it) and fails then; the session runs on its warm
 // slot without the prune, and the budget prune frees the disk.
+//
+// Slot bytes are metadata: an anyfs slot's pruned files free disk only
+// once their pages are reclaimed, and the disk also holds what no slot
+// accounts for (dormant repositories, written back blobs). So the prune
+// ends with the reclaim of the disk budget down to its low watermark,
+// also when the repository has no slot here.
 func (s *Worker) pruneRepo(ctx context.Context, repo string, target int64) (int64, error) {
 	if !s.hasSlot(repo) {
+		// Without the lock wait: the reclaim runs in the background
+		// unless another prune (which reclaims too) holds the lock.
+		go func() {
+			if s.pruneMu.TryLock() {
+				defer s.pruneMu.Unlock()
+				s.reclaimDisk()
+			}
+		}()
 		return 0, fmt.Errorf("no build slot for repository %s", repo)
 	}
 	ctx, cancel := context.WithTimeout(ctx, pruneLockWait)
@@ -540,6 +588,7 @@ func (s *Worker) pruneRepo(ctx context.Context, repo string, target int64) (int6
 		return 0, fmt.Errorf("prune of %s: %w (another prune is running)", repo, ctx.Err())
 	}
 	defer s.pruneMu.Unlock()
+	defer s.reclaimDisk()
 	var refs []slotRef
 	for _, r := range s.slots.list() {
 		if r.Repo == repo {

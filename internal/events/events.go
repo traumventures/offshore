@@ -297,7 +297,6 @@ type Log struct {
 	retention time.Duration
 	now       func() time.Time
 
-	taps []func(Event) // see Tap
 	// warn reports the first dropped event (nil: log.Printf).
 	warn func(msg string, err error)
 
@@ -344,15 +343,6 @@ func (l *Log) SetRetention(d time.Duration) {
 	l.mu.Unlock()
 }
 
-// Tap calls fn with every event appended from now on (before it is
-// written, Time set; also when writing fails). Taps are registered before
-// the log is used concurrently and must not block.
-func (l *Log) Tap(fn func(Event)) {
-	if l != nil {
-		l.taps = append(l.taps, fn)
-	}
-}
-
 // Dir returns the directory of the log.
 func (l *Log) Dir() string { return l.dir }
 
@@ -392,9 +382,6 @@ func (l *Log) Append(ev Event) {
 		ev.Time = now
 	}
 	ev.Time = ev.Time.UTC()
-	for _, fn := range l.taps {
-		fn(ev)
-	}
 	b, err := json.Marshal(ev)
 	if err != nil {
 		return

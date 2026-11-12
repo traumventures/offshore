@@ -34,8 +34,10 @@ func (p Default) placeScored(f Pool, t Task) (Placement, []option, int) {
 	var opts []option
 	var pls []Placement
 	var rejected []Option
+	var waitQ [][]time.Duration // per option: the wait's quantiles (nil: runs now)
+	var waitRun []time.Duration // per option: the run after the wait
 	consider := func(o option, cand Placement) {
-		opts, pls = append(opts, o), append(pls, cand)
+		opts, pls, waitQ, waitRun = append(opts, o), append(pls, cand), append(waitQ, nil), append(waitRun, 0)
 	}
 	assignable := false
 	raw := p.rawFits(f, t)
@@ -72,7 +74,14 @@ func (p Default) placeScored(f Pool, t Task) (Placement, []option, int) {
 	if !assignable {
 		reason := "no machine with free capacity"
 		wait := option{info: &Option{Kind: OptWaitCapacity, Reason: reason + " (scale-out decides)"}}
-		return Placement{Kind: Wait, Reason: reason, Decision: p.decision(f, t.EnvHash, []option{wait}, 0, rejected)}, nil, -1
+		d := p.decision(f, t.EnvHash, []option{wait}, 0, rejected)
+		if conf, ok := p.queueConf(); ok {
+			if v, ok := p.queueVerdictQueued(f, t, conf); ok {
+				d.Queue = &v
+				reason += "; " + v.Long()
+			}
+		}
+		return Placement{Kind: Wait, Reason: reason, Decision: d}, nil, -1
 	}
 	// Waiting for a busy or starting machine of the environment, not
 	// longer than getting a machine would take (option policy).
@@ -115,18 +124,33 @@ func (p Default) placeScored(f Pool, t Task) (Placement, []option, int) {
 		}
 		mm := m
 		mm.Reserved = Resources{} // runs after the sessions it waits for
+		var wq []time.Duration
+		if _, ok := p.queueConf(); ok {
+			wq = p.waitQuantiles(f, m, t.Request)
+		}
 		for _, rc := range p.runChoices(f, mm, t) {
 			o := option{cost: p.machineCost(f, m, t, f.Now.Add(expWait), rc.run) + rc.cost, time: expWait + rc.run, tie: Score(t.RepoID, m.ID), fit: math.Inf(1),
 				info: runOption(OptWaitMachine, m, t, rc, expWait)}
 			consider(o, Placement{Kind: Wait, Machine: m.ID, Reason: fmt.Sprintf("waiting %s for %s on %s", wait.Round(time.Second), rc.reason, m.ID)})
+			waitQ[len(waitQ)-1], waitRun[len(waitRun)-1] = wq, rc.run
 		}
 	}
-	i := p.choose(f, t.EnvHash, opts)
+	var verdict *QueueVerdict
+	i := -1
+	if conf, ok := p.queueConf(); ok {
+		i, verdict = p.chooseQueued(f, t, opts, pls, waitQ, waitRun, conf)
+	} else {
+		i = p.choose(f, t.EnvHash, opts)
+	}
 	pl := pls[i]
+	if verdict != nil {
+		pl.Reason += "; " + verdict.Long()
+	}
 	if pl.Kind == Wait {
 		pl.Machine = ""
 	}
 	pl.Decision = p.decision(f, t.EnvHash, opts, i, rejected)
+	pl.Decision.Queue = verdict
 	return pl, opts, i
 }
 
@@ -285,7 +309,12 @@ func (p Default) timeline(f Pool, ms []*tlMachine, tasks []Task, tail time.Durat
 			}
 			// Option policy: no waiting for existing capacity beyond the
 			// time a new machine takes (the hedge bound).
-			if b, ok := bounds[t.ID]; ok && !tm.created && f.Now.Sub(t.Since)+at.Sub(f.Now) > b {
+			// Capacity free now or a machine already on its way that is
+			// ready no later than a create now would be stays an option:
+			// otherwise every plan tick creates another machine for the
+			// same overdue request while the previous ones boot (prod
+			// 2026-11-12: 8 creates for 3 requests).
+			if b, ok := bounds[t.ID]; ok && !tm.created && f.Now.Sub(t.Since)+at.Sub(f.Now) > b && !p.onTime(f, tm, at) {
 				continue
 			}
 			if bestTM == nil || at.Add(run).Before(bestAt.Add(bestRun)) {
@@ -326,6 +355,24 @@ func (p Default) timeline(f Pool, ms []*tlMachine, tasks []Task, tail time.Durat
 	return cost, total, feasible
 }
 
+// onTime reports whether an existing machine may serve a task past its
+// hedge bound: capacity free now, or a machine already starting (it is
+// ready no later than a new one, which would boot from scratch; one
+// machine on its way per request is enough) unless its boot hangs.
+func (p Default) onTime(f Pool, tm *tlMachine, at time.Time) bool {
+	if !at.After(f.Now) {
+		return true
+	}
+	return tm.m.State == Starting && !p.hung(f, tm.m)
+}
+
+// hung reports whether a starting machine overran its expected readiness
+// by so much (twice its boot, at least 3 minutes) that it no longer counts
+// as capacity on its way.
+func (p Default) hung(f Pool, m Machine) bool {
+	return m.State == Starting && !m.ReadyAt.IsZero() && f.Now.Sub(m.ReadyAt) > max(2*p.boot(f, m.Provider), 3*time.Minute)
+}
+
 // tlOf builds the timeline view of an existing machine.
 func (p Default) tlOf(f Pool, m Machine) *tlMachine {
 	tm := &tlMachine{m: m, ready: f.Now, price: priceOf(f, m)}
@@ -337,13 +384,23 @@ func (p Default) tlOf(f Pool, m Machine) *tlMachine {
 	}
 	tm.free = p.admissible(m).Sub(m.Reserved)
 	covered := Resources{}
+	// Queue confidence: a session whose remaining time is unknown (no
+	// lease estimate) is not counted on to end.
+	_, qc := p.queueConf()
+	guess := f.Now.Add(DefaultRun)
+	if qc {
+		guess = f.Now.Add(24 * time.Hour)
+	}
 	for _, r := range m.Releases {
 		at := r.Expected(f.Now)
+		if qc && (r.Unknown || r.At.IsZero()) {
+			at = guess
+		}
 		tm.deltas = append(tm.deltas, Release{At: at, Res: r.Res})
 		covered = covered.Add(r.Res)
 	}
 	if rest := m.Reserved.Sub(covered); rest.CPU > 1e-9 || rest.Memory > 0 {
-		g := Release{At: f.Now.Add(DefaultRun), Res: Resources{CPU: math.Max(rest.CPU, 0), Memory: max(rest.Memory, 0)}}
+		g := Release{At: guess, Res: Resources{CPU: math.Max(rest.CPU, 0), Memory: max(rest.Memory, 0)}}
 		tm.deltas, tm.guess = append(tm.deltas, g), &g
 	}
 	return tm
@@ -499,7 +556,43 @@ func (p Default) scaleOutModel(st *planState, env string) {
 		if p.global() && !abl("nogate") {
 			projected = p.project(f, ms, prioritize(f.Now, tasks))
 		}
-		helps := func(lat time.Duration) bool {
+		// Queue confidence: a machine is added unless every queued task
+		// it could serve is confidently better off waiting (see
+		// queueconf.go); verdicts keeps the least confident one.
+		conf, qc := p.queueConf()
+		var proj []map[string]projection
+		if qc && projected != nil {
+			proj = p.projectDist(f, ms, prioritize(f.Now, tasks))
+		}
+		verdicts := map[*cand]QueueVerdict{}
+		helpsQ := func(cd *cand) bool {
+			// The capacity there does not serve every task in time (the
+			// timeline): no confidence in waiting.
+			hit := !feasible
+			for _, t := range tasks {
+				if !p.admissible(cd.tm.m).Fits(t.Request) || !p.physical(f, cd.tm.m.Capacity, t) {
+					continue
+				}
+				v, wait := p.queueVerdictNew(f, t, proj, cd.tm, conf)
+				if old, ok := verdicts[cd]; !ok || v.P < old.P {
+					verdicts[cd] = v
+				}
+				if !wait {
+					hit = true
+				}
+				// Whatever the odds, a request must start before its
+				// queue timeout: count on the pessimistic projection.
+				if pr, ok := proj[queueGrid*9/10][t.ID]; c.QueueTimeout > 0 && (!ok || pr.at.Sub(t.Since) > c.QueueTimeout/2) {
+					hit = true
+				}
+			}
+			return hit
+		}
+		helps := func(cd *cand) bool {
+			if proj != nil {
+				return helpsQ(cd)
+			}
+			lat := cd.tm.latency
 			if projected == nil {
 				return true
 			}
@@ -520,11 +613,18 @@ func (p Default) scaleOutModel(st *planState, env string) {
 			}
 			return false
 		}
+		added := false
 		for i := range cands {
 			cd := &cands[i]
-			if !helps(cd.tm.latency) {
+			if !helps(cd) {
 				info := candOption(cd.act, cd.tm)
 				info.Rejected = RejNoViolation
+				if proj != nil {
+					info.Rejected = RejConfidentWait
+				}
+				if v, ok := verdicts[cd]; ok {
+					info.Rejected += "; " + v.Long()
+				}
 				rejected = append(rejected, *info)
 				continue
 			}
@@ -537,6 +637,15 @@ func (p Default) scaleOutModel(st *planState, env string) {
 			}
 			info.Tasks = cd.tm.planned
 			opts, optC = append(opts, option{cost: cost, time: total, tie: Score(env, cd.tm.m.ID), info: info}), append(optC, cd)
+			added = true
+		}
+		// Not confident that waiting is faster for every task: the
+		// capacity there is no option.
+		if proj != nil && added && len(opts) > 0 && optC[0] == nil {
+			o := *opts[0].info
+			o.TimeSeconds, o.Cost, o.Rejected = secs(opts[0].time), round6(opts[0].cost), RejNotConfident
+			rejected = append(rejected, o)
+			opts, optC = opts[1:], optC[1:]
 		}
 		var bestC *cand
 		chosen := p.choose(f, env, opts)
@@ -545,6 +654,10 @@ func (p Default) scaleOutModel(st *planState, env string) {
 		}
 		if bestC != nil {
 			bestC.act.Decision = p.decision(f, env, opts, chosen, rejected)
+			if v, ok := verdicts[bestC]; ok {
+				bestC.act.Decision.Queue = &v
+				bestC.act.Reason += "; " + v.Short()
+			}
 		}
 		if bestC == nil {
 			if !feasible && len(cands) == 0 && p.room(st, env) {

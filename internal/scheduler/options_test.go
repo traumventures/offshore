@@ -116,7 +116,7 @@ func TestPhysicalFit(t *testing.T) {
 func TestHedgeBound(t *testing.T) {
 	b := busy("busy", res(8, 16), res(8, 16), 1)
 	b.Size, b.WarmRepos = "m", []string{"r"}
-	b.Releases = []Release{{At: now.Add(3 * time.Minute), Start: now.Add(-time.Minute), Res: res(8, 16)}}
+	b.Releases = []Release{{At: now.Add(3 * time.Minute), Start: now.Add(-time.Minute), Run: 4 * time.Minute, Res: res(8, 16)}}
 	idle := machine("idle", res(8, 16), res(4, 8)) // free, cold
 	idle.Size = "m"
 	tk := task(4, 8)

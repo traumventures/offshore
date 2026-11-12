@@ -76,7 +76,7 @@ func (o *Orchestrator) sessionSamplesLocked(id string, m *Machine) {
 			if ev.Repo == "" {
 				ev.Repo = se.Repo
 			}
-			o.obs.log.Append(ev)
+			o.obs.emit(ev)
 			attrs := []attribute.KeyValue{attribute.String("offshore.lease", se.Lease), attribute.String("offshore.machine", id),
 				attribute.String("offshore.repo_id", ev.Repo), attribute.String("offshore.usage_key", ev.Key)}
 			gauges = append(gauges,

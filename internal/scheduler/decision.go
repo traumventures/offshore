@@ -24,6 +24,19 @@ type Decision struct {
 	// Chosen is the index of the chosen option in Options (-1: none).
 	Chosen  int      `json:"chosen"`
 	Options []Option `json:"options"`
+	// Queue is the queue-confidence verdict: wait only when waiting
+	// finishes sooner with probability >= queue_confidence (default
+	// policy; see queueconf.go).
+	Queue *QueueVerdict `json:"queue,omitempty"`
+}
+
+// QueueShort is the decision's queue verdict for `offshore top` ("" when
+// none): "wait: p=0.86".
+func (d *Decision) QueueShort() string {
+	if d == nil {
+		return ""
+	}
+	return d.Queue.Short()
 }
 
 // Option kinds.
@@ -172,10 +185,13 @@ const (
 	RejNoTasks      = "takes none of the queued tasks"
 	RejOverdue      = "queued longer than a start or create takes"
 	RejNoViolation  = "no queued request would wait longer than the machine takes"
-	RejProviderDown = "provider down (capacity/quota cooldown or disabled)"
-	RejCreateBlock  = "create backoff after a failed create"
-	RejMachineLimit = "provider limit, disabled provider or max_spend_per_hour"
-	RejGuard        = "runaway guard reached (no request waits longer than a create takes)"
+	// Queue confidence (queueconf.go).
+	RejConfidentWait = "every queued request it could serve is confidently better off waiting"
+	RejNotConfident  = "not confident that waiting finishes every queued request sooner"
+	RejProviderDown  = "provider down (capacity/quota cooldown or disabled)"
+	RejCreateBlock   = "create backoff after a failed create"
+	RejMachineLimit  = "provider limit, disabled provider or max_spend_per_hour"
+	RejGuard         = "runaway guard reached (no request waits longer than a create takes)"
 )
 
 // sizeRejections lists the sizes of env that could not be created now,

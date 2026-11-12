@@ -343,6 +343,13 @@ trace.json` converts the real runs into a simulator trace (both work
 embedded and remote, via the control plane's `POST /v1/events`, API key
 protected). See [scheduling.md](scheduling.md#calibrating-the-simulator-from-real-runs).
 
+The event log is for observability only: the scheduler never reads it.
+What the scheduler learns (per-key run times and memory, refetch factors)
+is in the learning store `learning.json` in the state directory
+(versioned, bounded; see [scheduling.md](scheduling.md#learning-store)).
+Deleting event files never changes scheduling; deleting `learning.json`
+makes the estimator relearn from the next runs.
+
 ### Explainable scheduling and traceable reservations
 
 Every placement and every scale-out start/create carries a `decision`:

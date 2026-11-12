@@ -253,6 +253,8 @@ type Worker struct {
 	pruneMu        sync.Mutex // one prune at a time
 	budgetMu       sync.Mutex // one budget check at a time
 	machineBudgets machineCacheBudgets
+	// sourceFetch replaces fetchFile for tests (nil: fetchFile).
+	sourceFetch func(ctx context.Context, root string, n *anyfs.Node, w io.Writer) error
 }
 
 // New prepares a server.
@@ -723,10 +725,14 @@ func (s *Worker) projection(root string, workerLocal []string) (*anyfs.WritableF
 		return p, nil
 	}
 	upper := filepath.Join(s.cfg.CacheDir, "upper", strings.ReplaceAll(strings.Trim(root, "/"), "/", "_"))
+	fetch := s.fetchFile
+	if s.sourceFetch != nil {
+		fetch = s.sourceFetch
+	}
 	src := anyfs.NewPeerSource(nil, s.srcFiles, func(ctx context.Context, n *anyfs.Node, w io.Writer) error {
-		return s.fetchFile(ctx, root, n, w)
+		return fetch(ctx, root, n, w)
 	})
-	p, err := anyfs.NewWritable(src, upper, anyfs.WritableOptions{FsName: "offshore", AllowOther: true})
+	p, err := anyfs.NewWritable(src, upper, anyfs.WritableOptions{FsName: "offshore", AllowOther: os.Geteuid() == 0})
 	if err != nil {
 		return nil, err
 	}
