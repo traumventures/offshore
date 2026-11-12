@@ -101,6 +101,11 @@ type SlotOp struct {
 	// Store grants access to the repository's store prefix (save and
 	// restore; nil: the last grant of a session of the repository).
 	Store *store.Grant `json:"store,omitempty"`
+	// Source grants read access to the store prefix of Head when it is
+	// not the repository's own (restore of a sibling worktree's head, a
+	// seed, or of a head in another provider's store); nil: Head is in
+	// the repository's own prefix of Store.
+	Source *store.Grant `json:"source,omitempty"`
 }
 
 // SlotResult answers a SlotOp.

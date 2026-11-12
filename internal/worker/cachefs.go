@@ -156,6 +156,11 @@ type repoFS struct {
 	storeNm string
 	expires int64
 	link    *anyfs.Link
+	// seed is a read-only source below remote (see seed.go); seedPending
+	// makes the next flush refresh every page the own prefix lacks.
+	seed        blobcache.Store
+	seedPending bool
+	primary     blobcache.Store // remote without the seed
 
 	access *access.Model // access classes of the repository's files
 	ws     *workingSet   // files read in recent sessions
@@ -266,15 +271,33 @@ func (c *cacheFS) setGrant(repo string, g store.Grant) error {
 		return err
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.link != nil && r.storeNm == g.Store && (r.expires == 0 || (g.Expires != 0 && g.Expires <= r.expires)) {
+		r.mu.Unlock()
 		return nil
 	}
 	st, err := store.Open(g, store.RepoScope(repo), blobcache.MaxTTL)
 	if err != nil {
+		r.mu.Unlock()
 		return err
 	}
-	r.remote, r.storeNm, r.expires = st, g.Store, g.Expires
+	r.primary, r.storeNm, r.expires = st, g.Store, g.Expires
+	r.mu.Unlock()
+	return c.relink(r)
+}
+
+// relink (re)builds a repository's link to its store prefix (with the
+// seed source below it, if any).
+func (c *cacheFS) relink(r *repoFS) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.primary == nil {
+		return nil // connected by the grant that follows
+	}
+	var st blobcache.Store = r.primary
+	if r.seed != nil {
+		st = fallbackStore{primary: r.primary, source: r.seed}
+	}
+	r.remote = st
 	if r.link != nil {
 		r.link.Close()
 	}
@@ -890,7 +913,10 @@ func (c *cacheFS) flush(ctx context.Context, res commitResult) (proto.LayerHead,
 	begin := time.Now()
 	before := link.Stats()
 	keys := res.tree.Keys()
-	if res.refresh {
+	r.mu.Lock()
+	seeded := r.seedPending
+	r.mu.Unlock()
+	if res.refresh || seeded {
 		st := anyfs.NewStore(remote, anyfs.StoreMedium())
 		for _, k := range keys {
 			if st.Has(ctx, k) {
@@ -920,6 +946,15 @@ func (c *cacheFS) flush(ctx context.Context, res commitResult) (proto.LayerHead,
 	}
 	if err := anyfs.SetHead(ctx, remote, headName, top.ID); err != nil {
 		return proto.LayerHead{}, err
+	}
+	if seeded {
+		// Every page and layer of the head is in the own prefix now.
+		r.mu.Lock()
+		r.seed, r.seedPending = nil, false
+		r.mu.Unlock()
+		if err := r.c.relink(r); err != nil {
+			return proto.LayerHead{}, err
+		}
 	}
 	after := link.Stats()
 	h := proto.LayerHead{Repo: r.id, Store: storeNm, Layer: top.ID, Chain: res.chain.IDs(), Bytes: top.Bytes, Delta: top.Delta,

@@ -32,7 +32,7 @@ func (s *Worker) slotOp(ctx context.Context, op proto.SlotOp) proto.SlotResult {
 		if op.Head == nil {
 			err = fmt.Errorf("restore: no head")
 		} else {
-			res, err = s.restoreSlot(ctx, op.Repo, *op.Head, op.Store)
+			res, err = s.restoreSlotFrom(ctx, op.Repo, *op.Head, op.Store, op.Source)
 		}
 	default:
 		err = fmt.Errorf("unknown slot operation %q", op.Op)
