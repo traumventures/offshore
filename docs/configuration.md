@@ -70,12 +70,11 @@ machine_cpu    = 8         # size of the implicit "default" size
 machine_memory = "16G"
 min_machines   = 0         # warm machines per recently used environment
 # max_spend_per_hour = 5   # optional circuit breaker ($/h of running machines)
-idle_stop      = "20m"     # stop idle machines (disk kept)
+# idle_stop    = "20m"     # fixed idle stop (disk kept); unset: derived by the scheduler
 max_lifetime   = "24h"     # destroy machines (and their caches) after this
 queue_timeout  = "2m"      # a request waiting longer for capacity fails
 
 [scheduler]                # see scheduling.md
-policy            = "default"   # option policy (costmodel, binpack, classic for comparison)
 cost_optimization = 0.5         # 1 = cheapest, 0 = fastest result
 estimator         = "history"
 
@@ -99,16 +98,14 @@ price_per_hour = 0.1
 | `machine_cpu`, `machine_memory` | `8`, `"16G"` | capacity of the size `default` that providers without sizes get |
 | `min_machines` | 0 | warm pool per environment used in the last 24 hours |
 | `max_spend_per_hour` | unset (off) | circuit breaker: no machine is created or started while the running and starting machines cost this much per hour, whatever the queue |
-| `idle_stop` | `"20m"` | idle machines stop; disks and warm slots survive |
+| `idle_stop` | unset (derived) | idle machines stop; disks and warm slots survive. Unset, the scheduler decides per machine from the learned request arrivals, prices and start latency (rent-or-buy, at least a minute) and also destroys stopped machines whose disks cost more than a create instead of a start; set, a fixed time (unobserved machines stop themselves after it, 20 minutes when unset) |
 | `max_lifetime` | `"24h"` | machines are destroyed at this age; caps the slot TTL |
 | `queue_timeout` | `"2m"` | requests that cannot be placed within this time fail; the proxy then runs the command locally (unless `OFFSHORE_REQUIRE_REMOTE=1`) |
 
 The pool has no machine count limit. The scheduler adds a machine only
-for a request that would otherwise start later than the machine is ready,
-a runaway guard bounds the pool by its offered load (⌈R + β√R⌉ plus one
-per environment; exceeded only for a request that waited longer than a
-create takes, logged as `capacity exception`), and the providers' own
-limits are discovered: the EC2 vCPU quota (Service Quotas `L-1216C47A`
+when that scores better for a request than every wait (counting the
+machines already on their way), and the providers' own limits are
+discovered: the EC2 vCPU quota (Service Quotas `L-1216C47A`
 minus the account's other instances) and, on any provider, a limit error
 caps it at the vCPUs it runs for an hour. See
 [scheduling.md](scheduling.md#scale-out-bounds).

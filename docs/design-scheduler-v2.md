@@ -1,7 +1,7 @@
 # Scheduler v2: one decision model
 
-Status: implemented (`internal/scheduler/core.go`, `lifecycle.go`),
-default policy. Replaces the option policy, the cost model and the
+Status: implemented (`internal/scheduler/core.go`, `lifecycle.go`), the
+only policy. Replaces the option policy, the cost model and the
 layers added on top of them (runaway guard, capacity exception,
 capQueuedDemand, projected-start gate, queue verdicts, consolidation,
 flap guard, stop decay, batch/dist/stat experiments).
@@ -90,4 +90,8 @@ factors, arrivals). The event log is observability only.
 
 ## Evaluation
 
-See docs/scheduling.md, *v2 gate*.
+`TestGate` against the scheduler before the rewrite, 31 cases × r ∈
+{0.2, 0.5, 0.8}: cost −22..−26 % at high load, −1..−4 % at low load;
+objective (cost + time_value × Σ turnaround) lower everywhere; p95
+turnaround ≤ at r = 0.2 and at low load, +2 % at high load for r ≥ 0.5.
+Details in [scheduling.md](scheduling.md#v2-gate-nov-2026).

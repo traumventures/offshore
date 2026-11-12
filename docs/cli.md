@@ -123,12 +123,11 @@ offshore sim export [-since 7d] [-until T] [-o trace.json] [-cold-penalty 0.5] [
     convert the pool's event log (real runs) into a trace
 ```
 
-`sim` flags: `-config` (pool file; default the active one), `-policy`
-(comma separated: `default`, `binpack`, `classic`; default
-`default,binpack,classic`), `-estimator static|history`, `-boot` and `-start`
+`sim` flags: `-config` (pool file; default the active one),
+`-estimator static|history`, `-boot` and `-start`
 (`DUR` or `provider=DUR,...`; defaults 60s and 20s), `-cold-penalty`
 (default 0.5), `-queue-timeout`, `-cost-optimization 0,0.5,1` (compare
-values of the default policy), `-sweep`, `-resize` (machines can grow
+values; default the pool's), `-sweep`, `-resize` (machines can grow
 disks), `-json`. See
 [scheduling.md](scheduling.md#simulator).
 

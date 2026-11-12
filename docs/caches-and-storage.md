@@ -76,6 +76,21 @@ machines restore them instead of running the install.
 
 ## Pruning
 
+One invariant: the store head of a slot is the source of truth;
+everything on a machine (slot pages, materialized files, seeds, fetched
+sources, machine caches, dormant repositories, written-back blobs) is a
+reclaimable tier. The worker manages its disk in one function
+(`Worker.manageDisk`), called after a session releases its slot, on every
+lifecycle tick (5 s), on the 5-minute GC round and after a prune before
+placement, with one reclaim order against one watermark pair (85 % and
+100 % of the budget): a released slot over its own budget; the local tier
+of the cache file system above its capacity; machine caches over
+`max_size` (while idle, GC round); above 85 % dormant repositories,
+written-back blobs, resident slot data and fetched sources; above the
+budget itself the least recently used idle slots (policy prune, then
+cold). The scheduler only prices disk as part of an option (prune,
+resize, restore, a stopped machine's disk).
+
 Slots are pruned against two budgets: per slot the sum of the slot caches'
 `max_size` (unset: unbounded) after every session, per machine
 `[scheduler] disk_budget` of the cache file system (default `"90%"`, or a
