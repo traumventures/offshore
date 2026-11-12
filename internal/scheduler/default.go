@@ -402,6 +402,7 @@ type planState struct {
 	spend       float64              // hourly price of running and starting machines
 	guard       int                  // runaway guard: active machines without a capacity exception
 	exception   map[string]string    // environments whose requests wait too long: reason
+	excess      map[string]int       // machines env may add beyond the guard: overdue requests without a machine on its way
 	stopped     map[string][]Machine // usable stopped machines per environment
 	queued      map[string][]Task    // queued tasks per environment
 	envs        []string             // environments with queued tasks, in queue order
@@ -433,6 +434,7 @@ func (p Default) Plan(f Pool) []Action {
 	}
 	p.warmPool(st, running)
 	p.enforceLimits(st)
+	p.capQueuedDemand(st)
 	return st.acts
 }
 

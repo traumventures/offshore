@@ -285,7 +285,12 @@ func (p Default) timeline(f Pool, ms []*tlMachine, tasks []Task, tail time.Durat
 			}
 			// Option policy: no waiting for existing capacity beyond the
 			// time a new machine takes (the hedge bound).
-			if b, ok := bounds[t.ID]; ok && !tm.created && f.Now.Sub(t.Since)+at.Sub(f.Now) > b {
+			// Capacity free now or a machine already on its way that is
+			// ready no later than a create now would be stays an option:
+			// otherwise every plan tick creates another machine for the
+			// same overdue request while the previous ones boot (prod
+			// 2026-11-12: 8 creates for 3 requests).
+			if b, ok := bounds[t.ID]; ok && !tm.created && f.Now.Sub(t.Since)+at.Sub(f.Now) > b && !p.onTime(f, tm, at) {
 				continue
 			}
 			if bestTM == nil || at.Add(run).Before(bestAt.Add(bestRun)) {
@@ -324,6 +329,24 @@ func (p Default) timeline(f Pool, ms []*tlMachine, tasks []Task, tail time.Durat
 		tm.deltas = saved[i]
 	}
 	return cost, total, feasible
+}
+
+// onTime reports whether an existing machine may serve a task past its
+// hedge bound: capacity free now, or a machine already starting (it is
+// ready no later than a new one, which would boot from scratch; one
+// machine on its way per request is enough) unless its boot hangs.
+func (p Default) onTime(f Pool, tm *tlMachine, at time.Time) bool {
+	if !at.After(f.Now) {
+		return true
+	}
+	return tm.m.State == Starting && !p.hung(f, tm.m)
+}
+
+// hung reports whether a starting machine overran its expected readiness
+// by so much (twice its boot, at least 3 minutes) that it no longer counts
+// as capacity on its way.
+func (p Default) hung(f Pool, m Machine) bool {
+	return m.State == Starting && !m.ReadyAt.IsZero() && f.Now.Sub(m.ReadyAt) > max(2*p.boot(f, m.Provider), 3*time.Minute)
 }
 
 // tlOf builds the timeline view of an existing machine.
