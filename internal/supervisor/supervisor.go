@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/traumventures/offshore/internal/clock"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -123,6 +124,39 @@ type DiskGrower interface {
 	GrowDisk(ctx context.Context) error
 }
 
+// BinaryUpdater is implemented by platforms that replace the server
+// binary of a machine started again after the control plane moved to
+// another binary: UpdateBinary installs it at path (updated false: none
+// pending). The supervisor then executes the new binary before it starts
+// the containers (which mount it).
+type BinaryUpdater interface {
+	UpdateBinary(ctx context.Context, path string) (updated bool, err error)
+}
+
+// ReplaceBinary atomically replaces the executable at path with r.
+func ReplaceBinary(path string, r io.Reader) error {
+	tmp := path + ".new"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, r); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // PlatformFactory creates a platform for a spec.
 type PlatformFactory func(ctx context.Context, spec Spec) (Platform, error)
 
@@ -191,8 +225,17 @@ type Supervisor struct {
 	SysBlock string
 	// FSProbes inspect the mounted cache medium (zero: the real calls).
 	FSProbes hostfs.Probes
+	// BootScriptPath is where the boot script recorded its phases (empty:
+	// BootScript); Uptime is the time since the kernel started (nil: the
+	// kernel's).
+	BootScriptPath string
+	Uptime         func() time.Duration
+	// Exec replaces the process with a new supervisor binary (nil:
+	// syscall.Exec of the layout's binary).
+	Exec func(path string) error
 
-	touched time.Time // last touchCache
+	touched time.Time           // last touchCache
+	boot    []machine.BootPhase // phases of this boot (startBoot, phase)
 }
 
 func (a *Supervisor) now() time.Time {
@@ -306,17 +349,24 @@ func (a *Supervisor) EnsureContainers(ctx context.Context) error {
 					return err
 				}
 				prepared = true
+				a.phase(machine.PhaseRegistryLogin, 0)
 			}
 			a.Log.Info("pulling image", "image", c.Image)
 			if _, err := a.Docker(ctx, nil, nil, "pull", "--quiet", c.Image); err != nil {
 				return err
 			}
+			if c.Name == l.Name() {
+				a.phase(machine.PhaseImage, a.imageSize(ctx, c.Image))
+			}
+		} else if c.Name == l.Name() {
+			a.phase(machine.PhaseImage, 0)
 		}
 		if c.Name == l.Name() {
 			var err error
 			if secrets, err = a.Secrets(ctx); err != nil {
 				return err
 			}
+			a.phase(machine.PhaseSecrets, 0)
 			for _, v := range []string{l.CacheVolume, l.DepsVolume} {
 				if strings.HasPrefix(v, "/") {
 					continue // a host directory (the mounted cache medium)
@@ -336,8 +386,19 @@ func (a *Supervisor) EnsureContainers(ctx context.Context) error {
 			return err
 		}
 	}
+	a.phase(machine.PhaseContainers, 0)
 	a.Log.Info("machine containers started", "machine", l.ID)
 	return nil
+}
+
+// imageSize returns the unpacked size of a local image (0: unknown).
+func (a *Supervisor) imageSize(ctx context.Context, image string) int64 {
+	out, err := a.Docker(ctx, nil, nil, "image", "inspect", "--format", "{{.Size}}", image)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	return n
 }
 
 // status reads the server's published status (nil when unavailable).
@@ -405,12 +466,18 @@ func (a *Supervisor) Run(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
+	a.startBoot()
+	if a.updateBinary(ctx) {
+		return nil // Exec replaced the process; only a failed exec returns
+	}
 	if err := a.waitDocker(ctx); err != nil {
 		return err
 	}
+	a.phase(machine.PhaseDockerReady, 0)
 	if err := a.PrepareCache(ctx); err != nil {
 		return err // systemd restarts the supervisor
 	}
+	a.phase(machine.PhaseCache, 0)
 	for i := 0; ; i++ {
 		err := a.EnsureContainers(ctx)
 		if err == nil {

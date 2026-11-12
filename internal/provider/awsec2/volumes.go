@@ -187,7 +187,7 @@ func (e *EC2) CreateVolume(ctx context.Context, spec provider.VolumeSpec) (provi
 		return provider.Volume{}, fmt.Errorf("aws-ec2: create volume %s: %w", spec.Name, err)
 	}
 	id := aws.ToString(out.VolumeId)
-	if err := ec2.NewVolumeAvailableWaiter(e.api).Wait(ctx, &ec2.DescribeVolumesInput{VolumeIds: []string{id}}, volumeWait); err != nil {
+	if err := ec2.NewVolumeAvailableWaiter(e.api, fastVolume).Wait(ctx, &ec2.DescribeVolumesInput{VolumeIds: []string{id}}, volumeWait); err != nil {
 		return provider.Volume{}, fmt.Errorf("aws-ec2: volume %s not available: %w", id, err)
 	}
 	return e.volume(ctx, id)
@@ -222,7 +222,7 @@ func (e *EC2) AttachVolume(ctx context.Context, id, machineID string) (provider.
 	if err := e.setTags(ctx, id, map[string]string{provider.LabelMachine: machineID}, provider.LabelExpiresAt); err != nil {
 		return provider.Volume{}, err
 	}
-	if err := ec2.NewVolumeInUseWaiter(e.api).Wait(ctx, &ec2.DescribeVolumesInput{VolumeIds: []string{id}}, volumeWait); err != nil {
+	if err := ec2.NewVolumeInUseWaiter(e.api, fastVolumeInUse).Wait(ctx, &ec2.DescribeVolumesInput{VolumeIds: []string{id}}, volumeWait); err != nil {
 		return provider.Volume{}, fmt.Errorf("aws-ec2: volume %s not attached: %w", id, err)
 	}
 	return e.volume(ctx, id)
@@ -238,7 +238,7 @@ func (e *EC2) DetachVolume(ctx context.Context, id string, expiresAt time.Time) 
 		if _, err := e.api.DetachVolume(ctx, &ec2.DetachVolumeInput{VolumeId: aws.String(id)}); err != nil && !apiCode(err, "IncorrectState") {
 			return fmt.Errorf("aws-ec2: detach %s: %w", id, err)
 		}
-		if err := ec2.NewVolumeAvailableWaiter(e.api).Wait(ctx, &ec2.DescribeVolumesInput{VolumeIds: []string{id}}, volumeWait); err != nil {
+		if err := ec2.NewVolumeAvailableWaiter(e.api, fastVolume).Wait(ctx, &ec2.DescribeVolumesInput{VolumeIds: []string{id}}, volumeWait); err != nil {
 			return fmt.Errorf("aws-ec2: volume %s not detached: %w", id, err)
 		}
 	}

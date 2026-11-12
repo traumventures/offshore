@@ -20,7 +20,7 @@ func TestUserDataHasNoSecrets(t *testing.T) {
 		Services:  []provider.Service{{Name: "db", Image: "postgres"}},
 	}
 	in := &infra{bucket: "bkt", repo: "123.dkr.ecr.eu-central-1.amazonaws.com/offshore"}
-	ud, err := userData(spec, "eu-central-1", "offshore", in, "bin/cs", in.repo+":1")
+	ud, err := userData(spec, "eu-central-1", "offshore", in, binarySource{Key: "bin/cs"}, in.repo+":1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,5 +46,20 @@ func TestUserDataHasNoSecrets(t *testing.T) {
 	}
 	if !strings.Contains(ud, "systemctl enable --now offshore-supervisor.service") {
 		t.Fatal("agent unit not started")
+	}
+	for _, want := range []string{"command -v docker >/dev/null || dnf install", "echo user_data $(date +%s%3N) >> /run/offshore/boot-phases",
+		"echo docker $(date +%s%3N)", "aws s3 cp", "wait $binpid"} {
+		if !strings.Contains(ud, want) {
+			t.Fatalf("user data lacks %q:\n%s", want, ud)
+		}
+	}
+	if hs.Params[paramBucket] != "bkt" {
+		t.Fatalf("spec lacks the bucket (binary updates): %+v", hs.Params)
+	}
+	// A presigned URL replaces the AWS CLI download.
+	ud, err = userData(spec, "eu-central-1", "offshore", in, binarySource{Key: "bin/cs", URL: "https://bkt.s3/bin/cs?X-Amz-Signature=x"}, in.repo+":1")
+	if err != nil || !strings.Contains(ud, "curl -fsS --retry 5 --retry-all-errors -o /opt/offshore/bin/offshore.tmp 'https://bkt.s3/bin/cs?X-Amz-Signature=x'") ||
+		strings.Contains(ud, "aws s3 cp") {
+		t.Fatalf("presigned download:\n%s", ud)
 	}
 }

@@ -487,10 +487,14 @@ func machineState(m orchestrator.Machine, now time.Time) string {
 	state := string(m.State)
 	if booting(m) {
 		// Up at the provider but the worker does not answer or is still
-		// setting up: no capacity yet.
-		since := m.CreatedAt
-		if n := len(m.Uptime); n > 0 && m.Uptime[n-1].End.IsZero() {
-			since = m.Uptime[n-1].Start
+		// setting up: no capacity. Booting until it was first ready in
+		// this uptime period, unreachable after it was.
+		if m.EverReady() {
+			return "unreachable " + short(now.Sub(m.LastReady).Round(time.Second))
+		}
+		since := m.UpSince()
+		if since.IsZero() {
+			since = m.CreatedAt
 		}
 		if since.IsZero() {
 			return "booting"

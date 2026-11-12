@@ -216,7 +216,8 @@ See the [AWS guide](guides/aws.md) for IAM, quotas and costs.
 | `disk_gb` | 100 | gp3 root volume |
 | `disk_iops`, `disk_throughput` | 6000, 500 (MiB/s) | provisioned gp3 performance of the root volume (3000..80000 IOPS, at most 500 per GiB; 125..2000 MiB/s, at most IOPS/4). gp3's baseline (3000/125) saturates with concurrent builds: cargo's writes, the slot hasher, page-ins and writeback share the volume (~$0.05/h per machine for the defaults) |
 | `docker_command` | `["docker"]` | builds and pushes environment images |
-| `ami`, `ami_arm64` | newest Amazon Linux 2023 | AMI override per architecture |
+| `ami`, `ami_arm64` | newest Amazon Linux 2023 | AMI override per architecture (the base of baked images) |
+| `bake` | `true` | boot machines from baked images: the base AMI with Docker installed and the environment image pulled, baked once per environment image, architecture and base AMI on a builder instance in the background (~5 min, the two newest per image kept); saves the Docker installation (~29 s) and the image pull (~10 s for 2.4 GB) of every create. Needs the `offshore-operator-bake` policy of `deploy/aws/iam.yaml`; without it the provider logs once and boots the stock AMI |
 | `binary`, `binary_amd64`, `binary_arm64` | this executable, `offshore-linux-<arch>` next to it | worker binaries uploaded for the machines |
 
 #### `oci`

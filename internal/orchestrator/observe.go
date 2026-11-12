@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/machine"
 	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/provider"
 	"github.com/traumventures/offshore/internal/scheduler"
@@ -135,17 +136,45 @@ func (o *Orchestrator) traced(ctx context.Context, a scheduler.Action, fn func(c
 }
 
 // readyEvent records that a machine's server became ready, with the time
-// since its creation or start was requested.
-func (o *Orchestrator) readyEvent(ctx context.Context, id string) {
+// since its creation or start was requested and the phases of its boot.
+func (o *Orchestrator) readyEvent(ctx context.Context, id string, boot []machine.BootPhase) {
 	o.mu.Lock()
 	ev := o.machineEventLocked(events.MachineReady, id)
 	if c, ok := o.creating[id]; ok {
-		ev.LatencyMs = o.now().Sub(c.at).Milliseconds()
+		now := o.now()
+		ev.LatencyMs = now.Sub(c.at).Milliseconds()
+		// Machine phases carry wall clock times; the pool clock may be
+		// offset (test clock).
+		requested := time.Now().Add(-now.Sub(c.at))
+		ev.Boot = bootPhases(c, requested, boot, ev.LatencyMs)
 	}
 	o.mu.Unlock()
 	ev.TraceID = tracing.TraceID(ctx)
 	o.obs.log.Append(ev)
 	trace.SpanFromContext(ctx).AddEvent("machine ready", trace.WithAttributes(attribute.Int64("offshore.ready_ms", ev.LatencyMs)))
+}
+
+// providedLocked records that the provider call creating or starting a
+// machine returned.
+func (o *Orchestrator) providedLocked(id string) {
+	if c, ok := o.creating[id]; ok {
+		c.provided = o.now()
+		o.creating[id] = c
+	}
+}
+
+// bootPhases is the phase breakdown of a create or start requested at
+// requested (wall clock) and observed ready after readyMs: the provider
+// call, the machine's phases of this boot and the observation.
+func bootPhases(c creation, requested time.Time, boot []machine.BootPhase, readyMs int64) []events.BootPhase {
+	var out []events.BootPhase
+	if !c.provided.IsZero() {
+		out = append(out, events.BootPhase{Phase: "provider", Ms: c.provided.Sub(c.at).Milliseconds()})
+	}
+	for _, p := range boot {
+		out = append(out, events.BootPhase{Phase: p.Name, Ms: p.At - requested.UnixMilli(), Bytes: p.Bytes})
+	}
+	return append(out, events.BootPhase{Phase: "observed", Ms: readyMs})
 }
 
 // markEventsLocked records drain decisions (no provider call).

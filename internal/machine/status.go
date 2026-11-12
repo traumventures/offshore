@@ -23,6 +23,11 @@ func WriteHostStatus(path string, st HostStatus) error {
 	if err != nil {
 		return err
 	}
+	return writeAtomic(path, b)
+}
+
+// writeAtomic replaces path with b (mode 0644) through a rename.
+func writeAtomic(path string, b []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".status-*")
 	if err != nil {
 		return err

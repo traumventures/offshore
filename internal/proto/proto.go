@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/traumventures/offshore/internal/machine"
 	"io"
 	"sync"
 
@@ -370,6 +371,9 @@ type Status struct {
 	// Metrics is the server's metrics snapshot; the orchestrator republishes
 	// it with machine labels (no extra port or scope on the machine).
 	Metrics []metrics.Family `json:"metrics,omitempty"`
+	// Boot is the phase record of the machine's current boot (host clock;
+	// nil: not recorded, e.g. local-docker machines).
+	Boot []machine.BootPhase `json:"boot,omitempty"`
 }
 
 // DiskStatus is a machine's disk usage in bytes.

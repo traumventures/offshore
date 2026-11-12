@@ -177,8 +177,25 @@ type Event struct {
 	// and free labels; see internal/labels). Set on task events.
 	Labels map[string]string `json:"labels,omitempty"`
 
+	// Boot is the phase breakdown of a machine's create or start
+	// (MachineReady).
+	Boot []BootPhase `json:"boot,omitempty"`
+
 	// TraceID correlates the event with a distributed trace.
 	TraceID string `json:"trace_id,omitempty"`
+}
+
+// BootPhase is one step of a machine's create or start, reached Ms
+// milliseconds after it was requested: "provider" (the provider call
+// returned: instance running), the machine's own phases (kernel,
+// user_data, docker, binary, supervisor, docker_ready, cache,
+// registry_login, image, secrets, containers, worker, listening, ready;
+// host clock) and "observed" (the orchestrator saw it ready). Bytes is
+// a size of the step (the pulled image).
+type BootPhase struct {
+	Phase string `json:"phase"`
+	Ms    int64  `json:"ms"`
+	Bytes int64  `json:"bytes,omitempty"`
 }
 
 // WaitingInterval is how often a queued task emits task_waiting.

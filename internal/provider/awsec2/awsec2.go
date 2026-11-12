@@ -98,6 +98,9 @@ type EC2 struct {
 
 	builderOnce sync.Once
 	builder     *image.DockerBuilder
+	// bake bakes machine images with Docker and the environment image
+	// (bake.go; option bake = false: always the stock AMI).
+	bake *baker
 }
 
 var (
@@ -157,6 +160,8 @@ func open(opts map[string]any) (provider.Provider, error) {
 	e.cfg = cfg
 	e.ec2 = ec2.NewFromConfig(cfg)
 	e.api = e.ec2
+	bake, set := opts["bake"].(bool)
+	e.bake = newBaker(e.ec2, set && !bake)
 	e.ecr = ecr.NewFromConfig(cfg)
 	e.s3 = s3.NewFromConfig(cfg)
 	e.cf = cloudformation.NewFromConfig(cfg)
@@ -437,6 +442,23 @@ func (e *EC2) ensureBinary(ctx context.Context, bucket, arch string) (string, er
 	return key, nil
 }
 
+// binaryURLTTL is how long the boot script's binary URL stays valid.
+const binaryURLTTL = 6 * time.Hour
+
+// binarySource returns where the boot script fetches the server binary:
+// a presigned URL (fetched with curl, no AWS CLI start), else the key.
+func (e *EC2) binarySource(ctx context.Context, bucket, key string) binarySource {
+	src := binarySource{Key: key}
+	req, err := s3.NewPresignClient(e.s3).PresignGetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)},
+		s3.WithPresignExpires(binaryURLTTL))
+	if err != nil {
+		slog.Warn("aws-ec2: presign the server binary, falling back to the AWS CLI", "err", err)
+		return src
+	}
+	src.URL = req.URL
+	return src
+}
+
 // binaryKey is the content addressed S3 key of a server binary.
 func binaryKey(arch string, data []byte) string {
 	sum := sha256.Sum256(data)
@@ -472,7 +494,15 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 	if err != nil {
 		return provider.Machine{}, err
 	}
-	ud, err := userData(spec, e.region, e.stack, in, key, machineImage(in.repo, spec))
+	img := machineImage(in.repo, spec)
+	subnet, err := e.placement(ctx, spec)
+	if err != nil {
+		return provider.Machine{}, err
+	}
+	base := ami
+	ami, baked := e.bake.machineAMI(ctx, bakeJob{base: ami, image: img, arch: arch, region: e.region,
+		registry: in.repo[:strings.Index(in.repo, "/")], profile: in.profile, sg: in.sg, subnet: subnet, env: spec.EnvHash})
+	ud, err := userData(spec, e.region, e.stack, in, e.binarySource(ctx, in.bucket, key), img)
 	if err != nil {
 		return provider.Machine{}, err
 	}
@@ -493,6 +523,10 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 		{Key: aws.String(provider.LabelFinger), Value: aws.String(spec.Finger)},
 		{Key: aws.String(provider.LabelSize), Value: aws.String(spec.Size)},
 		{Key: aws.String(provider.LabelArch), Value: aws.String(arch)},
+		{Key: aws.String(provider.LabelBinary), Value: aws.String(key)},
+	}
+	if baked {
+		tags = append(tags, ec2types.Tag{Key: aws.String(tagBaked), Value: aws.String(ami)})
 	}
 	if p := provider.PriceLabel(spec.PricePerHour); p != "" {
 		tags = append(tags, ec2types.Tag{Key: aws.String(provider.LabelPrice), Value: aws.String(p)})
@@ -526,10 +560,6 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 			{ResourceType: ec2types.ResourceTypeNetworkInterface, Tags: tags},
 		},
 	}
-	subnet, err := e.placement(ctx, spec)
-	if err != nil {
-		return provider.Machine{}, err
-	}
 	if subnet != "" {
 		input.NetworkInterfaces[0].SubnetId = aws.String(subnet)
 	}
@@ -539,6 +569,13 @@ func (e *EC2) Create(ctx context.Context, spec provider.MachineSpec) (provider.M
 		return provider.Machine{}, err
 	}
 	out, instanceType, failed, err := launch(ctx, e.ec2.RunInstances, input, spec)
+	if err != nil && baked && denied(err) {
+		// Baked images need RunInstances from own images too.
+		e.bake.deny(err)
+		input.ImageId, baked = aws.String(base), false
+		input.TagSpecifications = untagBaked(input.TagSpecifications)
+		out, instanceType, failed, err = launch(ctx, e.ec2.RunInstances, input, spec)
+	}
 	if err != nil {
 		e.DeleteSecrets(context.Background(), spec.ID)
 		return provider.Machine{}, err
@@ -594,8 +631,30 @@ func (e *EC2) DeleteSecrets(ctx context.Context, id string) error {
 	return nil
 }
 
+// The SDK's EC2 waiters poll every 15 s at first; instances run (and
+// volumes attach) within seconds, and the machine boots meanwhile, so a
+// late poll is pure latency (on volume attach and on start, which return
+// only then). They poll every second, backing off to 5 s.
+const (
+	waitMinDelay = time.Second
+	waitMaxDelay = 5 * time.Second
+)
+
+func fastRunning(o *ec2.InstanceRunningWaiterOptions) {
+	o.MinDelay, o.MaxDelay = waitMinDelay, waitMaxDelay
+}
+func fastStopped(o *ec2.InstanceStoppedWaiterOptions) {
+	o.MinDelay, o.MaxDelay = waitMinDelay, waitMaxDelay
+}
+func fastVolume(o *ec2.VolumeAvailableWaiterOptions) {
+	o.MinDelay, o.MaxDelay = waitMinDelay, waitMaxDelay
+}
+func fastVolumeInUse(o *ec2.VolumeInUseWaiterOptions) {
+	o.MinDelay, o.MaxDelay = waitMinDelay, waitMaxDelay
+}
+
 func (e *EC2) waitRunning(ctx context.Context, instanceID string) error {
-	w := ec2.NewInstanceRunningWaiter(e.ec2)
+	w := ec2.NewInstanceRunningWaiter(e.ec2, fastRunning)
 	return w.Wait(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{instanceID}}, 10*time.Minute)
 }
 
@@ -686,12 +745,13 @@ func (e *EC2) Start(ctx context.Context, id string) (provider.Machine, error) {
 		return provider.Machine{}, err
 	}
 	// A machine that is still stopping cannot be started yet.
-	if err := ec2.NewInstanceStoppedWaiter(e.ec2).Wait(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{iid}}, 5*time.Minute); err != nil {
+	if err := ec2.NewInstanceStoppedWaiter(e.ec2, fastStopped).Wait(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{iid}}, 5*time.Minute); err != nil {
 		m, _ := e.byMachine(ctx, id)
 		if m.State != provider.Running && m.State != provider.Starting {
 			return provider.Machine{}, err
 		}
 	}
+	e.refreshBinary(ctx, id)
 	if _, err := e.ec2.StartInstances(ctx, &ec2.StartInstancesInput{InstanceIds: []string{iid}}); err != nil {
 		return provider.Machine{}, fmt.Errorf("aws-ec2: start %s: %w", id, err)
 	}
@@ -699,6 +759,42 @@ func (e *EC2) Start(ctx context.Context, id string) (provider.Machine, error) {
 		return provider.Machine{}, err
 	}
 	return e.byMachine(ctx, id)
+}
+
+// refreshBinary makes a machine created with another server binary
+// install the current one when it boots (binaryParameter, read by the
+// supervisor). Failures are logged: the machine starts with its binary.
+func (e *EC2) refreshBinary(ctx context.Context, id string) {
+	m, err := e.byMachine(ctx, id)
+	if err != nil {
+		return
+	}
+	have := m.Labels[provider.LabelBinary]
+	if have == "" {
+		return // created before machines recorded their binary
+	}
+	in, err := e.ensureInfra(ctx)
+	if err != nil {
+		slog.Warn("aws-ec2: server binary of a started machine", "machine", id, "err", err)
+		return
+	}
+	key, err := e.ensureBinary(ctx, in.bucket, archOf(m.Labels[provider.LabelArch]))
+	if err != nil || key == have {
+		if err != nil {
+			slog.Warn("aws-ec2: server binary of a started machine", "machine", id, "err", err)
+		}
+		return
+	}
+	if _, err := e.ssm.PutParameter(ctx, &ssm.PutParameterInput{Name: aws.String(binaryParameter(e.stack, id)), Type: ssmtypes.ParameterTypeString,
+		Value: aws.String(key), Overwrite: aws.Bool(true)}); err != nil {
+		slog.Warn("aws-ec2: server binary of a started machine", "machine", id, "err", err)
+		return
+	}
+	if _, err := e.ec2.CreateTags(ctx, &ec2.CreateTagsInput{Resources: []string{m.Labels["instance-id"]},
+		Tags: []ec2types.Tag{{Key: aws.String(provider.LabelBinary), Value: aws.String(key)}}}); err != nil {
+		slog.Warn("aws-ec2: retag started machine", "machine", id, "err", err)
+	}
+	slog.Info("aws-ec2: started machine installs the current server binary", "machine", id, "from", have, "to", key)
 }
 
 // Stop stops the instance; its disk (and with it the caches) is kept.
@@ -720,7 +816,13 @@ func (e *EC2) Destroy(ctx context.Context, id string) error {
 	if err := e.terminate(ctx, is); err != nil {
 		return err
 	}
-	// Normally the supervisor has deleted it already.
+	// Normally the supervisor has deleted them already.
+	if _, err := e.ssm.DeleteParameter(ctx, &ssm.DeleteParameterInput{Name: aws.String(binaryParameter(e.stack, id))}); err != nil {
+		var nf *ssmtypes.ParameterNotFound
+		if !errors.As(err, &nf) {
+			slog.Warn("aws-ec2: delete binary parameter", "machine", id, "err", err)
+		}
+	}
 	return e.DeleteSecrets(ctx, id)
 }
 

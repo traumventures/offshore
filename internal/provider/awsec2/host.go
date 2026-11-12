@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
@@ -26,10 +27,18 @@ const (
 	paramRegion   = "region"
 	paramSecret   = "secret_parameter" // SSM SecureString with the secret server environment
 	paramRegistry = "registry"         // ECR registry of the environment image
+	paramBucket   = "bucket"           // artifact bucket (server binaries)
 )
 
 func init() {
 	supervisor.RegisterPlatform("aws-ec2", openHost)
+}
+
+// binaryParameter is the SSM parameter naming the server binary (S3 key)
+// a started machine installs before it starts its containers: set by
+// Start when the machine was created with another binary.
+func binaryParameter(stack, machineID string) string {
+	return secretParameter(stack, machineID) + "/binary"
 }
 
 // secretParameter is the SSM parameter holding a machine's secret
@@ -47,6 +56,7 @@ type host struct {
 	ssm  *ssm.Client
 	ec2  *ec2.Client
 	ecr  *ecr.Client
+	s3   *s3.Client
 	imds *imds.Client
 }
 
@@ -60,7 +70,7 @@ func openHost(ctx context.Context, spec supervisor.Spec) (supervisor.Platform, e
 		return nil, err
 	}
 	return &host{spec: spec, cfg: cfg, ssm: ssm.NewFromConfig(cfg), ec2: ec2.NewFromConfig(cfg),
-		ecr: ecr.NewFromConfig(cfg), imds: imds.NewFromConfig(cfg)}, nil
+		ecr: ecr.NewFromConfig(cfg), s3: s3.NewFromConfig(cfg), imds: imds.NewFromConfig(cfg)}, nil
 }
 
 func (h *host) FetchSecrets(ctx context.Context) (map[string]string, error) {
@@ -74,6 +84,40 @@ func (h *host) FetchSecrets(ctx context.Context) (map[string]string, error) {
 		return nil, fmt.Errorf("aws-ec2 host: secret parameter: %w", err)
 	}
 	return m, nil
+}
+
+var _ supervisor.BinaryUpdater = (*host)(nil)
+
+// UpdateBinary implements supervisor.BinaryUpdater: it installs the
+// binary named by the machine's binary parameter (Start sets it when the
+// control plane's binary changed since the machine was created).
+func (h *host) UpdateBinary(ctx context.Context, path string) (bool, error) {
+	bucket := h.spec.Params[paramBucket]
+	if bucket == "" {
+		return false, nil // a machine of an older control plane
+	}
+	name := strings.TrimSuffix(h.spec.Params[paramSecret], "/") + "/binary"
+	out, err := h.ssm.GetParameter(ctx, &ssm.GetParameterInput{Name: aws.String(name)})
+	var nf *ssmtypes.ParameterNotFound
+	if errors.As(err, &nf) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("aws-ec2 host: read binary parameter: %w", err)
+	}
+	key := aws.ToString(out.Parameter.Value)
+	obj, err := h.s3.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if err != nil {
+		return false, fmt.Errorf("aws-ec2 host: download server binary %s: %w", key, err)
+	}
+	defer obj.Body.Close()
+	if err := supervisor.ReplaceBinary(path, obj.Body); err != nil {
+		return false, err
+	}
+	if _, err := h.ssm.DeleteParameter(ctx, &ssm.DeleteParameterInput{Name: aws.String(name)}); err != nil && !errors.As(err, &nf) {
+		return true, fmt.Errorf("aws-ec2 host: delete binary parameter: %w", err)
+	}
+	return true, nil
 }
 
 func (h *host) DeleteSecrets(ctx context.Context) error {

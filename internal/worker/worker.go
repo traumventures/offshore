@@ -231,6 +231,11 @@ type Worker struct {
 	lastProbe        time.Time // last status request (an orchestrator probe)
 	ready            bool
 	draining         bool
+	// boot is the machine's boot phase record: the supervisor's (read
+	// from the status directory until it is complete) and the worker's.
+	boot       []machine.BootPhase
+	bootHost   bool // the supervisor's record is complete
+	bootWorker []machine.BootPhase
 	// drainReason describes a drain the server started on its own
 	// (expiry).
 	drainReason string
@@ -292,6 +297,7 @@ func New(cfg Config, log *slog.Logger) (*Worker, error) {
 		mounts: map[string]*anyfs.WritableFS{}, srcFiles: srcFiles, sources: map[string]*quic.Conn{},
 		sourceWake: make(chan struct{}),
 		sessions:   map[string]*session{}, idleSince: cfg.now(), lastProbe: cfg.now(), cacheMedium: cacheMed,
+		bootWorker: []machine.BootPhase{{Name: machine.PhaseWorker, At: processStart().UnixMilli()}},
 	}
 	if s.cfs, err = newWorkerCacheFS(cfg, log, anyfs.RecordTransfers(&s.tiers, nil)); err != nil {
 		return nil, err
@@ -323,12 +329,14 @@ func (s *Worker) Run(parent context.Context) error {
 	}
 	defer ln.Close()
 	s.log.Info("listening", "addr", s.cfg.Listen, "machine", s.cfg.MachineID)
+	s.bootPhase(machine.PhaseListening)
 	go func() {
 		if err := s.provision(ctx); err != nil {
 			s.log.Error("machine provisioning failed", "err", err)
 			cancel()
 			return
 		}
+		s.bootPhase(machine.PhaseReady)
 		s.mu.Lock()
 		s.ready = true
 		s.mu.Unlock()
@@ -632,7 +640,32 @@ func (s *Worker) statusOnly() proto.Status {
 		st.VM = s.cfs.vm()
 	}
 	st.Tiers = s.tiers.Snapshot()
+	st.Boot = s.bootLocked()
 	return st
+}
+
+// bootPhase records a phase of the worker's start.
+func (s *Worker) bootPhase(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bootWorker = append(s.bootWorker, machine.BootPhase{Name: name, At: machine.NowMs()})
+}
+
+// bootLocked returns the boot phase record: the supervisor's phases
+// (published next to the host status file) followed by the worker's.
+func (s *Worker) bootLocked() []machine.BootPhase {
+	if !s.bootHost && s.cfg.HostStatus != "" {
+		if ph, err := machine.ReadBoot(filepath.Join(filepath.Dir(s.cfg.HostStatus), filepath.Base(machine.BootFile))); err == nil {
+			s.boot = ph
+			for _, p := range ph {
+				if p.Name == machine.PhaseContainers {
+					s.bootHost = true
+				}
+			}
+		}
+	}
+	out := make([]machine.BootPhase, 0, len(s.boot)+len(s.bootWorker))
+	return append(append(out, s.boot...), s.bootWorker...)
 }
 
 // serveSync receives a root's manifest stream from the client daemon.
@@ -920,3 +953,8 @@ func newWorkerCacheFS(cfg Config, log *slog.Logger, obs anyfs.Observer) (*cacheF
 	return newCacheFS(filepath.Join(cfg.CacheDir, "anyfs"), cacheFSOptions{Mode: cfg.SlotMode, Capacity: budget / 2,
 		Idle: cfg.DirtyExpire, DirtyBytes: int64(float64(budget) * ratio), Log: log, Now: cfg.now, Observer: obs})
 }
+
+// started approximates the process start (package initialization).
+var started = time.Now()
+
+func processStart() time.Time { return started }

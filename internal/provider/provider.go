@@ -30,6 +30,9 @@ const (
 	// LabelPrice is the hourly price of the machine's size at creation
 	// (cost stays right when the size leaves the pool configuration).
 	LabelPrice = "offshore.price-per-hour"
+	// LabelBinary identifies the server binary a machine was created with
+	// (BinaryVersioner).
+	LabelBinary = "offshore.binary"
 )
 
 // PriceLabel formats a price for LabelPrice ("" for unknown).

@@ -20,11 +20,14 @@ first use.
 
 ## 1. Operator identity (`deploy/aws/iam.yaml`)
 
-Do not use root or admin credentials. The template creates two managed
+Do not use root or admin credentials. The template creates three managed
 policies, `offshore-operator` (machines, images, artifacts, machine
-secrets, disk growth, worker store grants) and `offshore-operator-stack`
-(resources of the shared stack), and a role `offshore-operator` with both
-attached.
+secrets, disk growth, worker store grants), `offshore-operator-stack`
+(resources of the shared stack) and `offshore-operator-bake` (baked machine
+images: CreateImage of a builder, RunInstances from the account's own
+images of the project, pruning old images and snapshots; option `bake`),
+and a role `offshore-operator` with all three attached (and the user, with
+`CreateUser=true`).
 
 ```sh
 aws cloudformation deploy --stack-name offshore-iam \

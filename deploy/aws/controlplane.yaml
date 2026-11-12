@@ -242,7 +242,28 @@ Resources:
                 Resource: "*"
                 Condition:
                   StringEquals:
-                    ec2:CreateAction: [RunInstances, CreateSecurityGroup, CreateVolume]
+                    ec2:CreateAction: [RunInstances, CreateSecurityGroup, CreateVolume, CreateImage]
+              - Sid: BakeMachineImages
+                # baked machine images (awsec2 bake.go): builder -> image,
+                # old images and their snapshots pruned
+                Effect: Allow
+                Action: [ec2:CreateImage, ec2:DeregisterImage, ec2:DeleteSnapshot]
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}::image/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}::snapshot/*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/project: offshore
+              - Sid: BakeTaggedImages
+                Effect: Allow
+                Action: ec2:CreateImage
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}::image/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}::snapshot/*"
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/project: offshore
               - Sid: ManageMachines
                 Effect: Allow
                 Action: [ec2:StartInstances, ec2:StopInstances, ec2:TerminateInstances]

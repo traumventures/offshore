@@ -434,13 +434,72 @@ Resources:
             Resource: !Sub "arn:${AWS::Partition}:resource-groups:*:${AWS::AccountId}:group/${StackPrefix}*"
 
 
+  BakePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Baked machine images (internal/provider/awsec2/bake.go): a builder
+          instance with Docker and the environment image becomes an image the
+          machines boot, skipping the Docker installation and the image pull.
+          A separate policy keeps OperatorPolicy below the managed policy size
+          limit. Without it the provider boots the stock AMI.
+    Properties:
+      ManagedPolicyName: offshore-operator-bake
+      Description: Baked machine images of the offshore aws-ec2 provider
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RunFromOwnImages
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource: !Sub "arn:${AWS::Partition}:ec2:*::image/*"
+            Condition:
+              StringEquals:
+                ec2:Owner: !Ref AWS::AccountId
+                aws:ResourceTag/project: offshore
+          - Sid: ImageOfBuilder
+            Effect: Allow
+            Action: ec2:CreateImage
+            Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*"
+            Condition:
+              StringEquals:
+                aws:ResourceTag/project: offshore
+          - Sid: TaggedImages
+            Effect: Allow
+            Action: ec2:CreateImage
+            Resource:
+              - !Sub "arn:${AWS::Partition}:ec2:*::image/*"
+              - !Sub "arn:${AWS::Partition}:ec2:*::snapshot/*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/project: offshore
+          - Sid: TagImagesOnCreate
+            Effect: Allow
+            Action: ec2:CreateTags
+            Resource:
+              - !Sub "arn:${AWS::Partition}:ec2:*::image/*"
+              - !Sub "arn:${AWS::Partition}:ec2:*::snapshot/*"
+            Condition:
+              StringEquals:
+                ec2:CreateAction: CreateImage
+          - Sid: PruneImages
+            Effect: Allow
+            Action: [ec2:DeregisterImage, ec2:DeleteSnapshot]
+            Resource:
+              - !Sub "arn:${AWS::Partition}:ec2:*::image/*"
+              - !Sub "arn:${AWS::Partition}:ec2:*::snapshot/*"
+            Condition:
+              StringEquals:
+                aws:ResourceTag/project: offshore
+
   OperatorRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: offshore-operator
       Description: Assumed by the offshore control plane or daemon to manage build machines
       MaxSessionDuration: 43200
-      ManagedPolicyArns: [!Ref OperatorPolicy, !Ref StackPolicy]
+      ManagedPolicyArns: [!Ref OperatorPolicy, !Ref StackPolicy, !Ref BakePolicy]
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -460,7 +519,7 @@ Resources:
     Condition: WithUser
     Properties:
       UserName: offshore-operator
-      ManagedPolicyArns: [!Ref OperatorPolicy, !Ref StackPolicy]
+      ManagedPolicyArns: [!Ref OperatorPolicy, !Ref StackPolicy, !Ref BakePolicy]
       Tags:
         - { Key: project, Value: offshore }
 
@@ -471,6 +530,8 @@ Outputs:
       Name: offshore-operator-policy
   StackPolicyArn:
     Value: !Ref StackPolicy
+  BakePolicyArn:
+    Value: !Ref BakePolicy
     Export:
       Name: offshore-operator-stack-policy
   RoleArn:

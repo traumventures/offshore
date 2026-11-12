@@ -191,6 +191,9 @@ type Machine struct {
 	Provider string // name of the provider instance
 	Status   *proto.Status
 	StatusAt time.Time
+	// LastReady is when the worker last reported ready (pool clock; zero:
+	// never seen ready).
+	LastReady time.Time
 	// sampledAt is when the last machine_sample event was written.
 	sampledAt time.Time
 	// thrashing is the last reported thrash state (events on change).
@@ -211,7 +214,8 @@ type Machine struct {
 	// listed for cost accounting only.
 	Removed  time.Time
 	observed bool
-	price    float64 // hourly price recorded at creation or in its events (0: unknown)
+	seenAt   time.Time // first observed by this orchestrator (pool clock)
+	price    float64   // hourly price recorded at creation or in its events (0: unknown)
 	pending  map[string]pendingLease
 	// stopping: a stop or destroy passed its last check and is under way;
 	// the machine is not undrained any more.
@@ -223,6 +227,63 @@ type Machine struct {
 	// the listing) or last changed locally. Older listings are stale: a
 	// slow readiness poll must not overwrite a newer state or expiry.
 	listed time.Time
+}
+
+// UnhealthyAfter is how long a machine running at its provider may go
+// without a ready worker (booting, or after it was ready) before it is
+// replaced.
+const UnhealthyAfter = 10 * time.Minute
+
+// UpSince is the start of the machine's current uptime period (zero:
+// not up).
+func (m *Machine) UpSince() time.Time {
+	if n := len(m.Uptime); n > 0 && m.Uptime[n-1].End.IsZero() {
+		return m.Uptime[n-1].Start
+	}
+	return time.Time{}
+}
+
+// EverReady reports whether the worker was ready in the current uptime
+// period (a machine without one: ever).
+func (m *Machine) EverReady() bool {
+	return !m.LastReady.IsZero() && !m.LastReady.Before(m.UpSince())
+}
+
+// NotReadyFor is how long a machine running at its provider has been
+// without a ready worker: since its uptime period began when it was not
+// ready in it yet (booting), else since it last reported ready (0: ready,
+// or not running).
+func (m *Machine) NotReadyFor(now time.Time) time.Duration {
+	if m.State != provider.Running || !m.Removed.IsZero() || m.Status != nil && m.Status.Ready {
+		return 0
+	}
+	since := m.UpSince()
+	if m.EverReady() {
+		since = m.LastReady
+	}
+	if since.IsZero() {
+		return 0
+	}
+	// Not before this orchestrator saw it (after a restart nothing is
+	// known about earlier readiness).
+	if since.Before(m.seenAt) {
+		since = m.seenAt
+	}
+	return now.Sub(since)
+}
+
+// readyLocked records a ready status of m.
+func (o *Orchestrator) readyLocked(m *Machine) {
+	if m.Status != nil && m.Status.Ready {
+		m.LastReady = o.now()
+	}
+}
+
+// replaceable reports whether the orchestrator may replace an unhealthy
+// machine (a static host is the user's, not the pool's).
+func (o *Orchestrator) replaceable(m *Machine) bool {
+	p, ok := o.provs[m.Provider]
+	return ok && p.Name() != "static"
 }
 
 // update applies a provider listing started at listedAt unless the machine
@@ -257,6 +318,9 @@ func (m *Machine) observe(now time.Time) {
 		m.Uptime = append(m.Uptime, Span{Start: start})
 	case !up && open:
 		m.Uptime[len(m.Uptime)-1].End = now
+	}
+	if !m.observed {
+		m.seenAt = now
 	}
 	m.observed = true
 	for len(m.Uptime) > 0 && !m.Uptime[0].End.IsZero() && now.Sub(m.Uptime[0].End) > historyKeep {
@@ -298,8 +362,10 @@ type creation struct {
 	env     string
 	size    scheduler.Size
 	at      time.Time
-	started bool   // start of a stopped machine (else create)
-	volume  string // detached cache volume the create attaches (policy choice)
+	started bool // start of a stopped machine (else create)
+	// provided: the provider's create or start call returned.
+	provided time.Time
+	volume   string // detached cache volume the create attaches (policy choice)
 }
 
 // Orchestrator manages one owner's pool.
@@ -649,6 +715,7 @@ func (o *Orchestrator) Refresh(ctx context.Context) error {
 		}
 		m.Status = r.status
 		m.StatusAt = time.Now()
+		o.readyLocked(m)
 		o.statusHeadsLocked(r.id, m)
 		o.statusVMLocked(r.id, m)
 		o.statusVolumeLocked(m)
@@ -779,6 +846,7 @@ func (o *Orchestrator) Sample(ctx context.Context) {
 		}
 		st := r.st
 		m.Status, m.StatusAt = &st, time.Now()
+		o.readyLocked(m)
 		o.statusHeadsLocked(r.id, m)
 		o.statusVMLocked(r.id, m)
 		o.statusVolumeLocked(m)
@@ -1534,6 +1602,7 @@ func (o *Orchestrator) CreateMachine(ctx context.Context, id, envHash, image str
 	}
 	m.Fingerprint = ident.Fingerprint
 	o.mu.Lock()
+	o.providedLocked(id)
 	nm := &Machine{Machine: m, Provider: size.Provider, pending: map[string]pendingLease{}, listed: time.Now(), price: size.PricePerHour}
 	nm.observe(o.now())
 	o.machines[id] = nm
@@ -1568,6 +1637,7 @@ func (o *Orchestrator) startMachine(ctx context.Context, id string) {
 		return
 	}
 	o.mu.Lock()
+	o.providedLocked(id)
 	if mm, ok := o.machines[id]; ok {
 		mm.update(m, startedAt)
 		mm.observe(o.now())
@@ -1604,8 +1674,18 @@ func nextPoll(cur, max time.Duration) time.Duration {
 	return min(cur+cur/2, max)
 }
 
-// waitReady polls the machine until its server reports ready, at the
-// provider's poll interval.
+// Readiness polling of a booting machine: once the provider reports its
+// address, the server is probed every bootProbeEvery (each probe bounded
+// by bootProbeTimeout: a server not yet listening does not answer) and the
+// provider listed only every bootListEvery (to notice a machine that
+// stopped); until then the provider is listed at its poll interval.
+const (
+	bootProbeEvery   = time.Second
+	bootProbeTimeout = 3 * time.Second
+	bootListEvery    = 10 * time.Second
+)
+
+// waitReady polls the machine until its server reports ready.
 func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 	deadline := time.Now().Add(10 * time.Minute)
 	p, perr := o.provOf(id)
@@ -1613,53 +1693,65 @@ func (o *Orchestrator) waitReady(ctx context.Context, id string) error {
 		return perr
 	}
 	interval, maxInterval := pollIntervals(p.Caps())
+	var addr, finger string
+	var listed time.Time
 	for time.Now().Before(deadline) {
-		listedAt := time.Now()
-		list, err := p.List(ctx, o.cfg.Owner)
-		o.provErr(o.provName(p), "list", err)
-		if err == nil {
-			for _, pm := range list {
-				if pm.ID != id {
-					continue
-				}
-				if pm.State == provider.Stopped || pm.State == provider.Failed {
-					return fmt.Errorf("machine %s stopped during startup", id)
-				}
-				pm.Fingerprint = o.fingerprint(pm)
-				o.mu.Lock()
-				fresh := false
-				if m := o.machines[id]; m != nil {
-					fresh = m.update(pm, listedAt)
-					m.observe(o.now())
-				}
-				o.mu.Unlock()
-				if !fresh || pm.Addr == "" {
-					continue
-				}
-				pctx, cancel := context.WithTimeout(ctx, ProbeTimeout)
-				st, err := o.ProbeFunc(pctx, pm.Addr, pm.Fingerprint, o.probeToken(id))
-				cancel()
-				if err == nil {
-					o.mu.Lock()
-					if m := o.machines[id]; m != nil {
-						m.Status, m.StatusAt = &st, time.Now()
+		if addr == "" || time.Since(listed) >= bootListEvery {
+			listedAt := time.Now()
+			list, err := p.List(ctx, o.cfg.Owner)
+			o.provErr(o.provName(p), "list", err)
+			if err == nil {
+				listed = listedAt
+				for _, pm := range list {
+					if pm.ID != id {
+						continue
 					}
-					o.notify()
+					if pm.State == provider.Stopped || pm.State == provider.Failed {
+						return fmt.Errorf("machine %s stopped during startup", id)
+					}
+					pm.Fingerprint = o.fingerprint(pm)
+					o.mu.Lock()
+					fresh := false
+					if m := o.machines[id]; m != nil {
+						fresh = m.update(pm, listedAt)
+						m.observe(o.now())
+					}
 					o.mu.Unlock()
-					if st.Ready {
-						o.readyEvent(ctx, id)
-						o.log.Info("machine ready", "id", id, "addr", pm.Addr)
-						return nil
+					if fresh {
+						addr, finger = pm.Addr, pm.Fingerprint
 					}
 				}
 			}
 		}
+		if addr != "" {
+			pctx, cancel := context.WithTimeout(ctx, bootProbeTimeout)
+			st, err := o.ProbeFunc(pctx, addr, finger, o.probeToken(id))
+			cancel()
+			if err == nil {
+				o.mu.Lock()
+				if m := o.machines[id]; m != nil {
+					m.Status, m.StatusAt = &st, time.Now()
+					o.readyLocked(m)
+				}
+				o.notify()
+				o.mu.Unlock()
+				if st.Ready {
+					o.readyEvent(ctx, id, st.Boot)
+					o.log.Info("machine ready", "id", id, "addr", addr)
+					return nil
+				}
+			}
+		}
+		wait := bootProbeEvery
+		if addr == "" {
+			wait = interval
+			interval = nextPoll(interval, maxInterval)
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(interval):
+		case <-time.After(wait):
 		}
-		interval = nextPoll(interval, maxInterval)
 	}
 	return fmt.Errorf("machine %s not ready after 10m", id)
 }
@@ -1763,6 +1855,15 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	now := o.now()
 	o.mu.Lock()
 	var invariant []scheduler.Action
+	// A machine counts as unhealthy only while another machine of its
+	// provider is ready: when none answers, the network of the control
+	// plane is the likelier cause.
+	reachable := map[string]bool{}
+	for _, m := range o.machines {
+		if m.State == provider.Running && m.Status != nil && m.Status.Ready {
+			reachable[m.Provider] = true
+		}
+	}
 	for _, m := range o.machines {
 		expired := !m.ExpiresAt.IsZero() && !now.Before(m.ExpiresAt)
 		busy := m.Status != nil && len(m.Status.Sessions) > 0
@@ -1778,6 +1879,13 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 			m.Draining = true
 		case expired && m.State != provider.Starting:
 			invariant = append(invariant, scheduler.Action{Kind: scheduler.Destroy, Machine: m.ID, Reason: "expired"})
+		case !inFlight && len(m.pending) == 0 && o.replaceable(m) && m.NotReadyFor(now) > UnhealthyAfter && reachable[m.Provider]:
+			// Up at the provider, but its worker has not reported ready
+			// for long (a boot that never finished, a dead or wedged
+			// worker): no capacity, only cost. Replace it.
+			reason := "unhealthy: worker not ready for " + m.NotReadyFor(now).Round(time.Second).String()
+			o.log.Warn("replacing unhealthy machine", "id", m.ID, "reason", reason)
+			invariant = append(invariant, scheduler.Action{Kind: scheduler.Destroy, Machine: m.ID, Reason: reason})
 		}
 	}
 	for env, used := range o.recentEnvs {

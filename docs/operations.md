@@ -272,7 +272,13 @@ every resize; tiny terminals keep one row each, tables scroll):
   Default order: busy, idle (shortest idle first), booting, draining,
   stopped, failed, then age. A machine that is up at the provider but whose
   worker does not answer yet or is still setting up shows `booting` with
-  the time since its start and no capacity bars; a worker that stopped
+  the time since its start and no capacity bars, one whose worker was
+  ready in this uptime period but answers no more `unreachable` with the
+  time since it was last ready. A machine running at its provider without
+  a ready worker for 10 minutes (booting or unreachable) is destroyed with
+  reason `unhealthy: ...` and replaced on demand, as long as another
+  machine of its provider is ready (otherwise the control plane's network
+  is the likelier cause; static hosts are never destroyed); a worker that stopped
   admitting sessions shows `draining (disk full)`;
 * Storage: the disk of each running machine broken down by the worker
   (`Status.Disk.Items`): a header row (used/total, budget), then build
@@ -318,6 +324,16 @@ an analysis event log (`events-YYYY-MM-DD.jsonl` in its state directory,
 including the cache file system's `page_fault` (Pages), `page_in` and
 `reclaim` (Bytes) per machine and sample interval, `writeback` per
 committed slot head and `thrash` when a machine starts thrashing.
+`machine_ready` carries the boot breakdown `boot` (milliseconds since the
+create or start was requested): `provider` (the provider call returned),
+the machine's phases of this boot (`kernel`, `user_data`, `binary`,
+`docker`, `supervisor`, `docker_ready`, `cache`, `registry_login`, `image`
+with the pulled size in `bytes`, `secrets`, `containers`, `worker`,
+`listening`, `ready`; host clock, recorded by the boot script, supervisor
+and worker) and `observed`. A started machine has no boot script phases
+and no pull. Example (aws-ec2 x8 create, stock AMI, Nov 2026): provider
+17.5 s, kernel 6.5, user_data 11.0, docker 40.6 (dnf install 29 s), image
+50.8 (2.4 GB, 9.7 s), containers 54.7, ready 54.8, observed 55.2.
 `offshore report [--since 7d] [--by agent,worktree] [--json]` shows cost per day, repository
 and size, per agent/worktree/branch/repo/user, utilisation and overprovisioning, queue wait p50/p95, warm vs.
 cold caches and estimator accuracy, machine samples per size and, from

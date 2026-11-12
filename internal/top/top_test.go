@@ -348,6 +348,13 @@ func TestBootingMachine(t *testing.T) {
 	if !strings.Contains(Frame(s, NewHistory(0), v, nil, PlainStyles()), "booting") {
 		t.Fatal("not ready worker must show booting")
 	}
+	// Ready earlier in this uptime period, no status now: unreachable
+	// since then, not booting since the start.
+	s.Machines[1].Status, s.Machines[1].LastReady = nil, now.Add(-40*time.Second)
+	if f := Frame(s, NewHistory(0), v, nil, PlainStyles()); !strings.Contains(f, "unreachable 40s") || strings.Contains(f, "booting") {
+		t.Fatalf("lost worker must show unreachable:\n%s", f)
+	}
+	s.Machines[1].LastReady = time.Time{}
 	s.Machines[1].Status = &proto.Status{Ready: true, Draining: true, DrainReason: "disk full"}
 	if !strings.Contains(Frame(s, NewHistory(0), v, nil, PlainStyles()), "draining (disk full)") {
 		t.Fatal("drain reason")
