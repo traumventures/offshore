@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/traumventures/offshore/internal/events"
+	"github.com/traumventures/offshore/internal/learning"
 	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/scheduler"
 )
@@ -71,7 +72,7 @@ type Options struct {
 	// systems: a thrashing build refaults Refetch times its working set
 	// beyond the local capacity (0 = scheduler.DefaultRefetch). The policy
 	// does not know it: it sees the factor calibrated from the simulated
-	// thrash/page_in/reclaim events (events.Refetch).
+	// thrash/page_in/reclaim events (learning.Refetch).
 	Refetch float64
 	// Bandwidth is the restore throughput from a provider's own store,
 	// CrossBandwidth from another provider's (bytes/s; defaults like the
@@ -322,7 +323,7 @@ type sim struct {
 	est      map[string]estimate // per repository until the next observation
 	snaps    map[string][]scheduler.Snapshot
 	calm     map[string]time.Time // env -> last consolidation drain or stop
-	cal      *events.Refetch      // refetch calibration from cache events
+	cal      *learning.Refetch    // refetch calibration from cache events
 	vols     []*volume            // detached cache volumes
 	volIDs   int
 	now      time.Time
@@ -341,7 +342,7 @@ type sim struct {
 func Run(trace Trace, o Options) Report {
 	o.defaults()
 	s := &sim{o: o, now: trace.Start, recent: map[string]time.Time{}, fc: scheduler.NewForecast(),
-		snaps: map[string][]scheduler.Snapshot{}, calm: map[string]time.Time{}, cal: events.NewRefetch()}
+		snaps: map[string][]scheduler.Snapshot{}, calm: map[string]time.Time{}, cal: learning.NewRefetch()}
 	s.start = trace.Start
 	s.r = Report{Name: o.Name, Jobs: len(trace.Jobs), Actions: map[string]int{}, Created: map[string]int{}, HoursBy: map[string]float64{}}
 	jobs := make([]*job, len(trace.Jobs))

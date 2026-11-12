@@ -96,6 +96,12 @@ type Scheduler struct {
 	// CostOptimization is the cost model's knob, 0..1 (default 0.5): 1
 	// optimises purely for cost, 0 purely for time to result.
 	CostOptimization *float64 `toml:"cost_optimization"`
+	// QueueConfidence is how sure the scheduler must be that waiting for
+	// capacity (a busy or starting machine) finishes a request sooner than
+	// running it now (a cold or restored slot elsewhere, a start or create)
+	// before it queues it: P(finish_wait < finish_now) >= queue_confidence
+	// (default 0.8, 0 < x <= 1).
+	QueueConfidence *float64 `toml:"queue_confidence"`
 	// Egress are transfer prices and bandwidths from object stores to
 	// providers ([[scheduler.egress]] from = "aws", to = "oci",
 	// price_per_gb = 0.09, bandwidth = "50M" bytes/s).
@@ -529,6 +535,9 @@ func (u *PoolConfig) Validate() error {
 	}
 	if f.CostOptimization != nil && (*f.CostOptimization < 0 || *f.CostOptimization > 1) {
 		errs = append(errs, "scheduler.cost_optimization: must be between 0 (fastest result) and 1 (cheapest)")
+	}
+	if f.QueueConfidence != nil && (*f.QueueConfidence <= 0 || *f.QueueConfidence > 1) {
+		errs = append(errs, "scheduler.queue_confidence: must be above 0 and at most 1")
 	}
 	for i, e := range f.Egress {
 		if e.PricePerGB < 0 {

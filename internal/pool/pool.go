@@ -128,6 +128,9 @@ func Config(u *config.PoolConfig) orchestrator.Config {
 	if f.CostOptimization != nil {
 		c.Policy.CostOptimization = *f.CostOptimization
 	}
+	if f.QueueConfidence != nil {
+		c.Policy.QueueConfidence = *f.QueueConfidence
+	}
 	c.Policy.QueueTimeout = queue
 	c.Policy.DiskPricePerGBHour = f.DiskPricePerGBMonth / 730
 	for _, e := range f.Egress {

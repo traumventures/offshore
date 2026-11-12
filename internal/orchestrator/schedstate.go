@@ -183,7 +183,7 @@ func (o *Orchestrator) providerFailedLocked(prov string, err error) bool {
 			o.log.Error("PROVIDER DISABLED: it gets no machines until its configuration changes or `offshore provider reset "+prov+"`",
 				"provider", prov, "class", class, "err", err)
 		}
-		o.obs.log.Append(events.Event{Type: events.ProviderDown, Provider: prov, Error: err.Error(), ErrorClass: string(class), Reason: "disabled"})
+		o.obs.emit(events.Event{Type: events.ProviderDown, Provider: prov, Error: err.Error(), ErrorClass: string(class), Reason: "disabled"})
 		return true
 	case class == provider.ClassQuota && o.providerCPULocked(prov) > 0:
 		// The account allows no more than the pool runs now: cap the
@@ -192,7 +192,7 @@ func (o *Orchestrator) providerFailedLocked(prov string, err error) bool {
 		h.capCPU, h.capUntil = o.providerCPULocked(prov), o.now().Add(limitCap)
 		o.health[prov] = h
 		o.log.Warn("provider at its account limit, capped at its current vCPUs", "provider", prov, "vcpus", h.capCPU, "until", h.capUntil, "err", err)
-		o.obs.log.Append(events.Event{Type: events.ProviderDown, Provider: prov, Error: err.Error(), ErrorClass: string(class), Reason: "capped", Seconds: limitCap.Seconds()})
+		o.obs.emit(events.Event{Type: events.ProviderDown, Provider: prov, Error: err.Error(), ErrorClass: string(class), Reason: "capped", Seconds: limitCap.Seconds()})
 		return true
 	case class.CoolsDown():
 		if h.cooldown <= 0 {
@@ -203,7 +203,7 @@ func (o *Orchestrator) providerFailedLocked(prov string, err error) bool {
 		h.down = o.now().Add(h.cooldown)
 		o.health[prov] = h
 		o.log.Warn("provider out of "+string(class)+", cooling down", "provider", prov, "until", h.down, "err", err)
-		o.obs.log.Append(events.Event{Type: events.ProviderDown, Provider: prov, Error: err.Error(), ErrorClass: string(class), Reason: "cooldown", Seconds: h.cooldown.Seconds()})
+		o.obs.emit(events.Event{Type: events.ProviderDown, Provider: prov, Error: err.Error(), ErrorClass: string(class), Reason: "cooldown", Seconds: h.cooldown.Seconds()})
 		return true
 	}
 	return false
@@ -365,7 +365,7 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 					r.At, r.Run, seen[se.Lease] = li.start.Add(li.expected), li.run, true
 					r.MemMean, r.MemSD = li.memMean, li.memSD
 				} else {
-					r.At = r.Start.Add(scheduler.DefaultRun)
+					r.At, r.Unknown = r.Start.Add(scheduler.DefaultRun), true
 				}
 				sm.Releases = append(sm.Releases, r)
 			}
@@ -499,5 +499,5 @@ func (o *Orchestrator) prepareSlot(ctx context.Context, machineID string, a sche
 		ev.Error = err.Error()
 		o.log.Warn("slot preparation failed, running cold", "machine", machineID, "action", a.Kind, "repo", a.Repo, "err", err)
 	}
-	o.obs.log.Append(ev)
+	o.obs.emit(ev)
 }

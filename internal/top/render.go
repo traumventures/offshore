@@ -598,6 +598,7 @@ type SRow struct {
 	Kind     string // "run", "queued", "done"
 	Row      Row
 	Finished *Finished
+	Queue    string // queued: the queue-confidence verdict ("wait: p=0.86")
 }
 
 // sessionRows lists running sessions (sorted), then queued requests, then
@@ -615,7 +616,7 @@ func sessionRows(s Snapshot, h *History, v View, rates map[string]float64) []SRo
 			wt = q.RepoID
 		}
 		out = append(out, SRow{Kind: "queued", Row: Row{Session: q.ID, Worktree: wt, Branch: q.Labels[labels.Branch], Client: labels.UserHost(q.Labels),
-			Command: keyCommand(q.Key), Labels: q.Labels, Elapsed: s.Time.Sub(q.Since), ResCPU: q.Need.CPU, ResMem: q.Need.Memory}})
+			Command: keyCommand(q.Key), Labels: q.Labels, Elapsed: s.Time.Sub(q.Since), ResCPU: q.Need.CPU, ResMem: q.Need.Memory}, Queue: q.Queue})
 	}
 	running := map[string]bool{}
 	for _, r := range rows {
@@ -658,6 +659,9 @@ func sessionCells(r SRow) []Cell {
 	switch r.Kind {
 	case "queued":
 		state = "queued"
+		if r.Queue != "" {
+			state += " (" + r.Queue + ")"
+		}
 	case "done":
 		state = fmt.Sprintf("exit %d", r.Finished.Exit)
 		if r.Finished.OOM {
