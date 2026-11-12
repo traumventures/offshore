@@ -398,6 +398,8 @@ const (
 	StorageSource       = "source"        // faulted-in source contents
 	StorageMachineCache = "machine-cache" // a machine scope cache ([cache.<name>] scope machine, deps)
 	StorageGlobal       = "global"        // a global result cache's local tier (sccache, ccache, go)
+	StorageDormant      = "dormant"       // the local tier of a repository without build slots (reclaimable)
+	StorageWriteback    = "writeback"     // blobs of written back files (reclaimable)
 	StorageOther        = "other"         // the rest of the file system (images, system)
 )
 

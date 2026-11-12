@@ -367,6 +367,9 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) []
 	}
 	// A disk resized recently cannot grow again (EBS: once per 6 h).
 	if !m.CanResize || f.Now.Before(m.ResizableAt) {
+		if c, ok := diskTight(out, rc, missing, m.Warm(t.RepoID)); ok {
+			finish(c, capacity)
+		}
 		return out
 	}
 	s, hasSize := sizeOf(f, m)
@@ -415,7 +418,33 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) []
 		}
 		finish(c, cap)
 	}
+	if c, ok := diskTight(out, rc, missing, m.Warm(t.RepoID)); ok {
+		finish(c, capacity)
+	}
 	return out
+}
+
+// diskTightPenalty is the time charged to a run on a machine whose disk
+// the model sees short by more than pruning or a resize can free.
+const diskTightPenalty = 5 * time.Minute
+
+// diskTight keeps the run on a warm slot possible when its growth does
+// not fit the disk and neither a prune nor a resize covers it (a cold run
+// or restore needs the whole slot and goes elsewhere or waits): the disk usage counts
+// data outside the slots (images, unaccounted files) that no prune
+// frees, and without any option the task waited for capacity until its
+// queue timeout while machines were started and idle-stopped around it
+// (production: every task of a repository timed out for an hour). The
+// worker protects the disk itself (budget prune, no admission at 97 %);
+// the penalty lets a machine with room win when there is one.
+func diskTight(out []runChoice, rc runChoice, missing int64, warm bool) (runChoice, bool) {
+	if len(out) > 0 || missing <= 0 || !warm || rc.slot.Kind != SlotNone {
+		return rc, false
+	}
+	rc.run += diskTightPenalty
+	rc.prep += diskTightPenalty
+	rc.reason += ", disk tight"
+	return rc, true
 }
 
 // diskPriceOf is the price per GB-hour of m's hot medium (the configured
