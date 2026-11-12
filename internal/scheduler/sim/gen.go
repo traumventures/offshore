@@ -37,6 +37,17 @@ var Profiles = map[string][]Repo{
 		{Name: "cli", Env: "rust", Rate: 3, Duration: 90, CPU: 2, Memory: 2 * gib, Peak: 0.5, Burst: 0.1},
 		{Name: "web", Env: "node", Rate: 6, Duration: 100, CPU: 2, Memory: 3 * gib, Peak: 0.7, Burst: 0.2},
 	},
+	// solo: one developer with one repository, a few builds an hour
+	// (the 0-1 machine regime).
+	"solo": {
+		{Name: "app", Env: "rust", Rate: 3, Duration: 150, CPU: 4, Memory: 6 * gib, Peak: 0.6, Burst: 0.3},
+	},
+	// sparse: one developer, two repositories of one environment, a
+	// build every hour or two.
+	"sparse": {
+		{Name: "app", Env: "rust", Rate: 0.6, Duration: 200, CPU: 4, Memory: 6 * gib, Peak: 0.6, Burst: 0.2},
+		{Name: "lib", Env: "rust", Rate: 0.3, Duration: 90, CPU: 2, Memory: 3 * gib, Peak: 0.5, Burst: 0.1},
+	},
 	// team: a larger team, three environments, one heavy job type.
 	"team": {
 		{Name: "api", Env: "rust", Rate: 10, Duration: 240, CPU: 4, Memory: 4 * gib, Peak: 0.6, Burst: 0.25},

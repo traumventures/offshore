@@ -88,6 +88,10 @@ type Options struct {
 	// Limits are hard limits of the provider accounts (quotas) the
 	// policy sees as Pool.ProviderLimit.
 	Limits map[string]scheduler.Limit
+	// DiskPricePerGBHour charges the disks (Size.Capacity.Disk) of
+	// machines without a cache volume while they exist, running or
+	// stopped (EBS root volumes); 0 = free.
+	DiskPricePerGBHour float64
 	// Debug, when set, is called for every completed job with its wait.
 	Debug func(j Job, wait time.Duration)
 }
@@ -231,6 +235,12 @@ type Report struct {
 	// build cold), at least 0. RegretP95 and RegretSum summarise it.
 	RegretP95 time.Duration `json:"regret_p95"`
 	RegretSum time.Duration `json:"regret_sum"`
+	// First counts jobs that arrived while no machine of their
+	// environment was running or starting; FirstWaitP50/P95 is their
+	// wait (time to first session in the 0-1 machine regime).
+	First        int           `json:"first"`
+	FirstWaitP50 time.Duration `json:"first_wait_p50"`
+	FirstWaitP95 time.Duration `json:"first_wait_p95"`
 }
 
 // LateMargin is the grace beyond the best provisioning latency before a
@@ -252,6 +262,9 @@ type job struct {
 	// alternative turnaround (Late, Regret); set on the first arrival.
 	bound, alt time.Duration
 	hasAlt     bool
+	// first: no machine of its environment was running or starting when
+	// it arrived (the 0-1 machine regime: time to first session).
+	first bool
 }
 
 type run struct {
@@ -359,7 +372,7 @@ func Run(trace Trace, o Options) Report {
 	end := trace.Start.Add(time.Duration(math.Max(trace.End, last+6*3600) * float64(time.Second)))
 	next := 0
 	tick := trace.Start
-	var waits, turns []time.Duration
+	var waits, turns, firsts []time.Duration
 	var regrets []time.Duration
 	var predSum, actSum time.Duration // ThrashBias
 	var slow float64
@@ -404,6 +417,9 @@ func Run(trace Trace, o Options) Report {
 				r.j.runFor = s.now.Sub(r.start)
 				s.r.Completed++
 				waits = append(waits, r.j.wait)
+				if r.j.first {
+					firsts = append(firsts, r.j.wait)
+				}
 				if s.o.Debug != nil {
 					s.o.Debug(r.j.Job, r.j.wait)
 				}
@@ -467,6 +483,9 @@ func Run(trace Trace, o Options) Report {
 			j := jobs[next]
 			next++
 			j.since = j.arrival
+			j.first = !slices.ContainsFunc(s.machines, func(m *machine) bool {
+				return m.env == j.Env && (m.state == scheduler.Running || m.state == scheduler.Starting)
+			})
 			s.recent[j.Env] = s.now
 			s.alternative(j)
 			s.enqueue(j)
@@ -488,6 +507,12 @@ func Run(trace Trace, o Options) Report {
 		sort.Slice(turns, func(i, j int) bool { return turns[i] < turns[j] })
 		s.r.TurnP50 = turns[(n-1)/2]
 		s.r.TurnP95 = turns[int(math.Ceil(0.95*float64(n)))-1]
+	}
+	if n := len(firsts); n > 0 {
+		sort.Slice(firsts, func(i, j int) bool { return firsts[i] < firsts[j] })
+		s.r.First = n
+		s.r.FirstWaitP50 = firsts[(n-1)/2]
+		s.r.FirstWaitP95 = firsts[int(math.Ceil(0.95*float64(n)))-1]
 	}
 	if n := len(regrets); n > 0 {
 		sort.Slice(regrets, func(i, j int) bool { return regrets[i] < regrets[j] })
@@ -640,6 +665,10 @@ func (s *sim) advance(d time.Duration) {
 	for _, m := range s.machines {
 		if m.volume != "" {
 			s.storage(m.size, m.disk, sec)
+		} else if s.o.DiskPricePerGBHour > 0 && m.size.Capacity.Disk > 0 {
+			c := float64(m.size.Capacity.Disk) / 1e9 * s.o.DiskPricePerGBHour * sec / 3600
+			s.r.VolumeCost += c
+			s.r.Cost += c
 		}
 	}
 	for _, v := range s.vols {

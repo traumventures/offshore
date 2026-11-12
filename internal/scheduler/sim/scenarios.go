@@ -147,6 +147,9 @@ type EvalPool struct {
 	History     bool // history estimator (else static)
 	// Limits are hard provider limits (Options.Limits).
 	Limits map[string]scheduler.Limit
+	// DiskPricePerGBHour charges machine disks while they exist
+	// (Options.DiskPricePerGBHour).
+	DiskPricePerGBHour float64
 }
 
 // Run simulates tr on the pool with policy variant and cost
@@ -165,7 +168,8 @@ func (p EvalPool) Spec(name string, tr Trace, variant string, r float64, down []
 		est = scheduler.NewHistory("")
 	}
 	return Spec{Trace: tr, Options: Options{Name: name, Policy: scheduler.Default{Cfg: cfg}, Sizes: p.Sizes, Estimator: est,
-		Boot: p.Boot, Start: p.Start, Down: down, Resize: resize, QueueTimeout: cfg.QueueTimeout, Limits: p.Limits}}
+		Boot: p.Boot, Start: p.Start, Down: down, Resize: resize, QueueTimeout: cfg.QueueTimeout, Limits: p.Limits,
+		DiskPricePerGBHour: p.DiskPricePerGBHour}}
 }
 
 // EvalPools are the pool configurations of the evaluation: the c7a sample
@@ -206,6 +210,7 @@ func EvalPools() []EvalPool {
 			{Provider: "oci", Name: "e5-8", Capacity: scheduler.Resources{CPU: 8, Memory: 30 * gib, Disk: disk}, PricePerHour: 0.19},
 			{Provider: "oci", Name: "e5-16", Capacity: scheduler.Resources{CPU: 16, Memory: 60 * gib, Disk: disk}, PricePerHour: 0.37},
 		}, Boot: map[string]time.Duration{"aws": 100 * time.Second, "oci": 330 * time.Second},
-			Start: map[string]time.Duration{"aws": 16 * time.Second, "oci": 60 * time.Second}, Cfg: prod, History: true},
+			Start: map[string]time.Duration{"aws": 16 * time.Second, "oci": 60 * time.Second}, Cfg: prod, History: true,
+			DiskPricePerGBHour: 0.08 / 730}, // gp3 root volumes, also while stopped
 	}
 }
