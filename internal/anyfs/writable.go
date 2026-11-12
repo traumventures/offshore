@@ -64,8 +64,9 @@ type WritableFS struct {
 
 	mu      sync.RWMutex // guards the tree of src together with the fields below
 	dirty   map[string]*dirtyNode
-	mounts  map[string]bool // mount points of other file systems, shown as empty dirs
-	written map[string]bool // paths written here (kept out of passthrough)
+	mounts  map[string]bool        // mount points of other file systems, shown as empty dirs
+	written map[string]bool        // paths written here (kept out of passthrough)
+	bases   map[string]*activeBase // presented source views by session (mtimebase.go)
 	version uint64
 	changed chan struct{} // closed and replaced on every Apply
 
@@ -215,6 +216,7 @@ func (w *WritableFS) WaitVersion(ctx context.Context, v uint64) error {
 func (w *WritableFS) Apply(layer []Node, full bool, version uint64) {
 	w.mu.Lock()
 	affected := w.src.Apply(layer, full)
+	w.markChangedLocked(affected, full)
 	for _, a := range affected {
 		if d, ok := w.dirty[a]; ok {
 			w.dropLocked(a, d)
@@ -320,7 +322,9 @@ func (w *WritableFS) statLocked(rel string) (view, bool) {
 		return view{Node: d.Node, upper: d.Upper, dirty: true}, true
 	}
 	if n, ok := w.src.Tree().Get(rel); ok {
-		return view{Node: *n}, true
+		v := view{Node: *n}
+		v.MtimeNs = w.mtimeLocked(n)
+		return v, true
 	}
 	if w.mounts[rel] {
 		return view{Node: Node{Path: rel, Kind: Dir, Mode: 0o755}}, true

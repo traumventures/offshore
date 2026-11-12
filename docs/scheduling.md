@@ -231,8 +231,10 @@ the composite profile (`scheduler.Size.Stack`, a `medium.Stack`; anyfs.Profile i
   from the session's own worktree. Cargo keeps registry dependencies
   fresh across worktree paths (stable `-C metadata`, `$CARGO_HOME` at the
   client path, moved build-script `OUT_DIR`s rewritten via `root-output`);
-  the workspace's own crates rebuild because a fresh checkout's sources
-  are newer than the seeded fingerprints, so the model charges a seeded
+  the workspace's own crates stay fresh where their sources match the
+  sibling's (the slot's source view presents the mtimes the outputs were
+  built against, [caches-and-storage.md](caches-and-storage.md#source-mtimes));
+  changed sources and slots without a view rebuild, so the model charges a seeded
   run `SeedRebuild` (0.3) of the cold-warm difference on top of the warm
   run. See [caches-and-storage.md](caches-and-storage.md#seeds-and-other-stores).
 - *thrashing*: when the working set exceeds the local capacity (the top

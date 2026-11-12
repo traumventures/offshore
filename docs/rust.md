@@ -63,6 +63,15 @@ flag is part of cargo's fingerprint: a local cargo without it (rust-analyzer,
 remote target directory. It uses more memory (peak RSS +5 %) and CPU per
 session; set `[resources] cpu` accordingly.
 
+`RUSTC_BOOTSTRAP=1` also unlocks cargo's own `-Z` flags on the stable
+cargo 1.98.1 (cargo then treats its channel as `dev`), e.g.
+`CARGO_UNSTABLE_CHECKSUM_FRESHNESS=true` (content instead of mtime
+freshness for path crates; verified on a 2-crate workspace: `touch`
+keeps both fresh, an edit and its revert each rebuild). offshore does not
+need it for moved build directories: the slot's source view presents the
+mtimes the outputs were built against
+([caches-and-storage.md](caches-and-storage.md#source-mtimes)).
+
 ## Linker
 
 `[environment] linker = "mold" | "lld" | "wild"`, see
