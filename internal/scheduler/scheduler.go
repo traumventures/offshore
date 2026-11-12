@@ -205,6 +205,9 @@ type Release struct {
 	// (mean and standard deviation; 0: unknown, the reservation is the
 	// mean): statistical admission packs on them (see Default.admits).
 	MemMean, MemSD int64
+	// Unknown: no lease estimate; At is a placeholder guess. The default
+	// policy does not count on such a session to end (queue confidence).
+	Unknown bool
 }
 
 // Expected returns when r is expected at now: sessions running longer than

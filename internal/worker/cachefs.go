@@ -204,6 +204,7 @@ func newCacheFS(dir string, opt cacheFSOptions) (*cacheFS, error) {
 		}
 	}
 	c.obs = obs
+	c.cleanTrash()
 	var err error
 	if c.files, err = anyfs.OpenFiles(filepath.Join(dir, "files"), obs); err != nil {
 		return nil, err

@@ -24,7 +24,7 @@ func (o *Orchestrator) saveSlotLogged(ctx context.Context, slots SlotOps, t Slot
 	ev.Repo, ev.Reason, ev.Seconds = repo, why, time.Since(start).Seconds()
 	if err != nil {
 		ev.Error = err.Error()
-		o.obs.log.Append(ev)
+		o.obs.emit(ev)
 		return scheduler.Snapshot{}, err
 	}
 	h.Provider = prov
@@ -33,7 +33,7 @@ func (o *Orchestrator) saveSlotLogged(ctx context.Context, slots SlotOps, t Slot
 	}
 	snap := SnapshotFromHead(h)
 	ev.Store, ev.Bytes, ev.Pages = snap.Store, snap.Bytes, h.Pages
-	o.obs.log.Append(ev)
+	o.obs.emit(ev)
 	o.mu.Lock()
 	o.addHeadLocked(snap, h.Chain, time.Unix(h.Created, 0))
 	o.mu.Unlock()

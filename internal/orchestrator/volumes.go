@@ -155,7 +155,7 @@ func (o *Orchestrator) acquireVolume(ctx context.Context, id string, size schedu
 	o.saveVolumesLocked()
 	o.mu.Unlock()
 	ev.Seconds = time.Since(start).Seconds()
-	o.obs.log.Append(ev)
+	o.obs.emit(ev)
 	return v, nil
 }
 
@@ -169,7 +169,7 @@ func (o *Orchestrator) attachedVolume(v *VolumeState, zone string) {
 	ev := o.volumeEventLocked(events.VolumeAttach, v)
 	o.saveVolumesLocked()
 	o.mu.Unlock()
-	o.obs.log.Append(ev)
+	o.obs.emit(ev)
 }
 
 // releaseVolume handles the volume of a machine that is gone (destroyed or
@@ -238,10 +238,10 @@ func (o *Orchestrator) releaseVolume(ctx context.Context, machineID string) {
 		if err := o.provErr(v.Provider, "detach_volume", pv.DetachVolume(ctx, v.ID, v.ExpiresAt)); err != nil {
 			ev.Error = err.Error()
 		}
-		o.obs.log.Append(ev)
+		o.obs.emit(ev)
 		return
 	}
-	o.obs.log.Append(ev)
+	o.obs.emit(ev)
 	o.deleteVolume(ctx, pv, v)
 }
 
@@ -259,7 +259,7 @@ func (o *Orchestrator) deleteVolume(ctx context.Context, pv provider.Volumes, v 
 	if err != nil {
 		o.provErr(v.Provider, "delete_volume", err)
 	}
-	o.obs.log.Append(ev)
+	o.obs.emit(ev)
 }
 
 // resizeVolume grows the volume of a machine to at least bytes: by the
@@ -294,7 +294,7 @@ func (o *Orchestrator) resizeVolume(ctx context.Context, machineID string, bytes
 	o.saveVolumesLocked()
 	o.mu.Unlock()
 	ev.Seconds = time.Since(start).Seconds()
-	o.obs.log.Append(ev)
+	o.obs.emit(ev)
 	return nil
 }
 

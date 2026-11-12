@@ -20,7 +20,7 @@ func profiled(warm, cold time.Duration) Task {
 func TestCostOptimizationTradesWaitAgainstCold(t *testing.T) {
 	warm := busy("warm", res(8, 16), res(8, 16), 1)
 	warm.Size, warm.WarmRepos = "m", []string{"r"}
-	warm.Releases = []Release{{At: now.Add(8 * time.Minute), Res: res(8, 16)}}
+	warm.Releases = []Release{{At: now.Add(8 * time.Minute), Start: now.Add(-2 * time.Minute), Run: 10 * time.Minute, Res: res(8, 16)}}
 	idle := machine("idle", res(8, 16), Resources{})
 	idle.Size, idle.IdleSince = "m", now.Add(-time.Minute)
 	f := Pool{Now: now, Sizes: priced, Machines: []Machine{warm, idle}}

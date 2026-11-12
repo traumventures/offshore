@@ -48,6 +48,10 @@ type Config struct {
 	// QueueTimeout is how long a task may wait (0 = unbounded); the model
 	// does not let tasks wait for capacity that frees later than that.
 	QueueTimeout time.Duration
+	// QueueConfidence: a request waits for capacity only when
+	// P(finish_wait < finish_now) is at least this (0 = 0.8; default
+	// variant only, see queueconf.go).
+	QueueConfidence float64
 	// Egress are transfer prices and bandwidths between stores and
 	// providers (snapshot restores); unlisted pairs use defaults.
 	Egress []Egress
