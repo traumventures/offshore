@@ -63,9 +63,11 @@ func (s *Worker) trimSlot(ctx context.Context, slot, repo string, garbageOnly bo
 	total, before, _ := s.diskStat()
 	budget := slotBudget(m, total)
 	if !garbageOnly && m.Bytes <= int64(float64(budget)*trimShare) {
+		s.log.Debug("build slot within its budget", "slot", slot, "bytes", m.Bytes, "budget", budget)
 		return 0
 	}
 	if !s.slots.acquire(slot) {
+		s.log.Debug("build slot busy, not trimmed", "slot", slot)
 		return 0 // a session took it
 	}
 	res := pruneSlot(slot, m, 0)
@@ -73,6 +75,7 @@ func (s *Worker) trimSlot(ctx context.Context, slot, repo string, garbageOnly bo
 		r := pruneSlot(slot, m, budget)
 		res.Freed, res.Units, res.Sessions, res.BytesLeft = res.Freed+r.Freed, res.Units+r.Units, res.Sessions+r.Sessions, r.BytesLeft
 	}
+	s.log.Debug("pruned build slot", "slot", slot, "freed", res.Freed, "units", res.Units, "left", res.BytesLeft, "garbage", m.Garbage)
 	if res.Freed > 0 {
 		plain := s.cfs == nil || s.cfs.mode == fsPlain
 		s.slots.update(slot, func(x *slotMeta) {

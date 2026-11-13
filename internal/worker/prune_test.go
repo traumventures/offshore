@@ -198,3 +198,23 @@ func TestBudgetBytes(t *testing.T) {
 		t.Errorf("50G budget = %d", got)
 	}
 }
+
+// Cargo units in both target layouts: deps/ and .fingerprint/ (and
+// build/<unit>-<hash>/) of older cargo, build/<package>/<hash>/ of the
+// build-dir layout v2.
+func TestCargoUnitRootLayouts(t *testing.T) {
+	for _, c := range []struct{ rel, key, root string }{
+		{"debug/deps/libserde-0123456789abcdef.rlib", "debug\x00serde-0123456789abcdef", "debug/deps/libserde-0123456789abcdef.rlib"},
+		{"debug/.fingerprint/serde-0123456789abcdef/lib-serde", "debug\x00serde-0123456789abcdef", "debug/.fingerprint/serde-0123456789abcdef"},
+		{"debug/build/serde-0123456789abcdef/out/x", "debug\x00serde-0123456789abcdef", "debug/build/serde-0123456789abcdef"},
+		{"debug/build/serde_json/4e072dbae59c1bf0/out/libserde_json-4e072dbae59c1bf0.rlib", "debug\x00serde_json-4e072dbae59c1bf0", "debug/build/serde_json/4e072dbae59c1bf0"},
+		{"x86_64-unknown-linux-gnu/release/build/serde_json/ac657e40b17285ad/run/stdout", "x86_64-unknown-linux-gnu/release\x00serde_json-ac657e40b17285ad", "x86_64-unknown-linux-gnu/release/build/serde_json/ac657e40b17285ad"},
+		{"debug/smoke", "", ""},
+		{"debug/incremental/smoke-0123456789abcdef/s-x/a.o", "", ""},
+	} {
+		key, root, ok := cargoUnitRoot(c.rel)
+		if ok != (c.key != "") || key != c.key || root != c.root {
+			t.Errorf("%s: %q %q %v, want %q %q", c.rel, key, root, ok, c.key, c.root)
+		}
+	}
+}

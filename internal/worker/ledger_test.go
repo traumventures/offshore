@@ -161,7 +161,7 @@ func TestSlotOpReclaim(t *testing.T) {
 // stale unit is deleted, the deletion committed and flushed, the slot
 // rebased and the pages no tree references dropped.
 func TestTrimFreesPhysicalBytes(t *testing.T) {
-	for _, mode := range []fsMode{fsPlain, fsUser} {
+	for _, mode := range []fsMode{fsPlain, fsUser, fsKernel} {
 		t.Run(mode.String(), func(t *testing.T) {
 			w, gr := fsWorker(t, mode, t.TempDir(), cacheFSOptions{})
 			w.noteGrant("repo", gr) // as a session does

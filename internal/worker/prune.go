@@ -193,6 +193,9 @@ func unitOf(rel string, caches []slotCache) (key, root string, runs int64, ok bo
 // unitHash matches the metadata hash suffix of a cargo unit name.
 var unitHash = regexp.MustCompile(`^(.+-[0-9a-f]{16})$`)
 
+// unitHashOnly is a unit directory of cargo's build-dir layout v2.
+var unitHashOnly = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
 // cargoUnit returns the compilation unit of a file below a cargo target
 // directory (rel is relative to the target directory): the profile
 // directory and the unit name ("serde-0123456789abcdef"), or ok=false for
@@ -224,6 +227,12 @@ func cargoUnitRoot(rel string) (key, root string, ok bool) {
 			}
 			return "", "", false
 		case ".fingerprint", "build":
+			// Cargo's build-dir layout v2 (cargo >= 1.100): every unit
+			// is a directory build/<package>/<hash>/ (fingerprint, out,
+			// run); deps/ and .fingerprint/ are gone.
+			if p == "build" && i+3 < len(parts) && unitHashOnly.MatchString(parts[i+2]) {
+				return profile + "\x00" + parts[i+1] + "-" + parts[i+2], strings.Join(parts[:i+3], "/"), true
+			}
 			if unitHash.MatchString(parts[i+1]) {
 				return profile + "\x00" + parts[i+1], strings.Join(parts[:i+2], "/"), true
 			}
