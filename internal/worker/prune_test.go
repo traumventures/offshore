@@ -14,7 +14,7 @@ func TestCargoUnit(t *testing.T) {
 	for rel, want := range map[string]string{
 		"debug/deps/libserde-0123456789abcdef.rlib":                            "debug\x00serde-0123456789abcdef",
 		"debug/deps/serde-0123456789abcdef.d":                                  "debug\x00serde-0123456789abcdef",
-		"debug/deps/app_api-0123456789abcdef":                                 "debug\x00app_api-0123456789abcdef",
+		"debug/deps/app_api-0123456789abcdef":                                  "debug\x00app_api-0123456789abcdef",
 		"debug/.fingerprint/serde-0123456789abcdef/lib":                        "debug\x00serde-0123456789abcdef",
 		"x86_64-unknown-linux-gnu/release/build/ring-0123456789abcdef/out/x.o": "x86_64-unknown-linux-gnu/release\x00ring-0123456789abcdef",
 	} {

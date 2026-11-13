@@ -1,7 +1,6 @@
 # Roadmap
 
-Status as of November 2026. The detailed implementation table (German) is
-section 0 of [PLAN.md](PLAN.md).
+Status as of November 2026.
 
 ## Done
 
@@ -50,13 +49,11 @@ section 0 of [PLAN.md](PLAN.md).
 ## Verified (November 11, 2026)
 
 Final integration run: `go test ./...` and the three e2e suites green
-(embedded 163, remote core 97, remote full 169 checks); the app workspace
-built through an embedded control plane on AWS (cold, no-op, incremental,
+(embedded 163, remote core 97, remote full 169 checks); a ~120-crate
+production workspace built through an embedded control plane on AWS (cold, no-op, incremental,
 `cargo nextest run` split, output overlay with 0 local recompiles out of
 634 units); machine loss on AWS with a lazy restore (13.7 GB head mounted
 in 0.55 s, 4.6 GB paged in, warm build 7.5 s); an OCI machine smoke test.
-Numbers and the bugs found on the way are in [PLAN.md](PLAN.md) section 0
-("Verifikation").
 
 ## Open
 
@@ -69,7 +66,7 @@ Numbers and the bugs found on the way are in [PLAN.md](PLAN.md) section 0
   78 s -> 1.8 s after the session, but the session itself took 228 s
   instead of 113 s (hashing, page files and writeback share the disk).
   Open: reflink page files (FICLONERANGE) instead of a second write,
-  default hash rate limit per medium, live numbers for app on gp3.
+  default hash rate limit per medium, live numbers for the production workspace on gp3.
 * **Restore on slow root disks**: on gp3 roots (125 MB/s) the cost model
   prefers cold builds for big slots; learned cold times underestimate cold
   builds on fresh machines (empty compiler cache in the store). Planned:

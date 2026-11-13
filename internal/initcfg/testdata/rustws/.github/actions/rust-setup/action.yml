@@ -1,0 +1,40 @@
+name: rust-setup
+description: >
+  System packages for the Rust jobs (Debian trixie container, see
+  .github/workflows/ci-rust.yml).
+
+inputs:
+  postgres:
+    description: also install PostgreSQL 17 (the test job's throwaway server)
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # libheif 1.23 with its libde265 plugin (tests decode HEIC; trixie-security
+    # ships it), libssl-dev for the TLS crates (system OpenSSL, not vendored),
+    # unzip for setup-bun, sudo and e2fsprogs for the sticky disk mount (it
+    # formats ext4).
+    - name: System packages
+      shell: bash
+      working-directory: /
+      env:
+        POSTGRES: ${{ inputs.postgres }}
+      run: |
+        set -euo pipefail
+        extra=()
+        [[ "$POSTGRES" == "true" ]] && extra+=(postgresql-17)
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends \
+          cmake clang pkg-config libssl-dev python3 unzip openssh-client sudo e2fsprogs \
+          poppler-utils xz-utils curl ca-certificates \
+          libheif-dev/trixie-security libheif-plugin-libde265/trixie-security \
+          "${extra[@]}" >/dev/null
+        pkg-config --atleast-version=1.23 libheif
+        test -e "$(pkg-config --variable=libdir libheif)/libheif/plugins/libheif-libde265.so"
+        # Typst for the report template tests (app-server typesetting),
+        # pinned like the app-server image.
+        curl -fsSL -o /tmp/typst.tar.xz https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-unknown-linux-musl.tar.xz
+        echo "a6d077d0a95eed5a2eba715b2dae06be954f624ccbf85758a03f389ded33118c  /tmp/typst.tar.xz" | sha256sum -c -
+        tar -xJf /tmp/typst.tar.xz -C /usr/local/bin --strip-components=1 typst-x86_64-unknown-linux-musl/typst
+        typst --version

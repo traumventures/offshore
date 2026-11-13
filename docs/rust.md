@@ -5,8 +5,8 @@ turns on itself in `.offshore.toml`. Nothing here is on by default.
 
 ## Measurements (2026-11-11)
 
-Workspace `app` (~120 crates, cargo-hakari, `debug =
-"line-tables-only"`, dependencies at `opt-level = 1`) on a dedicated AWS
+A ~120-crate production workspace (crates `app-api`, `app-server`, ...;
+cargo-hakari, `debug = "line-tables-only"`, dependencies at `opt-level = 1`) on a dedicated AWS
 c7a.2xlarge (8 vCPU, the `x8` size), cargo with all 8 jobs, no sccache
 unless noted. Cold: empty target directory, registry fetched. Warm:
 incremental rebuild after changing one `const` string in `app-api`
@@ -57,7 +57,7 @@ CARGO_BUILD_RUSTFLAGS = "-Zthreads=8"
 Caveats: `RUSTFLAGS` from the client (passed through `[tool.cargo] env`)
 replaces `CARGO_BUILD_RUSTFLAGS`, so add `-Zthreads` there when you set
 it. `RUSTC_BOOTSTRAP=1` lets build scripts that probe for nightly
-features find them (app builds, checks and lints cleanly with it). The
+features find them (the workspace builds, checks and lints cleanly with it). The
 flag is part of cargo's fingerprint: a local cargo without it (rust-analyzer,
 `[outputs] mode = "fuse"` freshness) rebuilds instead of reusing the
 remote target directory. It uses more memory (peak RSS +5 %) and CPU per

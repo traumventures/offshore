@@ -1,0 +1,68 @@
+# offshore: cargo for app/ runs on build machines in the cloud (control plane
+# on a shared build host). Environment as .github/actions/rust-setup (Debian
+# trixie, PostgreSQL 17, Typst).
+version = 1
+
+[resources]                    # per cargo session
+cpu = 5                        # with cpu_overcommit 2: three sessions per 8-core machine
+memory = "4G"                 # reservation, not a limit; measured peaks 0.1-6.8G
+
+[environment]
+image = "rust:1-slim-trixie"
+linker = "mold"
+
+[environment.toolchains]
+rust = "app/rust-toolchain.toml"
+
+[environment.packages]
+apt = ["cmake", "clang", "pkg-config", "libssl-dev", "python3", "poppler-utils",
+       "xz-utils", "curl", "ca-certificates", "git", "libheif-dev", "libheif-plugin-libde265"]
+
+[[environment.setup]]          # Typst for the report template tests, pinned as in CI
+run = """
+curl -fsSL -o /tmp/typst.tar.xz https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-unknown-linux-musl.tar.xz \
+ && echo "a6d077d0a95eed5a2eba715b2dae06be954f624ccbf85758a03f389ded33118c  /tmp/typst.tar.xz" | sha256sum -c - \
+ && tar -xJf /tmp/typst.tar.xz -C /usr/local/bin --strip-components=1 typst-x86_64-unknown-linux-musl/typst \
+ && rm /tmp/typst.tar.xz && typst --version
+"""
+
+[[environment.setup]]          # cargo nextest
+run = "curl -fsSL https://get.nexte.st/latest/linux | tar -xzf - -C /usr/local/bin && cargo nextest --version"
+
+[[environment.setup]]          # private git dependencies: GH_TOKEN (see [secrets]) at fetch time
+run = """
+printf '#!/bin/sh\\n[ "$1" = get ] && printf "username=x-access-token\\\\npassword=%%s\\\\n" "$GH_TOKEN"\\n' > /usr/local/bin/git-credential-ghtoken \
+ && chmod 755 /usr/local/bin/git-credential-ghtoken \
+ && git config --system credential.https://github.com.helper /usr/local/bin/git-credential-ghtoken
+"""
+
+[environment.env]
+CARGO_NET_GIT_FETCH_WITH_CLI = "true"
+APP_TEST_DATABASE_URL = "postgres://postgres:app@127.0.0.1:5432/postgres"
+
+[services.postgres]            # throwaway server for app-test-db, as in CI
+image = "postgres:17"
+env = { POSTGRES_PASSWORD = "app" }
+port = 5432
+command = ["postgres", "-c", "max_connections=1000", "-c", "fsync=off"]
+
+[secrets]                      # resolved locally per run, never stored remotely
+GH_TOKEN = "cmd:gh auth token"
+
+[cache.target]
+scope = "slot"                 # stays on the machine (24 h), never synchronised
+paths = ["app/target"]
+prune = "rust"
+
+[cache.deps]
+scope = "machine"
+paths = ["$CARGO_HOME/registry", "$CARGO_HOME/git"]
+
+[cache.sccache]
+scope = "global"
+tool = "sccache"
+
+[tool.cargo]
+local = ["fmt", "publish", "login", "install", "new", "init", "add", "remove", "update"]
+env = ["RUSTFLAGS", "CARGO_TERM_*", "RUST_LOG", "RUST_BACKTRACE", "APP_TEST_SKIP_DB",
+       "APP_TEST_KEEP_DB", "NEXTEST_*", "INSTA_*"]

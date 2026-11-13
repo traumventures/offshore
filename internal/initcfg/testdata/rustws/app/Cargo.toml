@@ -1,0 +1,8 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.dependencies]
+errkit = { git = "https://github.com/example-org/errkit", rev = "0123456789abcdef0123456789abcdef01234567" }
+clockwork = { git = "https://github.com/example-org/clockwork-rs", rev = "89abcdef0123456789abcdef0123456789abcdef", features = ["tz"] }
+serde = "1"

@@ -12,7 +12,7 @@ import (
 
 func TestInitCmd(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.CopyFS(dir, os.DirFS("../../internal/initcfg/testdata/app")); err != nil {
+	if err := os.CopyFS(dir, os.DirFS("../../internal/initcfg/testdata/rustws")); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer

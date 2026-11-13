@@ -4,8 +4,8 @@ Go module `github.com/traumventures/offshore` (Go 1.26), one static
 binary (`CGO_ENABLED=0`). Layout: `cmd/offshore` (CLI), `internal/*`
 (proxy, daemon, orchestrator, scheduler, worker, supervisor, providers,
 adapters, caches, snapshots, ...), `deploy/` (control plane image and AWS
-templates), `test/` (end-to-end tests and benchmarks). The design plan
-(German) is [PLAN.md](PLAN.md), open work is in [ROADMAP.md](ROADMAP.md).
+templates), `test/` (end-to-end tests and benchmarks). Open work is in
+[ROADMAP.md](ROADMAP.md).
 
 ## Build and unit tests
 

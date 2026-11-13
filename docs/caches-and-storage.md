@@ -754,7 +754,7 @@ deleted.
 
 Machines use gp3 root volumes (`disk_gb`, default 100) provisioned with
 6000 IOPS and 500 MiB/s (`disk_iops`, `disk_throughput`; the gp3 baseline
-of 3000 IOPS and 125 MB/s made concurrent app sessions I/O bound at
+of 3000 IOPS and 125 MB/s made concurrent sessions of a large workspace I/O bound at
 0.15-0.4 cores, Nov 2026); OCI boot volumes use `disk_vpus` (default 20).
 Pages of files hashed during a session (and large files read by a commit)
 are reflinks of the slot's files on xfs with reflink (`FICLONERANGE`,

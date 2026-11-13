@@ -42,14 +42,14 @@ func sorted(s []string) []string {
 	return s
 }
 
-// The fixture copies the relevant files of ~/app: the generated
-// configuration must match its hand-written .offshore.toml in every
-// detectable item.
-func TestAppMatchesReference(t *testing.T) {
-	d, got, out := generate(t, "app")
+// The fixture models a production Rust workspace (CI workflow, setup
+// action, toolchain file, git dependencies): the generated configuration
+// must match its hand-written .offshore.toml in every detectable item.
+func TestRustWorkspaceMatchesReference(t *testing.T) {
+	d, got, out := generate(t, "rustws")
 	ref := &config.Repo{}
 	refDir := t.TempDir()
-	data, _ := os.ReadFile("testdata/app/reference.offshore.toml")
+	data, _ := os.ReadFile("testdata/rustws/reference.offshore.toml")
 	os.WriteFile(filepath.Join(refDir, config.RepoFileName), data, 0o644)
 	ref, err := config.LoadRepo(refDir)
 	if err != nil {

@@ -1,0 +1,158 @@
+name: ci / rust
+
+# The Rust workspace in app/: format, clippy, generated-code drift,
+# dependency policy and the test suite with its database tests; lint and
+# test run in parallel. A pull request tests the crates it changes and their
+# dependents, main the whole workspace (scripts/ci/crates.ts).
+#
+# Both jobs keep their cargo target directory and registry on a sticky disk
+# with incremental compilation, so a run recompiles what changed instead of
+# the whole workspace. Only main commits the disks; a pull request mounts
+# main's last snapshot, builds on top and discards its writes.
+on:
+  workflow_call:
+    inputs:
+      key:
+        description: the green marker's cache key, saved on success
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Git dependencies are fetched by git.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # main commits the sticky disks, pull requests only read them.
+  STICKY_COMMIT: ${{ github.event_name == 'pull_request' && 'false' || 'on-change' }}
+
+jobs:
+  lint:
+    name: lint
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 30
+    # Debian trixie as in the server image (libheif 1.23). The image's
+    # rustup installs the app/rust-toolchain.toml pin.
+    container:
+      image: rust:1.98.1-trixie
+      options: --privileged -v /dev:/dev
+    defaults:
+      run:
+        working-directory: app
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: /sticky/target
+      CARGO_INCREMENTAL: "1"
+    steps:
+      - uses: useblacksmith/checkout@v1
+        with:
+          allow-inside-container: true
+      - uses: ./.github/actions/rust-setup
+      - uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-rust-lint-v1
+          path: /sticky
+          commit: ${{ env.STICKY_COMMIT }}
+      - name: Cargo home on the sticky disk
+        run: ../scripts/ci/sticky.sh
+      # Unchanged sources get back the mtime the cached build saw, so cargo
+      # rebuilds only crates whose inputs changed.
+      - uses: example-org/ci/actions/source-mtimes@v1
+        with:
+          manifest: /sticky/source-mtimes
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-hakari,wasm-bindgen@0.2.127
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Single-feature builds
+        run: |
+          cargo check --locked -p app-api --no-default-features --features public
+          cargo check --locked -p app-api --no-default-features --features admin
+      - name: Generated API drift
+        run: cargo run --locked -p app-api --bin app-api-generate -- check
+      - name: Deny banned dependencies
+        run: cargo deny check bans
+      - name: Workspace-hack up to date
+        run: cargo hakari generate --diff && cargo hakari verify
+
+  test:
+    name: test
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 60
+    outputs:
+      status: ${{ steps.suite.outputs.status }}
+    container:
+      image: rust:1.98.1-trixie
+      options: --privileged -v /dev:/dev
+    defaults:
+      run:
+        working-directory: app
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: /sticky/target
+      CARGO_INCREMENTAL: "1"
+    steps:
+      - uses: useblacksmith/checkout@v1
+        with:
+          allow-inside-container: true
+      - uses: ./.github/actions/rust-setup
+        with:
+          postgres: "true"
+      - uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-rust-test-v1
+          path: /sticky
+          commit: ${{ env.STICKY_COMMIT }}
+      # initdb refuses root, so the suite runs as the unprivileged `ci` user.
+      - name: Cargo home on the sticky disk
+        run: |
+          useradd --uid 1001 --create-home ci
+          ../scripts/ci/sticky.sh ci
+      - uses: example-org/ci/actions/source-mtimes@v1
+        with:
+          manifest: /sticky/source-mtimes
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      # The script starts a throwaway PostgreSQL 17 with max_connections=1000
+      # for the parallel per-test databases; nextest runs the tests.
+      - name: Test (database tests included)
+        id: suite
+        env:
+          APP_TEST_PROFILE: ci
+          APP_TEST_PG_BIN: /usr/lib/postgresql/17/bin
+        run: |
+          set -euo pipefail
+          chown -R ci "$GITHUB_WORKSPACE" "$CARGO_HOME" "$RUSTUP_HOME" "$HOME"
+          status=0
+          setpriv --reuid=ci --regid=ci --init-groups ../scripts/test.sh || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+  verdict:
+    name: verdict
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          LINT: ${{ needs.lint.result }}
+          TEST: ${{ needs.test.result }}
+          SUITE: ${{ needs.test.outputs.status }}
+        run: |
+          [ "$LINT" = success ] && [ "$TEST" = success ] && [ "$SUITE" = 0 ]
+      - run: echo "${{ github.sha }}" > .ci-pass
+      - uses: actions/cache/save@v6
+        with:
+          path: .ci-pass
+          key: ${{ inputs.key }}

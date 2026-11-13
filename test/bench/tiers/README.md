@@ -16,7 +16,7 @@ container), `check.sh` (correctness checks), `run.sh` (host wrapper),
 - Toolchain: `rust:1-slim-bookworm` = rustc 1.99.1 for all layouts, sccache off,
   `CARGO_INCREMENTAL=1`, `-j 8`, `nice -n 10`.
 - Workload: cargo-nextest @2cf55ec, `cargo build -p cargo-nextest` (348 units,
-  ~590 crates in lock, debug target 3.2 GB / 5.8k files). The app workspace
+  ~590 crates in lock, debug target 3.2 GB / 5.8k files). The ~120-crate production workspace
   did not fit the ~15 GB free disk.
 - Steps: clean; no-op; 3x (edit leaf `cargo-nextest/src/main.rs`, edit core
   `nextest-metadata/src/lib.rs`, 4 units); no-op. Restore layouts start from

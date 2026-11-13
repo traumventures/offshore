@@ -89,8 +89,8 @@ func TestLearnedPeakFromPackageSubset(t *testing.T) {
 	h := NewHistory("")
 	h.Observe("bb83/cargo/clippy?p=app-api,app-sales", Usage{PeakMemory: 14 * gib})
 	h.Observe("bb83/cargo/clippy?p=app-api,app-other", Usage{PeakMemory: 20 * gib}) // not a subset
-	h.Observe("bb83/cargo/clippy?workspace", Usage{PeakMemory: 25 * gib})             // a superset
-	h.Observe("bb83/cargo/build?p=app-api", Usage{PeakMemory: 22 * gib})             // another command
+	h.Observe("bb83/cargo/clippy?workspace", Usage{PeakMemory: 25 * gib})           // a superset
+	h.Observe("bb83/cargo/build?p=app-api", Usage{PeakMemory: 22 * gib})            // another command
 	key := "bb83/cargo/clippy?p=app-api,app-comms,app-sales,app-store"
 	e := h.Explain(key, res(3, 3))
 	if e.LearnedPeak != 14*gib {

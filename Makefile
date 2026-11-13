@@ -2,7 +2,7 @@ GO ?= go
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test e2e vet clean image image-push
+.PHONY: build test e2e vet clean image image-push check-files
 
 # The binary is mounted into machines, so it must be static. Machines of
 # the other architecture (aws-ec2 sizes with arch = "arm64" or "amd64") run
@@ -45,3 +45,9 @@ e2e: build
 
 clean:
 	rm -rf bin
+
+# Tracked files must not be compiled binaries or larger than 5 MB.
+check-files:
+	@bad=$$(git ls-files -z | xargs -0 -r file --mime-type | grep -E ': +application/(x-executable|x-pie-executable|x-sharedlib|x-mach-binary|x-dosexec|x-object|x-archive)$$'); \
+	big=$$(git ls-files -z | xargs -0 -r du -k --apparent-size | awk '$$1 > 5120'); \
+	if [ -n "$$bad$$big" ]; then echo "binaries or large files tracked:"; echo "$$bad"; echo "$$big"; exit 1; fi

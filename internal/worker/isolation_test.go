@@ -69,14 +69,14 @@ func TestWorktreeProjectionsAreIsolated(t *testing.T) {
 	member := "[package]\nname = \"app-store\"\n"
 	trees := map[string]worktree{
 		filepath.Join(base, "wt-agent"): {
-			"app/Cargo.toml":                            "[workspace]\nmembers = [\"crates/*/*\"]\n",
-			"app/rust-toolchain.toml":                   "[toolchain]\nchannel = \"1.99.1\"\n",
+			"app/Cargo.toml":                           "[workspace]\nmembers = [\"crates/*/*\"]\n",
+			"app/rust-toolchain.toml":                  "[toolchain]\nchannel = \"1.99.1\"\n",
 			"app/crates/adapters/app-agent/Cargo.toml": "[package]\nname = \"app-agent\"\n",
 			"app/crates/domain/app-store/Cargo.toml":   member,
 		},
 		filepath.Join(base, "wt-pr539"): {
-			"app/Cargo.toml":                          "[workspace]\nmembers = [\"crates/*/*\"]\n",
-			"app/rust-toolchain.toml":                 "[toolchain]\nchannel = \"1.98.1\"\n",
+			"app/Cargo.toml":                         "[workspace]\nmembers = [\"crates/*/*\"]\n",
+			"app/rust-toolchain.toml":                "[toolchain]\nchannel = \"1.98.1\"\n",
 			"app/crates/domain/app-store/Cargo.toml": member,
 		},
 	}

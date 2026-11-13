@@ -27,12 +27,12 @@ func fakeSnapshot(cpuSec float64, at time.Time) Snapshot {
 		Status: &proto.Status{Ready: true, CPU: 32, Memory: 64 * gib, UsedCPU: 12,
 			Measured: scheduler.Resources{CPU: 10, Memory: 20 * gib}, Pressure: scheduler.Pressure{CPU: 0.12},
 			Sessions: []proto.Session{
-				{ID: "s1", Repo: "/home/u/app", Argv: []string{"cargo", "build"}, Started: at.Add(-90 * time.Second).Unix(),
+				{ID: "s1", Repo: "/home/u/repo", Argv: []string{"cargo", "build"}, Started: at.Add(-90 * time.Second).Unix(),
 					CPU: 8, Memory: 16 * gib, UsedMemory: 12 * gib, CPUSeconds: cpuSec,
 					Labels: map[string]string{"agent": "codex", "user": "u", "host": "box", "worktree": "/home/u/cs-wt/feature-a", "branch": "wp/a"}},
-				{ID: "s2", Repo: "/home/u/app", Argv: []string{"cargo", "test"}, Started: at.Add(-10 * time.Minute).Unix(),
+				{ID: "s2", Repo: "/home/u/repo", Argv: []string{"cargo", "test"}, Started: at.Add(-10 * time.Minute).Unix(),
 					CPU: 4, Memory: 8 * gib, UsedMemory: 2 * gib, CPUSeconds: 60,
-					Labels: map[string]string{"agent": "claude-code", "worktree": "/home/u/app", "branch": "main"}},
+					Labels: map[string]string{"agent": "claude-code", "worktree": "/home/u/repo", "branch": "main"}},
 			}},
 	}
 	stopped := orchestrator.Machine{Machine: provider.Machine{ID: "m-aws-2", State: provider.Stopped, CPU: 16, Memory: 32 * gib}, Provider: "aws"}

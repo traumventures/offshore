@@ -5,3 +5,11 @@ testdata/rapid/
 __pycache__/
 *.pyc
 /offshore
+# build outputs and stray binaries (CI rejects tracked binaries, make check-files)
+/cloudsourced
+/offshore-*
+*.exe
+*.so
+*.dylib
+*.o
+*.a

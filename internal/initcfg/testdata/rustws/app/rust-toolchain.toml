@@ -1,0 +1,7 @@
+# Pinned so local and CI clippy agree under -D warnings. Bump deliberately.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]
+# The parser crate also builds as WebAssembly (app-parser-wasm).
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
