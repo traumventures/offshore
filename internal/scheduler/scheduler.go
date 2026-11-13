@@ -168,6 +168,9 @@ type Machine struct {
 	// the size of each repository's build slot (repo id -> bytes).
 	DiskTotal int64
 	DiskUsed  int64
+	// Disk is the worker's physical ledger of the disk (nil: not
+	// reported); with it DiskUsed and DiskBudget are not used.
+	Disk *DiskLedger
 	// DiskBudget is the bytes the worker lets the disk fill before pruning
 	// (0 = unknown: diskFull of DiskTotal).
 	DiskBudget int64

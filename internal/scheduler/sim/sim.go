@@ -92,6 +92,8 @@ type Options struct {
 	// machines without a cache volume while they exist, running or
 	// stopped (EBS root volumes); 0 = free.
 	DiskPricePerGBHour float64
+	// Storage is the simulated worker's disk management (disk.go).
+	Storage StorageModel
 	// Debug, when set, is called for every completed job with its wait.
 	Debug func(j Job, wait time.Duration)
 }
@@ -244,6 +246,24 @@ type Report struct {
 	First        int           `json:"first"`
 	FirstWaitP50 time.Duration `json:"first_wait_p50"`
 	FirstWaitP95 time.Duration `json:"first_wait_p95"`
+	// Storage (disk.go). WarmStarts are builds that ran warm: on their
+	// warm slot or restored within warmStartSlack of the warm run.
+	// ENOSPC counts builds failed by a full disk; DiskWaits builds delayed
+	// by disk handling (a prune, reclaim or resize of more than 5 s before
+	// they ran, or an ENOSPC), DiskWaitTime that delay. Demoted counts
+	// slots dropped to their store heads (v2), TrimmedBytes stale build
+	// units removed; StoreLag is build end to flushed head.
+	WarmStarts    int           `json:"warm_starts"`
+	WarmStartRate float64       `json:"warm_start_rate"`
+	ENOSPC        int           `json:"enospc"`
+	DiskWaits     int           `json:"disk_waits"`
+	DiskWaitTime  time.Duration `json:"disk_wait_time"`
+	Demoted       int           `json:"demoted"`
+	TrimmedBytes  int64         `json:"trimmed_bytes"`
+	Grows         int           `json:"grows"`
+	StoreLagP50   time.Duration `json:"store_lag_p50"`
+	StoreLagP95   time.Duration `json:"store_lag_p95"`
+	MaxDiskShare  float64       `json:"max_disk_share"`
 }
 
 // LateMargin is the grace beyond the best provisioning latency before a
@@ -291,6 +311,9 @@ type run struct {
 	predThrash bool
 	// memMean, memSD: the belief about its peak memory at placement.
 	memMean, memSD int64
+	// growth is the bytes the build adds to its slot (cold: the slot),
+	// forecast the worker's forecast of it (v2 reserve).
+	growth, forecast int64
 }
 
 type machine struct {
@@ -309,12 +332,13 @@ type machine struct {
 	idle     time.Time
 	up       time.Time // compute billed since (create or start)
 	swapping bool
-	disk     int64            // disk size (0 = unlimited)
-	slots    map[string]int64 // repository -> slot bytes
-	volume   string           // cache volume (medium volume)
-	resized  time.Time        // last disk resize
-	ws       int64            // working set of the last build
-	thrash   bool             // the last build thrashed
+	disk     int64                 // disk size (0 = unlimited)
+	slots    map[string]*buildSlot // repository -> build slot
+	diskFull bool                  // the worker admits no sessions (disk)
+	volume   string                // cache volume (medium volume)
+	resized  time.Time             // last disk resize
+	ws       int64                 // working set of the last build
+	thrash   bool                  // the last build thrashed
 }
 
 // capacity is the bytes m's top tier holds: its disk for a single hot
@@ -354,6 +378,8 @@ type sim struct {
 	seq      int
 	ids      int
 	r        Report
+	lags     []time.Duration // build end to flushed head
+	pending  []pendingSnap   // snapshots not yet flushed
 
 	cpuUsed, cpuProv, memUsed, memProv float64
 	start                              time.Time
@@ -446,13 +472,7 @@ func Run(trace Trace, o Options) Report {
 				m.warm[r.j.Repo] = true
 				after := r.before
 				if r.j.SlotBytes > 0 {
-					if r.warm || r.restored {
-						after += int64(r.j.SlotGrowth)
-					} else {
-						after = int64(r.j.SlotBytes)
-					}
-					m.slots[r.j.Repo] = after
-					s.fitDisk(m, r.j.Repo)
+					after = s.endBuild(m, r)
 					if !s.o.NoWriteback {
 						s.snapshot(m, r.j.Repo, after)
 					}
@@ -472,9 +492,20 @@ func Run(trace Trace, o Options) Report {
 				}
 				s.observe(r.j.key(), u)
 			}
+			done := len(kept) < len(m.runs)
 			m.runs = kept
 			if len(m.runs) == 0 && m.idle.IsZero() && m.state == scheduler.Running {
 				m.idle = s.now
+			}
+			if done {
+				s.manageDisk(m)
+			}
+		}
+		s.flushPending()
+		for _, m := range s.machines {
+			s.guard(m)
+			if m.disk > 0 {
+				s.r.MaxDiskShare = math.Max(s.r.MaxDiskShare, float64(s.used(m))/float64(m.disk))
 			}
 		}
 		s.ooms() // after the completions: a finished build frees its memory
@@ -540,6 +571,11 @@ func Run(trace Trace, o Options) Report {
 		s.r.ColdRate = float64(s.r.Cold) / float64(s.r.Completed+s.r.OOMs)
 	}
 	s.r.Refetch = s.cal.Factors()[""]
+	if n := s.r.Completed + s.r.OOMs + s.r.ENOSPC; n > 0 {
+		s.r.WarmStartRate = float64(s.r.WarmStarts) / float64(n)
+	}
+	sort.Slice(s.lags, func(i, j int) bool { return s.lags[i] < s.lags[j] })
+	s.r.StoreLagP50, s.r.StoreLagP95 = percentile(s.lags, 0.5), percentile(s.lags, 0.95)
 	if actSum > 0 {
 		s.r.ThrashBias = float64(predSum) / float64(actSum)
 	}
@@ -736,7 +772,7 @@ func (s *sim) pool() scheduler.Pool {
 	}
 	for _, m := range s.machines {
 		sm := scheduler.Machine{ID: m.id, Provider: m.prov, EnvHash: m.env, Size: m.size.Name, State: m.state,
-			Draining: m.draining, Capacity: m.size.Capacity, CreatedAt: m.created, ExpiresAt: m.expires}
+			Draining: m.draining || m.diskFull, Capacity: m.size.Capacity, CreatedAt: m.created, ExpiresAt: m.expires}
 		if m.state == scheduler.Starting {
 			sm.ReadyAt = m.readyAt.Add(-m.overrun)
 		}
@@ -769,10 +805,13 @@ func (s *sim) pool() scheduler.Pool {
 				}
 			}
 			if len(m.slots) > 0 {
-				sm.SlotBytes = map[string]int64{}
-				for repo, b := range m.slots {
-					sm.SlotBytes[repo] = b
-					sm.DiskUsed += b
+				sm.SlotBytes = slotBytes(m)
+			}
+			if m.disk > 0 {
+				// The worker measures the file system (statfs).
+				sm.DiskUsed = s.used(m)
+				if s.o.Storage == StorageV2 {
+					sm.Disk = s.ledgerOf(m)
 				}
 			}
 			for repo := range m.warm {
@@ -804,30 +843,6 @@ func (s *sim) pool() scheduler.Pool {
 		}
 	}
 	return f
-}
-
-// fitDisk drops other repositories' slots while m's disk is over full
-// (the worker's own eviction when nobody pruned).
-func (s *sim) fitDisk(m *machine, keep string) {
-	if m.disk <= 0 {
-		return
-	}
-	for {
-		var used int64
-		victim, vb := "", int64(0)
-		for repo, b := range m.slots {
-			used += b
-			if repo != keep && (b > vb || b == vb && victim != "" && repo < victim) {
-				victim, vb = repo, b
-			}
-		}
-		if used <= m.disk || victim == "" {
-			return
-		}
-		delete(m.slots, victim)
-		delete(m.warm, victim)
-		s.r.Evictions++
-	}
 }
 
 // down reports whether prov has no capacity now.
@@ -949,7 +964,7 @@ func (s *sim) placeQueued() {
 // take any task (a cheap filter before building the pool).
 func (s *sim) anyFree(j *job) bool {
 	for _, m := range s.machines {
-		if m.env != j.Env || m.state != scheduler.Running || m.draining {
+		if m.env != j.Env || m.state != scheduler.Running || m.draining || m.diskFull {
 			continue
 		}
 		var cpu float64
@@ -983,31 +998,6 @@ func (s *sim) cacheEvents(m *machine, r *run) {
 	s.cal.Observe(events.Event{Type: events.TaskEnd, Machine: m.id, Provider: m.prov})
 }
 
-// prune frees bytes on m for repo (other slots, largest first, then a
-// third of repo's own) and returns the seconds it takes.
-func (s *sim) prune(m *machine, repo string, bytes int64) float64 {
-	s.r.Prunes++
-	freed := int64(0)
-	for freed < bytes {
-		victim, vb := "", int64(0)
-		for r, b := range m.slots {
-			if r != repo && (b > vb || b == vb && victim != "" && r < victim) {
-				victim, vb = r, b
-			}
-		}
-		if victim == "" {
-			if b := m.slots[repo]; b > 0 {
-				m.slots[repo] = b * 2 / 3
-			}
-			break
-		}
-		delete(m.slots, victim)
-		delete(m.warm, victim)
-		freed += vb
-	}
-	return scheduler.DefaultPrune.Seconds()
-}
-
 // resize grows m's disk to target (capped by its volume's maximum) and
 // returns the seconds it takes.
 func (s *sim) resize(m *machine, target int64) float64 {
@@ -1039,7 +1029,9 @@ func (s *sim) assign(m *machine, j *job, pl scheduler.Placement, exp time.Durati
 	restored := false
 	switch slot.Kind {
 	case scheduler.SlotPrune:
-		prep = s.prune(m, j.Repo, slot.Bytes)
+		s.r.Prunes++
+		s.pruneV1(m, j.Repo, slot.Bytes)
+		prep = scheduler.DefaultPrune.Seconds()
 	case scheduler.SlotResize:
 		prep = s.resize(m, slot.Bytes)
 	}
@@ -1059,7 +1051,7 @@ func (s *sim) assign(m *machine, j *job, pl scheduler.Placement, exp time.Durati
 		}
 		prep += scheduler.LazyRestore(m.size.Stack, slot.Snapshot.Bytes, int64(j.WorkingSet), bw).Seconds()
 		s.r.PageInBytes += min(slot.Snapshot.Bytes, max(int64(j.WorkingSet), 0)) // 0: not modelled
-		m.slots[j.Repo] = slot.Snapshot.Bytes
+		m.slots[j.Repo] = &buildSlot{bytes: slot.Snapshot.Bytes, base: slot.Snapshot.Bytes, first: s.now, used: s.now, flushAt: s.now}
 		restored = true
 	case scheduler.SlotMove:
 		// Save on the source (its provider's store), then restore here.
@@ -1074,15 +1066,30 @@ func (s *sim) assign(m *machine, j *job, pl scheduler.Placement, exp time.Durati
 		}
 		prep += float64(slot.Bytes)/float64(s.o.Bandwidth) + scheduler.LazyRestore(m.size.Stack, slot.Bytes, int64(j.WorkingSet), bw).Seconds()
 		s.r.PageInBytes += min(slot.Bytes, max(int64(j.WorkingSet), 0))
-		m.slots[j.Repo] = slot.Bytes
+		m.slots[j.Repo] = &buildSlot{bytes: slot.Bytes, base: slot.Bytes, first: s.now, used: s.now, flushAt: s.now}
 		restored = true
 	}
 	warm := m.warm[j.Repo]
+	diskPrep := prep
 	if warm {
 		s.r.WarmHits++
+		s.r.WarmStarts++
 	} else if !restored {
 		work *= 1 + s.o.ColdPenalty
 		s.r.Cold++
+	}
+	if restored {
+		diskPrep = 0
+		if slot.Grow > 0 {
+			diskPrep = scheduler.DefaultResize.Seconds()
+		}
+		if prep-diskPrep <= warmStartSlack*j.Duration {
+			s.r.WarmStarts++
+		}
+	}
+	if diskPrep > 5 {
+		s.r.DiskWaits++
+		s.r.DiskWaitTime += time.Duration(diskPrep * float64(time.Second))
 	}
 	work += prep
 	// The working set beyond the local capacity faults in again during
@@ -1101,9 +1108,19 @@ func (s *sim) assign(m *machine, j *job, pl scheduler.Placement, exp time.Durati
 		refault = scheduler.RefetchBytes(m.capacity(), m.ws, refetch)
 		s.r.PageInBytes += refault
 	}
+	var before, growth int64
+	if sl := m.slots[j.Repo]; sl != nil {
+		before = sl.bytes
+	}
+	if j.SlotBytes > 0 {
+		growth = int64(j.SlotGrowth)
+		if !warm && !restored {
+			growth = int64(j.SlotBytes)
+		}
+	}
 	s.seq++
 	m.runs = append(m.runs, &run{j: j, reserve: reserve, work: work, total: work, seq: s.seq, start: s.now, expected: exp, warm: warm,
-		restored: restored, before: m.slots[j.Repo], ws: m.ws, capacity: m.capacity(), refault: refault,
+		restored: restored, before: before, growth: growth, forecast: s.forecast(j), ws: m.ws, capacity: m.capacity(), refault: refault,
 		pred: pl.Run, predThrash: strings.Contains(pl.Reason, "thrashing")})
 	m.idle = time.Time{}
 	if !s.o.Swap {
@@ -1164,6 +1181,11 @@ func (s *sim) oom(m *machine) {
 // while busy and are destroyed otherwise; old environments leave the warm pool.
 func (s *sim) reconcile() {
 	for _, m := range s.machines {
+		if m.state == scheduler.Running {
+			s.manageDisk(m) // the worker's lifecycle tick
+		}
+	}
+	for _, m := range s.machines {
 		if s.now.Before(m.expires) {
 			continue
 		}
@@ -1199,7 +1221,7 @@ func (s *sim) execute(acts []scheduler.Action) {
 				state: scheduler.Starting, readyAt: s.now.Add(latency(s.o.Boot, a.Size.Provider, 60*time.Second) + s.o.BootOverrun),
 				overrun: s.o.BootOverrun,
 				created: s.now, expires: s.now.Add(s.o.MaxLifetime), warm: map[string]bool{}, up: s.now,
-				disk: a.Size.Capacity.Disk, slots: map[string]int64{}}
+				disk: a.Size.Capacity.Disk, slots: map[string]*buildSlot{}}
 			if a.Size.Medium == medium.Volume {
 				s.attachVolume(m, a.Volume)
 			}
@@ -1260,21 +1282,56 @@ func (s *sim) execute(acts []scheduler.Action) {
 // saveSnapshots models workers saving their slots when they stop: a
 // snapshot per warm repository in the provider's store.
 func (s *sim) saveSnapshots(m *machine) {
-	for repo, b := range m.slots {
-		if b <= 0 || !m.warm[repo] {
+	for repo, sl := range m.slots {
+		if sl.bytes <= 0 || !m.warm[repo] {
 			continue
 		}
-		s.snapshot(m, repo, b)
+		s.flush(m, repo) // the orchestrator saves before it stops
 	}
 }
 
-// snapshot records the slot of repo on m (bytes) in m's provider's store.
+// snapshot records the slot of repo on m (bytes) in m's provider's store
+// once its commit is flushed (flushAt).
 func (s *sim) snapshot(m *machine, repo string, b int64) {
-	ss := append([]scheduler.Snapshot{{Repo: repo, Provider: m.prov, Store: m.prov, Bytes: b, At: s.now}}, s.snaps[repo]...)
+	at := s.now
+	if sl := m.slots[repo]; sl != nil {
+		at = sl.flushAt
+	}
+	s.pending = append(s.pending, pendingSnap{at: at, snap: scheduler.Snapshot{Repo: repo, Provider: m.prov, Store: m.prov, Bytes: b}})
+}
+
+// pendingSnap is a snapshot whose commit is in flight.
+type pendingSnap struct {
+	at   time.Time
+	snap scheduler.Snapshot
+}
+
+// flushPending publishes the snapshots flushed by now.
+func (s *sim) flushPending() {
+	kept := s.pending[:0]
+	for _, p := range s.pending {
+		if p.at.After(s.now) {
+			kept = append(kept, p)
+			continue
+		}
+		s.publish(p.snap, p.at)
+	}
+	s.pending = kept
+}
+
+// snapshotNow records the slot of repo on m in the store now.
+func (s *sim) snapshotNow(m *machine, repo string, b int64) {
+	s.publish(scheduler.Snapshot{Repo: repo, Provider: m.prov, Store: m.prov, Bytes: b}, s.now)
+}
+
+func (s *sim) publish(sn scheduler.Snapshot, at time.Time) {
+	sn.At = at
+	ss := append([]scheduler.Snapshot{sn}, s.snaps[sn.Repo]...)
+	sort.SliceStable(ss, func(i, j int) bool { return ss[i].At.After(ss[j].At) })
 	if len(ss) > 2 {
 		ss = ss[:2]
 	}
-	s.snaps[repo] = ss
+	s.snaps[sn.Repo] = ss
 }
 
 // attachVolume gives a new machine of a volume size its cache volume: the
@@ -1286,8 +1343,9 @@ func (s *sim) attachVolume(m *machine, id string) {
 			continue
 		}
 		s.vols = append(s.vols[:i], s.vols[i+1:]...)
-		m.volume, m.disk, m.slots = v.id, v.bytes, v.slots
+		m.volume, m.disk = v.id, v.bytes
 		for repo, b := range v.slots {
+			m.slots[repo] = &buildSlot{bytes: b, base: b, first: s.now, used: s.now, flushAt: s.now}
 			if b > 0 {
 				m.warm[repo] = true
 			}
@@ -1309,9 +1367,9 @@ func (s *sim) detachVolume(m *machine) {
 		return
 	}
 	slots := map[string]int64{}
-	for repo, b := range m.slots {
+	for repo, sl := range m.slots {
 		if m.warm[repo] {
-			slots[repo] = b
+			slots[repo] = sl.bytes
 		}
 	}
 	s.vols = append(s.vols, &volume{id: m.volume, prov: m.prov, size: m.size, bytes: m.disk, slots: slots, expires: s.now.Add(m.size.Volume.TTL)})
