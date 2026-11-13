@@ -70,6 +70,7 @@ type lpage struct {
 	state  State
 	pinned bool
 	shared bool // linked from the pool (another tier held it)
+	cloned bool // a clone (reflink) of a file range
 	hint   PageHint
 	last   time.Time
 	inT2   bool
@@ -549,7 +550,7 @@ func (l *Local) put(k Key, b []byte, s State, clone func(tmp string) (bool, erro
 	if l.pages[k] != nil { // raced with another Put
 		return nil
 	}
-	pg := &lpage{key: k, size: int64(len(b)), state: s, last: l.opt.Now(), shared: shared}
+	pg := &lpage{key: k, size: int64(len(b)), state: s, last: l.opt.Now(), shared: shared, cloned: cloned}
 	if shared {
 		l.st.SharedBytes += pg.size
 	}
@@ -611,6 +612,23 @@ func (l *Local) Remove(k Key) {
 	if pg := l.pages[k]; pg != nil {
 		l.drop(pg)
 	}
+}
+
+// DropUnreferenced removes the clean, unpinned pages keep rejects (no
+// tree the owner still mounts or commits references them; the store has
+// them) and returns their bytes. Dirty pages are never dropped here.
+func (l *Local) DropUnreferenced(keep func(Key) bool) int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var freed int64
+	for _, pg := range l.pages {
+		if pg.state != Clean || pg.pinned || keep(pg.key) {
+			continue
+		}
+		freed += pg.size
+		l.drop(pg)
+	}
+	return freed
 }
 
 // Pin implements Pinner.
@@ -685,6 +703,9 @@ func (l *Local) unlink(pg *lpage) {
 	}
 	if pg.shared {
 		l.st.SharedBytes -= pg.size
+	}
+	if pg.cloned {
+		l.st.ClonedBytes -= pg.size
 	}
 }
 

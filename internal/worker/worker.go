@@ -208,9 +208,10 @@ type Worker struct {
 	// cacheMedium is the cache directory's file system checked against
 	// the policy at startup.
 	cacheMedium *proto.CacheFSStatus
-	maintMu     sync.Mutex // one slot maintenance pass at a time
+	maintMu     sync.Mutex      // guards maintRepos
+	maintRepos  map[string]bool // repositories a maintenance pass works on
 	headMu      sync.Mutex
-	headTimers  map[string]*time.Timer // repo -> armed head flush deadline
+	headTimers  map[string]chan struct{} // repo -> armed head watch (closed: stop)
 	// tiers counts the cache file system's transfers per medium
 	// (anyfs.RecordTransfers), reported in the status.
 	tiers medium.Recorder
@@ -239,7 +240,7 @@ type Worker struct {
 	// drainReason describes a drain the server started on its own
 	// (expiry).
 	drainReason string
-	// diskFull: the cache disk is above the emergency threshold; no
+	// diskFull: the ENOSPC guard could not keep the reserve free; no
 	// sessions are admitted (reported as draining) until it recovers.
 	diskFull bool
 
@@ -249,9 +250,11 @@ type Worker struct {
 	// the periodic gc.
 	machineCacheBytes atomic.Int64
 	// storage is the last storage measurement (storage.go).
-	storage        storageMeasure
-	pruneMu        sync.Mutex // one prune at a time
-	budgetMu       sync.Mutex // one budget check at a time
+	storage   storageMeasure
+	reclaimMu sync.Mutex // one disk reclaim at a time (ledger.go)
+	dropAt    time.Time  // last scan for unreferenced pages (reclaimMu)
+	// statfs replaces the cache disk's statfs for tests (total, free).
+	statfs         func() (int64, int64, bool)
 	machineBudgets machineCacheBudgets
 	// sourceFetch replaces fetchFile for tests (nil: fetchFile).
 	sourceFetch func(ctx context.Context, root string, n *anyfs.Node, w io.Writer) error
@@ -405,6 +408,7 @@ func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
 	defer t.Stop()
 	lastGC := time.Now()
 	go s.measureMachineCaches() // the storage breakdown before the first GC round
+	go s.diskGuard(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -412,18 +416,14 @@ func (s *Worker) lifecycle(ctx context.Context, cancel func()) {
 		case <-t.C:
 		}
 		go s.maintainSlots(ctx)
-		// Disk and cache budgets every tick (statfs and counters are
+		// The disk watermarks every tick (statfs and counters are
 		// cheap): sessions can write tens of GB between GC rounds.
-		go s.checkBudgets()
+		go s.backgroundReclaim()
 		if time.Since(lastGC) > 5*time.Minute {
 			s.slots.gc(s.cfg.BuildTTL)
 			s.gcDigests(time.Now())
 			go s.measureMachineCaches()
-			go func() {
-				s.pruneMu.Lock()
-				defer s.pruneMu.Unlock()
-				s.manageDisk(diskPass{machineCaches: true})
-			}()
+			go s.pruneMachineCaches()
 			lastGC = time.Now()
 		}
 		if s.cfg.ExpiresAt.IsZero() || s.cfg.now().Before(s.cfg.ExpiresAt) {
@@ -634,7 +634,7 @@ func (s *Worker) statusOnly() proto.Status {
 		st.Mounts = append(st.Mounts, r)
 	}
 	st.WarmRepos = s.slots.warmRepos(s.cfg.BuildTTL)
-	st.Disk = s.diskStatus()
+	st.Disk = s.diskStatus(s.loadLocked())
 	st.CacheFS = s.cacheMedium
 	if s.cfs != nil {
 		st.Heads = s.cfs.flushedHeads()

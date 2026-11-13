@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/traumventures/offshore/internal/anyfs"
@@ -295,6 +296,23 @@ func (s *Worker) slotReleased(slot, repo string) {
 		s.log.Warn("build slot snapshot commit", "slot", slot, "err", err)
 		return
 	}
+	if s.cfs.takeQueued(slot) {
+		// This session ended while an earlier snapshot was committing:
+		// commit the live slot now that it is done (a session holding
+		// the slot meanwhile captures it at its own end).
+		if m, err := readMeta(slot); err == nil && m.uncommitted() {
+			cr, err := s.commitSlot(ctx, slotRef{Repo: repo, Path: slot, Meta: m})
+			switch {
+			case err == nil:
+				if cr.changed {
+					res = cr
+				}
+			case errors.Is(err, errSlotBusy):
+			default:
+				s.log.Warn("build slot commit of a queued session", "slot", slot, "err", err)
+			}
+		}
+	}
 	if res.changed {
 		s.scheduleHeadFlush(repo)
 	}
@@ -320,25 +338,69 @@ func (s *Worker) slotReleased(slot, repo string) {
 }
 
 // maintainSlots commits idle slots, flushes them when a grant is known
-// and rebases idle slots with a large upper (lifecycle tick).
+// and rebases idle slots with a large upper (lifecycle tick). Each
+// repository is maintained by one pass at a time, repositories in
+// parallel: a slow commit or flush of one (minutes for a large head)
+// delays neither the others nor the next tick's pass over them. It
+// returns when the repositories it took are done.
 func (s *Worker) maintainSlots(ctx context.Context) {
-	if !s.maintMu.TryLock() {
-		return
-	}
-	defer s.maintMu.Unlock()
-	now := s.cfg.now()
+	byRepo := map[string][]slotRef{}
 	for _, r := range s.slots.list() {
-		if r.Leased || ctx.Err() != nil {
-			continue
-		}
-		if r.Meta.uncommitted() && now.Sub(time.Unix(r.Meta.LastUsed, 0)) >= s.cfs.opt.Idle {
-			s.maintainSlot(ctx, r, "idle")
-		} else if s.unflushed(r) {
-			s.flushWhenClean(ctx, r, false)
-		} else if r.Meta.Head != r.Meta.Base && r.Meta.UpperBytes > s.cfs.opt.RebaseBytes {
-			s.rebaseSlot(ctx, r)
+		if !r.Leased {
+			byRepo[r.Repo] = append(byRepo[r.Repo], r)
 		}
 	}
+	var wg sync.WaitGroup
+	for repo, refs := range byRepo {
+		if !s.claimMaint(repo) {
+			continue // a pass is still at it
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer s.endMaint(repo)
+			for _, r := range refs {
+				if ctx.Err() != nil {
+					return
+				}
+				s.maintainOne(ctx, r)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// maintainOne is maintainSlots' work on one idle slot.
+func (s *Worker) maintainOne(ctx context.Context, r slotRef) {
+	now := s.cfg.now()
+	if r.Meta.uncommitted() && now.Sub(time.Unix(r.Meta.LastUsed, 0)) >= s.cfs.opt.Idle {
+		s.maintainSlot(ctx, r, "idle")
+	} else if s.unflushed(r) {
+		s.flushWhenClean(ctx, r, false)
+	} else if r.Meta.Head != r.Meta.Base && r.Meta.UpperBytes > s.cfs.opt.RebaseBytes {
+		s.rebaseSlot(ctx, r)
+	}
+}
+
+// claimMaint marks a repository as maintained; false if a pass has it.
+func (s *Worker) claimMaint(repo string) bool {
+	s.maintMu.Lock()
+	defer s.maintMu.Unlock()
+	if s.maintRepos[repo] {
+		return false
+	}
+	if s.maintRepos == nil {
+		s.maintRepos = map[string]bool{}
+	}
+	s.maintRepos[repo] = true
+	return true
+}
+
+// endMaint ends claimMaint.
+func (s *Worker) endMaint(repo string) {
+	s.maintMu.Lock()
+	defer s.maintMu.Unlock()
+	delete(s.maintRepos, repo)
 }
 
 // maintainSlot commits a slot and writes it back when the store is
@@ -392,6 +454,7 @@ func (s *Worker) rebaseSlot(ctx context.Context, r slotRef) bool {
 		x.Base = base
 		if base == x.Head {
 			x.UpperBytes = 0
+			x.Physical = slotUpperBytes(r.Path)
 		}
 	})
 	return err == nil
@@ -414,37 +477,6 @@ func (s *Worker) mountSlot(slot, repo string) {
 	}
 }
 
-// reclaimSlots frees disk above the budget without losing build state:
-// clean pages and materialized files first, then rebases of idle
-// committed slots (their upper files become reclaimable) and reclaim
-// again. It returns the bytes still over.
-func (s *Worker) reclaimSlots(over func() int64) int64 {
-	if s.cfs == nil {
-		return over()
-	}
-	ctx := context.Background()
-	if n := s.cfs.reclaim(ctx, over()); n > 0 {
-		s.log.Info("reclaimed resident slot data for the disk budget", "freed", n)
-	}
-	if over() <= 0 || s.cfs.mode == fsPlain {
-		return over()
-	}
-	refs := s.slots.list()
-	sort.Slice(refs, func(i, j int) bool { return refs[i].Meta.LastUsed < refs[j].Meta.LastUsed })
-	for _, r := range refs {
-		if over() <= 0 {
-			break
-		}
-		if r.Leased || r.Meta.Head == r.Meta.Base || r.Meta.uncommitted() {
-			continue
-		}
-		if s.rebaseSlot(ctx, r) {
-			s.cfs.reclaim(ctx, over())
-		}
-	}
-	return over()
-}
-
 // headFlushDeadline bounds how long a committed head waits for its
 // pages' class writeback before it is flushed whole: the store head is
 // at most this far behind the first commit it lacks, so losing the
@@ -456,32 +488,87 @@ func (s *Worker) reclaimSlots(over func() int64) int64 {
 // store never references a page the store lacks.
 const headFlushDeadline = 30 * time.Second
 
-// scheduleHeadFlush arms the repository's head flush deadline unless it
-// is armed already (the deadline counts from the first unflushed
-// commit; later commits are flushed with it).
+// headCheckInterval is how often an armed head watch checks whether the
+// pages of the latest committed head are clean (then the store head moves
+// right away: layer objects and heads/slot only).
+var headCheckInterval = time.Second
+
+// scheduleHeadFlush arms the repository's head watch unless it is armed
+// already: the store head moves as soon as every page the latest
+// committed head references is clean (unrelated dirty pages do not
+// matter), at the latest at the flush deadline, which counts from the
+// first unflushed commit (later commits are flushed with it).
 func (s *Worker) scheduleHeadFlush(repo string) {
 	s.headMu.Lock()
 	defer s.headMu.Unlock()
 	if s.headTimers == nil {
-		s.headTimers = map[string]*time.Timer{}
+		s.headTimers = map[string]chan struct{}{}
 	}
 	if s.headTimers[repo] != nil {
 		return
 	}
-	s.headTimers[repo] = time.AfterFunc(s.cfs.opt.FlushDeadline, func() {
-		s.headMu.Lock()
-		delete(s.headTimers, repo)
-		s.headMu.Unlock()
-		s.flushHeadDeadline(repo)
-	})
+	stop := make(chan struct{})
+	s.headTimers[repo] = stop
+	deadline := time.NewTimer(s.cfs.opt.FlushDeadline)
+	tick := time.NewTicker(min(headCheckInterval, max(s.cfs.opt.FlushDeadline/4, time.Millisecond)))
+	go func() {
+		defer deadline.Stop()
+		defer tick.Stop()
+		done := func() {
+			s.headMu.Lock()
+			if s.headTimers[repo] == stop {
+				delete(s.headTimers, repo)
+			}
+			s.headMu.Unlock()
+		}
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				if s.flushHeadIfClean(repo) {
+					done()
+					return
+				}
+			case <-deadline.C:
+				done()
+				s.flushHeadDeadline(repo)
+				return
+			}
+		}
+	}()
 }
 
-// stopHeadFlushes disarms the head flush deadlines (shutdown).
+// flushHeadIfClean moves the store head to the repository's latest
+// committed head when its pages are all clean; it reports whether the
+// store has that head now.
+func (s *Worker) flushHeadIfClean(repo string) bool {
+	ref, ok := s.latestSlot(repo)
+	if !ok || ref.Meta.Head == "" {
+		return true
+	}
+	if s.headFlushed(repo, ref.Meta.Head) {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	s.flushWhenClean(ctx, ref, false)
+	return s.headFlushed(repo, ref.Meta.Head)
+}
+
+// headFlushed reports whether layer is the repository's flushed head.
+func (s *Worker) headFlushed(repo, layer string) bool {
+	s.cfs.mu.Lock()
+	defer s.cfs.mu.Unlock()
+	return s.cfs.heads[repo].Layer == layer
+}
+
+// stopHeadFlushes disarms the head watches (shutdown).
 func (s *Worker) stopHeadFlushes() {
 	s.headMu.Lock()
 	defer s.headMu.Unlock()
-	for repo, t := range s.headTimers {
-		t.Stop()
+	for repo, stop := range s.headTimers {
+		close(stop)
 		delete(s.headTimers, repo)
 	}
 }

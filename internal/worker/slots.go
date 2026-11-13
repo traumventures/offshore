@@ -124,6 +124,19 @@ type slotMeta struct {
 	// Head's tree then, later changes have a newer ctime in the upper
 	// directory (incremental commits).
 	Scanned int64 `json:"scanned_ns,omitempty"`
+	// FirstRun and LastRun are the start times (unix seconds) of the
+	// slot's first and last run (the mean gap between runs drives the
+	// reuse probability of its reclaim cost).
+	FirstRun int64 `json:"first_run,omitempty"`
+	LastRun  int64 `json:"last_run,omitempty"`
+	// ColdBytes is the slot size after its first run here (the budget
+	// is twice it without cache max_size); Garbage the bytes of units
+	// unread for their policy's runs at the last run; Physical the disk
+	// the slot holds alone (overlay: upper and snapshots; plain: data),
+	// measured at the last run, trim or rebase.
+	ColdBytes int64 `json:"cold_bytes,omitempty"`
+	Garbage   int64 `json:"garbage,omitempty"`
+	Physical  int64 `json:"physical,omitempty"`
 	// Worktree and Branch are the labels of the last session.
 	Worktree string `json:"worktree,omitempty"`
 	Branch   string `json:"branch,omitempty"`

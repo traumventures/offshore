@@ -281,7 +281,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 		}
 		s.slots.releaseSized(slot, slotAfter)
 		go s.slotReleased(slot, req.RepoID)
-		go s.enforceBudgets(slot)
+		go s.afterSession(slot, req.RepoID)
 	}()
 
 	env := s.sessionEnv(req, se.id)

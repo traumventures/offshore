@@ -21,7 +21,19 @@ type storageMeasure struct {
 	classes map[string]map[string]int64
 	topDirs map[string][]proto.DirSize
 	dormant []dormantRepo // repositories without an open stack
+	// machineDirs are the sizes of machine cache directories with a
+	// max_size (directory -> bytes).
+	machineDirs map[string]int64
+	// repos is the disk of each open repository's directory (pages,
+	// layer objects), hard links (the page pool) counted once; pool the
+	// pool's pages no tier links.
+	repos map[string]int64
+	pool  int64
 }
+
+// writebackItem is the storage item (and cacheDirs key) of the written
+// back blobs.
+const writebackItem = "written back files"
 
 // topDirsN is the number of largest directories reported per repository.
 const topDirsN = 8
@@ -43,7 +55,7 @@ func (s *Worker) cacheDirs() map[string][2]string {
 		out["sccache"] = [2]string{s.cfg.SccacheDir, proto.StorageGlobal}
 	}
 	if d := s.writebackDir(); d != "" {
-		out["written back files"] = [2]string{d, proto.StorageWriteback}
+		out[writebackItem] = [2]string{d, proto.StorageWriteback}
 	}
 	if s.cfg.CacheDir != "" {
 		for _, n := range []string{"ccache", "gocache"} {
@@ -53,8 +65,11 @@ func (s *Worker) cacheDirs() map[string][2]string {
 	return out
 }
 
-// measureStorage walks the cache directories and the committed heads (in
-// memory) of the repositories; called with the machine cache measurement.
+// measureStorage walks the cache directories, the repository
+// directories (dormant and open ones and the page pool, hard links
+// counted once overall) and the committed heads (in memory) of the
+// repositories, and refreshes the physical size of idle overlay slots;
+// called with the machine cache measurement.
 func (s *Worker) measureStorage(ctx context.Context) {
 	dirs := map[string]int64{}
 	for name, d := range s.cacheDirs() {
@@ -62,17 +77,51 @@ func (s *Worker) measureStorage(ctx context.Context) {
 			dirs[name] = treeSize(d[0])
 		}
 	}
+	machine := map[string]int64{}
+	s.machineBudgets.mu.Lock()
+	for dir, lim := range s.machineBudgets.dirs {
+		if lim > 0 {
+			machine[dir] = 0
+		}
+	}
+	s.machineBudgets.mu.Unlock()
+	for dir := range machine {
+		machine[dir] = treeSize(dir)
+	}
 	var dormant []dormantRepo
 	classes := map[string]map[string]int64{}
 	tops := map[string][]proto.DirSize{}
+	repos := map[string]int64{}
+	var pool int64
 	if s.cfs != nil {
-		dormant = s.cfs.dormantRepos(true)
+		var seen sync.Map
+		// Open repositories first: a page a dormant one shares with
+		// them is theirs (dropping the dormant one frees nothing).
+		for _, r := range s.cfs.openRepos() {
+			repos[r.id] = dirBytes(filepath.Join(s.cfs.dir, "repos", r.id), &seen)
+		}
+		dormant = s.cfs.dormantRepos(nil)
+		for i := range dormant {
+			dormant[i].bytes = dirBytes(dormant[i].dir, &seen)
+		}
+		pool = dirBytes(filepath.Join(s.cfs.dir, "pool"), &seen) // pages no tier links
 		for repo, cl := range s.cfs.headBreakdown(ctx) {
 			classes[repo], tops[repo] = cl.classes, cl.top
+		}
+		if s.cfs.mode != fsPlain {
+			for _, r := range s.slots.list() {
+				if r.Leased {
+					continue
+				}
+				if n := slotUpperBytes(r.Path); n != r.Meta.Physical {
+					s.slots.update(r.Path, func(m *slotMeta) { m.Physical = n })
+				}
+			}
 		}
 	}
 	s.storage.mu.Lock()
 	s.storage.dirs, s.storage.classes, s.storage.topDirs, s.storage.dormant = dirs, classes, tops, dormant
+	s.storage.machineDirs, s.storage.repos, s.storage.pool = machine, repos, pool
 	s.storage.mu.Unlock()
 }
 
@@ -143,10 +192,16 @@ func (s *Worker) storageItems(used int64) []proto.StorageItem {
 		h := heads[r.Repo]
 		items = append(items, proto.StorageItem{Kind: proto.StorageSlot, Name: r.Path, Repo: r.Repo, Worktree: r.Meta.Worktree, Branch: r.Meta.Branch,
 			Bytes: r.Meta.Bytes, LastUsed: r.Meta.LastUsed, Committed: r.Meta.Committed, StoreAt: h.At, Stored: h.Bytes, Leased: r.Leased})
-		sum += r.Meta.UpperBytes
+		// The slot's own disk (Bytes is its logical, merged size).
+		if r.Meta.Physical > 0 {
+			sum += r.Meta.Physical
+		} else {
+			sum += r.Meta.UpperBytes
+		}
 	}
 	s.storage.mu.Lock()
 	classes, tops, dirs, dormant := s.storage.classes, s.storage.topDirs, s.storage.dirs, s.storage.dormant
+	measured, pool := s.storage.repos, s.storage.pool
 	s.storage.mu.Unlock()
 	for _, d := range dormant {
 		items = append(items, proto.StorageItem{Kind: proto.StorageDormant, Name: d.id, Repo: d.id, Bytes: d.bytes, LastUsed: d.used.Unix()})
@@ -156,8 +211,19 @@ func (s *Worker) storageItems(used int64) []proto.StorageItem {
 		for _, p := range s.cfs.repoPages() {
 			h := heads[p.Repo]
 			p.Stored, p.StoreAt, p.Classes, p.TopDirs = h.Bytes, h.At, classes[p.Repo], tops[p.Repo]
+			if n, ok := measured[p.Repo]; ok {
+				// The directory's disk (pages, layer objects; a page
+				// shared through the pool counts once, here or in an
+				// earlier repository): the counters miss pages every
+				// tier marks shared after a restart.
+				p.Bytes = n
+			}
 			items = append(items, p)
-			sum += p.Resident
+			sum += p.Bytes
+		}
+		if pool > 0 {
+			items = append(items, proto.StorageItem{Kind: proto.StoragePages, Name: "page pool (unlinked pages)", Bytes: pool})
+			sum += pool
 		}
 		f := s.cfs.files.Stats()
 		items = append(items, proto.StorageItem{Kind: proto.StorageFiles, Name: "materialized files", Bytes: f.ResidentBytes, Resident: f.ResidentBytes})

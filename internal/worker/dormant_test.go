@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // writePage writes a page file into a repository's local tier and links
@@ -27,7 +28,7 @@ func writePage(t *testing.T, anyfsDir, repo, key string, size int) {
 
 // The local tiers of repositories without an open stack (a previous
 // worker process; slots gone) are counted and, while the disk is over
-// its budget, dropped least recently used first with their pool pages;
+// space is needed, dropped (cheapest, stalest first) with their pool pages;
 // a repository with a build slot or an open stack stays.
 func TestDormantRepositoriesAreCountedAndReclaimed(t *testing.T) {
 	w, _ := fsWorker(t, fsPlain, t.TempDir(), cacheFSOptions{})
@@ -45,27 +46,25 @@ func TestDormantRepositoriesAreCountedAndReclaimed(t *testing.T) {
 	if err := writeMeta(slot, slotMeta{}); err != nil {
 		t.Fatal(err)
 	}
-	ds := w.cfs.dormantRepos(true)
+	ds := w.cfs.dormantRepos(nil)
 	if len(ds) != 2 {
 		t.Fatalf("dormant %+v, want gone and slotted", ds)
 	}
-	if n := w.cfs.dormantBytes(); n < 2<<20 {
-		t.Fatalf("dormant bytes %d, want at least 2 MiB", n)
+	old := time.Now().Add(-48 * time.Hour)
+	for _, p := range []string{"", "local"} {
+		os.Chtimes(filepath.Join(dir, "repos", "gone", p), old, old)
 	}
 	w.measureMachineCaches()
 	if mc := w.machineCacheBytes.Load(); mc < 2<<20 {
 		t.Fatalf("machine caches %d do not count the dormant tiers", mc)
 	}
-	calls := 0
-	over := func() int64 { // over until the first drop
-		calls++
-		if _, err := os.Stat(filepath.Join(dir, "repos", "gone")); err == nil {
-			return 1
-		}
-		return 0
-	}
-	if left := w.reclaimDormant(over); left > 0 {
-		t.Fatalf("still over: %d", left)
+	fakeDisk(w, 0)
+	_, free, _ := w.diskStat()
+	w.reclaimMu.Lock()
+	_, err := w.reclaim(t.Context(), free+1, "", false) // the stalest dormant tier first
+	w.reclaimMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
 	}
 	for repo, want := range map[string]bool{"gone": false, "slotted": true, "open": true} {
 		_, err := os.Stat(filepath.Join(dir, "repos", repo))

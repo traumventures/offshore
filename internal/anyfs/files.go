@@ -612,6 +612,26 @@ func (f *Files) Drop(digest string) {
 	}
 }
 
+// DropUnreferenced removes the resident files keep rejects (content no
+// tree references any more) unless they are open, pinned or the only copy
+// (unbacked), and returns their bytes.
+func (f *Files) DropUnreferenced(keep func(digest string) bool) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var freed int64
+	for d, m := range f.files {
+		if m.open > 0 || !m.backed || f.pins[d] > 0 || keep(d) {
+			continue
+		}
+		os.Remove(f.path(d))
+		f.lru.Remove(m.elem)
+		delete(f.files, d)
+		f.resident -= m.size
+		freed += m.size
+	}
+	return freed
+}
+
 // Cold marks the materialized content of nodes as least recently used,
 // in order (the last node becomes the coldest), so that Reclaim drops it
 // first: the caller's reclaim order (e.g. by access class) ahead of plain

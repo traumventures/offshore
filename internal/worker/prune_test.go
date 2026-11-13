@@ -1,16 +1,11 @@
 package worker
 
 import (
-	"context"
-	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/traumventures/offshore/internal/anyfs"
 	"github.com/traumventures/offshore/internal/config"
 	"github.com/traumventures/offshore/internal/proto"
 )
@@ -64,8 +59,8 @@ func TestRecordRunTracksReadsAndRearmsAtime(t *testing.T) {
 	start := time.Now().Add(-time.Minute)
 	read(t, filepath.Join(data, "a"), time.Now())
 	write(t, filepath.Join(data, "c"), 4096, time.Now())
-	if n := recordRun(data, start, 2, idx, nil); n < 3*4096 {
-		t.Fatalf("size %d", n)
+	if n, garbage := recordRun(data, start, 2, idx, nil, nil); n < 3*4096 || garbage != 0 {
+		t.Fatalf("size %d, garbage %d", n, garbage)
 	}
 	if idx["a"] != 2 || idx["b"] != 1 || idx["c"] != 2 {
 		t.Fatalf("index %v", idx)
@@ -115,8 +110,8 @@ func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 func TestPruneSlotPolicyStages(t *testing.T) {
 	slot, meta := rustSlot(t, t.TempDir())
 	tgt := filepath.Join(slot, "data", "target", "debug")
-	r := pruneSlot(slot, meta, 0, defaultUnreadRuns, false, rmAll)
-	if r.Sessions != 1 || r.Units != 1 || r.Cold {
+	r := pruneSlot(slot, meta, 0)
+	if r.Sessions != 1 || r.Units != 1 {
 		t.Fatalf("result %+v", r)
 	}
 	if exists(filepath.Join(tgt, "incremental", "app-xyz", "s-old")) || !exists(filepath.Join(tgt, "incremental", "app-xyz", "s-new")) {
@@ -133,65 +128,33 @@ func TestPruneSlotPolicyStages(t *testing.T) {
 	}
 }
 
-func TestPruneSlotTargetGoesCold(t *testing.T) {
+// A size target never removes the latest run's units nor the slot.
+func TestPruneSlotTargetKeepsLatestRun(t *testing.T) {
 	slot, meta := rustSlot(t, t.TempDir())
-	// The latest run's unit is protected: a tiny target ends cold.
-	if r := pruneSlot(slot, meta, 1, defaultUnreadRuns, false, rmAll); r.Cold || !exists(slot) || r.BytesLeft == 0 {
-		t.Fatalf("without allowCold: %+v", r)
-	}
-	if r := pruneSlot(slot, meta, 1, defaultUnreadRuns, true, rmAll); !r.Cold || exists(slot) {
-		t.Fatalf("with allowCold: %+v", r)
+	r := pruneSlot(slot, meta, 1)
+	tgt := filepath.Join(slot, "data", "target", "debug")
+	if !exists(filepath.Join(tgt, "deps", "libnew-fedcba9876543210.rlib")) || r.BytesLeft == 0 || exists(filepath.Join(tgt, "deps", "libold-0123456789abcdef.rlib")) {
+		t.Fatalf("result %+v", r)
 	}
 }
 
-func TestPruneRepoRPC(t *testing.T) {
-	root := t.TempDir()
-	sl, _ := newSlots(root)
-	slot, _ := rustSlot(t, root)
-	// An older second slot goes cold first.
-	old := filepath.Join(root, "repo", "1")
-	write(t, filepath.Join(old, "data", "target", "x"), 64<<10, time.Now())
-	writeMeta(old, slotMeta{Created: time.Now().Unix(), LastUsed: time.Now().Add(-2 * time.Hour).Unix(), Bytes: 64 << 10})
-	m, _ := readMeta(slot)
-	m.Bytes = treeSize(filepath.Join(slot, "data"))
-	writeMeta(slot, m)
-	w := &Worker{slots: sl, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotReclaim, Repo: "repo", FreeBytes: m.Bytes})
-	if res.Err != "" || res.Freed < 64<<10 || exists(old) || !exists(slot) {
-		t.Fatalf("prune to the newest slot's size: %+v", res)
+// Garbage is computed at the end of every run: rust units unread for 3
+// runs, lru files unread for 5.
+func TestRecordRunGarbage(t *testing.T) {
+	data := t.TempDir()
+	old := time.Now().Add(-time.Hour)
+	write(t, filepath.Join(data, "target/debug/deps/libold-0123456789abcdef.rlib"), 64<<10, old)
+	write(t, filepath.Join(data, "target/debug/deps/libnew-fedcba9876543210.rlib"), 64<<10, old)
+	write(t, filepath.Join(data, "node_modules/x.js"), 64<<10, old)
+	caches := []slotCache{{Path: "target", Prune: config.PruneRust}, {Path: "node_modules", Prune: config.PruneLRU}}
+	idx := readIndex{"target/debug/deps/libold-0123456789abcdef.rlib": 2, "target/debug/deps/libnew-fedcba9876543210.rlib": 4, "node_modules/x.js": 2}
+	_, garbage := recordRun(data, time.Now(), 5, idx, map[string]bool{}, caches)
+	if garbage < 64<<10 || garbage >= 128<<10 {
+		t.Fatalf("garbage %d, want the old unit only", garbage)
 	}
-	if res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotReclaim, Repo: "nope"}); res.Err == "" {
-		t.Fatal("unknown repo accepted")
-	}
-	if res := w.slotOp(t.Context(), proto.SlotOp{Op: "explode"}); res.Err == "" {
-		t.Fatal("unknown op accepted")
-	}
-}
-
-// A prune before a placement must not wait for a long maintenance prune
-// (production: placements waited up to 20 minutes behind one), nor take
-// the lock at all for a repository without a slot.
-func TestPruneRepoBoundedByRunningPrune(t *testing.T) {
-	root := t.TempDir()
-	sl, _ := newSlots(root)
-	rustSlot(t, root)
-	w := &Worker{slots: sl, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	old := pruneLockWait
-	pruneLockWait = 100 * time.Millisecond
-	defer func() { pruneLockWait = old }()
-	w.pruneMu.Lock()
-	begin := time.Now()
-	res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotReclaim, Repo: "repo"})
-	if res.Err == "" || time.Since(begin) > 5*time.Second {
-		t.Fatalf("prune behind a running prune: %+v after %s", res, time.Since(begin))
-	}
-	begin = time.Now()
-	if res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotReclaim, Repo: "nope"}); !strings.Contains(res.Err, "no build slot") || time.Since(begin) > 50*time.Millisecond {
-		t.Fatalf("unknown repo waited for the lock: %+v after %s", res, time.Since(begin))
-	}
-	w.pruneMu.Unlock()
-	if res := w.slotOp(t.Context(), proto.SlotOp{Op: proto.SlotReclaim, Repo: "repo"}); res.Err != "" {
-		t.Fatalf("prune after the lock is free: %+v", res)
+	_, garbage = recordRun(data, time.Now(), 7, idx, map[string]bool{}, caches)
+	if garbage < 3*(64<<10) {
+		t.Fatalf("garbage %d, want everything", garbage)
 	}
 }
 
@@ -202,12 +165,27 @@ func TestSlotBudgetAndCaches(t *testing.T) {
 		{Scope: "machine", Paths: []string{"x"}},
 	}}
 	cs := slotCaches(req)
-	if len(cs) != 2 || cs[0].Path != "target" || slotBudget(slotMeta{Caches: cs}) != 15 {
+	if len(cs) != 2 || cs[0].Path != "target" || cachesBudget(slotMeta{Caches: cs}) != 15 {
 		t.Fatalf("caches %+v", cs)
 	}
 	cs[1].MaxBytes = 0
-	if slotBudget(slotMeta{Caches: cs}) != 0 {
+	if cachesBudget(slotMeta{Caches: cs}) != 0 {
 		t.Fatal("an unbounded cache must make the slot unbounded")
+	}
+	const g = int64(1) << 30
+	for _, c := range []struct {
+		m     slotMeta
+		total int64
+		want  int64
+	}{
+		{slotMeta{Caches: []slotCache{{Path: "t", MaxBytes: 30 * g}}}, 200 * g, 30 * g},
+		{slotMeta{ColdBytes: 12 * g}, 200 * g, 24 * g},
+		{slotMeta{ColdBytes: 1 * g}, 200 * g, 10 * g},  // at least 10G
+		{slotMeta{ColdBytes: 60 * g}, 200 * g, 80 * g}, // at most 40 %
+	} {
+		if got := slotBudget(c.m, c.total); got != c.want {
+			t.Errorf("slot budget %+v = %d GiB, want %d", c.m, got/g, c.want/g)
+		}
 	}
 }
 
@@ -218,35 +196,5 @@ func TestBudgetBytes(t *testing.T) {
 	b, _ := config.ParseDiskBudget("50G")
 	if got := budgetBytes(b, 100<<30); got != 50<<30 {
 		t.Errorf("50G budget = %d", got)
-	}
-}
-
-func rmAll(p string) { os.RemoveAll(p) }
-
-func TestReclaimSourcesKeepsOpenFiles(t *testing.T) {
-	files, err := anyfs.OpenFiles(t.TempDir(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var nodes []anyfs.Node
-	for _, c := range []string{"aaaa", "bbbb", "cccc"} {
-		n := anyfs.Node{Path: c, Kind: anyfs.File, Size: 4, Digest: string(anyfs.KeyOf([]byte(c)))}
-		if _, err := files.EnsureWith(context.Background(), &n, func(_ context.Context, _ *anyfs.Node, w io.Writer) error {
-			_, err := io.WriteString(w, c)
-			return err
-		}); err != nil {
-			t.Fatal(err)
-		}
-		nodes = append(nodes, n)
-	}
-	f, _ := files.Open(&nodes[0])
-	defer f.Close()
-	w := &Worker{srcFiles: files, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	over := func() int64 { return files.Stats().ResidentBytes }
-	if left := w.reclaimSources(over); left != 4 {
-		t.Fatalf("left over %d, want the open file's 4 bytes", left)
-	}
-	if _, ok := files.Local(&nodes[0]); !ok {
-		t.Fatal("open source file reclaimed")
 	}
 }

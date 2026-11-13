@@ -140,6 +140,7 @@ type cacheFS struct {
 	heads  map[string]proto.LayerHead // repo -> last flushed head
 	snapMu map[string]*sync.Mutex     // slot -> snapshot/commit lock
 	hashed map[string]*anyfs.Hasher   // slot -> background hasher of its upper
+	queued map[string]bool            // slot -> a session ended uncaptured (queueCapture)
 }
 
 // repoFS is a repository's tier stack and layer store.
@@ -898,8 +899,26 @@ func (c *cacheFS) dirtyIn(r *repoFS, t *anyfs.Tree) int {
 
 // flush writes a committed chain back to the store: the dirty pages of
 // its tree, its layer objects, then the head.
+//
+// The upload of the dirty pages runs before r.cmu is taken, so a commit
+// of the next session does not wait for it (minutes for a large head);
+// under the lock the keys are flushed again (only pages dirtied or
+// discarded meanwhile cost anything; a page a commit discarded fails the
+// flush, which is retried with the newer head) before the layers and the
+// head are published. Refreshes (compaction, seeds) stay under the lock.
 func (c *cacheFS) flush(ctx context.Context, res commitResult) (proto.LayerHead, error) {
 	r := res.repo
+	begin := time.Now()
+	var before anyfs.Stats
+	if _, link, _, _ := r.stack(); link != nil {
+		before = link.Stats()
+		r.mu.Lock()
+		seeded := r.seedPending
+		r.mu.Unlock()
+		if !res.refresh && res.tree != nil && !seeded {
+			link.FlushKeys(ctx, res.tree.Keys()) // best effort: the locked pass decides
+		}
+	}
 	r.cmu.Lock()
 	defer r.cmu.Unlock()
 	_, link, remote, storeNm := r.stack()
@@ -910,8 +929,6 @@ func (c *cacheFS) flush(ctx context.Context, res commitResult) (proto.LayerHead,
 	if top == nil {
 		return proto.LayerHead{}, errors.New("nothing committed")
 	}
-	begin := time.Now()
-	before := link.Stats()
 	keys := res.tree.Keys()
 	r.mu.Lock()
 	seeded := r.seedPending
@@ -1055,6 +1072,111 @@ func (c *cacheFS) reclaim(ctx context.Context, want int64) int64 {
 		freed += n
 	}
 	return freed
+}
+
+// openRepo returns a repository's stack if this process opened it.
+func (c *cacheFS) openRepo(id string) *repoFS {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.repos[id]
+}
+
+// openRepos returns the opened repository stacks.
+func (c *cacheFS) openRepos() []*repoFS {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]*repoFS, 0, len(c.repos))
+	for _, r := range c.repos {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].id < out[j].id })
+	return out
+}
+
+// dropUnreferenced removes the clean pages and materialized files that no
+// tree a slot mounts or starts from references any more (live: repository
+// id -> layer ids of its slots; the local head and running hashers count
+// too): pages of files a trim or a demoted slot deleted. They are in the
+// store (clean), so nothing is lost. A repository busy committing or
+// flushing is skipped; materialized files only go when every
+// repository's references are known. It returns the bytes dropped.
+func (c *cacheFS) dropUnreferenced(ctx context.Context, live map[string][]string) int64 {
+	digests := map[string]bool{}
+	complete := true
+	var freed int64
+	for _, r := range c.openRepos() {
+		if !r.cmu.TryLock() {
+			complete = false
+			continue
+		}
+		keep, err := c.referenced(ctx, r, live[r.id], digests)
+		if err == nil {
+			freed += r.local.DropUnreferenced(func(k anyfs.Key) bool { return keep[k] })
+		} else {
+			complete = false
+		}
+		r.cmu.Unlock()
+	}
+	if complete {
+		freed += c.files.DropUnreferenced(func(d string) bool { return digests[d] })
+	}
+	return freed
+}
+
+// referenced collects the pages (returned) and file digests (added to
+// digests) of a repository's live trees: the layers in live, its local
+// head, mounted chains and the pages its hashers hold (r.cmu held).
+func (c *cacheFS) referenced(ctx context.Context, r *repoFS, live []string, digests map[string]bool) (map[anyfs.Key]bool, error) {
+	keep := map[anyfs.Key]bool{}
+	addTree := func(t *anyfs.Tree) {
+		for _, k := range t.Keys() {
+			keep[k] = true
+		}
+		for _, n := range t.Nodes() {
+			if n.Kind == anyfs.File {
+				if n.Digest == "" && n.Size == 0 {
+					continue
+				}
+				digests[n.Digest] = true
+			}
+		}
+	}
+	if id, err := anyfs.Head(ctx, r.layers, headName); err == nil {
+		live = append(live, id)
+	}
+	seen := map[string]bool{}
+	for _, id := range live {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ch, err := r.chain(ctx, id)
+		if err != nil {
+			return nil, err // unknown references: keep everything
+		}
+		addTree(ch.Tree())
+	}
+	c.mu.Lock()
+	var hs []*anyfs.Hasher
+	var trees []*anyfs.Tree
+	for slot, sm := range c.mounts {
+		if sm.repo == r {
+			trees = append(trees, sm.src.Tree())
+			if h := c.hashed[slot]; h != nil {
+				hs = append(hs, h)
+			}
+		}
+	}
+	c.mu.Unlock()
+	for _, t := range trees {
+		addTree(t)
+	}
+	for _, h := range hs {
+		for _, k := range h.Keys() {
+			keep[k] = true
+		}
+	}
+	return keep, nil
 }
 
 // resident is the machine-wide resident bytes of the local tiers
