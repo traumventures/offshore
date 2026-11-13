@@ -20,6 +20,16 @@ Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
     Description: VPC of the build machines (the default VPC unless configured).
+  CacheRetentionDays:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 7
+    Description: >-
+      Days after which cache/ objects are deleted: the pool's [storage]
+      retention rounded up to whole days (default 24h = 1). Stores never serve
+      objects older than the retention, so the lifecycle never deletes data
+      that is still served.
 Resources:
   MachineSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -133,7 +143,8 @@ Resources:
       com.aws.cloudformation.Context:
         why: >-
           Holds only reproducible artifacts (server binaries, cache objects with a
-          one day lifetime), so it is deleted with the stack instead of retained.
+          lifetime of the pool's [storage] retention, default one day), so it is
+          deleted with the stack instead of retained.
     Properties:
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
@@ -145,10 +156,10 @@ Resources:
           - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
       LifecycleConfiguration:
         Rules:
-          - Id: cache-24h
+          - Id: cache-retention
             Status: Enabled
             Prefix: cache/
-            ExpirationInDays: 1
+            ExpirationInDays: !Ref CacheRetentionDays
           - Id: binaries
             Status: Enabled
             Prefix: bin/
@@ -362,7 +373,9 @@ Resources:
 
 Outputs:
   TemplateVersion:
-    Value: "8"
+    Value: "9"
+  CacheRetentionDays:
+    Value: !Ref CacheRetentionDays
   SecurityGroupId:
     Value: !Ref MachineSecurityGroup
   InstanceProfileArn:

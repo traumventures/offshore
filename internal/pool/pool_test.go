@@ -235,3 +235,11 @@ func TestProviderEnabledInPolicy(t *testing.T) {
 		t.Fatalf("disabled %v, max spend %v", p.DisabledProviders, p.MaxSpendPerHour)
 	}
 }
+
+func TestRetentionDays(t *testing.T) {
+	for d, want := range map[time.Duration]int64{24 * time.Hour: 1, 36 * time.Hour: 2, 7 * 24 * time.Hour: 7} {
+		if got := retentionDays(d); got != want {
+			t.Errorf("%v: %d, want %d", d, got, want)
+		}
+	}
+}

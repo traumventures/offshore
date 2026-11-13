@@ -23,8 +23,25 @@ import (
 	"time"
 )
 
-// MaxTTL is the upper bound for the age of served objects.
-const MaxTTL = 24 * time.Hour
+// DefaultTTL is the time to live of a store opened without one: the
+// default [storage] retention and the 24 h cleanup guarantee.
+const DefaultTTL = 24 * time.Hour
+
+// MaxTTL is the upper bound for the age of served objects: the largest
+// allowed [storage] retention. Stores opened from grants use the grant's
+// retention (store.Grant.Retention), never more.
+const MaxTTL = 7 * 24 * time.Hour
+
+// TTLer is implemented by stores that report their time to live.
+type TTLer interface{ TTL() time.Duration }
+
+// TTLOf returns a store's time to live (DefaultTTL if it does not tell).
+func TTLOf(st Store) time.Duration {
+	if t, ok := st.(TTLer); ok && t.TTL() > 0 {
+		return t.TTL()
+	}
+	return DefaultTTL
+}
 
 // ErrNotFound reports a missing or expired object.
 var ErrNotFound = errors.New("blobcache: not found")
@@ -48,9 +65,13 @@ type Store interface {
 	Delete(ctx context.Context, key string) error
 }
 
-// ClampTTL returns ttl bounded to (0, MaxTTL]; zero or negative means MaxTTL.
+// ClampTTL returns ttl bounded to (0, MaxTTL]; zero or negative means
+// DefaultTTL.
 func ClampTTL(ttl time.Duration) time.Duration {
-	if ttl <= 0 || ttl > MaxTTL {
+	if ttl <= 0 {
+		return DefaultTTL
+	}
+	if ttl > MaxTTL {
 		return MaxTTL
 	}
 	return ttl

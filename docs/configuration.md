@@ -115,6 +115,22 @@ caps it at the vCPUs it runs for an hour. See
 [caches-and-storage.md](caches-and-storage.md#object-store-storage), and
 `[telemetry]` in [operations.md](operations.md#tracing).
 
+`[storage] retention` (default `"24h"`, allowed `"24h"` to `"7d"`) is the
+maximum age of cache data in the object store, for `[storage]` and for the
+providers' native stores; it may be set without a bucket:
+
+```toml
+[storage]
+retention = "3d"   # keep repository heads restorable for 3 days
+```
+
+It sets the store TTL of every grant, the orchestrator's layer garbage
+collection, the age (half of it) after which workers rewrite chains, and
+the `cache/` lifecycle of the aws-ec2 and oci buckets in whole days.
+Longer than 24 h gives up the 24 h cleanup guarantee for store data
+([operations.md](operations.md#24-h-guarantees-and-cleanup)); see
+[caches-and-storage.md](caches-and-storage.md#object-store-storage).
+
 `[writeback]` sets when workers commit build slots and write their pages
 back to the store
 ([caches-and-storage.md](caches-and-storage.md#build-slots-on-anyfs-commit-writeback-lazy-restore)):
@@ -211,7 +227,7 @@ See the [AWS guide](guides/aws.md) for IAM, quotas and costs.
 | `allow_cidrs` | embedded: the orchestrator's public IP (checkip.amazonaws.com), added to the existing rules; shared control plane: required | CIDRs of the clients that may reach machines (UDP 7443). An explicit list is authoritative: UDP 7443 rules for other sources are revoked. `["0.0.0.0/0"]` admits any client (sessions still need a lease token) |
 | `subnet` | default VPC | subnet of the machines |
 | `disk_gb` | 100 | gp3 root volume |
-| `disk_iops`, `disk_throughput` | 6000, 500 (MiB/s) | provisioned gp3 performance of the root volume (3000..80000 IOPS, at most 500 per GiB; 125..2000 MiB/s, at most IOPS/4). gp3's baseline (3000/125) saturates with concurrent builds: cargo's writes, the slot hasher, page-ins and writeback share the volume (~$0.05/h per machine for the defaults) |
+| `disk_iops`, `disk_throughput` | 6000, 500 (MiB/s) | provisioned gp3 performance of the root volume (3000..80000 IOPS, at most 500 per GiB; 125..2000 MiB/s, at most IOPS/4). gp3's baseline (3000/125) saturates with concurrent builds: cargo's writes, the slot hasher, page-ins and writeback share the volume (~$0.05/h per machine for the defaults). The scheduler prices the root volume (also while stopped) with this extra, pro rata over `disk_gb` ([Disks](caches-and-storage.md#disks)) |
 | `docker_command` | `["docker"]` | builds and pushes environment images |
 | `ami`, `ami_arm64` | newest Amazon Linux 2023 | AMI override per architecture (the base of baked images) |
 | `bake` | `true` | boot machines from baked images: the base AMI with Docker installed and the environment image pulled, baked once per environment image, architecture and base AMI on a builder instance in the background (~5 min, the two newest per image kept); saves the Docker installation (~29 s) and the image pull (~10 s for 2.4 GB) of every create. Needs the `offshore-operator-bake` policy of `deploy/aws/iam.yaml`; without it the provider logs once and boots the stock AMI |
@@ -418,7 +434,7 @@ Every table is one cache; names match `[a-z0-9_-]+`. Full semantics in
 | `tool` | global | required | `sccache`, `ccache` or `go` (each at most once) |
 | `max_size` | slot, machine | unbounded | budget enforced by pruning |
 | `prune` | slot, machine | `lru` (`none` with `digest`) | `rust`, `lru` or `none` |
-| `ttl` | all | slot 24h, machine 7d, global 24h | global: at most 24h |
+| `ttl` | all | slot 24h, machine 7d, global 24h | global: at most 7d and never longer than the pool's `[storage] retention` |
 
 ### `[tool.<name>]`
 

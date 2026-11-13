@@ -39,6 +39,9 @@ func Default(providerType, med string) Profile {
 var awsDefaults = map[string]Profile{
 	// gp3 root volume: 3000 IOPS and 125 MiB/s baseline included,
 	// $0.08/GB-month; dies with the instance (DeleteOnTermination).
+	// config.PoolConfig.Profile applies the provider's provisioned
+	// disk_iops/disk_throughput (GP3Profile): numbers and the price of the
+	// extra performance pro rata over disk_gb.
 	// https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html
 	// https://aws.amazon.com/ebs/pricing/
 	Local: {Medium: Local, Throughput: 125 * mb, IOPS: 3000, Latency: time.Millisecond,

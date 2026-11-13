@@ -25,15 +25,15 @@ import (
 // results). The orchestrator keeps per repository the newest heads
 // (restore and move targets, scheduler cache affinity) and every layer
 // it saw in their chains. Garbage collection (mark and sweep) deletes
-// layer objects no kept head reaches and those older than the slot TTL;
+// layer objects no kept head reaches and those older than the retention;
 // pages expire with the store TTL.
 
 // headsKeep bounds the heads remembered per repository.
 const headsKeep = 4
 
-// layerTTL is the age after which layers and heads are dropped (the
-// build slot TTL and the store's object TTL).
-const layerTTL = blobcache.MaxTTL
+// layerTTL is the age after which layers and heads are dropped: the
+// store's object TTL, the pool's [storage] retention.
+func (o *Orchestrator) layerTTL() time.Duration { return o.Stores.RetentionTTL() }
 
 // gcInterval is how often layer garbage collection runs.
 const gcInterval = 10 * time.Minute
@@ -176,6 +176,7 @@ type layerVictim struct {
 func (o *Orchestrator) gcLayersLocked(now time.Time) []layerVictim {
 	var out []layerVictim
 	changed := false
+	layerTTL := o.layerTTL()
 	for repo, rl := range o.heads {
 		keep := rl.Heads[:0]
 		reach := map[string]bool{}

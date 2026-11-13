@@ -20,7 +20,8 @@ import (
 var _ provider.StoreGranter = (*OCI)(nil)
 
 // NativeGranter makes the provider's bucket the pool's store: objects
-// below cache/<pool>/ (deleted after a day by the bucket's lifecycle rule).
+// below cache/<pool>/ (deleted after the [storage] retention, default a
+// day, by the bucket's lifecycle rule).
 // Workers get pre-authenticated request URLs, one per granted scope
 // (prefix PARs with AnyObjectReadWrite, listing denied), instead of
 // credentials: OCI's S3 compatible API would need a user's customer secret

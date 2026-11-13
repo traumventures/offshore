@@ -36,6 +36,9 @@ func newURLStore(base string, ttl time.Duration) *urlStore {
 	return &urlStore{base: base, client: http.DefaultClient, ttl: blobcache.ClampTTL(ttl), now: time.Now, spool: 16 << 20, retries: 8}
 }
 
+// TTL returns the store's time to live.
+func (s *urlStore) TTL() time.Duration { return s.ttl }
+
 func (s *urlStore) url(key string) (string, error) {
 	if !blobcache.ValidKey(key) {
 		return "", fmt.Errorf("blobcache: invalid key %q", key)

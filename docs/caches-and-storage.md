@@ -235,6 +235,7 @@ secret_key = "env:R2_SECRET_ACCESS_KEY"
 # role_arn   = "arn:aws:iam::123:role/cache"  # STS: per-repository credentials
 # path_style = true                            # MinIO
 # dir        = "/srv/offshore-store"       # a directory every machine mounts (instead of bucket)
+# retention  = "24h"                        # max age of cache data, 24h..7d (also without a bucket)
 ```
 
 | key | |
@@ -247,11 +248,30 @@ secret_key = "env:R2_SECRET_ACCESS_KEY"
 | `role_arn` | STS role from which per-repository credentials are minted; required with a bucket unless keys are given |
 | `path_style` | path-style addressing |
 | `dir` | directory store shared by the machines (exclusive with `bucket`) |
+| `retention` | maximum age of cache data in the object store, `"24h"` (default) to `"7d"`; applies to the native stores too and may be set alone |
+
+**Retention.** Objects under `cache/` are build caches with a fixed
+maximum age, the pool's `retention` (default 24 h, the
+[cleanup guarantee](operations.md#24-h-guarantees-and-cleanup)). It sets
+everything that ages store data: every grant carries it, so stores opened
+by workers and the control plane never serve older objects; the
+orchestrator drops heads and layers older than it (layer garbage
+collection, every 10 min); workers rewrite a chain's base and its pages
+once they are half the retention old, so a head stays restorable for at
+least the other half; and the native buckets' lifecycle rules delete
+`cache/` objects after the retention in whole days (rounded up). A longer
+retention keeps repository heads restorable after days without a build
+(30 GB of head costs 0.023 $/GB-month, ~0.02 $/day in S3, versus a cold
+build) but gives up the 24 h guarantee for cache data. With your own
+`[storage]` bucket, configure its lifecycle yourself: expire `cache/`
+after at least the retention. Global caches keep their own `ttl` (default
+24 h), bounded by the retention.
 
 Native stores: `aws-ec2` uses the stack's bucket below `cache/<pool>/`
-(one-day lifecycle) and the stack's `StoreRole`; `local-docker` a volume
+(lifecycle: the retention in days, stack parameter `CacheRetentionDays`)
+and the stack's `StoreRole`; `local-docker` a volume
 `cs-store-<pool>` shared by its containers (`/store`); `oci` its bucket
-below `cache/<pool>/` (one-day lifecycle) through pre-authenticated
+below `cache/<pool>/` (lifecycle: the retention in days) through pre-authenticated
 requests (below); `static` has none (use `[storage]`). Without a store, global caches stay machine-local and slots
 cannot move between machines.
 
@@ -596,7 +616,7 @@ hot cache of it (builds read and write only there).
 | --- | --- | --- | --- | --- | --- | --- |
 | hot | `local` (default) | root disk, or instance-store NVMe (aws-ec2 `*d` types, oci DenseIO) | fastest (NVMe: GB/s) | nothing beyond the machine | snapshot to the store + lazy restore | root disk: per GB; NVMe: in the instance price |
 | hot / warm | `volume` | attachable block volume (EBS gp3, OCI block volume) | network disk (gp3 125 MiB/s baseline) | the machine (detached, until `ttl`) | detach/attach within its zone; other zone or provider: snapshot path | per GB-month, also while detached |
-| cold / durable | `store` | S3-compatible object store (`[storage]` or the provider's) | network, tens of ms first byte | everything; 24 h TTL | free (reachable everywhere) | per GB-month + requests + egress |
+| cold / durable | `store` | S3-compatible object store (`[storage]` or the provider's) | network, tens of ms first byte | everything; TTL = `[storage] retention` (24 h) | free (reachable everywhere) | per GB-month + requests + egress |
 
 The medium is chosen per size (`medium = "local" | "volume"`); volumes are
 off by default until measurements justify them. Repository caches
@@ -641,7 +661,7 @@ with the provider documentation cited in `internal/medium/defaults.go`:
 
 | provider | medium | throughput | IOPS | price/GB-month | attach | limits |
 | --- | --- | --- | --- | --- | --- | --- |
-| aws-ec2 | local (gp3 root) | 125 MiB/s | 3000 | 0.08 | | 16 TiB, resize every 6 h |
+| aws-ec2 | local (gp3 root) | `disk_throughput` (500 MiB/s) | `disk_iops` (6000) | 0.08 + provisioned extra / `disk_gb` (0.38 at 100 GB) | | 16 TiB, resize every 6 h |
 | aws-ec2 | local (instance store) | ~1.5 GB/s | ~100k | in the instance | | lost on stop |
 | aws-ec2 | volume (gp3) | 125 MiB/s (up to 1000) | 3000 (up to 16000) | 0.08 | ~10 s | 1 GiB..16 TiB, resize every 6 h |
 | aws-ec2 | store (S3) | ~200 MB/s | | 0.023 (+0.0004 per 1000 GET) | | egress ~0.09/GB |
@@ -671,6 +691,18 @@ machine's gp3 root volume (`ec2:ModifyVolume`, once per six hours, never
 shrinking) and the supervisor grows partition and file system
 (`growpart`, `xfs_growfs`/`resize2fs`) on its next check. Sizes may declare
 `disk = "200G"` so the scheduler plans slots against it.
+
+A stopped `aws-ec2` machine keeps its gp3 root volume and pays for all of
+it: 0.08 $/GB-month of storage plus the provisioned performance above the
+gp3 baseline, 0.005 $ per IOPS-month above 3000 (`disk_iops`) and 0.04 $
+per MiB/s-month above 125 MiB/s (`disk_throughput`). The local profile's
+price per GB-month spreads that extra over `disk_gb`: the defaults (100 GB,
+6000 IOPS, 500 MiB/s) cost 15 + 15 $/month extra, so 0.08 + 30/100 = 0.38
+$/GB-month, 38 $/month for the stopped disk instead of 8 $. The scheduler's
+lifecycle (stop or destroy an idle machine) and its storage cost use this
+price; a `[providers.NAME.media.local] price_per_gb_month` override
+replaces it. Growing a disk adds only storage (0.08 $/GB-month,
+`disk_price_per_gb_month`), the provisioned performance stays fixed.
 
 ### Volumes
 

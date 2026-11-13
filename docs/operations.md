@@ -439,11 +439,17 @@ them in `offshore_events_skipped_lines_total`.
 | --- | --- | --- |
 | machines | `max_lifetime` (default 24h) | worker drains (saving slots to the store) and exits at expiry; orchestrator destroys; AWS: instance shuts down (terminate on shutdown), reaper Lambda terminates 5 min after `expires-at` every 10 min; OCI: the supervisor terminates its instance through the API; static: the supervisor removes the machine |
 | build slots | slot cache `ttl` (default 24h), capped by `max_lifetime` | worker garbage collection and pruning; die with the machine's cache volume |
-| global caches (sccache, ccache, go), snapshots | 24h | never served when older; aws-ec2 bucket lifecycle on `cache/` deletes after 1 day; snapshot chunks older than 12 h are uploaded again |
+| global caches (sccache, ccache, go), snapshots (heads, layers, pages) | `[storage] retention` (default 24h, at most 7d) | never served when older (every store grant carries the retention); orchestrator layer garbage collection drops older heads and layers every 10 min; aws-ec2 (stack parameter `CacheRetentionDays`) and oci bucket lifecycles on `cache/` delete after the retention in whole days (1 day by default); chains and pages older than half the retention (12 h) are written again; a global cache's `ttl` (default 24h) bounds its reads further |
 | machine caches | `ttl` of `scope = "machine"` caches (default 7 days) | volume expiry label, orchestrator reaps volumes |
 | machine secrets (AWS SSM) | until the supervisor reads them | supervisor deletes after reading; reaper deletes parameters under `/offshore/<stack>/machines/` without a live machine (after 15 min) |
 | worker binaries (S3 `bin/`) | 30 days | bucket lifecycle |
 | environment images (ECR) | 30 days | repository lifecycle |
+
+The table's 24 h guarantee for store data holds with the default
+`retention = "24h"`; a longer retention (up to 7 days) is a pool choice
+that keeps repository heads restorable longer and extends every bound in
+that row to it. Your own `[storage]` bucket needs a lifecycle rule that
+expires `cache/` after at least the retention.
 
 `offshore down` destroys all machines and caches of the pool;
 `offshore reconcile` reloads the pool configuration and applies the
