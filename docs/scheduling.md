@@ -11,8 +11,9 @@ The decision model is described in
 [design-scheduler-v2.md](design-scheduler-v2.md): one option model for
 placement and scale-out (`core.go`), a rent-or-buy lifecycle for idle and
 stopped machines (`lifecycle.go`), hard limits only (`limits.go`), the
-option costs of run, restore, move, prune and resize (`model.go`,
-`tiers.go`).
+option costs of run, restore, move, reclaim and resize (`model.go`,
+`tiers.go`) against the worker's disk ledger
+([design-storage-v2.md](design-storage-v2.md), `ledger.go`).
 
 ## Configuration
 
@@ -21,7 +22,7 @@ option costs of run, restore, move, prune and resize (`model.go`,
 cost_optimization   = 0.5         # 1 = cheapest, 0 = fastest result
 queue_confidence    = 0.8         # waits are scored at this quantile of the remaining run times
 disk_price_per_gb_month = 0.08    # prices disk resizes
-disk_budget    = "90%"            # cache disk machines fill before pruning ("150G": bytes)
+disk_budget    = "90%"            # the rest of the cache disk is the worker's minimum reserve ("150G": bytes)
 source_cache   = "12.5%"          # fetched source contents kept, share of the disk budget ("20G": bytes)
 estimator           = "history"   # history | static
 cpu_overcommit      = 2.0         # only slows builds down
@@ -58,7 +59,7 @@ enabled = false                                  # no machines here (default tru
 | `[[egress]]` | free within a provider, 0.09/GB at 50 MB/s across | `from` (provider or `storage`), `to` (provider), `price_per_gb`, `bandwidth` |
 | `disk_price_per_gb_month` | 0.08 | price of extra disk and of stopped machines' disks (resize, destroy decisions) |
 | `source_cache` | `"12.5%"` | source contents a worker fetched from the laptop are kept as a cache, reclaimed least recently used beyond this share of the disk budget or size (`"20G"`); open files never |
-| `disk_budget` | `"90%"` | how much of a machine's cache file system build slots and machine caches may fill before the worker reclaims and prunes: a percentage or a size (`"150G"`); sizes override it with their own `disk_budget` |
+| `disk_budget` | `"90%"` | how much of a machine's cache file system data may fill: the rest (at least 5 GB) is the minimum of the worker's reserve, the headroom it keeps free beyond the forecast growth of the running sessions; a percentage or a size (`"150G"`); sizes override it with their own `disk_budget` |
 | `estimator` | `"history"` | `history` learns CPU (average busy cores, capped by the configured value) and memory (p90 of the peak plus 25 %; before 3 runs the configured value raised to the largest observed peak plus 25 %) per repository/tool/subcommand from cgroup usage; `static` uses `[resources]` |
 | `cpu_overcommit` | 2 | reserved CPU may exceed physical cores by this factor (>= 1) |
 | `memory_overcommit` | 1 | > 1 needs `swap = true` or `soft_limit` |
@@ -116,8 +117,13 @@ repository's build slot (`Status.Disk`), and the snapshots held in object
 stores (`Status.Heads`, plus those the orchestrator saved, each recorded
 with the provider of the machine it came from). Sizes may declare `disk`. Sessions report their slot
 size before and after the run (`task_end.usage.slot_bytes_before/after`).
-The mechanisms for a full disk (prune, move by snapshot and restore, grow
-the disk) are in [caches-and-storage.md](caches-and-storage.md).
+Workers report a physical ledger of their disk (`Status.Disk.Ledger`:
+free, pinned, reserve and what is reclaimable at which cost); a placement
+that needs room reclaims (`SlotAction.Reclaim`) or grows the disk
+(`SlotAction.Grow`), a machine that cannot make room is no option, and
+disks whose pinned data and reserve exceed 60 % grow in the background
+(`Grow`). See [design-storage-v2.md](design-storage-v2.md) and
+[caches-and-storage.md](caches-and-storage.md).
 
 ## Simulator
 
@@ -248,6 +254,13 @@ OFFSHORE_GATE=v2 OFFSHORE_GATE_BASE=testdata/gate-base.json \
   go test ./internal/scheduler/sim/ -run TestGate -v
 ```
 
+With storage v2 (the physical disk model of the simulator, the ledger in
+the scheduler) the same gate gives, against the scheduler before v2: cost
+−25 % / −24 % at high load (r = 0.2 / 0.8), turnaround p95 −6.0 % / −3.9 %
+(geometric mean), objective −15 % / −21 %; low load −1 to −3 % cost,
+p95 −0.6 to −1.5 %. Storage-specific results (warm starts, ENOSPC, disk
+waits) are in [design-storage-v2.md](design-storage-v2.md#gate-simstorage_gate_testgo).
+
 ## Learning store
 
 What the scheduler learns from the past lives in a dedicated store,
@@ -356,10 +369,10 @@ memory; the machine stayed unreachable and requests queued behind it.
   day (on Monday morning after a quiet weekend no machine is pre-started).
 - EBS/AMI warm-up effects after a start are not modelled (EC2's 60 s
   minimum billing per start is).
-- disk/tiers (sizes with local disks) is the one gate case clearly slower
-  than before v2: turnaround p95 +7 to +35 % at about equal cost. The
-  local-tier capacity and its eviction are priced only through prune and
-  restore options.
+- disk/tiers (sizes with local disks) was the one gate case clearly
+  slower after scheduler v2; with storage v2 it runs without ENOSPC (the
+  physical disk model showed 74-170 before) at half the cost, see
+  `sim/testdata/storage-gate-v2.md`.
 - The simulator assumes peak memory for the whole run and constant CPU use;
   real builds have phases.
 - `sim export` cannot tell a build that was slowed by CPU contention from

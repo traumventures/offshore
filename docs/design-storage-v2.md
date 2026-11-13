@@ -1,6 +1,8 @@
 # Storage v2: one notion of space
 
-Status: design, implemented in phases (see the end). Companion of
+Status: implemented (worker `internal/worker/ledger.go`, `prune.go`,
+`slottrim.go`; scheduler `internal/scheduler/ledger.go`, `model.go`;
+sim `internal/scheduler/sim/disk.go`). Companion of
 [design-scheduler-v2.md](design-scheduler-v2.md); details of the tiers in
 [caches-and-storage.md](caches-and-storage.md).
 
@@ -60,9 +62,10 @@ file system's own counters, never with logical tree sizes:
 
 An idle slot that is *not* flushed is pinned until its commit lands; the
 reclaimer flushes it first (demotion never loses warmth). `floor` is
-max(5 GB, 3 % of the disk); the growth forecast per running session is
-the p90 slot growth of its usage key from the learning store, passed with
-the session (`Exec.SlotGrowth`).
+max(5 GB, 3 % of the disk, the disk beyond `disk_budget`); the growth
+forecast per running session is twice the learned median slot growth of
+its usage key (learning store), passed with the lease (`Exec.SlotGrowth`,
+2 GB unknown).
 
 ## One reclaim order, driven by watermarks
 
@@ -98,9 +101,11 @@ of the machine.
   8+ cores. gp3 at 6000 IOPS/500 MiB/s costs 0.08 $/GB-month + 30 $/month
   for the provisioned extra; the scheduler prices a stopped machine's disk
   with both (`medium` profile `price_per_gb_month` includes them pro rata).
-* **Grow early, in the background**: a lifecycle action (not part of a
+* **Grow early, in the background**: a Plan action (`Grow`, not part of a
   placement) grows a disk by max(50 %, 50 GB) when `pinned + reserve`
-  exceeds 70 % of it, because EBS allows one change per 6 h.
+  exceeds 60 % of it, because EBS allows one change per 6 h (the
+  orchestrator records the resize for the cooldown). In the sim 60 %
+  beat 70 % (more warm starts, no disk waits) and 50 % (cost).
 * **Never shrink** (EBS cannot): a machine past `max_lifetime` is replaced
   with the configured size; warmth moves through the store.
 * Local NVMe (`*d` types) fits this model: losing the disk on stop costs a
@@ -115,10 +120,18 @@ day without use. Cost: 30 GB of head = 0.023 $/GB-month × 30 GB = 0.023 $/day
 in S3, versus a cold Rust build of ~10 min on an x8 (0.10 $ plus the wait at
 time_value). Keeping heads 7 days would pay off for every repository built
 at least weekly, but it breaks the 24 h guarantee, so it is a pool choice:
-`[storage] retention` (default `"24h"`, at most `"7d"`) sets the store TTL,
-the bucket lifecycle (`ExpirationInDays`), the layer TTL of the
-orchestrator's GC and the compaction age (half of it). Unreachable layers
-are deleted every 10 min as today.
+`[storage] retention` (default `"24h"`, at most `"7d"`) sets the store TTL
+(carried in the store grant), the bucket lifecycle (aws stack parameter
+`CacheRetentionDays`, oci rule), the layer TTL of the orchestrator's GC
+and the chain rewrite age (half of it). Unreachable layers are deleted
+every 10 min as today.
+
+**Heads reach the store sooner.** The commit waited for the 30 s head
+deadline, queued behind other repositories' flushes (one maintenance
+lock) and skipped captures while a commit ran. Now maintenance runs per
+repository, a skipped capture is queued and committed right after, pages
+upload outside the commit lock and the head moves as soon as its pages
+are clean. What remains is the commit itself (hashing at 32 MB/s).
 
 ## How the scheduler consumes it
 
@@ -130,24 +143,41 @@ For a placement of task `t` on `m`:
     missing = need − room(m)
 
 * `missing ≤ 0`: no disk handling; the run is as warm as it is.
-* reclaimable covers it: option `SlotReclaim{Bytes: need}`; time 2 s +
-  the flushes it waits for; its time cost is Σ cost of the classes it takes
-  (lost warmth of others) — usually ≈ 0 since slots demote to the store.
-* else grow (`SlotResize`, as today) or the option does not exist; the
-  disk-tight penalty is gone: a machine that cannot make room is not a
-  candidate, so no session ever runs into a full disk.
+* reclaimable covers it: `SlotAction.Reclaim = need`; time 2 s plus Σ
+  cost of the entries it takes (lost warmth of others), usually ≈ 0 since
+  slots demote to the store.
+* else grow (`SlotAction.Grow`) or the option does not exist (the
+  disk-tight penalty and the logical prune are gone); a new machine is
+  costed with the disk it will report (`FreshDisk`), and only when no
+  machine or size can make room is a fresh one taken anyway (1 h penalty).
+
+Two pricing errors the ledger made visible are removed: a restore no
+longer pays for "a second warm copy" (local copies are a demotable tier of
+a fixed-size disk; only a grow costs money), and a learned cold run is at
+least 1.25× the warm run (a few short cold samples made cold builds look
+as fast as warm ones; in the growth sim two thirds of the cold builds had
+a fresh head to restore).
 
 Restores are costed with the working set (`LazyRestore`, page_in
 calibrated); the event log stays observability only, the forecast inputs
 come from the learning store.
 
-## Phases
+## Gate (`sim/storage_gate_test.go`)
 
-1. Sim: physical disk model (ledger, growth during runs, garbage, trim,
-   reclaim, ENOSPC, store lag, grow) with the v1 and v2 worker behaviour;
-   gate on warm-start rate, ENOSPC, disk waits, cost, p95.
-2. Worker: ledger, reclaim(free), watermarks, ENOSPC guard, slot budget
-   and trim, `SlotOp reclaim` (replaces `prune`).
-3. Scheduler and orchestrator: ledger in `Machine`, `SlotReclaim`,
-   background grow, disk price incl. provisioned IOPS/throughput.
-4. Store retention setting.
+Physical disk model calibrated on Nov 11-12 (growth p50 0.64 GB / p90
+5.5 GB per warm build, working set 0.21 of the slot, 17.5 GB system, head
+lag 10 s + 15 MB/s before, 2 s + 32 MB/s after). Base = scheduler and
+worker before storage v2 (`testdata/storage-gate-base.json`), 8 cases × r
+∈ {0.2, 0.8}; full tables in `testdata/storage-gate-{v1,v2}.md`.
+
+| sum over 16 runs | warm starts | ENOSPC | disk waits | failed | cost |
+|---|---|---|---|---|---|
+| base | 90.2 % | 246 (disk/tiers 244, nov11 on 100 GB disks 2) | 383 (19 h) | 109 | $441 |
+| v2 | 94.7 %, ≥ base in 16/16 | 0 | 3 (60 s grows on disk/tiers' 30 GB disks) | 0 | $408 |
+
+Turnaround p95 ≤ base in every run (disk/tiers r=0.8: base completed
+nothing). Cost ≤ base in 15/16; team-week r=0.2 costs +0.9 % for a 17 %
+lower p95 (objective $543 vs $593).
+
+Not modelled: the trim's rebuilds after branch switches, NVMe sizes,
+retention beyond 24 h.

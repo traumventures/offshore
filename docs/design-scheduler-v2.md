@@ -20,7 +20,7 @@ over an explicit option set:
 
 | option | time | cost |
 |---|---|---|
-| run on machine M now (warm slot, sibling seed, restore, move or cold; the prune or resize it needs is part of the option) | run (+ restore/prune/resize, thrash) | M's marginal price for the run + egress + extra disk + the slowdown it causes the sessions already on M (overcommitted cores) |
+| run on machine M now (warm slot, sibling seed, restore, move or cold; the reclaim or resize it needs is part of the option) | run (+ restore/reclaim/resize, thrash) | M's marginal price for the run + egress + extra disk + the slowdown it causes the sessions already on M (overcommitted cores) |
 | wait for M (busy, starting, or brought by an earlier request of this solve) | wait at the queue_confidence quantile (0.8) of the sessions' remaining times + run | the same, from M's free time |
 | start stopped machine S | start latency + run | price × (latency + run + idle tail) |
 | create size Z (or attach a warm detached volume) | boot (+ attach) + run | price × (boot + run + idle tail) |
@@ -77,14 +77,10 @@ time of day when there are enough), are the distribution of when.
 
 The store head of a slot is the source of truth; everything on a machine
 (slot pages, materialized files, seeds, fetched sources, machine caches)
-is a reclaimable tier. The worker has one disk function
-(`Worker.manageDisk`): one watermark pair on the disk budget and one
-reclaim order — local-tier capacity, machine caches over `max_size`,
-dormant repositories, written-back blobs, resident slot data, fetched
-sources; above the budget itself the idle slots least recently used are
-pruned, then dropped (they restore lazily from the head). The scheduler
-prices disk only as option cost (prune, resize, restore), never with
-separate penalties.
+is a reclaimable tier. The worker reports a physical ledger of its disk
+and reclaims in one order (cost per byte); the scheduler prices disk
+only as option cost (reclaim, resize, restore). See
+[design-storage-v2.md](design-storage-v2.md).
 
 ## What the scheduler reads
 

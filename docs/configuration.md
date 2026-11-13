@@ -158,7 +158,7 @@ Sizes are `[[providers.NAME.size]]` tables:
 | `cpu`, `memory` | required | capacity used for scheduling (vCPUs, bytes) |
 | `price_per_hour` | 0 (unknown) | used for sizing decisions, `status` and `report` |
 | `disk` | unknown | machine disk (`"200G"`); the scheduler plans build slots against it |
-| `disk_budget` | `[scheduler] disk_budget` | cache disk machines of this size fill before pruning (`"85%"`, `"150G"`) |
+| `disk_budget` | `[scheduler] disk_budget` | cache disk data of machines of this size may fill; the rest is the worker's minimum reserve (`"85%"`, `"150G"`) |
 | `arch` | `amd64` (local-docker: the host) | `amd64` or `arm64`; repositories pick it with `resources.arch` |
 | `instance_types` | aws-ec2: the size name; oci: `VM.Standard.E5.Flex` / `VM.Standard.A1.Flex` | provider machine types tried in order on capacity errors (aws-ec2, oci only) |
 | `medium` | `local` | where the cache lives: `local` (root disk, or the instance-store NVMe disk of instance types that have one, formatted on every boot; aws-ec2 takes `disk` from the instance type then) or `volume` (an attachable volume, `[providers.NAME.volume]`; aws-ec2, oci, local-docker) |

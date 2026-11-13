@@ -369,8 +369,8 @@ Every placement and every scale-out start/create carries a `decision`:
 - `kind`: `assign` (run now), `wait_machine` (wait for a busy or starting machine), `wait_capacity`
   (scale-out: let the queued tasks wait for what is there or on its way), `start`, `create`, `reject`.
 - `slot`: `warm`, `cold`, `restore` (snapshot from the store), `move` (save the warm slot elsewhere and
-  restore it here: the "move cache" option next to waiting for the warm machine), `prune+…`, `resize+…`.
-- Times in seconds: `wait`, `latency` (start/boot), `prep` (restore/move/prune/resize), `page_in`
+  restore it here: the "move cache" option next to waiting for the warm machine), `reclaim+…`, `resize+…`.
+- Times in seconds: `wait`, `latency` (start/boot), `prep` (restore/move/reclaim/resize), `page_in`
   (predicted thrash of a working set beyond the local tier), `run` (prep + run), `time` (time to result;
   for scale-out summed over the queued tasks, `tasks` of which the option takes). `cost` is money.
 - `score` is what the policy ranked by: option policy `cost + time_value_per_hour × hours`
