@@ -231,3 +231,57 @@ func TestLinkStream(t *testing.T) {
 		}
 	}
 }
+
+// Large files page the same with the concurrent packer as serially, and
+// a failing sink stops it.
+func TestPackerLargeSerialEqual(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "big")
+	writeRand(t, p, 3*PageSize+12345)
+	pack := func(pk *Packer) Node {
+		f, err := os.Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		var n Node
+		if err := pk.AddLargeFile(&n, f, 1, f); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	s1, s2 := &memSink{}, &memSink{}
+	a, b := pack(NewPacker(s1.put)), pack(NewPacker(s2.put).Serial())
+	if !reflect.DeepEqual(a, b) || len(a.Pages) != 4 || len(s1.pages) != 4 || !reflect.DeepEqual(s1.pages, s2.pages) {
+		t.Fatalf("concurrent %+v serial %+v", a, b)
+	}
+	f, _ := os.Open(p)
+	defer f.Close()
+	calls := 0
+	err := NewPacker(func(Key, []byte) error { calls++; return fmt.Errorf("full") }).AddLargeFile(&Node{}, f, 1, f)
+	if err == nil || calls != 1 {
+		t.Fatalf("err %v after %d puts", err, calls)
+	}
+}
+
+// The rate limit applies only under IO pressure; Forget drops queued
+// files.
+func TestHasherPressureAndForget(t *testing.T) {
+	var p float64
+	h := NewHasher(HasherOptions{BytesPerSec: 1, Settle: time.Hour, Pressure: func() (float64, bool) { return p, true }})
+	defer h.Close()
+	if h.underPressure() {
+		t.Fatal("no pressure, limited")
+	}
+	p = 50
+	h.pressuredAt = time.Time{}
+	if !h.underPressure() {
+		t.Fatal("pressure, unlimited")
+	}
+	h.Queue("a", "/nonexistent/a")
+	h.Queue("b", "/nonexistent/b")
+	h.Forget([]string{"a"})
+	if st := h.Stats(); st.Pending != 1 {
+		t.Fatalf("pending %d", st.Pending)
+	}
+}

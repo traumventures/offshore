@@ -131,7 +131,17 @@ deadline, queued behind other repositories' flushes (one maintenance
 lock) and skipped captures while a commit ran. Now maintenance runs per
 repository, a skipped capture is queued and committed right after, pages
 upload outside the commit lock and the head moves as soon as its pages
-are clean. What remains is the commit itself (hashing at 32 MB/s).
+are clean. What remains is the commit itself: background hashing was
+capped at 32 MB/s on two files, so a cold build's outputs were mostly
+left to the commit. Now the hasher runs on idle cores at the lowest CPU
+and IO priority with a quarter of the cores, and the 32 MB/s cap applies
+only while the machine's IO is under pressure (PSI `some avg10` ≥ 10 %);
+the commit reads with half the cores and hashes a large file's page keys
+and digest on separate cores (2.2 GB/s per file instead of 0.7). Build host
+bench (2.25 GB of cargo target dirs written at 150 MB/s): session end to
+committed tree 1.7–2.2 s before, 50–75 ms after (hasher kept up), 0.8–1.4 s
+under IO pressure. Digests are unchanged (BLAKE3): existing heads stay
+valid.
 
 ## How the scheduler consumes it
 

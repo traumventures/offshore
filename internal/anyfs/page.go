@@ -108,6 +108,7 @@ func PutPage(ctx context.Context, t Tier, k Key, b []byte, r Range, s State) err
 type Packer struct {
 	sink    PageSink
 	ranges  RangeSink // pages of large files with their range (nil: sink)
+	serial  bool      // hash on the calling goroutine only (Serial)
 	pack    bytes.Buffer
 	pending []*Node
 	pages   int64
@@ -116,6 +117,14 @@ type Packer struct {
 
 // NewPacker returns a packer emitting pages to sink.
 func NewPacker(sink PageSink) *Packer { return &Packer{sink: sink} }
+
+// Serial makes the packer hash large files on the calling goroutine
+// only: a caller running at a low scheduling priority (background
+// hashing) keeps all of its work there.
+func (p *Packer) Serial() *Packer {
+	p.serial = true
+	return p
+}
 
 // Pages returns the number of pages emitted and their bytes.
 func (p *Packer) Pages() (int64, int64) { return p.pages, p.bytes }
@@ -196,7 +205,85 @@ func (p *Packer) AddLarge(n *Node, r io.Reader) error {
 // AddLargeFile is AddLarge for content read from r at the start of f
 // (r may limit the rate of reading f), whose ctime before reading was
 // ctime: with WithRanges, the pages carry their range in f.
+//
+// Every byte is hashed twice (the page key and the file digest): the two
+// run on separate cores, and the next page is read while the previous
+// one is hashed, so one large file pages at several times one BLAKE3
+// core's rate instead of half of it.
 func (p *Packer) AddLargeFile(n *Node, f *os.File, ctime int64, r io.Reader) error {
+	if p.serial {
+		return p.addLargeSerial(n, f, ctime, r)
+	}
+	type page struct {
+		b   []byte
+		off int64
+		key chan Key
+	}
+	h := blake3.New()
+	pages := make(chan page, 2)
+	readErr := make(chan error, 1)
+	stop := make(chan struct{})
+	go func() {
+		defer close(pages)
+		var off int64
+		for {
+			b := make([]byte, PageSize)
+			k, err := io.ReadFull(r, b)
+			if k > 0 {
+				pg := page{b: b[:k], off: off, key: make(chan Key, 1)}
+				go func() { pg.key <- KeyOf(pg.b) }()
+				select {
+				case pages <- pg:
+				case <-stop:
+					readErr <- nil
+					return
+				}
+				off += int64(k)
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					err = nil
+				}
+				readErr <- err
+				return
+			}
+		}
+	}()
+	var refs []PageRef
+	var total int64
+	var perr error
+	for pg := range pages {
+		if perr != nil {
+			continue
+		}
+		h.Write(pg.b)
+		key := <-pg.key
+		p.pages++
+		p.bytes += int64(len(pg.b))
+		if p.ranges != nil && f != nil {
+			perr = p.ranges(key, pg.b, Range{File: f, Off: pg.off, Ctime: ctime})
+		} else {
+			perr = p.sink(key, pg.b)
+		}
+		if perr != nil {
+			close(stop)
+			continue
+		}
+		refs = append(refs, PageRef{Key: key, Len: int64(len(pg.b))})
+		total += int64(len(pg.b))
+	}
+	if err := <-readErr; err != nil {
+		return err
+	}
+	if perr != nil {
+		return perr
+	}
+	n.Pages, n.Size, n.Digest = refs, total, hex.EncodeToString(h.Sum(nil))
+	return nil
+}
+
+// addLargeSerial is AddLargeFile on the calling goroutine.
+func (p *Packer) addLargeSerial(n *Node, f *os.File, ctime int64, r io.Reader) error {
 	h := blake3.New()
 	buf := make([]byte, PageSize)
 	var refs []PageRef

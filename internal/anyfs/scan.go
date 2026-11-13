@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"github.com/zeebo/blake3"
@@ -46,9 +47,10 @@ type ScanOptions struct {
 }
 
 // DefaultReadWorkers is the default number of files read concurrently:
-// enough to keep a network volume's queue busy and several cores
-// hashing, bounded so a scan does not starve the build's IO.
-const DefaultReadWorkers = 4
+// half the cores (4..16), enough to keep a network volume's queue busy
+// and the cores hashing (a commit runs after its session: the cores it
+// used are idle), bounded so a scan does not starve other builds.
+var DefaultReadWorkers = min(max(runtime.NumCPU()/2, 4), 16)
 
 // ScanStats describe a scan.
 type ScanStats struct {
