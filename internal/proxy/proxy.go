@@ -258,13 +258,26 @@ type sessionKilled struct {
 	machine string
 	oom     bool
 	peak    int64
+	what    string // what was killed ("rustc"; empty: the command)
 }
 
 func (k *sessionKilled) Error() string {
 	if k.oom {
-		return fmt.Sprintf("killed by OOM on shared machine %s (peak %.1f GiB)", k.machine, float64(k.peak)/(1<<30))
+		what := k.what
+		if what == "" {
+			what = "command"
+		}
+		return fmt.Sprintf("%s killed by OOM on a shared machine %s (peak %.1f GiB)", what, k.machine, float64(k.peak)/(1<<30))
 	}
 	return fmt.Sprintf("killed: machine %s shut down under the command", k.machine)
+}
+
+// killedProcess names what an OOM kill of tool's session most likely hit.
+func killedProcess(tool string) string {
+	if tool == "cargo" {
+		return "rustc"
+	}
+	return ""
 }
 
 // killedByMachine reports whether a session's end is a kill by its
@@ -494,7 +507,7 @@ func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, 
 	if killedByMachine(code, usage) {
 		if ok, _ := retryable(st, 1, os.Getenv("OFFSHORE_NO_RETRY") != ""); ok && !st.retried.Load() {
 			// Skip the write-back: the retry produces it.
-			return code, &sessionKilled{machine: prep.Machine, oom: usage.OOM, peak: usage.PeakMemory}
+			return code, &sessionKilled{machine: prep.Machine, oom: usage.OOM, peak: usage.PeakMemory, what: killedProcess(tool)}
 		}
 	}
 	st.writeback.Store(true)

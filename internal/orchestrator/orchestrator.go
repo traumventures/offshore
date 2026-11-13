@@ -1163,6 +1163,15 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 		// Admission counts the learned peak, not only the estimate: the
 		// sessions of a machine must fit its memory at their peaks.
 		task.Request = o.cfg.Policy.PeakReservation(task.Request, e.LearnedPeak, req.Limit.Memory)
+		// Never more than the largest size admits (a run that peaked
+		// near it ran there before).
+		var largest int64
+		for _, sz := range o.cfg.Sizes {
+			largest = max(largest, int64(float64(sz.Capacity.Memory)*max(o.cfg.Policy.MemoryOvercommit, 1)))
+		}
+		if largest > 0 && task.Request.Memory > largest {
+			task.Request.Memory = max(largest, req.Need.Memory)
+		}
 	}
 	o.recentEnvs[req.EnvHash] = now
 	o.noteFamilyLocked(req.Family, req.RepoID)

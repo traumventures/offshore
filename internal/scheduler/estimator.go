@@ -410,6 +410,9 @@ type Estimate struct {
 	LearnedPeak int64 `json:"learned_peak,omitempty"`
 }
 
+// PeakHeadroom is added to a learned peak for admission.
+const PeakHeadroom = 0.25
+
 // PeakReservation is the memory a task reserves given its estimated need
 // and learned peak: at least the peak scaled by memory_overcommit, so the
 // sum of the learned peaks on a machine stays within its physical
@@ -422,6 +425,14 @@ func (c Config) PeakReservation(need Resources, peak, limit int64) Resources {
 	oc := c.MemoryOvercommit
 	if oc < 1 {
 		oc = 1
+	}
+	// Peaks vary between runs and sessions share the machine's memory
+	// minus the worker's headroom: plan the peak with PeakHeadroom
+	// (production: a 14.5G peak on a 16G x8s hit the 14.6G sessions
+	// limit).
+	peak = int64(float64(peak) * (1 + PeakHeadroom))
+	if limit > 0 && peak > limit {
+		peak = limit
 	}
 	if m := int64(math.Ceil(float64(peak) * oc)); m > need.Memory {
 		need.Memory = m
@@ -462,13 +473,56 @@ func (h *History) relatedPeakLocked(key string) int64 {
 	for _, s := range suffixes(ParentKeys(key)) {
 		sufs[s] = true
 	}
+	base, pkgs := packageScope(keySuffix(key))
 	for k, rs := range h.runs {
-		if k == key || !sufs[keySuffix(k)] {
+		if k == key {
 			continue
+		}
+		suf := keySuffix(k)
+		if !sufs[suf] {
+			// A run of the same command over a subset of the key's
+			// packages (any worktree) needs no more memory than this run:
+			// its peak is a lower bound (production: a clippy of 2 crates
+			// peaked at 14G, the first clippy of 8 crates including them
+			// reserved the 3G default).
+			b, ps := packageScope(suf)
+			if b != base || len(ps) == 0 || len(pkgs) == 0 || !subset(ps, pkgs) {
+				continue
+			}
 		}
 		for _, u := range rs {
 			peak = max(peak, u.PeakMemory)
 		}
 	}
 	return peak
+}
+
+// packageScope splits a usage key suffix ("cargo/clippy?p=a,b") into the
+// command ("cargo/clippy") and its package set (nil: none, the workspace
+// or the default members).
+func packageScope(suf string) (string, map[string]bool) {
+	base, scope, ok := strings.Cut(suf, "?")
+	if !ok {
+		return base, nil
+	}
+	list, ok := strings.CutPrefix(scope, "p=")
+	if !ok {
+		return base, nil
+	}
+	ps := map[string]bool{}
+	for _, p := range strings.Split(list, ",") {
+		if p != "" {
+			ps[p] = true
+		}
+	}
+	return base, ps
+}
+
+func subset(a, b map[string]bool) bool {
+	for p := range a {
+		if !b[p] {
+			return false
+		}
+	}
+	return true
 }

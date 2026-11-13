@@ -349,6 +349,22 @@ type memEvents struct {
 	High         int64 // usage exceeded memory.high (throttled)
 }
 
+// sessionsEvents reads memory.events of the sessions group (zero when
+// sessions are not in one).
+func (c *cgroups) sessionsEvents() memEvents {
+	if c == nil || !c.enabled || c.parent == "" || c.parent == cgroupRoot {
+		return memEvents{}
+	}
+	return c.memoryEvents(c.parent)
+}
+
+// sessionsOOM reports whether the sessions group's OOM killer acted
+// between before and after (its limit was reached: the sessions together
+// outgrew the machine).
+func sessionsOOM(before, after memEvents) bool {
+	return after.OOMKill+after.OOMGroupKill > before.OOMKill+before.OOMGroupKill || after.OOM > before.OOM
+}
+
 // memoryEvents reads memory.events of a session cgroup.
 func (c *cgroups) memoryEvents(dir string) memEvents {
 	if dir == "" {
@@ -408,6 +424,7 @@ func machineOOMKills() int64 {
 const (
 	killerCgroupOOM      = "cgroup_oom"        // OOM killer in the session cgroup (its limit or the machine's)
 	killerMachineOOM     = "machine_oom"       // kernel OOM kill on the machine during the session, session SIGKILLed
+	killerSessionsOOM    = "sessions_oom"      // OOM kill in the shared sessions group (all sessions outgrew the machine)
 	killerClient         = "client_disconnect" // offshore killed it: the client went away
 	killerClientSignal   = "client_signal"     // the client forwarded the signal (Ctrl-C)
 	killerWorkerShutdown = "worker_shutdown"   // offshore killed it: the worker stopped
@@ -421,7 +438,13 @@ const (
 // SIGKILLed), the signal it reports; offshoreKill is why offshore killed
 // the session ("" when it did not); oomDelta the machine's OOM kills
 // during the session (-1 unknown).
-func exitCause(code, signal int, ev memEvents, oomDelta int64, offshoreKill string, lastClientSignal int) (sig int, oom bool, killer string) {
+//
+// sharedOOM reports an OOM kill in the sessions group during the session
+// (its memory.events delta). A killed child of a wrapper (rustc under
+// cargo, which exits 101) leaves no signal on the command: a failed
+// session during such a kill counts as killed by it (with concurrent
+// sessions the victim may have been a neighbour's; a retry is harmless).
+func exitCause(code, signal int, ev memEvents, sharedOOM bool, oomDelta int64, offshoreKill string, lastClientSignal int) (sig int, oom bool, killer string) {
 	sig = signal
 	if sig == 0 && code > 128 && code <= 128+64 {
 		sig = code - 128
@@ -429,6 +452,8 @@ func exitCause(code, signal int, ev memEvents, oomDelta int64, offshoreKill stri
 	switch {
 	case ev.OOMKill > 0 || ev.OOMGroupKill > 0:
 		return sig, true, killerCgroupOOM
+	case sharedOOM && code != 0 && offshoreKill == "" && (lastClientSignal == 0 || lastClientSignal != sig):
+		return sig, true, killerSessionsOOM
 	case sig == 0:
 		return 0, false, ""
 	case offshoreKill != "":

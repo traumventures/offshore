@@ -330,6 +330,7 @@ func (s *Worker) serveExec(ctx context.Context, pc *proto.Conn, st *quic.Stream,
 	se.cgroup = cgDir
 	defer s.cg.remove(cgDir)
 	oomBefore := machineOOMKills()
+	sharedBefore := s.cg.sessionsEvents()
 	if cgDir != "" {
 		go se.sample(se.done)
 	}
@@ -499,12 +500,17 @@ loop:
 	if after := machineOOMKills(); oomBefore >= 0 && after >= 0 {
 		oomDelta = after - oomBefore
 	}
-	exit.Usage.Signal, exit.Usage.OOM, exit.Usage.Killer = exitCause(exit.Code, exit.Signal, mev, oomDelta, se.killReason(), int(se.clientSignal.Load()))
+	sharedAfter := s.cg.sessionsEvents()
+	shared := sessionsOOM(sharedBefore, sharedAfter)
+	exit.Usage.Signal, exit.Usage.OOM, exit.Usage.Killer = exitCause(exit.Code, exit.Signal, mev, shared, oomDelta, se.killReason(), int(se.clientSignal.Load()))
 	exit.Usage.OOMKills = mev.OOMKill + mev.OOMGroupKill
+	if exit.Usage.Killer == killerSessionsOOM {
+		exit.Usage.OOMKills = max(exit.Usage.OOMKills, sharedAfter.OOMKill+sharedAfter.OOMGroupKill-sharedBefore.OOMKill-sharedBefore.OOMGroupKill)
+	}
 	exit.Usage.MemoryMaxEvents, exit.Usage.MemoryHighEvents = mev.Max, mev.High
 	if exit.Usage.OOM {
 		msg := fmt.Sprintf("offshore: session exceeded its memory limit (%d bytes); the next run reserves more\n", req.Grant.MemoryMax)
-		if exit.Usage.Killer == killerMachineOOM || mev.Max == 0 && (req.Grant.MemoryMax == 0 || exit.Usage.PeakMemory < req.Grant.MemoryMax) {
+		if exit.Usage.Killer == killerMachineOOM || exit.Usage.Killer == killerSessionsOOM || mev.Max == 0 && (req.Grant.MemoryMax == 0 || exit.Usage.PeakMemory < req.Grant.MemoryMax) {
 			// Not its own limit: the sessions together outgrew the
 			// machine (the sessions cgroup) or the kernel killed it.
 			msg = "offshore: the machine ran out of memory and the kernel killed the session; the next run reserves more\n"

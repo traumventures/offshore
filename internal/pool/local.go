@@ -380,7 +380,30 @@ func (l *Local) Acquire(ctx context.Context, req orchestrator.Request, progress 
 		pw.w = nil // the caller's writer is gone after return
 		pw.mu.Unlock()
 	}()
+	req = l.serverPeak(ctx, req)
 	return l.orch.Acquire(ctx, req, pw)
+}
+
+// serverPeak sets the learned peak of a request from the control plane's
+// own history: clients that predate Estimate.LearnedPeak (or estimated
+// before the latest runs) send none, and admission would fall back to
+// the reservation alone (production 2026-11-13: an 8-crate clippy of a
+// new worktree reserved 3G on a 16G x8s and peaked at 14.5G).
+func (l *Local) serverPeak(ctx context.Context, req orchestrator.Request) orchestrator.Request {
+	if req.Key == "" {
+		return req
+	}
+	e, err := l.Estimate(ctx, req.Key, req.Need)
+	if err != nil || req.Estimate != nil && req.Estimate.LearnedPeak >= e.LearnedPeak {
+		return req
+	}
+	est := e
+	if req.Estimate != nil {
+		est = *req.Estimate
+		est.LearnedPeak = e.LearnedPeak
+	}
+	req.Estimate = &est
+	return req
 }
 
 func (l *Local) Release(ctx context.Context, leaseID, usageKey string, usage *scheduler.Usage) error {

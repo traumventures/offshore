@@ -37,10 +37,10 @@ func TestLearnedPeakFromSiblingWorktree(t *testing.T) {
 
 func TestPeakReservation(t *testing.T) {
 	c := Config{MemoryOvercommit: 1}
-	if r := c.PeakReservation(res(4, 3), 6*gib, 0); r.Memory != 6*gib || r.CPU != 4 {
+	if r := c.PeakReservation(res(4, 3), 4*gib, 0); r.Memory != 5*gib || r.CPU != 4 {
 		t.Fatalf("raised to the peak: %+v", r)
 	}
-	if r := c.PeakReservation(res(4, 8), 6*gib, 0); r.Memory != 8*gib {
+	if r := c.PeakReservation(res(4, 8), 4*gib, 0); r.Memory != 8*gib {
 		t.Fatalf("a larger estimate stays: %+v", r)
 	}
 	if r := c.PeakReservation(res(4, 3), 6*gib, 5*gib); r.Memory != 5*gib {
@@ -49,7 +49,7 @@ func TestPeakReservation(t *testing.T) {
 	// With overcommit the reservations may exceed capacity by the
 	// factor, the peaks never exceed capacity.
 	oc := Config{MemoryOvercommit: 1.25}
-	if r := oc.PeakReservation(res(4, 3), 4*gib, 0); r.Memory != 5*gib {
+	if r := oc.PeakReservation(res(4, 3), 4*gib, 0); r.Memory != 5*gib*5/4 {
 		t.Fatalf("overcommit: %+v", r)
 	}
 }
@@ -77,5 +77,32 @@ func TestPeakAdmissionOnX8s(t *testing.T) {
 	// The 3G estimates alone would have admitted it (the incident).
 	if pl := pol.Place(Pool{Now: now, Machines: []Machine{machine("x8s", res(8, 15), res(4, 6))}}, task(2, 3)); pl.Kind != Assign {
 		t.Fatalf("control: %+v", pl)
+	}
+}
+
+// Production 2026-11-13: the first clippy of 8 crates in a new worktree
+// reserved the 3G default on a 16G x8s and peaked at 14.5G; a clippy of
+// two of those crates had peaked at 14.1G in the same repository. A run
+// over a subset of the packages is a lower bound, and with the peak
+// headroom the run needs more than an x8s.
+func TestLearnedPeakFromPackageSubset(t *testing.T) {
+	h := NewHistory("")
+	h.Observe("bb83/cargo/clippy?p=app-api,app-sales", Usage{PeakMemory: 14 * gib})
+	h.Observe("bb83/cargo/clippy?p=app-api,app-other", Usage{PeakMemory: 20 * gib}) // not a subset
+	h.Observe("bb83/cargo/clippy?workspace", Usage{PeakMemory: 25 * gib})            // a superset
+	h.Observe("bb83/cargo/build?p=app-api", Usage{PeakMemory: 22 * gib})            // another command
+	key := "bb83/cargo/clippy?p=app-api,app-comms,app-sales,app-store"
+	e := h.Explain(key, res(3, 3))
+	if e.LearnedPeak != 14*gib {
+		t.Fatalf("learned peak %.1fG", float64(e.LearnedPeak)/float64(gib))
+	}
+	pol := Default{Cfg: Config{CPUOvercommit: 2, MemoryOvercommit: 1}}
+	tk := task(3, 3)
+	tk.Request = pol.Cfg.PeakReservation(tk.Request, e.LearnedPeak, 0)
+	if pl := pol.Place(Pool{Now: now, Machines: []Machine{machine("x8s", Resources{CPU: 8, Memory: 16106127360}, Resources{})}}, tk); pl.Kind == Assign {
+		t.Fatalf("placed on an x8s: %+v", pl)
+	}
+	if pl := pol.Place(Pool{Now: now, Machines: []Machine{machine("x8", res(8, 30), Resources{})}}, tk); pl.Kind != Assign {
+		t.Fatalf("x8: %+v", pl)
 	}
 }

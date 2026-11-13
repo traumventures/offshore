@@ -155,7 +155,7 @@ func TestKilledByMachine(t *testing.T) {
 			t.Errorf("%d %+v: %v, want %v", c.code, c.u, got, c.want)
 		}
 	}
-	if s := (&sessionKilled{machine: "m1", oom: true, peak: 3 << 30}).Error(); s != "killed by OOM on shared machine m1 (peak 3.0 GiB)" {
+	if s := (&sessionKilled{machine: "m1", oom: true, peak: 3 << 30, what: killedProcess("cargo")}).Error(); s != "rustc killed by OOM on a shared machine m1 (peak 3.0 GiB)" {
 		t.Errorf("%q", s)
 	}
 }

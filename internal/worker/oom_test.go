@@ -42,7 +42,7 @@ func TestExitCause(t *testing.T) {
 		{"sigterm", 143, int(syscall.SIGTERM), memEvents{}, 0, "", 0, int(syscall.SIGTERM), false, killerSignal},
 		{"exit 1", 1, 0, memEvents{Max: 4}, 0, "", 0, 0, false, ""},
 	} {
-		sig, oom, killer := exitCause(c.code, c.sig, c.ev, c.delta, c.offshore, c.client)
+		sig, oom, killer := exitCause(c.code, c.sig, c.ev, false, c.delta, c.offshore, c.client)
 		if sig != c.wantSig || oom != c.wantOOM || killer != c.wantKiller {
 			t.Errorf("%s: got %d %v %q", c.name, sig, oom, killer)
 		}
@@ -145,5 +145,45 @@ func TestSessionsGroup(t *testing.T) {
 	}
 	if filepath.Dir(s) != dir {
 		t.Fatalf("session cgroup %s outside %s", s, dir)
+	}
+}
+
+// Production 2026-11-13: cargo clippy exited 101 after a rustc was killed
+// by the sessions group's limit; the session cgroup showed no oom_kill.
+func TestExitCauseSessionsOOM(t *testing.T) {
+	sig, oom, killer := exitCause(101, 0, memEvents{}, true, 0, "", 0)
+	if !oom || killer != killerSessionsOOM || sig != 0 {
+		t.Fatalf("got %d %v %q", sig, oom, killer)
+	}
+	if _, oom, _ := exitCause(0, 0, memEvents{}, true, 0, "", 0); oom {
+		t.Fatal("a successful session is not OOM killed")
+	}
+	if _, oom, k := exitCause(137, int(syscall.SIGKILL), memEvents{}, true, 0, killerClient, 0); oom || k != killerClient {
+		t.Fatal("offshore's own kill wins")
+	}
+	if _, oom, k := exitCause(101, 0, memEvents{OOMKill: 1}, true, 0, "", 0); !oom || k != killerCgroupOOM {
+		t.Fatal("its own cgroup's counter wins")
+	}
+}
+
+func TestSessionsOOMDelta(t *testing.T) {
+	root := t.TempDir()
+	dir, err := setupSessionsGroup(root, nil, 1<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := filepath.Join(dir, "memory.events")
+	os.WriteFile(ev, []byte("low 0\nhigh 0\nmax 10\noom 1\noom_kill 1\noom_group_kill 0\n"), 0o644)
+	cg := &cgroups{enabled: true, parent: dir}
+	before := cg.sessionsEvents()
+	if sessionsOOM(before, cg.sessionsEvents()) {
+		t.Fatal("no change: no OOM")
+	}
+	os.WriteFile(ev, []byte("low 0\nhigh 0\nmax 30\noom 2\noom_kill 2\noom_group_kill 0\n"), 0o644)
+	if !sessionsOOM(before, cg.sessionsEvents()) {
+		t.Fatal("oom_kill delta not detected")
+	}
+	if (&cgroups{enabled: true, parent: cgroupRoot}).sessionsEvents() != (memEvents{}) {
+		t.Fatal("no sessions group: no events")
 	}
 }
