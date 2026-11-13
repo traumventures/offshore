@@ -62,9 +62,11 @@ func (c *cacheFS) snapLock(slot string) *sync.Mutex {
 // (finishing), and the next session of the repository waits for that
 // slot: it must take seconds. It therefore never commits: while an
 // earlier snapshot is still being committed (or waits for it), this
-// session is not captured on its own. Its changes stay in the upper
-// (newer than the head's watermark) and the next capture or the idle
-// commit takes them together with later sessions. Committing pending
+// session is not captured on its own but queued (queueCapture): its
+// changes stay in the upper (newer than the head's watermark) and its
+// release commits the live slot as soon as the earlier commit is done
+// (slotReleased), or the next capture takes them if a session holds the
+// slot by then. Committing pending
 // snapshots here held the slot for the whole commit (hashing, pages,
 // layer: minutes for large sessions on a busy disk), and the next
 // session waited up to maintWait (production: 2 min "worker barrier").
@@ -74,12 +76,14 @@ func (s *Worker) snapshotSlot(ctx context.Context, slot, repo string) error {
 	}
 	lk := s.cfs.snapLock(slot)
 	if !lk.TryLock() {
-		s.log.Debug("build slot session not captured: a commit is running", "slot", slot)
+		s.log.Debug("build slot session queued: a commit is running", "slot", slot)
+		s.cfs.queueCapture(slot)
 		return nil
 	}
 	defer lk.Unlock()
 	if len(pendingSnapshots(slot)) > 0 {
-		s.log.Debug("build slot session not captured: snapshots wait for their commit", "slot", slot)
+		s.log.Debug("build slot session queued: snapshots wait for their commit", "slot", slot)
+		s.cfs.queueCapture(slot)
 		return nil
 	}
 	m, err := readMeta(slot)
@@ -147,6 +151,28 @@ func (s *Worker) snapshotSlot(ctx context.Context, slot, repo string) error {
 	s.log.Debug("build slot session captured", "slot", slot, "files", len(p.Changes.Read), "known", len(p.Resolved),
 		"known_bytes", p.Changes.Stats.KnownRead, "seconds", time.Since(begin).Seconds())
 	return nil
+}
+
+// queueCapture records that a session of slot ended uncaptured (an
+// earlier snapshot was committing): the commit after that one takes it
+// from the live slot right away (slotReleased) instead of the idle
+// commit.
+func (c *cacheFS) queueCapture(slot string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.queued == nil {
+		c.queued = map[string]bool{}
+	}
+	c.queued[slot] = true
+}
+
+// takeQueued reports and clears a queued capture of slot.
+func (c *cacheFS) takeQueued(slot string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	q := c.queued[slot]
+	delete(c.queued, slot)
+	return q
 }
 
 // capturedIntact reports whether every captured file has the size the

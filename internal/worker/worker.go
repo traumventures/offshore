@@ -208,9 +208,10 @@ type Worker struct {
 	// cacheMedium is the cache directory's file system checked against
 	// the policy at startup.
 	cacheMedium *proto.CacheFSStatus
-	maintMu     sync.Mutex // one slot maintenance pass at a time
+	maintMu     sync.Mutex      // guards maintRepos
+	maintRepos  map[string]bool // repositories a maintenance pass works on
 	headMu      sync.Mutex
-	headTimers  map[string]*time.Timer // repo -> armed head flush deadline
+	headTimers  map[string]chan struct{} // repo -> armed head watch (closed: stop)
 	// tiers counts the cache file system's transfers per medium
 	// (anyfs.RecordTransfers), reported in the status.
 	tiers medium.Recorder

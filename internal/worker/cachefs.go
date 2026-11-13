@@ -140,6 +140,7 @@ type cacheFS struct {
 	heads  map[string]proto.LayerHead // repo -> last flushed head
 	snapMu map[string]*sync.Mutex     // slot -> snapshot/commit lock
 	hashed map[string]*anyfs.Hasher   // slot -> background hasher of its upper
+	queued map[string]bool            // slot -> a session ended uncaptured (queueCapture)
 }
 
 // repoFS is a repository's tier stack and layer store.
@@ -898,8 +899,26 @@ func (c *cacheFS) dirtyIn(r *repoFS, t *anyfs.Tree) int {
 
 // flush writes a committed chain back to the store: the dirty pages of
 // its tree, its layer objects, then the head.
+//
+// The upload of the dirty pages runs before r.cmu is taken, so a commit
+// of the next session does not wait for it (minutes for a large head);
+// under the lock the keys are flushed again (only pages dirtied or
+// discarded meanwhile cost anything; a page a commit discarded fails the
+// flush, which is retried with the newer head) before the layers and the
+// head are published. Refreshes (compaction, seeds) stay under the lock.
 func (c *cacheFS) flush(ctx context.Context, res commitResult) (proto.LayerHead, error) {
 	r := res.repo
+	begin := time.Now()
+	var before anyfs.Stats
+	if _, link, _, _ := r.stack(); link != nil {
+		before = link.Stats()
+		r.mu.Lock()
+		seeded := r.seedPending
+		r.mu.Unlock()
+		if !res.refresh && res.tree != nil && !seeded {
+			link.FlushKeys(ctx, res.tree.Keys()) // best effort: the locked pass decides
+		}
+	}
 	r.cmu.Lock()
 	defer r.cmu.Unlock()
 	_, link, remote, storeNm := r.stack()
@@ -910,8 +929,6 @@ func (c *cacheFS) flush(ctx context.Context, res commitResult) (proto.LayerHead,
 	if top == nil {
 		return proto.LayerHead{}, errors.New("nothing committed")
 	}
-	begin := time.Now()
-	before := link.Stats()
 	keys := res.tree.Keys()
 	r.mu.Lock()
 	seeded := r.seedPending
