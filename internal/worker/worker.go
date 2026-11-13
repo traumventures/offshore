@@ -251,6 +251,7 @@ type Worker struct {
 	// storage is the last storage measurement (storage.go).
 	storage   storageMeasure
 	reclaimMu sync.Mutex // one disk reclaim at a time (ledger.go)
+	dropAt    time.Time  // last scan for unreferenced pages (reclaimMu)
 	// statfs replaces the cache disk's statfs for tests (total, free).
 	statfs         func() (int64, int64, bool)
 	machineBudgets machineCacheBudgets

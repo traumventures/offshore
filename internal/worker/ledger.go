@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"syscall"
 	"time"
@@ -47,6 +48,10 @@ const (
 	// reclaim flushes (and demotes) after the ledger is exhausted.
 	maxReclaimFlushes = 2
 )
+
+// dropInterval rate-limits the reclaim's scan for unreferenced pages
+// (it loads every live tree); trims and demotions drop right away.
+const dropInterval = time.Minute
 
 // reclaimWait bounds a reclaim before a placement (SlotOp), the wait for
 // a running reclaim included.
@@ -287,6 +292,9 @@ func (s *Worker) demotable(r slotRef) bool {
 	if r.Meta.Head == "" {
 		return true // empty: nothing to keep
 	}
+	if r.Meta.Restored != 0 && r.Meta.Head == r.Meta.Base {
+		return true // restored from a store head, unchanged since
+	}
 	return ok && h.Layer != "" && (h.Layer == r.Meta.Head || h.At > r.Meta.LastUsed)
 }
 
@@ -350,9 +358,9 @@ func (s *Worker) reclaim(ctx context.Context, want int64, keepRepo string, urgen
 		if e.Class == proto.ReclaimSlot && e.Repo == keepRepo {
 			continue
 		}
-		if e.Class == proto.ReclaimResident && !dropped && s.cfs != nil {
+		if e.Class == proto.ReclaimResident && !dropped && s.cfs != nil && time.Since(s.dropAt) >= dropInterval {
 			// Unreferenced pages and files first: no warmth lost.
-			dropped = true
+			dropped, s.dropAt = true, time.Now()
 			if n := s.cfs.dropUnreferenced(ctx, s.liveLayerMap()); n > 0 {
 				s.log.Info("dropped unreferenced pages and files", "bytes", n)
 			}
@@ -517,7 +525,11 @@ func (s *Worker) backgroundReclaim() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	freed, err := s.reclaim(ctx, 3*r, "", false)
-	s.log.Info("background disk reclaim", "free", free, "reserve", r, "freed", freed, "err", err)
+	lvl := slog.LevelDebug
+	if freed > 0 {
+		lvl = slog.LevelInfo
+	}
+	s.log.Log(ctx, lvl, "background disk reclaim", "free", free, "reserve", r, "freed", freed, "err", err)
 }
 
 // guardInterval is the ENOSPC guard's tick while sessions run.
