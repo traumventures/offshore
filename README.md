@@ -96,3 +96,7 @@ Guides:
 * Ecosystems: [Rust](docs/guides/rust.md), [TypeScript / Node](docs/guides/typescript.md), [Go](docs/guides/go.md)
 
 Project: [roadmap](docs/ROADMAP.md).
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).
