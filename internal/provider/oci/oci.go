@@ -59,15 +59,18 @@ func init() {
 
 // OCI is the oci provider.
 type OCI struct {
-	region      string
-	profile     string
-	configFile  string
-	compartment string // name below the tenancy root, or an OCID
-	ad          string // availability domain (name or suffix; default: the first)
-	subnet      string // optional existing subnet
-	ingress     provider.Ingress
-	images      map[string]string // optional fixed image OCID per architecture
-	diskGB      int64
+	// retentionDays is the cache/ lifecycle expiration of the bucket
+	// (provider.OptStoreRetentionDays).
+	retentionDays int64
+	region        string
+	profile       string
+	configFile    string
+	compartment   string // name below the tenancy root, or an OCID
+	ad            string // availability domain (name or suffix; default: the first)
+	subnet        string // optional existing subnet
+	ingress       provider.Ingress
+	images        map[string]string // optional fixed image OCID per architecture
+	diskGB        int64
 	// diskVPUs are the boot volume's performance units per GB (10
 	// balanced, 20 higher performance, 30-120 ultra high): throughput
 	// and IOPS grow with VPUs and size, builds are disk bound below.
@@ -124,6 +127,7 @@ func open(opts map[string]any) (provider.Provider, error) {
 		log: slog.Default(),
 	}
 	o.region = provider.String(opts, "region", "")
+	o.retentionDays = provider.RetentionDays(opts)
 	o.profile = provider.String(opts, "profile", "DEFAULT")
 	o.configFile = provider.String(opts, "config_file", "")
 	if v := provider.String(opts, "compartment", ""); v != "" {

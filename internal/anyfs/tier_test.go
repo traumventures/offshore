@@ -465,3 +465,30 @@ func TestOpenFilesDropsEmptiedFiles(t *testing.T) {
 		t.Fatalf("digests after reopen: %v", got)
 	}
 }
+
+// A store's refresh age is half its TTL (the pool's retention).
+func TestStoreRefreshAge(t *testing.T) {
+	for ttl, want := range map[time.Duration]time.Duration{24 * time.Hour: 12 * time.Hour, 72 * time.Hour: 36 * time.Hour} {
+		ds, err := blobcache.NewDirStore(t.TempDir(), ttl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := NewStore(ds, StoreMedium())
+		if got := RefreshAgeOf(ds); got != want || s.refresh != want {
+			t.Errorf("ttl %v: refresh %v/%v, want %v", ttl, got, s.refresh, want)
+		}
+		now := time.Now()
+		k := KeyOf([]byte("p"))
+		if err := s.Put(context.Background(), k, []byte("p"), 0); err != nil {
+			t.Fatal(err)
+		}
+		s.now = func() time.Time { return now.Add(want - time.Minute) }
+		if !s.Has(context.Background(), k) {
+			t.Errorf("ttl %v: young page not reused", ttl)
+		}
+		s.now = func() time.Time { return now.Add(want + time.Minute) }
+		if s.Has(context.Background(), k) {
+			t.Errorf("ttl %v: old page reused", ttl)
+		}
+	}
+}

@@ -89,3 +89,34 @@ func TestOutputsStoreNewestHeadWithGrant(t *testing.T) {
 		t.Fatalf("grant scopes %v", out.Grant.Scopes)
 	}
 }
+
+// The pool's retention reaches grants and bounds the layer GC's TTL.
+func TestStoreRetention(t *testing.T) {
+	ctx := context.Background()
+	o := newTestOrch(t, newFake(), nil)
+	if o.layerTTL() != 24*time.Hour {
+		t.Fatalf("default layer ttl %v", o.layerTTL())
+	}
+	o.Stores = &StoreSet{Pool: "p", Retention: 72 * time.Hour, Override: &store.Config{Name: "storage", Dir: t.TempDir()}}
+	g, err := o.Stores.Granter(ctx, "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gr, err := g.Grant(ctx, []string{store.RepoScope("r")}, time.Hour)
+	if err != nil || gr.Retention() != 72*time.Hour {
+		t.Fatalf("grant %+v %v", gr, err)
+	}
+	if o.layerTTL() != 72*time.Hour {
+		t.Fatalf("layer ttl %v", o.layerTTL())
+	}
+	now := time.Now()
+	o.mu.Lock()
+	o.addHeadLocked(scheduler.Snapshot{Repo: "r", Provider: "fake", Store: "storage", At: now, Layer: "1-a"}, []string{"1-a"}, now.Add(-48*time.Hour))
+	o.mu.Unlock()
+	o.GCLayers(ctx, true)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(o.heads["r"].Heads) != 1 {
+		t.Fatal("head within the retention dropped")
+	}
+}

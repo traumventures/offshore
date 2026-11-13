@@ -44,6 +44,7 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/traumventures/offshore/internal/image"
+	"github.com/traumventures/offshore/internal/medium"
 	"github.com/traumventures/offshore/internal/provider"
 	"github.com/traumventures/offshore/internal/store"
 )
@@ -52,7 +53,7 @@ import (
 var stackTemplate string
 
 // templateVersion must match the TemplateVersion output of stack.yaml.
-const templateVersion = "8"
+const templateVersion = "9"
 
 const (
 	serverPort = 7443
@@ -79,22 +80,25 @@ type EC2 struct {
 	// writeback share it; production sessions ran at 0.15-0.4 cores).
 	diskIOPS       int32
 	diskThroughput int32
-	amis           map[string]string // optional fixed AMI per architecture
-	docker         []string
-	binaries       map[string]string // server binary per architecture
-	subnet         string
-	cfg            aws.Config
-	ec2            *ec2.Client
-	api            ec2API // e.ec2 (fakes in tests)
-	ecr            *ecr.Client
-	s3             *s3.Client
-	cf             *cloudformation.Client
-	ssm            *ssm.Client
-	quotas         quotaAPI // Service Quotas (created on first use)
-	infraMu        sync.Mutex
-	infra          *infra
-	binMu          sync.Mutex
-	binKeys        map[string]string // architecture -> uploaded binary key
+	// retentionDays is the cache/ lifecycle expiration of the stack's
+	// bucket (provider.OptStoreRetentionDays).
+	retentionDays int64
+	amis          map[string]string // optional fixed AMI per architecture
+	docker        []string
+	binaries      map[string]string // server binary per architecture
+	subnet        string
+	cfg           aws.Config
+	ec2           *ec2.Client
+	api           ec2API // e.ec2 (fakes in tests)
+	ecr           *ecr.Client
+	s3            *s3.Client
+	cf            *cloudformation.Client
+	ssm           *ssm.Client
+	quotas        quotaAPI // Service Quotas (created on first use)
+	infraMu       sync.Mutex
+	infra         *infra
+	binMu         sync.Mutex
+	binKeys       map[string]string // architecture -> uploaded binary key
 
 	builderOnce sync.Once
 	builder     *image.DockerBuilder
@@ -114,7 +118,7 @@ type infra struct {
 }
 
 func open(opts map[string]any) (provider.Provider, error) {
-	e := &EC2{stack: project, diskGB: 100, docker: []string{"docker"}, amis: map[string]string{}, binKeys: map[string]string{}}
+	e := &EC2{stack: project, diskGB: medium.AWSRootDiskGB, docker: []string{"docker"}, amis: map[string]string{}, binKeys: map[string]string{}}
 	e.region = provider.String(opts, "region", "")
 	if v := provider.String(opts, "stack", ""); v != "" {
 		e.stack = v
@@ -130,6 +134,7 @@ func open(opts map[string]any) (provider.Provider, error) {
 	if v := provider.StringList(opts["docker_command"]); len(v) > 0 {
 		e.docker = v
 	}
+	e.retentionDays = provider.RetentionDays(opts)
 	e.diskGB = int32(provider.Int(opts, "disk_gb", int64(e.diskGB)))
 	e.diskIOPS = int32(provider.Int(opts, "disk_iops", DefaultDiskIOPS))
 	e.diskThroughput = int32(provider.Int(opts, "disk_throughput", DefaultDiskThroughput))
@@ -187,7 +192,7 @@ func (e *EC2) ensureInfra(ctx context.Context) (*infra, error) {
 	if err != nil {
 		return nil, err
 	}
-	if st == nil || outputs(st)["TemplateVersion"] != templateVersion {
+	if o := outputs(st); st == nil || o["TemplateVersion"] != templateVersion || o["CacheRetentionDays"] != strconv.FormatInt(e.retentionDays, 10) {
 		if err := e.deployStack(ctx, st); err != nil {
 			return nil, err
 		}
@@ -262,7 +267,10 @@ func (e *EC2) deployStack(ctx context.Context, st *cftypes.Stack) error {
 	if err != nil {
 		return err
 	}
-	params := []cftypes.Parameter{{ParameterKey: aws.String("VpcId"), ParameterValue: aws.String(vpc)}}
+	params := []cftypes.Parameter{
+		{ParameterKey: aws.String("VpcId"), ParameterValue: aws.String(vpc)},
+		{ParameterKey: aws.String("CacheRetentionDays"), ParameterValue: aws.String(strconv.FormatInt(e.retentionDays, 10))},
+	}
 	tags := []cftypes.Tag{{Key: aws.String(tagProject), Value: aws.String(project)}}
 	caps := []cftypes.Capability{cftypes.CapabilityCapabilityIam}
 	if st == nil {
@@ -913,8 +921,8 @@ func rootVolume(i ec2types.Instance) string {
 
 // Default gp3 root volume performance (gp3 baseline: 3000 IOPS, 125 MiB/s).
 const (
-	DefaultDiskIOPS       = 6000
-	DefaultDiskThroughput = 500
+	DefaultDiskIOPS       = medium.AWSRootDiskIOPS
+	DefaultDiskThroughput = medium.AWSRootDiskThroughput
 )
 
 // checkGP3 validates the provisioned performance of a gp3 volume of gb

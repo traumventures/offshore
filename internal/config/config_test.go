@@ -153,7 +153,7 @@ ttl = "12h"
 	}
 	for name, tc := range map[string]struct{ body, want string }{
 		"unknown tool":        {"[cache.c]\ntool = \"bazel\"\n", "cache.c.tool"},
-		"ttl too long":        {"[cache.c]\ntool = \"sccache\"\nttl = \"2d\"\n", "cache.c.ttl"},
+		"ttl too long":        {"[cache.c]\ntool = \"sccache\"\nttl = \"8d\"\n", "cache.c.ttl"},
 		"ttl invalid":         {"[cache.c]\npaths = [\"t\"]\nttl = \"soon\"\n", "cache.c.ttl"},
 		"global no tool":      {"[cache.c]\nscope = \"global\"\n", "cache.c.tool"},
 		"duplicate tool":      {"[cache.a]\ntool = \"go\"\n[cache.b]\ntool = \"go\"\n", "also used by"},

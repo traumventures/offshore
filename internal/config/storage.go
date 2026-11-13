@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Storage is the pool's [storage] section: an S3-compatible object store
@@ -24,6 +25,31 @@ type Storage struct {
 	// Dir is a directory store shared by the machines (a path the workers
 	// see, e.g. a network file system mounted on static hosts).
 	Dir string `toml:"dir"`
+	// Retention is the maximum age of cache data in the object store
+	// (the [storage] store or the providers' native ones): the store TTL,
+	// the bucket lifecycle, the orchestrator's layer TTL and, at half of
+	// it, the age after which active chains are rewritten. Default "24h",
+	// allowed "24h".."7d". It may be set without a bucket.
+	Retention string `toml:"retention"`
+}
+
+// Retention bounds of [storage] retention.
+const (
+	DefaultRetention = 24 * time.Hour
+	MaxRetention     = 7 * 24 * time.Hour
+)
+
+// RetentionDuration returns the configured retention (DefaultRetention
+// when unset or invalid; Validate reports invalid values).
+func (s Storage) RetentionDuration() time.Duration {
+	if s.Retention == "" {
+		return DefaultRetention
+	}
+	d, err := ParseDuration(s.Retention)
+	if err != nil || d < DefaultRetention || d > MaxRetention {
+		return DefaultRetention
+	}
+	return d
 }
 
 // StorageName is the store name of the [storage] section.
@@ -33,8 +59,14 @@ const StorageName = "storage"
 func (s Storage) Configured() bool { return s.Bucket != "" || s.Dir != "" }
 
 func (s Storage) validate(errs []string) []string {
+	if s.Retention != "" {
+		d, err := ParseDuration(s.Retention)
+		if err != nil || d < DefaultRetention || d > MaxRetention {
+			errs = append(errs, fmt.Sprintf("storage.retention: %q must be between 24h and 7d", s.Retention))
+		}
+	}
 	if !s.Configured() {
-		if s != (Storage{}) {
+		if s != (Storage{Retention: s.Retention}) {
 			errs = append(errs, "storage: bucket (or dir) required")
 		}
 		return errs

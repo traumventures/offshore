@@ -46,6 +46,9 @@ func NewS3Store(api S3API, bucket, prefix string, ttl time.Duration) *S3Store {
 	return &S3Store{api: api, bucket: bucket, prefix: prefix, ttl: ClampTTL(ttl), now: time.Now, spool: 16 << 20}
 }
 
+// TTL returns the store's time to live.
+func (s *S3Store) TTL() time.Duration { return s.ttl }
+
 // ParseS3Location splits "bucket/prefix" (prefix optional).
 func ParseS3Location(s string) (bucket, prefix string, err error) {
 	bucket, prefix, _ = strings.Cut(strings.TrimPrefix(s, "s3://"), "/")

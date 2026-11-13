@@ -8,8 +8,9 @@
 // Workers open the store from a grant and read and write directly.
 //
 // Objects are build caches: stores built here never serve objects older
-// than their TTL (at most 24h, see blobcache.MaxTTL); the aws-ec2 stack's
-// bucket deletes them after one day.
+// than their TTL, the pool's [storage] retention carried by the grant
+// (default 24h, at most 7d, see blobcache.MaxTTL); the providers' bucket
+// lifecycles delete them after the same number of days.
 package store
 
 import (
@@ -72,7 +73,24 @@ type Grant struct {
 	// pre-authenticated requests): no credentials, each reaches only the
 	// objects below its scope until Expires.
 	URLs map[string]string `json:"urls,omitempty"`
+	// RetentionSeconds is the pool's [storage] retention: the maximum age
+	// of objects (0: blobcache.DefaultTTL). Stores opened from the grant
+	// never serve older objects.
+	RetentionSeconds int64 `json:"retention_seconds,omitempty"`
 }
+
+// Retention returns the grant's object retention (the store TTL).
+func (g Grant) Retention() time.Duration {
+	if g.RetentionSeconds <= 0 {
+		return blobcache.DefaultTTL
+	}
+	return blobcache.ClampTTL(time.Duration(g.RetentionSeconds) * time.Second)
+}
+
+// RefreshAge is the age after which data held by the grant's store is
+// written again instead of reused (half the retention): a chain
+// referencing it stays restorable for at least the other half.
+func (g Grant) RefreshAge() time.Duration { return g.Retention() / 2 }
 
 // Expired reports whether the grant's credentials ended before now plus
 // margin.
@@ -121,10 +139,14 @@ var Opener = func(g Grant, scope string, ttl time.Duration) (Store, error) {
 }
 
 // Open opens the part of a store below scope (relative to the grant's
-// prefix). ttl bounds the age of served objects (0: 24h).
+// prefix). ttl bounds the age of served objects; the grant's retention
+// bounds it further (0 or blobcache.MaxTTL: the retention).
 func Open(g Grant, scope string, ttl time.Duration) (Store, error) {
 	if !g.Allows(scope) {
 		return nil, fmt.Errorf("%w: %q (granted %v)", ErrScope, scope, g.Scopes)
+	}
+	if r := g.Retention(); ttl <= 0 || ttl > r {
+		ttl = r
 	}
 	return Opener(g, scope, ttl)
 }

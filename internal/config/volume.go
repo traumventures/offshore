@@ -160,5 +160,35 @@ func (u *PoolConfig) Profile(provider, med string) medium.Profile {
 	if med == medium.LocalNVMe {
 		key = medium.Local
 	}
-	return medium.Resolve(u.ProviderType(provider), provider, med, u.Profiles[provider][key].Profile())
+	return medium.ResolveWith(u.ProviderType(provider), provider, med, u.rootDisk(provider, med), u.Profiles[provider][key].Profile())
+}
+
+// rootDisk adapts the default profile of an aws-ec2 gp3 root volume
+// (medium local) to the provider's disk_gb, disk_iops and disk_throughput
+// options: its numbers and its price per GB-month including the
+// provisioned performance above the gp3 baseline, pro rata over the size,
+// which a stopped machine keeps paying. Other media and providers: nil.
+func (u *PoolConfig) rootDisk(provider, med string) func(medium.Profile) medium.Profile {
+	if med != medium.Local || u.ProviderType(provider) != "aws-ec2" {
+		return nil
+	}
+	opts := u.Providers[provider]
+	gb := intOption(opts, "disk_gb", medium.AWSRootDiskGB)
+	iops := intOption(opts, "disk_iops", medium.AWSRootDiskIOPS)
+	tp := intOption(opts, "disk_throughput", medium.AWSRootDiskThroughput)
+	return func(p medium.Profile) medium.Profile { return medium.GP3Profile(p, gb, iops, tp) }
+}
+
+// intOption returns an integer provider option (TOML integers, JSON
+// numbers) or def.
+func intOption(opts map[string]any, key string, def int64) int64 {
+	switch v := opts[key].(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case float64:
+		return int64(v)
+	}
+	return def
 }

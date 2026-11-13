@@ -235,7 +235,17 @@ func SetMeasured(m Measured) {
 // of a provider type: the code defaults, the configured override, then a
 // measurement.
 func Resolve(providerType, name, med string, override Profile) Profile {
+	return ResolveWith(providerType, name, med, nil, override)
+}
+
+// ResolveWith is Resolve with the default adapted to the provider
+// instance's options by adapt (nil: unchanged) before the override and
+// measurements apply.
+func ResolveWith(providerType, name, med string, adapt func(Profile) Profile, override Profile) Profile {
 	p := Default(providerType, med)
+	if adapt != nil && p.Medium != "" {
+		p = adapt(p)
+	}
 	if override != (Profile{}) {
 		p = p.Merge(override, "config")
 	}

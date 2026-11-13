@@ -713,7 +713,7 @@ func (u *PoolConfig) Document() (map[string]any, error) {
 		}
 		doc["writeback"] = wb
 	}
-	if u.Storage.Configured() {
+	if u.Storage.Configured() || u.Storage.Retention != "" {
 		st, err := section(u.Storage)
 		if err != nil {
 			return nil, err

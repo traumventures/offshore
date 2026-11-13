@@ -272,3 +272,17 @@ func Int(opts map[string]any, key string, def int64) int64 {
 	}
 	return def
 }
+
+// OptStoreRetentionDays is the provider option the pool sets to the
+// [storage] retention in whole days (rounded up, at least 1): providers
+// that own a bucket set its cache/ lifecycle expiration to it, so objects
+// are deleted after the retention and never before the store TTL.
+const OptStoreRetentionDays = "store_retention_days"
+
+// RetentionDays returns the OptStoreRetentionDays option (1 when unset).
+func RetentionDays(opts map[string]any) int64 {
+	if d := Int(opts, OptStoreRetentionDays, 1); d > 1 {
+		return d
+	}
+	return 1
+}

@@ -14,3 +14,14 @@ func TestCheckVPUs(t *testing.T) {
 		}
 	}
 }
+
+func TestLifecycleRules(t *testing.T) {
+	r := lifecycleRules(3)
+	if len(r) != 2 || *r[0].TimeAmount != 3 || r[0].ObjectNameFilter.InclusionPrefixes[0] != "cache/" ||
+		*r[1].TimeAmount != 1 || r[1].ObjectNameFilter.InclusionPrefixes[0] != "secrets/" {
+		t.Fatalf("rules %+v", r)
+	}
+	if r := lifecycleRules(0); *r[0].TimeAmount != 1 {
+		t.Fatalf("default retention %d", *r[0].TimeAmount)
+	}
+}

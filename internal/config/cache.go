@@ -58,7 +58,9 @@ const (
 const (
 	DefaultSlotTTL    = 24 * time.Hour
 	DefaultMachineTTL = 7 * 24 * time.Hour
-	MaxGlobalTTL      = 24 * time.Hour
+	// MaxGlobalTTL bounds a global cache's ttl; the pool's [storage]
+	// retention bounds it further (objects never outlive the store TTL).
+	MaxGlobalTTL = MaxRetention
 )
 
 // buildCaches turns the [cache.<name>] tables into Repo.Caches (sorted by
@@ -189,7 +191,7 @@ func (r *Repo) validateCaches(errs []string) []string {
 				errs = append(errs, at+": paths, digest, install and prune are not allowed for scope \"global\"")
 			}
 			if err == nil && (ttl < time.Second || ttl > MaxGlobalTTL) {
-				errs = append(errs, fmt.Sprintf("%s.ttl: %q must be between 1s and 24h", at, c.TTL))
+				errs = append(errs, fmt.Sprintf("%s.ttl: %q must be between 1s and 7d (and is bounded by the pool's [storage] retention)", at, c.TTL))
 			}
 		default:
 			errs = append(errs, fmt.Sprintf("%s.scope: unsupported %q (slot, machine, global)", at, c.Scope))

@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/traumventures/offshore/internal/blobcache"
 	"github.com/traumventures/offshore/internal/provider"
 	"github.com/traumventures/offshore/internal/store"
 )
@@ -19,6 +20,10 @@ type StoreSet struct {
 	Pool     string
 	Override *store.Config // [storage] (nil: native stores)
 	Provs    map[string]provider.Provider
+	// Retention is the pool's [storage] retention (0: blobcache.DefaultTTL):
+	// every grant carries it, so stores opened from grants never serve
+	// older objects and workers rewrite chains after half of it.
+	Retention time.Duration
 	// NewGranter is store.NewGranter (replaceable in tests).
 	NewGranter func(context.Context, store.Config) (store.Granter, error)
 
@@ -42,8 +47,7 @@ func (s *StoreSet) Granter(ctx context.Context, prov string) (store.Granter, err
 		if err != nil || !ok {
 			return nil, err
 		}
-		s.remember(prov, g)
-		return g, nil
+		return s.remember(prov, g), nil
 	}
 	c, ok, err := provider.StoreConfig(ctx, p, s.Pool, s.Override)
 	if err != nil || !ok {
@@ -60,15 +64,40 @@ func (s *StoreSet) Granter(ctx context.Context, prov string) (store.Granter, err
 	if err != nil {
 		return nil, err
 	}
-	s.remember(prov, g)
-	return g, nil
+	return s.remember(prov, g), nil
 }
 
-func (s *StoreSet) remember(prov string, g store.Granter) {
+// remember caches a provider's granter, stamping the retention on its
+// grants, and returns it.
+func (s *StoreSet) remember(prov string, g store.Granter) store.Granter {
 	if s.granters == nil {
 		s.granters = map[string]store.Granter{}
 	}
-	s.granters[prov] = g
+	rg := retentionGranter{g, s.RetentionTTL()}
+	s.granters[prov] = rg
+	return rg
+}
+
+// RetentionTTL returns the store retention (the object TTL).
+func (s *StoreSet) RetentionTTL() time.Duration {
+	if s == nil || s.Retention <= 0 {
+		return blobcache.DefaultTTL
+	}
+	return blobcache.ClampTTL(s.Retention)
+}
+
+// retentionGranter stamps the pool's retention on grants.
+type retentionGranter struct {
+	store.Granter
+	retention time.Duration
+}
+
+func (g retentionGranter) Grant(ctx context.Context, scopes []string, ttl time.Duration) (store.Grant, error) {
+	gr, err := g.Granter.Grant(ctx, scopes, ttl)
+	if err == nil {
+		gr.RetentionSeconds = int64(g.retention / time.Second)
+	}
+	return gr, err
 }
 
 // storeGrant mints a worker grant for a repository and environment on a

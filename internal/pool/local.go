@@ -65,7 +65,8 @@ func NewControlPlane(u *config.PoolConfig, stateDir string, log *slog.Logger) (*
 func newLocal(u *config.PoolConfig, stateDir string, log *slog.Logger, shared bool) (*Local, error) {
 	provs := map[string]provider.Provider{}
 	for _, name := range u.ProviderNames() {
-		opts := map[string]any{"binary": os.Getenv("OFFSHORE_SERVER_BINARY"), "owner": u.Pool.ID, provider.OptSharedControlPlane: shared}
+		opts := map[string]any{"binary": os.Getenv("OFFSHORE_SERVER_BINARY"), "owner": u.Pool.ID, provider.OptSharedControlPlane: shared,
+			provider.OptStoreRetentionDays: retentionDays(u.Storage.RetentionDuration())}
 		for k, v := range u.Providers[name] {
 			opts[k] = v
 		}
@@ -89,7 +90,7 @@ func newLocal(u *config.PoolConfig, stateDir string, log *slog.Logger, shared bo
 	}
 	orch.PrepareImage = l.prepareImage
 	orch.Profile = est.Profile
-	orch.Stores = &orchestrator.StoreSet{Pool: u.Pool.ID, Provs: provs}
+	orch.Stores = &orchestrator.StoreSet{Pool: u.Pool.ID, Provs: provs, Retention: u.Storage.RetentionDuration()}
 	if u.Storage.Configured() {
 		sc, err := StorageConfig(u)
 		if err != nil {
@@ -444,6 +445,13 @@ func (l *Local) DestroyAll(ctx context.Context) error { return l.orch.DestroyAll
 
 func (l *Local) OutputsStore(ctx context.Context, repo string) (orchestrator.OutputsStore, error) {
 	return l.orch.OutputsStore(ctx, repo)
+}
+
+// retentionDays is the bucket lifecycle expiration of a retention: whole
+// days, rounded up, so objects never expire before the store TTL.
+func retentionDays(d time.Duration) int64 {
+	day := 24 * time.Hour
+	return int64((d + day - 1) / day)
 }
 
 // StorageConfig resolves the pool's [storage] section.

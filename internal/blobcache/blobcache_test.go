@@ -49,7 +49,7 @@ func TestValidKey(t *testing.T) {
 }
 
 func TestClampTTL(t *testing.T) {
-	for in, want := range map[time.Duration]time.Duration{0: MaxTTL, -1: MaxTTL, time.Hour: time.Hour, 48 * time.Hour: MaxTTL} {
+	for in, want := range map[time.Duration]time.Duration{0: DefaultTTL, -1: DefaultTTL, time.Hour: time.Hour, 48 * time.Hour: 48 * time.Hour, 30 * 24 * time.Hour: MaxTTL} {
 		if got := ClampTTL(in); got != want {
 			t.Errorf("ClampTTL(%v) = %v, want %v", in, got, want)
 		}
@@ -354,9 +354,13 @@ func (f *fakeS3) DeleteObject(_ context.Context, in *s3.DeleteObjectInput, _ ...
 func TestS3Store(t *testing.T) {
 	ctx := context.Background()
 	f := &fakeS3{objects: map[string][]byte{}, mod: map[string]time.Time{}}
-	s := NewS3Store(f, "bkt", "/cache/sccache/", 48*time.Hour)
+	s := NewS3Store(f, "bkt", "/cache/sccache/", 30*24*time.Hour)
 	if s.ttl != MaxTTL {
 		t.Fatalf("ttl not capped: %v", s.ttl)
+	}
+	s = NewS3Store(f, "bkt", "/cache/sccache/", 0)
+	if s.ttl != DefaultTTL {
+		t.Fatalf("default ttl %v", s.ttl)
 	}
 	s.spool = 4
 	if err := s.Put(ctx, "env/k1", strings.NewReader("ab"), 2); err != nil {
