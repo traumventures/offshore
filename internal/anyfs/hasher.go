@@ -3,15 +3,18 @@ package anyfs
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"runtime"
 	"sort"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/zeebo/blake3"
+	"golang.org/x/sys/unix"
 )
 
 // FileID identifies a file's content without reading it: the inode and
@@ -49,11 +52,23 @@ type HasherOptions struct {
 	// MinSize: smaller files are left to the commit (default 64 KiB;
 	// the bytes are in the large files).
 	MinSize int64
-	// Workers bounds files hashed at once (default 2).
+	// Workers bounds files hashed at once (default DefaultHashWorkers).
+	// They run at the lowest CPU and IO priority (nice 19, idle IO
+	// class), so they use cores the session leaves idle.
 	Workers int
-	// BytesPerSec bounds the read rate (0: unbounded), so hashing in the
-	// background does not starve the session's own IO.
+	// BytesPerSec bounds the read rate (0: unbounded) while the
+	// machine's IO is under pressure (Pressure at least PressureLimit),
+	// so hashing in the background does not starve the session's own IO
+	// on a slow disk; without pressure (outputs read from the page cache,
+	// a fast disk) hashing runs at full speed.
 	BytesPerSec float64
+	// Pressure returns the share of time (percent) tasks stalled on IO
+	// recently (ok false: unknown, the rate always applies). Default:
+	// /proc/pressure/io "some" avg10.
+	Pressure func() (float64, bool)
+	// PressureLimit is the IO pressure (percent) from which BytesPerSec
+	// applies (default 10).
+	PressureLimit float64
 	// Settle: a file is hashed once its last change is this old (default
 	// 1s); a write while it is read changes its ctime and the result is
 	// dropped.
@@ -92,6 +107,9 @@ type Hasher struct {
 	tokens  float64
 	last    time.Time
 	seq     int64
+	// pressured caches the IO pressure check (once a second).
+	pressured   bool
+	pressuredAt time.Time
 }
 
 type hitem struct {
@@ -113,7 +131,13 @@ func NewHasher(opt HasherOptions) *Hasher {
 		opt.MinSize = 64 << 10
 	}
 	if opt.Workers <= 0 {
-		opt.Workers = 2
+		opt.Workers = DefaultHashWorkers()
+	}
+	if opt.Pressure == nil {
+		opt.Pressure = IOPressure
+	}
+	if opt.PressureLimit <= 0 {
+		opt.PressureLimit = 10
 	}
 	if opt.Settle <= 0 {
 		opt.Settle = time.Second
@@ -130,6 +154,37 @@ func NewHasher(opt HasherOptions) *Hasher {
 		go h.loop()
 	}
 	return h
+}
+
+// DefaultHashWorkers is the default number of files a Hasher hashes at
+// once: a quarter of the cores (2..8).
+func DefaultHashWorkers() int {
+	return min(max(runtime.NumCPU()/4, 2), 8)
+}
+
+// IOPressure returns the machine's IO pressure: the share of the last 10
+// seconds some task stalled on IO (/proc/pressure/io, percent).
+func IOPressure() (float64, bool) {
+	b, err := os.ReadFile("/proc/pressure/io")
+	if err != nil {
+		return 0, false
+	}
+	var avg10 float64
+	if _, err := fmt.Sscanf(string(b), "some avg10=%f", &avg10); err != nil {
+		return 0, false
+	}
+	return avg10, true
+}
+
+// lowPriority lowers the calling goroutine's thread to nice 19 and the
+// idle IO class; it stays locked to the thread, which exits with the
+// goroutine (the priority never leaks to other goroutines).
+func lowPriority() {
+	runtime.LockOSThread()
+	tid := unix.Gettid()
+	unix.Setpriority(unix.PRIO_PROCESS, tid, 19)
+	const ioprioWhoProcess, ioprioClassIdle, ioprioClassShift = 1, 3, 13
+	unix.Syscall(unix.SYS_IOPRIO_SET, ioprioWhoProcess, uintptr(tid), ioprioClassIdle<<ioprioClassShift)
 }
 
 // Close stops the workers (files being hashed are finished).
@@ -159,6 +214,16 @@ func (h *Hasher) Queue(rel, path string) {
 	}
 }
 
+// Forget drops queued files (a commit reads them itself: hashing them
+// again in the background would read them twice).
+func (h *Hasher) Forget(rels []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range rels {
+		delete(h.queue, r)
+	}
+}
+
 // next takes the queued file due first (ok false: none due; wait is how
 // long until the next one is).
 func (h *Hasher) next() (hitem, bool, time.Duration) {
@@ -183,6 +248,7 @@ func (h *Hasher) next() (hitem, bool, time.Duration) {
 
 func (h *Hasher) loop() {
 	defer h.wg.Done()
+	lowPriority()
 	for {
 		it, ok, wait := h.next()
 		if !ok {
@@ -239,9 +305,9 @@ func (h *Hasher) hash(it hitem) {
 	}
 	switch {
 	case h.opt.RangeSink != nil:
-		err = NewPacker(h.opt.Sink).WithRanges(h.opt.RangeSink).AddLargeFile(n, f, id.Ctime, r)
+		err = NewPacker(h.opt.Sink).Serial().WithRanges(h.opt.RangeSink).AddLargeFile(n, f, id.Ctime, r)
 	case h.opt.Sink != nil:
-		err = NewPacker(h.opt.Sink).AddLarge(n, r)
+		err = NewPacker(h.opt.Sink).Serial().AddLarge(n, r)
 	default:
 		err = hashReader(n, r)
 	}
@@ -413,8 +479,27 @@ func (l *limitedReader) Read(p []byte) (int, error) {
 	if len(p) > 1<<20 {
 		p = p[:1<<20]
 	}
-	l.h.take(len(p))
+	if l.h.underPressure() {
+		l.h.take(len(p))
+	}
 	return l.r.Read(p)
+}
+
+// underPressure reports whether the rate limit applies (IO pressure at
+// least the limit, or unknown), checked at most once a second.
+func (h *Hasher) underPressure() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := time.Now()
+	if now.Sub(h.pressuredAt) < time.Second {
+		return h.pressured
+	}
+	p, ok := h.opt.Pressure()
+	h.pressured, h.pressuredAt = !ok || p >= h.opt.PressureLimit, now
+	if !h.pressured {
+		h.last = time.Time{} // a fresh bucket when pressure returns
+	}
+	return h.pressured
 }
 
 func (h *Hasher) take(n int) {
