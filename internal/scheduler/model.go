@@ -346,6 +346,11 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) []
 		c := rc
 		c.run += DefaultResize
 		c.prep += DefaultResize
+		if short > 0 {
+			// A session waiting for its disk is what the background grow
+			// exists to avoid: other capacity of the same latency wins.
+			c.run += DefaultResize
+		}
 		c.cost += float64(g) / 1e9 * p.diskPriceOf(m) * hours(left)
 		c.slot.Repo, c.slot.Grow = t.RepoID, target
 		c.reason += ", resize disk"

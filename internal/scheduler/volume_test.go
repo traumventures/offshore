@@ -56,7 +56,8 @@ func TestResizeCooldown(t *testing.T) {
 	tk := profiled(time.Minute, 3*time.Minute)
 	tk.Profile.SlotBytes = 20 * gib
 	pol := Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1}}
-	f := Pool{Now: now, Sizes: []Size{volSize()}, Machines: []Machine{m}}
+	// No capacity to create (provider down): the disk grows.
+	f := Pool{Now: now, Sizes: []Size{volSize()}, Machines: []Machine{m}, Providers: map[string]ProviderState{"aws": {Down: now.Add(24 * time.Hour)}}}
 	pl := pol.Place(f, tk)
 	if pl.Kind != Assign || pl.Slot.Grow < m.DiskTotal+50*gib {
 		t.Fatalf("want a resize of at least one step, got %+v", pl)

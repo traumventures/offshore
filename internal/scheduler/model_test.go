@@ -60,8 +60,13 @@ func TestPlaceFullDiskReclaimsOrResizes(t *testing.T) {
 	if pl := pol.Place(Pool{Now: now, Sizes: priced, Machines: []Machine{m}}, tk); pl.Kind != Wait {
 		t.Fatalf("no room and no resize: want wait, got %+v", pl)
 	}
+	// Resizable: with other capacity (a create of about the latency of a
+	// resize) the session does not wait for a disk; without, it grows.
 	m.CanResize = true
-	pl = pol.Place(Pool{Now: now, Sizes: priced, Machines: []Machine{m}}, tk)
+	if pl := pol.Place(Pool{Now: now, Sizes: priced, Machines: []Machine{m}}, tk); pl.Kind != Wait {
+		t.Fatalf("resizable with a size to create: want the create, got %+v", pl)
+	}
+	pl = pol.Place(Pool{Now: now, Machines: []Machine{m}}, tk)
 	if pl.Kind != Assign || pl.Slot.Grow <= m.DiskTotal || pl.Slot.Reclaim != 0 {
 		t.Fatalf("want resize, got %+v", pl)
 	}

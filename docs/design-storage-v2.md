@@ -150,6 +150,8 @@ For a placement of task `t` on `m`:
   disk-tight penalty and the logical prune are gone); a new machine is
   costed with the disk it will report (`FreshDisk`), and only when no
   machine or size can make room is a fresh one taken anyway (1 h penalty).
+  A grow during a placement counts its 60 s twice, so other capacity of
+  the same latency wins: sessions should not wait for disks.
 
 Two pricing errors the ledger made visible are removed: a restore no
 longer pays for "a second warm copy" (local copies are a demotable tier of
@@ -173,7 +175,7 @@ worker before storage v2 (`testdata/storage-gate-base.json`), 8 cases × r
 | sum over 16 runs | warm starts | ENOSPC | disk waits | failed | cost |
 |---|---|---|---|---|---|
 | base | 90.2 % | 246 (disk/tiers 244, nov11 on 100 GB disks 2) | 383 (19 h) | 109 | $441 |
-| v2 | 94.7 %, ≥ base in 16/16 | 0 | 3 (60 s grows on disk/tiers' 30 GB disks) | 0 | $408 |
+| v2 | 94.7 %, ≥ base in 16/16 | 0 | 1 (a 60 s grow on disk/tiers' 30 GB disks) | 0 | $408 |
 
 Turnaround p95 ≤ base in every run (disk/tiers r=0.8: base completed
 nothing). Cost ≤ base in 15/16; team-week r=0.2 costs +0.9 % for a 17 %
