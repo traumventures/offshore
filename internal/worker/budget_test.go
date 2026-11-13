@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/traumventures/offshore/internal/proto"
 )
 
 // The cache capacity bounds the resident data of all repositories
@@ -39,38 +41,40 @@ func TestEnforceCapacityMachineWide(t *testing.T) {
 	}
 }
 
-// Reclaim starts at and frees down to 85% of the budget.
-func TestDiskTargetLowWatermark(t *testing.T) {
-	const g = int64(1) << 30
-	if got := diskTarget(200 * g); got != 170*g {
-		t.Fatalf("target %d GiB", got/g)
-	}
-}
-
-// Above 97% of the disk the machine admits no sessions and reports
-// draining ("disk full") until usage is below 95%.
-func TestDiskFullStopsAdmission(t *testing.T) {
+// While sessions run and free drops below the reserve, the guard
+// reclaims synchronously; when nothing can be freed the machine admits no
+// sessions (draining, "disk full") until free is back at 1.5 x reserve.
+func TestDiskGuardStopsAdmission(t *testing.T) {
 	cache := t.TempDir()
 	sl, err := newSlots(filepath.Join(cache, "build"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &Worker{cfg: Config{CacheDir: cache, BuildTTL: time.Hour}, slots: sl, log: slog.New(slog.NewTextHandler(io.Discard, nil)), ready: true}
-	w.setDiskFull(0.96)
-	if st := w.statusOnly(); st.Draining {
-		t.Fatal("draining below the emergency threshold")
+	const g = int64(1) << 30
+	free := 3 * g
+	w := &Worker{cfg: Config{CacheDir: cache, BuildTTL: time.Hour}, slots: sl, log: slog.New(slog.NewTextHandler(io.Discard, nil)), ready: true,
+		sessions: map[string]*session{}, statfs: func() (int64, int64, bool) { return 100 * g, free, true }}
+	// Reserve: floor max(5G, 3%, 100G - 90G) = 10G, plus 4G of growth.
+	w.sessions["s1"] = &session{id: "s1", req: proto.Exec{SlotGrowth: 4 * g}}
+	if r := w.reserve(100 * g); r != 14*g {
+		t.Fatalf("reserve %d GiB, want 14", r/g)
 	}
-	w.setDiskFull(0.975)
-	st := w.statusOnly()
-	if !st.Draining || st.DrainReason != "disk full" {
-		t.Fatalf("status %+v", st)
+	w.guardTick(t.Context())
+	if !w.diskFull {
+		t.Fatal("not full below the reserve with nothing to reclaim")
 	}
-	w.setDiskFull(0.96) // hysteresis
-	if !w.statusOnly().Draining {
-		t.Fatal("cleared above 95%")
+	free = 15 * g // above the reserve, below 1.5 x: hysteresis
+	w.guardTick(t.Context())
+	if !w.diskFull {
+		t.Fatal("cleared below 1.5 x reserve")
 	}
-	w.setDiskFull(0.94)
+	free = 22 * g
+	w.guardTick(t.Context())
+	if w.diskFull {
+		t.Fatal("not cleared at 1.5 x reserve")
+	}
+	delete(w.sessions, "s1")
 	if st := w.statusOnly(); st.Draining || st.DrainReason != "" {
-		t.Fatalf("not cleared: %+v", st)
+		t.Fatalf("status %+v", st)
 	}
 }

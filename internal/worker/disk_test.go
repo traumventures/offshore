@@ -36,7 +36,7 @@ func TestSlotSizesAndDiskStatus(t *testing.T) {
 	os.WriteFile(filepath.Join(deps, "reg"), make([]byte, 8<<10), 0o644)
 	w := &Worker{cfg: Config{CacheDir: cache, DepsDir: deps}, slots: sl}
 	w.measureMachineCaches()
-	d := w.diskStatus()
+	d := w.diskStatus(w.load())
 	if d == nil || d.Total <= 0 || d.Used <= 0 || d.Slots != n || d.SlotBytes["repo"] != n || d.MachineCaches < 8<<10 {
 		t.Fatalf("disk status %+v", d)
 	}

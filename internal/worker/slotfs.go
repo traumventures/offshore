@@ -392,6 +392,7 @@ func (s *Worker) rebaseSlot(ctx context.Context, r slotRef) bool {
 		x.Base = base
 		if base == x.Head {
 			x.UpperBytes = 0
+			x.Physical = slotUpperBytes(r.Path)
 		}
 	})
 	return err == nil
@@ -412,37 +413,6 @@ func (s *Worker) mountSlot(slot, repo string) {
 	if err := s.cfs.mount(ctx, slot, repo, m.Base); err != nil {
 		s.log.Warn("mount build slot", "slot", slot, "err", err)
 	}
-}
-
-// reclaimSlots frees disk above the budget without losing build state:
-// clean pages and materialized files first, then rebases of idle
-// committed slots (their upper files become reclaimable) and reclaim
-// again. It returns the bytes still over.
-func (s *Worker) reclaimSlots(over func() int64) int64 {
-	if s.cfs == nil {
-		return over()
-	}
-	ctx := context.Background()
-	if n := s.cfs.reclaim(ctx, over()); n > 0 {
-		s.log.Info("reclaimed resident slot data for the disk budget", "freed", n)
-	}
-	if over() <= 0 || s.cfs.mode == fsPlain {
-		return over()
-	}
-	refs := s.slots.list()
-	sort.Slice(refs, func(i, j int) bool { return refs[i].Meta.LastUsed < refs[j].Meta.LastUsed })
-	for _, r := range refs {
-		if over() <= 0 {
-			break
-		}
-		if r.Leased || r.Meta.Head == r.Meta.Base || r.Meta.uncommitted() {
-			continue
-		}
-		if s.rebaseSlot(ctx, r) {
-			s.cfs.reclaim(ctx, over())
-		}
-	}
-	return over()
 }
 
 // headFlushDeadline bounds how long a committed head waits for its

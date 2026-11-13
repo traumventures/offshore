@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,19 +25,26 @@ import (
 // atime again because it is not newer than the mtime. On noatime mounts
 // only writes are tracked.
 //
-// Pruning runs in stages until the slot fits its target:
+// Pruning (the in-slot trim, slottrim.go) runs in stages until the slot
+// fits its target:
 //  1. rust: old incremental compilation sessions (all but the newest per
 //     crate);
 //  2. units (rust: all files of one compilation unit, lru: single files)
-//     not read for unreadRuns runs, the stalest first; with a size target
-//     also more recently read ones, never those of the latest run;
-//  3. the whole slot (cold), only when allowed and still too large.
+//     not read for their policy's unread runs (garbage), the stalest
+//     first; with a size target also more recently read ones, never those
+//     of the latest run.
+//
+// A slot is never removed here: demotion of whole slots is the disk
+// reclaim's (ledger.go).
 
 const readsFile = "reads.json"
 
-// defaultUnreadRuns is how many runs a unit may stay unread before the
-// policy prune (no size target) removes it.
-const defaultUnreadRuns = 5
+// Unread runs after which a unit is garbage: cargo units (rebuilt only
+// after a branch switch) and single files of the lru policy.
+const (
+	rustUnreadRuns = 3
+	lruUnreadRuns  = 5
+)
 
 // readIndex maps a file path relative to the slot data directory to the
 // last run that read or wrote it.
@@ -75,13 +81,16 @@ func fileTimes(fi os.FileInfo) (atime, mtime time.Time) {
 
 // recordRun scans the slot data after a session that started at start
 // and was the slot's run number run. It updates idx (files that no longer
-// exist are dropped) and returns the slot's size. reads are the files the
-// session read when tracked (nil: from atimes, re-armed for relatime).
-func recordRun(data string, start time.Time, run int64, idx readIndex, reads map[string]bool) int64 {
+// exist are dropped) and returns the slot's size and its garbage: the
+// bytes of units of caches (see unitOf) unread for their policy's runs.
+// reads are the files the session read when tracked (nil: from atimes,
+// re-armed for relatime).
+func recordRun(data string, start time.Time, run int64, idx readIndex, reads map[string]bool, caches []slotCache) (size, garbage int64) {
 	var mu sync.Mutex
 	var seen sync.Map
-	var total int64
 	next := readIndex{}
+	type unit struct{ last, bytes, runs int64 }
+	units := map[string]*unit{}
 	walkFiles(data, func(p string, fi os.FileInfo) {
 		rel, err := filepath.Rel(data, p)
 		if err != nil {
@@ -98,15 +107,23 @@ func recordRun(data string, start time.Time, run int64, idx readIndex, reads map
 				os.Chtimes(p, mt, mt) // re-arm relatime for the next run
 			}
 		}
+		key, _, runs, isUnit := unitOf(rel, caches)
 		mu.Lock()
 		defer mu.Unlock()
-		total += n
+		size += n
 		last, known := idx[rel]
-		switch {
-		case used || !known:
-			next[rel] = run
-		default:
-			next[rel] = last
+		if used || !known {
+			last = run
+		}
+		next[rel] = last
+		if isUnit {
+			u := units[key]
+			if u == nil {
+				u = &unit{runs: runs}
+				units[key] = u
+			}
+			u.last = max(u.last, last)
+			u.bytes += n
 		}
 	})
 	for k := range idx {
@@ -115,7 +132,62 @@ func recordRun(data string, start time.Time, run int64, idx readIndex, reads map
 	for k, v := range next {
 		idx[k] = v
 	}
-	return total
+	for _, u := range units {
+		if run-u.last >= u.runs {
+			garbage += u.bytes
+		}
+	}
+	return size, garbage
+}
+
+// effectiveCaches are a slot's caches for pruning (none recorded: the
+// whole slot under the lru policy).
+func effectiveCaches(m slotMeta) []slotCache {
+	if len(m.Caches) == 0 {
+		return []slotCache{{Path: ".", Prune: config.PruneLRU}}
+	}
+	return m.Caches
+}
+
+// unitOf returns the prune unit of a file (rel to the slot data
+// directory) under the most specific cache containing it: its key, what
+// removing it deletes (slash separated, relative to the data directory)
+// and the unread runs after which it is garbage; ok=false for files of no
+// cache, of a "none" cache, or of no cargo unit.
+func unitOf(rel string, caches []slotCache) (key, root string, runs int64, ok bool) {
+	rel = filepath.ToSlash(rel)
+	best := -1
+	for i, c := range caches {
+		p := filepath.ToSlash(c.Path)
+		if p == "." || rel == p || strings.HasPrefix(rel, p+"/") {
+			if best < 0 || len(p) > len(filepath.ToSlash(caches[best].Path)) {
+				best = i
+			}
+		}
+	}
+	if best < 0 {
+		return "", "", 0, false
+	}
+	c := caches[best]
+	p := filepath.ToSlash(c.Path)
+	switch c.Prune {
+	case config.PruneNone:
+		return "", "", 0, false
+	case config.PruneRust:
+		in := rel
+		if p != "." {
+			in = strings.TrimPrefix(rel, p+"/")
+		}
+		k, r, ok := cargoUnitRoot(in)
+		if !ok {
+			return "", "", 0, false
+		}
+		if p != "." {
+			r = p + "/" + r
+		}
+		return p + "\x00" + k, r, rustUnreadRuns, true
+	}
+	return rel, rel, lruUnreadRuns, true
 }
 
 // unitHash matches the metadata hash suffix of a cargo unit name.
@@ -166,38 +238,34 @@ func cargoUnitRoot(rel string) (key, root string, ok bool) {
 // pruneUnit is a group of files removed together.
 type pruneUnit struct {
 	last  int64
+	runs  int64 // unread runs after which it is garbage
 	bytes int64
 	files []string        // relative to the slot data directory
-	roots map[string]bool // what to delete (files or unit directories)
+	roots map[string]bool // what to delete (files or unit directories, slash separated)
 }
 
 // pruneResult describes what a prune removed.
 type pruneResult struct {
 	Freed     int64
-	Units     int  // stage 2 units removed
-	Sessions  int  // stage 1 incremental sessions removed
-	Cold      bool // stage 3: the slot was removed
+	Units     int // stage 2 units removed
+	Sessions  int // stage 1 incremental sessions removed
 	BytesLeft int64
 }
 
 // pruneSlot prunes a slot (which the caller has acquired) to target bytes
-// (0: the policy prune, removing units unread for unreadRuns runs).
-// allowCold permits removing the whole slot data in the last stage.
-// rm deletes the slot directory (unmounting it).
-func pruneSlot(slot string, meta slotMeta, target int64, unreadRuns int64, allowCold bool, rm func(string)) pruneResult {
+// (0: the garbage prune, removing old incremental sessions and units
+// unread for their policy's runs).
+func pruneSlot(slot string, meta slotMeta, target int64) pruneResult {
 	data := filepath.Join(slot, "data")
 	size := treeSize(data)
 	res := pruneResult{}
 	fits := func() bool { return target > 0 && size <= target }
-	if target > 0 && fits() {
+	if fits() {
 		res.BytesLeft = size
 		return res
 	}
 	idx := loadReads(slot)
-	caches := meta.Caches
-	if len(caches) == 0 {
-		caches = []slotCache{{Path: ".", Prune: config.PruneLRU}}
-	}
+	caches := effectiveCaches(meta)
 	// Stage 1: old incremental sessions.
 	for _, c := range caches {
 		if c.Prune != config.PruneRust {
@@ -211,42 +279,30 @@ func pruneSlot(slot string, meta slotMeta, target int64, unreadRuns int64, allow
 	if !fits() {
 		// Stage 2: unread units.
 		units := map[string]*pruneUnit{}
-		for _, c := range caches {
-			if c.Prune == config.PruneNone {
-				continue
+		var mu sync.Mutex
+		var seen sync.Map
+		walkFiles(data, func(p string, fi os.FileInfo) {
+			rel, err := filepath.Rel(data, p)
+			if err != nil {
+				return
 			}
-			root := filepath.Join(data, c.Path)
-			var mu sync.Mutex
-			var seen sync.Map
-			walkFiles(root, func(p string, fi os.FileInfo) {
-				rel, _ := filepath.Rel(data, p)
-				inCache, _ := filepath.Rel(root, p)
-				key, root := rel, rel
-				if c.Prune == config.PruneRust {
-					k, r, ok := cargoUnitRoot(inCache)
-					if !ok {
-						return
-					}
-					key, root = c.Path+"\x00"+k, filepath.Join(c.Path, filepath.FromSlash(r))
-				}
-				mu.Lock()
-				u := units[key]
-				if u == nil {
-					u = &pruneUnit{}
-					units[key] = u
-				}
-				if l := idx[rel]; l > u.last {
-					u.last = l
-				}
-				u.bytes += allocated(fi, &seen)
-				u.files = append(u.files, rel)
-				if u.roots == nil {
-					u.roots = map[string]bool{}
-				}
-				u.roots[root] = true
-				mu.Unlock()
-			})
-		}
+			key, root, runs, ok := unitOf(rel, caches)
+			if !ok {
+				return
+			}
+			n := allocated(fi, &seen)
+			mu.Lock()
+			defer mu.Unlock()
+			u := units[key]
+			if u == nil {
+				u = &pruneUnit{runs: runs, roots: map[string]bool{}}
+				units[key] = u
+			}
+			u.last = max(u.last, idx[rel])
+			u.bytes += n
+			u.files = append(u.files, rel)
+			u.roots[root] = true
+		})
 		list := make([]*pruneUnit, 0, len(units))
 		for _, u := range units {
 			list = append(list, u)
@@ -258,15 +314,15 @@ func pruneSlot(slot string, meta slotMeta, target int64, unreadRuns int64, allow
 			return list[i].bytes > list[j].bytes
 		})
 		for _, u := range list {
-			stale := meta.Runs-u.last >= unreadRuns
-			if target == 0 && !stale {
+			if target > 0 && fits() {
 				break
 			}
-			if target > 0 && (fits() || u.last >= meta.Runs) {
-				break
+			stale := meta.Runs-u.last >= u.runs
+			if target == 0 && !stale || target > 0 && u.last >= meta.Runs {
+				continue
 			}
 			for r := range u.roots {
-				os.RemoveAll(filepath.Join(data, r))
+				os.RemoveAll(filepath.Join(data, filepath.FromSlash(r)))
 			}
 			for _, f := range u.files {
 				delete(idx, f)
@@ -276,13 +332,6 @@ func pruneSlot(slot string, meta slotMeta, target int64, unreadRuns int64, allow
 			res.Units++
 		}
 		saveReads(slot, idx)
-	}
-	if target > 0 && !fits() && allowCold {
-		// Stage 3: cold (the next session starts a new slot).
-		rm(slot)
-		res.Freed += size
-		res.Cold = true
-		size = 0
 	}
 	if size < 0 {
 		size = treeSize(data)
@@ -344,21 +393,53 @@ func slotCaches(req proto.Exec) []slotCache {
 }
 
 // recordSlotRun counts a finished session as the slot's next run, updates
-// its read index and returns its size.
+// its read index, garbage, physical size and run times, and returns its
+// size.
 func (s *Worker) recordSlotRun(slot string, start time.Time, reads map[string]bool) int64 {
 	var run int64
-	s.slots.update(slot, func(m *slotMeta) { m.Runs++; run = m.Runs })
+	var caches []slotCache
+	s.slots.update(slot, func(m *slotMeta) {
+		m.Runs++
+		run, caches = m.Runs, effectiveCaches(*m)
+		if m.FirstRun == 0 {
+			m.FirstRun = start.Unix()
+		}
+		m.LastRun = start.Unix()
+	})
 	idx := loadReads(slot)
-	size := recordRun(filepath.Join(slot, "data"), start, run, idx, reads)
+	size, garbage := recordRun(filepath.Join(slot, "data"), start, run, idx, reads, caches)
 	if err := saveReads(slot, idx); err != nil {
 		s.log.Warn("slot read index", "slot", slot, "err", err)
 	}
+	phys := size // a plain slot's data is its disk
+	if s.cfs != nil && s.cfs.mode != fsPlain {
+		phys = slotUpperBytes(slot)
+	}
+	s.slots.update(slot, func(m *slotMeta) {
+		m.Garbage, m.Physical = garbage, phys
+		if m.ColdBytes == 0 {
+			m.ColdBytes = size
+		}
+	})
 	return size
 }
 
-// slotBudget is the sum of the max_size of a slot's caches (0: unbounded,
-// also when one cache is unbounded).
-func slotBudget(m slotMeta) int64 {
+// slotUpperBytes is the disk an overlay slot holds alone: its upper
+// directory and pending snapshots (the lower is the repository's page
+// tier).
+func slotUpperBytes(slot string) int64 {
+	var n int64
+	for _, d := range []string{"upper", snapsDir} {
+		if _, err := os.Stat(filepath.Join(slot, d)); err == nil {
+			n += treeSize(filepath.Join(slot, d))
+		}
+	}
+	return n
+}
+
+// cachesBudget is the sum of the max_size of a slot's caches (0:
+// unbounded, also when one cache is unbounded).
+func cachesBudget(m slotMeta) int64 {
 	var b int64
 	for _, c := range m.Caches {
 		if c.MaxBytes <= 0 {
@@ -378,246 +459,6 @@ func budgetBytes(b config.DiskBudget, total int64) int64 {
 	return b.Of(total)
 }
 
-// enforceBudgets fits a released slot into its budget, then the disk.
-func (s *Worker) enforceBudgets(slot string) {
-	s.pruneMu.Lock()
-	defer s.pruneMu.Unlock()
-	s.manageDisk(diskPass{slot: slot})
-}
-
-// Disk watermarks: reclaim of resident data (refetched on use, never
-// build state) starts at diskLowWater of the budget and frees down to it;
-// slots are pruned only above the budget, also down to the low watermark.
-// At diskFullAt of the file system the machine admits no sessions (it
-// reports draining) until usage is below diskFullClear.
-const (
-	diskLowWater  = 0.85
-	diskFullAt    = 0.97
-	diskFullClear = 0.95
-)
-
-// diskTarget is the low watermark of a budget.
-func diskTarget(budget int64) int64 { return int64(float64(budget) * diskLowWater) }
-
-// checkBudgets runs every lifecycle tick (statfs and counters are
-// cheap; the walks only run above the low watermark). It skips the tick
-// while a prune runs: that prune ends with the same pass.
-func (s *Worker) checkBudgets() {
-	if !s.budgetMu.TryLock() {
-		return
-	}
-	defer s.budgetMu.Unlock()
-	if !s.pruneMu.TryLock() {
-		return
-	}
-	defer s.pruneMu.Unlock()
-	s.manageDisk(diskPass{})
-}
-
-// setDiskFull updates the emergency state from the used share of the disk.
-func (s *Worker) setDiskFull(share float64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	switch {
-	case !s.diskFull && share >= diskFullAt:
-		s.diskFull = true
-		s.log.Warn("cache disk almost full: admitting no sessions", "used_share", share)
-	case s.diskFull && share < diskFullClear:
-		s.diskFull = false
-		s.log.Info("cache disk below the emergency threshold: admitting sessions again", "used_share", share)
-	}
-}
-
-// reclaimSteps are the reclaims of data that is not build state, in
-// order: dormant repositories, written back blobs, resident slot data,
-// source contents. Each returns the bytes still over.
-func (s *Worker) reclaimSteps() []func(func() int64) int64 {
-	return []func(func() int64) int64{s.reclaimDormant, s.reclaimWriteback, s.reclaimSlots, s.reclaimSources}
-}
-
-// diskPass is what one manageDisk pass may do beyond the reclaim.
-type diskPass struct {
-	slot          string // a released slot: fit it into its own budget first
-	machineCaches bool   // prune plain machine caches over their max_size (while idle)
-	noPrune       bool   // never prune build state (the prune before a placement)
-}
-
-// manageDisk is the worker's one disk function. Store heads are the
-// source of truth; everything on the cache disk is a reclaimable tier,
-// freed in one order against one watermark pair of the disk budget:
-//
-//  1. a released slot over its own budget is pruned (pass.slot);
-//  2. the local tier of the cache file system is bounded by its capacity;
-//  3. plain machine caches over max_size (pass.machineCaches, while idle);
-//  4. above the low watermark: dormant repositories, written back blobs,
-//     resident slot data (refetched on use), fetched source contents;
-//  5. above the budget itself: idle slots least recently used first,
-//     policy prune, then cold (they restore lazily from their heads),
-//     down to the low watermark (not with pass.noPrune).
-//
-// Every step measures the file system (statfs), so data no slot accounts
-// for counts too; usage also drives the emergency stop of admissions.
-// The caller holds pruneMu.
-func (s *Worker) manageDisk(pass diskPass) {
-	if pass.slot != "" {
-		if m, err := readMeta(pass.slot); err == nil {
-			if b := slotBudget(m); b > 0 && m.Bytes > b && s.slots.acquire(pass.slot) {
-				r := pruneSlot(pass.slot, m, b, defaultUnreadRuns, false, s.slots.removeDir)
-				s.slots.releaseMaint(pass.slot, r.BytesLeft)
-				s.log.Info("pruned build slot over its budget", "slot", pass.slot, "freed", r.Freed, "left", r.BytesLeft)
-			}
-		}
-	}
-	if s.cfs != nil {
-		if n := s.cfs.enforceCapacity(context.Background()); n > 0 {
-			s.log.Info("reclaimed resident slot data above the cache capacity", "freed", n)
-		}
-	}
-	if pass.machineCaches {
-		s.pruneMachineCaches()
-	}
-	total, used, ok := fsUsage(s.cfg.CacheDir)
-	if !ok || total <= 0 {
-		return
-	}
-	s.setDiskFull(float64(used) / float64(total))
-	budget := budgetBytes(s.cfg.DiskBudget, total)
-	if budget <= 0 {
-		return
-	}
-	target := diskTarget(budget)
-	over := func() int64 {
-		_, used, _ := fsUsage(s.cfg.CacheDir)
-		return used - target
-	}
-	if over() <= 0 {
-		return
-	}
-	for _, step := range s.reclaimSteps() {
-		if step(over) <= 0 {
-			return
-		}
-	}
-	if pass.noPrune {
-		return
-	}
-	if _, used, _ := fsUsage(s.cfg.CacheDir); used <= budget {
-		return // below the budget: build state stays
-	}
-	refs := s.slots.list()
-	sort.Slice(refs, func(i, j int) bool { return refs[i].Meta.LastUsed < refs[j].Meta.LastUsed })
-	for _, cold := range []bool{false, true} {
-		for _, r := range refs {
-			if over() <= 0 {
-				return
-			}
-			if r.Leased || !s.slots.acquire(r.Path) {
-				continue
-			}
-			var res pruneResult
-			if cold {
-				res = coldSlot(r.Path, s.slots.removeDir)
-			} else {
-				res = pruneSlot(r.Path, r.Meta, 0, defaultUnreadRuns, false, s.slots.removeDir)
-			}
-			s.slots.releaseMaint(r.Path, res.BytesLeft)
-			if res.Freed > 0 {
-				s.log.Info("pruned build slot for the disk budget", "slot", r.Path, "cold", res.Cold, "freed", res.Freed)
-			}
-		}
-	}
-}
-
-// reclaimSources drops faulted-in source contents that are not open
-// (they are fetched from the laptop again on use) and returns the bytes
-// still over.
-func (s *Worker) reclaimSources(over func() int64) int64 {
-	o := over()
-	if o <= 0 || s.srcFiles == nil {
-		return o
-	}
-	res := s.srcFiles.Stats().ResidentBytes
-	if n := s.srcFiles.Reclaim(max(0, res-o)); n > 0 {
-		s.log.Info("reclaimed source contents for the disk budget", "freed", n)
-	}
-	return over()
-}
-
-// pruneRepo shrinks the slots of a repository to target bytes in total
-// (0: the policy prune of every slot): older slots go cold first, then
-// the newest is pruned in stages. It returns the bytes freed.
-//
-// It is the orchestrator's prune before a placement, so the session
-// waits for it: it waits at most pruneLockWait (and until ctx ends) for a
-// maintenance prune holding pruneMu (in production a budget prune held
-// it for up to 20 minutes while a session hung, and every placement with
-// a prune waited for it) and fails then; the session runs on its warm
-// slot without the prune, and the budget prune frees the disk.
-//
-// Slot bytes are metadata: an anyfs slot's pruned files free disk only
-// once their pages are reclaimed, and the disk also holds what no slot
-// accounts for (dormant repositories, written back blobs). So the prune
-// ends with the reclaim of the disk budget down to its low watermark,
-// also when the repository has no slot here.
-func (s *Worker) pruneRepo(ctx context.Context, repo string, target int64) (int64, error) {
-	if !s.hasSlot(repo) {
-		// Without the lock wait: the reclaim runs in the background
-		// unless another prune (which reclaims too) holds the lock.
-		go func() {
-			if s.pruneMu.TryLock() {
-				defer s.pruneMu.Unlock()
-				s.manageDisk(diskPass{noPrune: true})
-			}
-		}()
-		return 0, fmt.Errorf("no build slot for repository %s", repo)
-	}
-	ctx, cancel := context.WithTimeout(ctx, pruneLockWait)
-	defer cancel()
-	if !lockCtx(ctx, &s.pruneMu) {
-		return 0, fmt.Errorf("prune of %s: %w (another prune is running)", repo, ctx.Err())
-	}
-	defer s.pruneMu.Unlock()
-	defer s.manageDisk(diskPass{noPrune: true})
-	var refs []slotRef
-	for _, r := range s.slots.list() {
-		if r.Repo == repo {
-			refs = append(refs, r)
-		}
-	}
-	if len(refs) == 0 {
-		return 0, fmt.Errorf("no build slot for repository %s", repo)
-	}
-	sort.Slice(refs, func(i, j int) bool { return refs[i].Meta.LastUsed > refs[j].Meta.LastUsed })
-	var total, freed int64
-	for _, r := range refs {
-		total += r.Meta.Bytes
-	}
-	for i := len(refs) - 1; i >= 0; i-- {
-		r := refs[i]
-		if r.Leased || !s.slots.acquire(r.Path) {
-			continue
-		}
-		var res pruneResult
-		switch {
-		case target == 0:
-			res = pruneSlot(r.Path, r.Meta, 0, defaultUnreadRuns, false, s.slots.removeDir)
-		case total <= target:
-		case i > 0:
-			res = coldSlot(r.Path, s.slots.removeDir)
-		default:
-			res = pruneSlot(r.Path, r.Meta, max(1, target-(total-r.Meta.Bytes)), defaultUnreadRuns, true, s.slots.removeDir)
-		}
-		s.slots.releaseMaint(r.Path, res.BytesLeft)
-		total -= res.Freed
-		freed += res.Freed
-	}
-	return freed, nil
-}
-
-// pruneLockWait bounds how long an on-demand prune waits for a running
-// prune.
-var pruneLockWait = 20 * time.Second
-
 // lockCtx locks mu unless ctx ends first.
 func lockCtx(ctx context.Context, mu *sync.Mutex) bool {
 	if mu.TryLock() {
@@ -635,23 +476,6 @@ func lockCtx(ctx context.Context, mu *sync.Mutex) bool {
 			}
 		}
 	}
-}
-
-// hasSlot reports whether repo has a build slot on this machine.
-func (s *Worker) hasSlot(repo string) bool {
-	for _, r := range s.slots.list() {
-		if r.Repo == repo {
-			return true
-		}
-	}
-	return false
-}
-
-// coldSlot removes a slot (stage 3 directly).
-func coldSlot(slot string, rm func(string)) pruneResult {
-	n := treeSize(filepath.Join(slot, "data"))
-	rm(slot) // the next session starts a new slot
-	return pruneResult{Freed: n, Cold: true}
 }
 
 // sourceCacheBytes is the limit of the fetched source contents on a cache

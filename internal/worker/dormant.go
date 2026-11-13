@@ -35,9 +35,9 @@ type dormantRepo struct {
 }
 
 // dormantRepos lists the repository directories without an open stack,
-// least recently used first; measure adds their sizes (a page shared
-// through the pool counts once, in the first repository).
-func (c *cacheFS) dormantRepos(measure bool) []dormantRepo {
+// least recently used first; with seen it adds their sizes (a hard link,
+// a page shared through the pool, counts once per seen map).
+func (c *cacheFS) dormantRepos(seen *sync.Map) []dormantRepo {
 	es, err := os.ReadDir(filepath.Join(c.dir, "repos"))
 	if err != nil {
 		return nil
@@ -63,24 +63,12 @@ func (c *cacheFS) dormantRepos(measure bool) []dormantRepo {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].used.Before(out[j].used) })
-	if measure {
-		var seen sync.Map
+	if seen != nil {
 		for i := range out {
-			var n atomic.Int64
-			walkFiles(out[i].dir, func(_ string, fi os.FileInfo) { n.Add(allocated(fi, &seen)) })
-			out[i].bytes = n.Load()
+			out[i].bytes = dirBytes(out[i].dir, seen)
 		}
 	}
 	return out
-}
-
-// dormantBytes is the disk held by dormant repositories.
-func (c *cacheFS) dormantBytes() int64 {
-	var n int64
-	for _, d := range c.dormantRepos(true) {
-		n += d.bytes
-	}
-	return n
 }
 
 // dropRepo deletes a dormant repository's directory (no open stack; the
@@ -128,62 +116,10 @@ func (c *cacheFS) sweepPool() int64 {
 // cleanTrash removes repositories dropped by a previous process.
 func (c *cacheFS) cleanTrash() { os.RemoveAll(filepath.Join(c.dir, "trash")) }
 
-// reclaimDormant drops dormant repositories without a build slot, least
-// recently used first, while the disk is over (see enforceDiskBudget);
-// it returns the bytes still over.
-func (s *Worker) reclaimDormant(over func() int64) int64 {
-	o := over()
-	if o <= 0 || s.cfs == nil {
-		return o
-	}
-	withSlot := map[string]bool{}
-	for _, r := range s.slots.list() {
-		withSlot[r.Repo] = true
-	}
-	dropped := 0
-	for _, d := range s.cfs.dormantRepos(false) {
-		if over() <= 0 {
-			break
-		}
-		if withSlot[d.id] || !s.cfs.dropRepo(d.id) {
-			continue
-		}
-		dropped++
-		freed := s.cfs.sweepPool()
-		s.log.Info("dropped the local tier of a repository without build slots for the disk budget", "repo", d.id, "pool_freed", freed)
-	}
-	if dropped > 0 {
-		go s.measureMachineCaches()
-	}
-	return over()
-}
-
 // writebackDir is the local blob store of written back files (cas).
 func (s *Worker) writebackDir() string {
 	if s.store == nil {
 		return ""
 	}
 	return s.store.Dir
-}
-
-// reclaimWriteback deletes the least recently used blobs of written back
-// files while no session runs (a writeback reads them; afterwards they
-// only spare a fetch from the client) and returns the bytes still over.
-// They were neither counted nor pruned: 10 GiB on a production machine.
-func (s *Worker) reclaimWriteback(over func() int64) int64 {
-	o := over()
-	dir := s.writebackDir()
-	if o <= 0 || dir == "" {
-		return o
-	}
-	s.mu.Lock()
-	idle := len(s.sessions) == 0
-	s.mu.Unlock()
-	if !idle {
-		return o
-	}
-	if n := pruneLRU(dir, max(0, treeSize(dir)-o)); n > 0 {
-		s.log.Info("pruned written back blobs for the disk budget", "freed", n)
-	}
-	return over()
 }

@@ -25,7 +25,7 @@ func (s *Worker) slotOp(ctx context.Context, op proto.SlotOp) proto.SlotResult {
 	var err error
 	switch op.Op {
 	case proto.SlotReclaim:
-		res.Freed, err = s.pruneRepo(ctx, op.Repo, op.FreeBytes) // TODO(storagev2): reclaim
+		res.Freed, err = s.reclaimFor(ctx, op.Repo, op.FreeBytes)
 	case proto.SlotSave:
 		res, err = s.saveSlot(ctx, op.Repo, op.Store)
 	case proto.SlotRestore:

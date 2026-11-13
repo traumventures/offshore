@@ -41,6 +41,14 @@ func walkFiles(dir string, fn func(path string, fi os.FileInfo)) {
 	wg.Wait()
 }
 
+// dirBytes returns the bytes allocated below dir, hard links counted once
+// per seen map (shared by several measurements).
+func dirBytes(dir string, seen *sync.Map) int64 {
+	var total atomic.Int64
+	walkFiles(dir, func(_ string, fi os.FileInfo) { total.Add(allocated(fi, seen)) })
+	return total.Load()
+}
+
 // treeSize returns the bytes allocated by the files below dir (hard links
 // counted once).
 func treeSize(dir string) int64 {
@@ -77,38 +85,41 @@ func fsUsage(dir string) (total, used int64, ok bool) {
 	return total, used, true
 }
 
-// measureMachineCaches records the size of the machine caches: the
-// machine cache directory, the written back blobs and the local tiers of
-// dormant repositories (the open ones are counted live, residentBytes),
-// so that the disk sample accounts for everything the worker keeps.
+// measureMachineCaches measures the storage (measureStorage) and records
+// the size of the machine caches: the machine cache directory, the
+// written back blobs and the local tiers of dormant repositories (the
+// open ones are counted live, residentBytes).
 func (s *Worker) measureMachineCaches() {
+	s.measureStorage(context.Background())
 	var n int64
 	if s.cfg.DepsDir != "" {
 		n += treeSize(s.cfg.DepsDir)
 	}
-	if d := s.writebackDir(); d != "" {
-		n += treeSize(d)
+	s.storage.mu.Lock()
+	n += s.storage.dirs[writebackItem]
+	for _, d := range s.storage.dormant {
+		n += d.bytes
 	}
-	if s.cfs != nil {
-		n += s.cfs.dormantBytes()
-	}
+	s.storage.mu.Unlock()
 	s.machineCacheBytes.Store(n)
-	s.measureStorage(context.Background())
 }
 
-// diskStatus reports the cache disk: filesystem totals, slot bytes (from
-// the slot metadata) and the machine caches (measured by the periodic gc).
-func (s *Worker) diskStatus() *proto.DiskStatus {
-	total, used, ok := fsUsage(s.cfg.CacheDir)
-	if !ok {
+// diskStatus reports the cache disk: its ledger (physical, statfs),
+// filesystem totals, slot bytes (from the slot metadata, logical) and the
+// machine caches (measured by the periodic gc). The caller holds s.mu
+// (load: the running sessions).
+func (s *Worker) diskStatus(load sessionLoad) *proto.DiskStatus {
+	l, _ := s.ledgerWith(load)
+	if l == nil {
 		return nil
 	}
+	total, used := l.Total, l.Total-l.Free
 	mc := s.machineCacheBytes.Load()
 	if s.cfs != nil {
 		mc += s.cfs.residentBytes()
 	}
 	d := &proto.DiskStatus{Total: total, Used: used, MachineCaches: mc, SlotBytes: map[string]int64{},
-		Budget: budgetBytes(s.cfg.DiskBudget, total)}
+		Budget: budgetBytes(s.cfg.DiskBudget, total), Ledger: l}
 	for _, r := range s.slots.list() {
 		d.Slots += r.Meta.Bytes
 		d.SlotBytes[r.Repo] += r.Meta.Bytes

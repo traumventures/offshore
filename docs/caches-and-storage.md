@@ -78,56 +78,84 @@ machines restore them instead of running the install.
 
 One invariant: the store head of a slot is the source of truth;
 everything on a machine (slot pages, materialized files, seeds, fetched
-sources, machine caches, dormant repositories, written-back blobs) is a
-reclaimable tier. The worker manages its disk in one function
-(`Worker.manageDisk`), called after a session releases its slot, on every
-lifecycle tick (5 s), on the 5-minute GC round and after a prune before
-placement, with one reclaim order against one watermark pair (85 % and
-100 % of the budget): a released slot over its own budget; the local tier
-of the cache file system above its capacity; machine caches over
-`max_size` (while idle, GC round); above 85 % dormant repositories,
-written-back blobs, resident slot data and fetched sources; above the
-budget itself the least recently used idle slots (policy prune, then
-cold). The scheduler only prices disk as part of an option (prune,
-resize, restore, a stopped machine's disk).
+sources, machine caches, dormant repositories, written-back blobs, idle
+flushed slots) is a reclaimable tier. The design is in
+[design-storage-v2.md](design-storage-v2.md); this is what the worker does.
 
-Slots are pruned against two budgets: per slot the sum of the slot caches'
-`max_size` (unset: unbounded) after every session, per machine
-`[scheduler] disk_budget` of the cache file system (default `"90%"`, or a
-size like `"150G"`; a size's own `disk_budget` overrides it). The
-orchestrator passes it to each new machine. The worker tracks reads per
-session: after a run it records for every slot file the last run (session
-number of the slot) that read or wrote it, using the atime (relatime
-re-armed by resetting the atime of read files to their mtime; on `noatime`
-mounts only writes count). Pruning runs in stages until the slot fits:
+**The ledger.** `Status.Disk.Ledger` (`proto.DiskLedger`) is the physical
+account of the cache disk: `Total` and `Free` from statfs, one `Reclaim`
+entry per class (and repository) with the bytes reclaiming it frees on the
+disk and a `Cost` (build seconds expected to be lost: rebuild seconds x
+P(reuse), P = gap / (gap + idle), gap the slot's mean time between runs, 1 h
+without history; refetch at 100 MB/s, sources at 10 MB/s), sorted by
+ascending cost per byte, and `Pinned = Used - Σ Reclaim`: leased slots,
+dirty pages, images, the system and anything not accounted for. Classes:
+
+| class | bytes | reclaim |
+| --- | --- | --- |
+| `garbage` | units of an idle slot unread for their policy's runs (rust 3, lru 5), measured at the end of every run (`slotMeta.Garbage`), as far as they are in the slot's upper or resident pages | the in-slot trim (below), cost ≈ 0 |
+| `resident` | clean pages a repository's tier alone holds (pool-shared and cloned pages excluded), and materialized files (less the slots' uppers when committed files are reflinked) | unreferenced pages and files first, then ARC/LRU |
+| `writeback`, `machine` | written-back blobs; machine caches over their `max_size` (only while no session runs) | LRU |
+| `dormant` | local tiers of repositories without slot or open stack | dropped with their pool pages |
+| `source` | faulted-in source contents | LRU (open files never) |
+| `slot` | an idle slot whose state the store has (committed and the flushed head is its head or newer than its last use): its own disk (`slotMeta.Physical`: upper and snapshots; plain slots their data) | demoted: removed, its pages become unreferenced; the next session starts over the head |
+
+Nothing is counted twice (an entry is never estimated high: what cannot be
+measured physically is pinned), and the entries never exceed the used
+bytes. `Reserve = max(5 GB, 3 % of the disk, disk - disk_budget) + Σ` the
+running sessions' `Exec.SlotGrowth` (2 GB when unknown); `Room() = Free +
+Σ Reclaim - Reserve` is what a new session may take. `[scheduler]
+disk_budget` (default `"90%"`, or a size like `"150G"`) thus only sets the
+floor of the reserve. The storage items of the status measure page tiers by
+their directories (hard links of the page pool counted once, including the
+pages every tier marks shared after a worker restart) and slots by their own
+disk, so "other" is the real remainder.
+
+**One reclaim order.** `Worker.reclaim(want)` frees entries in ledger order
+until statfs reports `want` free bytes and returns the bytes statfs says it
+freed; when the ledger is exhausted it flushes idle slots the store lacks
+and demotes them (two at most, all when urgent). It runs:
+
+* in the background on the lifecycle tick (5 s) when `free < 2 x reserve`,
+  up to `3 x reserve` (the local tiers' capacity, half the budget, is
+  enforced on the same tick);
+* on the ENOSPC guard's 1 s tick while sessions run when `free < reserve`:
+  synchronously and urgent up to `2 x reserve`; only when that fails the
+  machine admits no new sessions and reports draining (`drain_reason "disk
+  full"`) until free is back at 1.5 x reserve;
+* before a placement on the orchestrator's `SlotOp{Op: "reclaim", Repo,
+  FreeBytes}` (slot stream, admin token): `want = FreeBytes + reserve`,
+  keeping `Repo`'s slots, bounded by 20 s including the wait for a reclaim
+  already running; it fails (`SlotResult.Err`) when it stays short and
+  reports the freed bytes either way.
+
+**Per-slot budget and trim.** Every slot has a budget: the sum of its slot
+caches' `max_size`, else twice its size after its first run here
+(`slotMeta.ColdBytes`), at least 10 GB, at most 40 % of the disk. After
+every session the worker trims the slot in the background when its size
+exceeds 75 % of the budget: the garbage stages below, then down to the
+budget. The worker tracks reads per session: after a run it records for
+every slot file the last run (session number of the slot) that read or
+wrote it (tracked reads, or the atime: relatime re-armed by resetting the
+atime of read files to their mtime; on `noatime` mounts only writes count).
+Stages:
 
 1. `prune = "rust"`: old incremental compilation sessions (all but the
    newest per crate in `target/*/incremental/`);
-2. units not read for 5 runs, the stalest first (`rust`: all files of one
-   compilation unit, i.e. `deps/*-<hash>.*`, `.fingerprint/<unit>/`,
-   `build/<unit>/`; `lru`: single files); with a size target also more
-   recently read ones, never those of the latest run;
-3. the whole slot (cold; the next session starts a new one).
+2. units not read for 3 runs (`rust`: all files of one compilation unit,
+   i.e. `deps/*-<hash>.*`, `.fingerprint/<unit>/`, `build/<unit>/`) or 5
+   runs (`lru`, the default and slots without caches: single files), the
+   stalest first; with a size target also more recently read ones, never
+   those of the latest run.
 
-`prune = "none"` leaves only the TTL and the machine budget. The worker
-checks the cache disk every 5 s (one statfs of the whole file system, so
-images and other data on it count against the budget): above 85% of the
-budget it reclaims resident data that is refetched on use (clean pages and
-materialized files, also of leased slots, then faulted-in sources) down to
-85%; only above the budget itself the least recently used idle slots get the
-policy prune (stages 1 and 2), then go cold, also down to 85%. At 97% of the
-disk the machine admits no new sessions and reports draining (`drain_reason
-"disk full"`) until usage is below 95%. The local tiers of all repositories
-together (pages plus materialized files) are bounded by half the budget. The orchestrator can prune a repository's slots
-on demand through the worker's slot stream (`proto.KindSlot`, admin token;
-`orchestrator.WorkerSlotOps.PruneSlot`): older duplicate slots go cold
-first, then the newest is pruned in stages to the requested size. Such a
-prune runs before a placement, so it is bounded: the orchestrator gives
-it 90 s (closing the stream at the deadline), the worker waits at most
-20 s for a prune already running and fails at once for a repository
-without a slot; on failure the session runs on its slot unpruned. (In
-production unbounded prunes held placements for up to 20 minutes behind
-a maintenance prune.)
+`prune = "none"` leaves only the TTL and the disk reclaim. A trim must free
+the disk, not the merged view: deleting a file of an overlay slot's lower
+only adds a whiteout, its pages stay in the repository's tier. So the trim
+is committed (the store head shrinks once flushed), the idle slot is
+rebased over the new head and the pages and materialized files no tree a
+slot mounts or starts from references any more are dropped
+(`cacheFS.dropUnreferenced`; dirty pages never, they are not in the store).
+A slot is never removed by a trim; demotion of whole slots is the reclaim's.
 
 ### Access classes
 
