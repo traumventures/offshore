@@ -39,7 +39,7 @@ func (s *Worker) startCompilerCache(ctx context.Context) {
 	if ns == "" {
 		ns = "default"
 	}
-	local, err := blobcache.NewDirStore(s.cfg.SccacheDir, blobcache.MaxTTL)
+	local, err := blobcache.NewDirStore(s.cfg.SccacheDir, blobcache.DefaultTTL)
 	if err != nil {
 		s.log.Warn("compiler cache disabled", "err", err)
 		return

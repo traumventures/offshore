@@ -254,7 +254,7 @@ func (c *cacheFS) repo(id string) (*repoFS, error) {
 	if err != nil {
 		return nil, err
 	}
-	layers, err := blobcache.NewDirStore(filepath.Join(base, "layers"), blobcache.MaxTTL)
+	layers, err := blobcache.NewDirStore(filepath.Join(base, "layers"), blobcache.DefaultTTL)
 	if err != nil {
 		return nil, err
 	}
@@ -309,6 +309,15 @@ func (c *cacheFS) relink(r *repoFS) error {
 		DirtyExpire: access.DefaultWritebackDelay, Interval: c.opt.WritebackInterval}, r.c.obs)
 	r.link.Start()
 	return nil
+}
+
+// refreshAge is the age after which the repository's chain is rewritten:
+// half its store's retention (anyfs.RefreshAge without a store).
+func (r *repoFS) refreshAge() time.Duration {
+	if _, _, remote, _ := r.stack(); remote != nil {
+		return anyfs.RefreshAgeOf(remote)
+	}
+	return anyfs.RefreshAge
 }
 
 // stack returns the repository's current top tier, link and remote.
@@ -781,7 +790,7 @@ func (c *cacheFS) finish(ctx context.Context, slot string, r *repoFS, m slotMeta
 		l.Created = m.Created
 	}
 	ch = append(ch, l)
-	if l.Depth >= c.opt.CompactDepth || now.Sub(time.Unix(ch[0].At, 0)) >= anyfs.RefreshAge {
+	if l.Depth >= c.opt.CompactDepth || now.Sub(time.Unix(ch[0].At, 0)) >= r.refreshAge() {
 		b := anyfs.Compact(ch, now)
 		if err := anyfs.SaveLayer(ctx, r.layers, l); err != nil {
 			return res, err
@@ -954,7 +963,7 @@ func (c *cacheFS) flush(ctx context.Context, res commitResult) (proto.LayerHead,
 	for _, l := range res.chain {
 		// Layer objects the store lacks (new, or deleted by the control
 		// plane's garbage collection) or that would expire too soon.
-		if info, err := remote.Stat(ctx, anyfs.LayerObject(l.ID)); err == nil && time.Since(info.ModTime) < anyfs.RefreshAge {
+		if info, err := remote.Stat(ctx, anyfs.LayerObject(l.ID)); err == nil && time.Since(info.ModTime) < anyfs.RefreshAgeOf(remote) {
 			continue
 		}
 		if err := anyfs.SaveLayer(ctx, remote, l); err != nil {
