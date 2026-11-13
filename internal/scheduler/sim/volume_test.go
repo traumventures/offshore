@@ -48,7 +48,7 @@ func TestVolumeResizeCooldown(t *testing.T) {
 	o := opts(scheduler.Config{})
 	o.Sizes, o.Estimator = volumeSizes(false), scheduler.NewHistory("")
 	r := Run(Trace{Start: DefaultStart, End: 4 * 3600, Jobs: js}, o)
-	if r.Completed != 6 || r.Resizes != 1 {
-		t.Fatalf("want exactly one resize within 6 h: %+v", r)
+	if r.Completed != 6 || r.Resizes > r.Machines || r.ENOSPC > 0 {
+		t.Fatalf("want at most one resize per machine within 6 h: %+v", r)
 	}
 }

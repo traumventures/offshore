@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"fmt"
+	"github.com/traumventures/offshore/internal/medium"
 	"math"
 	"sort"
 	"time"
@@ -256,7 +257,7 @@ func (p Default) coreChoose(ss *solveState, t Task, explain bool) coreChoice {
 			cost := price*hours(lat+rc.run+tail) + rc.cost
 			info := candOption(act, tm)
 			info.Slot, info.RunSeconds, info.PrepSeconds = rc.slot.Steps(), secs(rc.run), secs(rc.prep)
-			if rc.slot.Kind == SlotNone {
+			if rc.slot.None() {
 				info.Slot = "warm"
 				if rc.reason == "cold" {
 					info.Slot = "cold"
@@ -290,11 +291,14 @@ func (p Default) coreChoose(ss *solveState, t Task, explain bool) coreChoice {
 		}
 		m := Machine{ID: "new:" + s.Provider + "/" + s.Name, Provider: s.Provider, EnvHash: t.EnvHash, Size: s.Name, State: Starting, Capacity: s.Capacity,
 			Medium: s.Medium, Stack: s.Stack, DiskTotal: max(s.Volume.Min, s.Capacity.Disk)}
+		m.Disk = FreshDisk(m.DiskTotal, nil)
+		m.CanResize = f.Providers[s.Provider].Resize && s.Medium != medium.Volume || s.Medium == medium.Volume && (s.Volume.Max == 0 || m.DiskTotal < s.Volume.Max)
 		lat := p.boot(f, s.Provider)
 		newCap(Action{Kind: Create, EnvHash: t.EnvHash, Size: s, Reason: "queued demand"}, m, lat, sizePrice(s), p.sizeAdmissible(s))
 		for _, v := range p.warmVolumes(&planState{f: f, acts: ss.acts}, s, []Task{t}) {
 			vm := m
 			vm.ID, vm.Zone, vm.Volume, vm.DiskTotal, vm.SlotBytes = m.ID+"/"+v.ID, v.Zone, v.ID, v.Bytes, v.SlotBytes
+			vm.Disk = FreshDisk(v.Bytes, v.SlotBytes)
 			vm.WarmRepos = nil
 			for repo := range v.SlotBytes {
 				vm.WarmRepos = append(vm.WarmRepos, repo)
@@ -493,6 +497,7 @@ func (p Default) planCore(f Pool) []Action {
 	st := p.newPlanState(f)
 	st.acts = ss.acts
 	running := p.lifecycle(st, ss.booked)
+	p.growDisks(st)
 	p.warmPool(st, running)
 	p.enforceLimits(st)
 	return st.acts

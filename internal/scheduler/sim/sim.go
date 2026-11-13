@@ -92,8 +92,6 @@ type Options struct {
 	// machines without a cache volume while they exist, running or
 	// stopped (EBS root volumes); 0 = free.
 	DiskPricePerGBHour float64
-	// Storage is the simulated worker's disk management (disk.go).
-	Storage StorageModel
 	// Debug, when set, is called for every completed job with its wait.
 	Debug func(j Job, wait time.Duration)
 }
@@ -183,7 +181,7 @@ type Report struct {
 	WarmRate     float64       `json:"warm_rate"`
 	Restores     int           `json:"restores"`
 	Moves        int           `json:"moves"` // slots saved on one machine and restored on another
-	Prunes       int           `json:"prunes"`
+	Reclaims     int           `json:"reclaims"`
 	Resizes      int           `json:"resizes"`
 	Evictions    int           `json:"evictions"` // slots dropped because a disk was full
 	EgressCost   float64       `json:"egress_cost"`
@@ -253,7 +251,11 @@ type Report struct {
 	// they ran, or an ENOSPC), DiskWaitTime that delay. Demoted counts
 	// slots dropped to their store heads (v2), TrimmedBytes stale build
 	// units removed; StoreLag is build end to flushed head.
-	WarmStarts    int           `json:"warm_starts"`
+	WarmStarts int `json:"warm_starts"`
+	// ColdFirst are cold builds of repositories without any head yet,
+	// ColdLag those whose head was still being flushed.
+	ColdFirst     int           `json:"cold_first"`
+	ColdLag       int           `json:"cold_lag"`
 	WarmStartRate float64       `json:"warm_start_rate"`
 	ENOSPC        int           `json:"enospc"`
 	DiskWaits     int           `json:"disk_waits"`
@@ -474,7 +476,7 @@ func Run(trace Trace, o Options) Report {
 				if r.j.SlotBytes > 0 {
 					after = s.endBuild(m, r)
 					if !s.o.NoWriteback {
-						s.snapshot(m, r.j.Repo, after)
+						s.snapshot(m, r.j.Repo, m.slots[r.j.Repo].bytes)
 					}
 				}
 				u := scheduler.Usage{PeakMemory: int64(r.j.PeakMemory), CPUSeconds: r.j.CPU * r.j.Duration,
@@ -709,8 +711,9 @@ func (s *sim) advance(d time.Duration) {
 	for _, m := range s.machines {
 		if m.volume != "" {
 			s.storage(m.size, m.disk, sec)
-		} else if s.o.DiskPricePerGBHour > 0 && m.size.Capacity.Disk > 0 {
-			c := float64(m.size.Capacity.Disk) / 1e9 * s.o.DiskPricePerGBHour * sec / 3600
+		} else if s.o.DiskPricePerGBHour > 0 && max(m.disk, m.size.Capacity.Disk) > 0 {
+			// The disk as grown, running or stopped.
+			c := float64(max(m.disk, m.size.Capacity.Disk)) / 1e9 * s.o.DiskPricePerGBHour * sec / 3600
 			s.r.VolumeCost += c
 			s.r.Cost += c
 		}
@@ -765,7 +768,7 @@ func (s *sim) pool() scheduler.Pool {
 	}
 	for _, sz := range s.o.Sizes {
 		f.Providers[sz.Provider] = scheduler.ProviderState{Boot: latency(s.o.Boot, sz.Provider, 60*time.Second),
-			Start: latency(s.o.Start, sz.Provider, 20*time.Second)}
+			Start: latency(s.o.Start, sz.Provider, 20*time.Second), Resize: s.o.Resize}
 	}
 	if len(s.machines) > 0 {
 		f.Machines = make([]scheduler.Machine, 0, len(s.machines))
@@ -808,11 +811,7 @@ func (s *sim) pool() scheduler.Pool {
 				sm.SlotBytes = slotBytes(m)
 			}
 			if m.disk > 0 {
-				// The worker measures the file system (statfs).
-				sm.DiskUsed = s.used(m)
-				if s.o.Storage == StorageV2 {
-					sm.Disk = s.ledgerOf(m)
-				}
+				sm.Disk = s.ledgerOf(m)
 			}
 			for repo := range m.warm {
 				sm.WarmRepos = append(sm.WarmRepos, repo)
@@ -1027,15 +1026,12 @@ func (s *sim) assign(m *machine, j *job, pl scheduler.Placement, exp time.Durati
 	work := j.Duration
 	prep := 0.0 // seconds of slot preparation before the build runs
 	restored := false
-	switch slot.Kind {
-	case scheduler.SlotPrune:
-		s.r.Prunes++
-		s.pruneV1(m, j.Repo, slot.Bytes)
-		prep = scheduler.DefaultPrune.Seconds()
-	case scheduler.SlotResize:
-		prep = s.resize(m, slot.Bytes)
+	// The disk handling first: the worker's reclaim, a disk resize.
+	if slot.Reclaim > 0 {
+		s.r.Reclaims++
+		s.reclaim(m, slot.Reclaim+s.reserve(m), j.Repo, false)
+		prep += scheduler.DefaultReclaim.Seconds()
 	}
-	// A restore or move may grow the disk in the same step.
 	if slot.Grow > 0 {
 		prep += s.resize(m, slot.Grow)
 	}
@@ -1051,7 +1047,7 @@ func (s *sim) assign(m *machine, j *job, pl scheduler.Placement, exp time.Durati
 		}
 		prep += scheduler.LazyRestore(m.size.Stack, slot.Snapshot.Bytes, int64(j.WorkingSet), bw).Seconds()
 		s.r.PageInBytes += min(slot.Snapshot.Bytes, max(int64(j.WorkingSet), 0)) // 0: not modelled
-		m.slots[j.Repo] = &buildSlot{bytes: slot.Snapshot.Bytes, base: slot.Snapshot.Bytes, first: s.now, used: s.now, flushAt: s.now}
+		m.slots[j.Repo] = restoredSlot(slot.Snapshot.Bytes, int64(j.SlotBytes), s.now)
 		restored = true
 	case scheduler.SlotMove:
 		// Save on the source (its provider's store), then restore here.
@@ -1066,7 +1062,7 @@ func (s *sim) assign(m *machine, j *job, pl scheduler.Placement, exp time.Durati
 		}
 		prep += float64(slot.Bytes)/float64(s.o.Bandwidth) + scheduler.LazyRestore(m.size.Stack, slot.Bytes, int64(j.WorkingSet), bw).Seconds()
 		s.r.PageInBytes += min(slot.Bytes, max(int64(j.WorkingSet), 0))
-		m.slots[j.Repo] = &buildSlot{bytes: slot.Bytes, base: slot.Bytes, first: s.now, used: s.now, flushAt: s.now}
+		m.slots[j.Repo] = restoredSlot(slot.Bytes, int64(j.SlotBytes), s.now)
 		restored = true
 	}
 	warm := m.warm[j.Repo]
@@ -1077,17 +1073,26 @@ func (s *sim) assign(m *machine, j *job, pl scheduler.Placement, exp time.Durati
 	} else if !restored {
 		work *= 1 + s.o.ColdPenalty
 		s.r.Cold++
+		switch {
+		case s.pendingFor(j.Repo):
+			s.r.ColdLag++
+		case len(s.snaps[j.Repo]) == 0:
+			s.r.ColdFirst++
+		}
 	}
 	if restored {
 		diskPrep = 0
 		if slot.Grow > 0 {
 			diskPrep = scheduler.DefaultResize.Seconds()
 		}
+		if slot.Reclaim > 0 {
+			diskPrep += scheduler.DefaultReclaim.Seconds()
+		}
 		if prep-diskPrep <= warmStartSlack*j.Duration {
 			s.r.WarmStarts++
 		}
 	}
-	if diskPrep > 5 {
+	if diskPrep > 5 && !strings.Contains(pl.Reason, "for working set") { // a resize for the working set is a tier choice
 		s.r.DiskWaits++
 		s.r.DiskWaitTime += time.Duration(diskPrep * float64(time.Second))
 	}
@@ -1275,6 +1280,11 @@ func (s *sim) execute(acts []scheduler.Action) {
 			}
 		case scheduler.Undrain:
 			m.draining = false
+		case scheduler.Grow:
+			if m.disk > 0 && a.Bytes > m.disk {
+				s.r.Grows++
+				s.resize(m, a.Bytes)
+			}
 		}
 	}
 }

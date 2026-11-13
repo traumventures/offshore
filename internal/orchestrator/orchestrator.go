@@ -184,6 +184,9 @@ type Lease struct {
 	// BuildTTL is the effective build slot TTL of the session (the
 	// request's, capped by max_lifetime).
 	BuildTTL time.Duration `json:",omitempty"`
+	// SlotGrowth is the forecast (p90, twice the learned median) of the
+	// bytes the session adds to its slot (proto.Exec.SlotGrowth).
+	SlotGrowth int64 `json:",omitempty"`
 	// Store grants the session's worker access to the repository's and
 	// environment's prefixes of the machine's store (nil: no store).
 	Store *store.Grant `json:",omitempty"`
@@ -239,6 +242,8 @@ type Machine struct {
 	// the listing) or last changed locally. Older listings are stale: a
 	// slow readiness poll must not overwrite a newer state or expiry.
 	listed time.Time
+	// resizedAt is the last disk resize the orchestrator requested.
+	resizedAt time.Time
 }
 
 // UnhealthyAfter is how long a machine running at its provider may go
@@ -1052,7 +1057,7 @@ func (o *Orchestrator) poolLocked(now time.Time) scheduler.Pool {
 			sm.Sessions = len(st.Sessions)
 			sm.WarmRepos = st.WarmRepos
 			if d := st.Disk; d != nil {
-				sm.DiskTotal, sm.DiskUsed, sm.SlotBytes, sm.DiskBudget = d.Total, d.Used, d.SlotBytes, d.Budget
+				sm.DiskTotal, sm.SlotBytes, sm.Disk = d.Total, d.SlotBytes, d.Ledger
 			}
 			if st.VM != nil {
 				sm.VM = vmOf(st.VM)
@@ -1201,7 +1206,7 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 				Grant: pl.Grant, MemoryOvercommit: o.cfg.Policy.MemoryOvercommit,
 				Provider: m.Provider, Size: size, PricePerHour: o.machinePriceLocked(m), Reason: pl.Reason,
 				BuildTTL: req.buildTTL(o.cfg.MaxLifetime), Decision: pl.Decision,
-				Predicted: predicted(pl, req),
+				Predicted: predicted(pl, req), SlotGrowth: 2 * task.Profile.SlotGrowth,
 			}
 			m.pending[task.ID] = pendingLease{res: pl.Grant.Reserve, expires: o.now().Add(2*time.Minute + slotTimeout)}
 			exp := pl.Expected
@@ -1211,8 +1216,8 @@ func (o *Orchestrator) acquire(ctx context.Context, req Request, log io.Writer) 
 			o.leases[task.ID] = leaseInfo{start: o.now(), expected: exp, run: pl.Run, memMean: task.Profile.PeakMean, memSD: task.Profile.PeakSD}
 			env := m.EnvHash
 			o.mu.Unlock()
-			if pl.Slot.Kind != scheduler.SlotNone {
-				fmt.Fprintf(log, "offshore: preparing build slot on %s (%s)\n", m.ID, pl.Slot.Kind)
+			if !pl.Slot.None() {
+				fmt.Fprintf(log, "offshore: preparing build slot on %s (%s)\n", m.ID, pl.Slot.Steps())
 				o.prepareSlot(ctx, m.ID, pl.Slot)
 			}
 			lease.Store = o.storeGrant(ctx, lease.Provider, req.RepoID, env)
@@ -1340,6 +1345,8 @@ func (o *Orchestrator) execute(ctx context.Context, acts []scheduler.Action, wai
 			go o.traced(ctx, a, func(ctx context.Context) { o.createMachine(ctx, a.Machine, a.EnvHash, image, a.Size) })
 		case scheduler.Start:
 			go o.traced(ctx, a, func(ctx context.Context) { o.startMachine(ctx, a.Machine) })
+		case scheduler.Grow:
+			go o.traced(ctx, a, func(ctx context.Context) { o.growDisk(ctx, a.Machine, a.Bytes, a.Reason) })
 		case scheduler.Stop, scheduler.Destroy:
 			o.mu.Lock()
 			busy := o.downing[a.Machine]

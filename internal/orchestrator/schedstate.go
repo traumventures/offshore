@@ -33,10 +33,9 @@ const (
 	slotTimeout = 5 * time.Minute
 )
 
-// pruneTimeout bounds a prune before a placement: the session keeps its
-// warm slot when the prune fails, so waiting longer costs more than the
-// disk the prune would free (a normal prune takes about a second).
-var pruneTimeout = 90 * time.Second
+// reclaimTimeout bounds a reclaim before a placement (the worker bounds
+// its own to 20 s; deletes take seconds).
+var reclaimTimeout = 30 * time.Second
 
 // reconcileWait bounds how long Reconcile waits for its stops and
 // destroys (snapshot saves before a stop can take minutes); a var for tests.
@@ -322,7 +321,8 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 	f.Providers = map[string]scheduler.ProviderState{}
 	for name := range o.provs {
 		h := o.health[name]
-		f.Providers[name] = scheduler.ProviderState{Boot: h.boot, Start: h.start, Down: h.down, Store: name}
+		_, resize := o.provs[name].(provider.DiskResizer)
+		f.Providers[name] = scheduler.ProviderState{Boot: h.boot, Start: h.start, Down: h.down, Store: name, Resize: resize}
 		if l := h.limit(f.Now); l != (scheduler.Limit{}) {
 			if f.ProviderLimit == nil {
 				f.ProviderLimit = map[string]scheduler.Limit{}
@@ -346,6 +346,15 @@ func (o *Orchestrator) schedPoolLocked(f *scheduler.Pool) {
 		sm := &f.Machines[i]
 		if p, ok := o.provs[sm.Provider]; ok {
 			_, sm.CanResize = p.(provider.DiskResizer)
+		}
+		if m := o.machines[sm.ID]; m != nil && !m.resizedAt.IsZero() {
+			// EBS and other providers allow one change per cooldown; a
+			// failed resize backs off as long.
+			cd := scheduler.SlotMedium(sm.Stack).ResizeCooldown
+			if cd <= 0 {
+				cd = 6 * time.Hour
+			}
+			sm.ResizableAt = m.resizedAt.Add(cd)
 		}
 		sm.StartBlocked = o.startBlocked[sm.ID]
 		if c, ok := o.creating[sm.ID]; ok && sm.State == scheduler.Starting {
@@ -415,25 +424,21 @@ func (o *Orchestrator) slotTargetLocked(id string) (SlotTarget, *Machine, bool) 
 }
 
 // prepareSlot performs a placement's slot action on the machine before
-// the session starts (prune, disk resize, snapshot restore, a restore
-// with its disk resize in one step). Failures are
-// logged; the session then runs on whatever slot is there (cold).
+// the session starts: the disk handling first (the worker's reclaim, a
+// disk resize), then a snapshot restore or a move. Failures are logged;
+// the session then runs on whatever slot is there (cold).
 func (o *Orchestrator) prepareSlot(ctx context.Context, machineID string, a scheduler.SlotAction) {
-	if a.Kind == scheduler.SlotNone {
+	if a.None() {
 		return
 	}
 	timeout := slotTimeout
-	if a.Kind == scheduler.SlotPrune {
-		timeout = pruneTimeout
+	if a.Kind == scheduler.SlotNone && a.Grow == 0 {
+		timeout = reclaimTimeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	o.mu.Lock()
-	t, m, ok := o.slotTargetLocked(machineID)
-	var p provider.Provider
-	if ok {
-		p = o.provs[m.Provider]
-	}
+	t, _, ok := o.slotTargetLocked(machineID)
 	slots := o.Slots
 	o.mu.Unlock()
 	if !ok {
@@ -442,40 +447,28 @@ func (o *Orchestrator) prepareSlot(ctx context.Context, machineID string, a sche
 	start := time.Now()
 	ev := o.machineEvent(events.SlotAction, machineID)
 	ev.Repo, ev.Reason, ev.Bytes = a.Repo, a.Steps(), a.Bytes
-	prune := func(bytes int64) (int64, error) {
-		if slots == nil {
-			return 0, errors.New("no slot operations configured")
-		}
-		return slots.PruneSlot(ctx, t, a.Repo, bytes)
-	}
-	resize := func(bytes int64) error {
-		o.mu.Lock()
-		vol := o.volumeOfLocked(machineID)
-		o.mu.Unlock()
-		if vol != nil {
-			return o.resizeVolume(ctx, machineID, bytes)
-		}
-		r, ok := p.(provider.DiskResizer)
-		if !ok {
-			return errors.New("provider cannot resize disks")
-		}
-		return r.ResizeDisk(ctx, machineID, bytes)
-	}
 	var err error
-	// A restore or move grows the disk in the same step; a failure there
-	// is logged and the restore proceeds (it may thrash).
+	// A failed reclaim or resize is logged and the preparation proceeds:
+	// the worker's guard protects the disk.
+	if a.Reclaim > 0 {
+		if slots == nil {
+			err = errors.New("no slot operations configured")
+		} else {
+			var freed int64
+			freed, err = slots.ReclaimSlot(ctx, t, a.Repo, a.Reclaim)
+			ev.Bytes = freed
+		}
+		if err != nil {
+			o.log.Warn("disk reclaim before a session failed", "machine", machineID, "repo", a.Repo, "err", err)
+		}
+	}
 	if a.Grow > 0 {
-		if rerr := resize(a.Grow); rerr != nil {
-			o.log.Warn("disk resize before restore failed", "machine", machineID, "repo", a.Repo, "err", rerr)
+		if rerr := o.resizeDisk(ctx, machineID, a.Grow); rerr != nil {
+			err = rerr
+			o.log.Warn("disk resize before a session failed", "machine", machineID, "repo", a.Repo, "err", rerr)
 		}
 	}
 	switch a.Kind {
-	case scheduler.SlotPrune:
-		var freed int64
-		freed, err = prune(a.Bytes)
-		ev.Bytes = freed
-	case scheduler.SlotResize:
-		err = resize(a.Bytes)
 	case scheduler.SlotRestore:
 		if slots == nil {
 			err = errors.New("no slot operations configured")
@@ -499,5 +492,43 @@ func (o *Orchestrator) prepareSlot(ctx context.Context, machineID string, a sche
 		ev.Error = err.Error()
 		o.log.Warn("slot preparation failed, running cold", "machine", machineID, "action", a.Kind, "repo", a.Repo, "err", err)
 	}
+	o.obs.emit(ev)
+}
+
+// resizeDisk grows a machine's cache disk to bytes: its volume, else the
+// provider's root disk. It records the time for the resize cooldown.
+func (o *Orchestrator) resizeDisk(ctx context.Context, machineID string, bytes int64) error {
+	o.mu.Lock()
+	vol := o.volumeOfLocked(machineID)
+	m := o.machines[machineID]
+	var p provider.Provider
+	if m != nil {
+		p = o.provs[m.Provider]
+		m.resizedAt = o.now()
+	}
+	o.mu.Unlock()
+	if vol != nil {
+		return o.resizeVolume(ctx, machineID, bytes)
+	}
+	r, ok := p.(provider.DiskResizer)
+	if !ok {
+		return errors.New("provider cannot resize disks")
+	}
+	return r.ResizeDisk(ctx, machineID, bytes)
+}
+
+// growDisk grows a running machine's disk in the background (the
+// scheduler's Grow: pinned data and reserve above its threshold).
+func (o *Orchestrator) growDisk(ctx context.Context, machineID string, bytes int64, reason string) {
+	ctx, cancel := context.WithTimeout(ctx, slotTimeout)
+	defer cancel()
+	start := time.Now()
+	ev := o.machineEvent(events.SlotAction, machineID)
+	ev.Reason, ev.Bytes = "grow: "+reason, bytes
+	if err := o.resizeDisk(ctx, machineID, bytes); err != nil {
+		ev.Error = err.Error()
+		o.log.Warn("disk grow failed", "machine", machineID, "bytes", bytes, "err", err)
+	}
+	ev.Seconds = time.Since(start).Seconds()
 	o.obs.emit(ev)
 }

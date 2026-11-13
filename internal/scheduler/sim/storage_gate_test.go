@@ -48,21 +48,18 @@ func storageCases(t testing.TB) []evalCase {
 	return cs
 }
 
-// TestStorageGate runs the storage gate: OFFSHORE_SGATE=v1 or v2 (the
-// simulated worker), OFFSHORE_SGATE_JSON writes the reports,
-// OFFSHORE_SGATE_BASE adds those of an earlier run (the scheduler before
-// storage v2 is no longer in the tree) as the first variant "base",
+// TestStorageGate runs the storage gate: OFFSHORE_SGATE=label (e.g. v2),
+// OFFSHORE_SGATE_JSON writes the reports,
+// OFFSHORE_SGATE_BASE adds those of an earlier run (the scheduler and
+// worker before storage v2 are no longer in the tree:
+// testdata/storage-gate-base.json) as the first variant "base",
 // OFFSHORE_SGATE_CASE filters cases, OFFSHORE_SGATE_OUT writes the table.
 // Primary metrics in order: warm-start rate, ENOSPC (must be 0), disk
 // waits (must be 0), then cost and p95 turnaround.
 func TestStorageGate(t *testing.T) {
 	v := os.Getenv("OFFSHORE_SGATE")
 	if v == "" {
-		t.Skip("set OFFSHORE_SGATE=v1|v2 to run the storage gate")
-	}
-	model := StorageV1
-	if v == "v2" {
-		model = StorageV2
+		t.Skip("set OFFSHORE_SGATE=<label> to run the storage gate")
 	}
 	base := map[string]Report{}
 	if p := os.Getenv("OFFSHORE_SGATE_BASE"); p != "" {
@@ -87,7 +84,6 @@ func TestStorageGate(t *testing.T) {
 	for _, c := range cases {
 		for _, r := range rs {
 			sp := c.pool.Spec(fmt.Sprintf("%s r=%.1f", v, r), c.trace, "v2", r, c.down, c.resize)
-			sp.Options.Storage = model
 			specs = append(specs, sp)
 			keys = append(keys, fmt.Sprintf("%s|%.1f", c.name, r))
 		}
@@ -127,7 +123,7 @@ func TestStorageGate(t *testing.T) {
 			}
 		}
 		row(name, r, v, out[k])
-		if model == StorageV2 && (out[k].ENOSPC > 0 || out[k].DiskWaits > 0) {
+		if out[k].ENOSPC > 0 || out[k].DiskWaits > 0 {
 			t.Errorf("%s: %d ENOSPC, %d disk waits", k, out[k].ENOSPC, out[k].DiskWaits)
 		}
 	}

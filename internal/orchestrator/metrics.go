@@ -76,6 +76,8 @@ func actionName(k scheduler.ActionKind) string {
 		return "drain"
 	case scheduler.Undrain:
 		return "undrain"
+	case scheduler.Grow:
+		return "grow"
 	}
 	return "other"
 }

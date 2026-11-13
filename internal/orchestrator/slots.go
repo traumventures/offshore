@@ -20,9 +20,10 @@ type SlotTarget struct {
 // pruned, its disk resized, moved (saved and restored elsewhere) or
 // rebuilt cold.
 type SlotOps interface {
-	// PruneSlot shrinks repo's build slot on the machine to at most
-	// targetBytes (0: the cache's prune policy) and returns the bytes freed.
-	PruneSlot(ctx context.Context, t SlotTarget, repo string, targetBytes int64) (int64, error)
+	// ReclaimSlot makes freeBytes free on the machine's cache disk beyond
+	// the worker's reserve for a session of repo (whose slots stay) and
+	// returns the bytes freed; an error when it could not make the room.
+	ReclaimSlot(ctx context.Context, t SlotTarget, repo string, freeBytes int64) (int64, error)
 	// SaveSlot commits repo's build slot and flushes it to the object
 	// store; it returns the head.
 	SaveSlot(ctx context.Context, t SlotTarget, repo string) (proto.LayerHead, error)

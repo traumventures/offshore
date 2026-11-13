@@ -11,36 +11,34 @@ import (
 // The physical disk model (docs/design-storage-v2.md). A machine's disk
 // holds otherBytes (system, images, global caches) and its build slots;
 // a running build grows its slot linearly over the run. Of a warm build's
-// growth, garbageShare becomes stale build units (superseded outputs a
+// growth, garbageShare (all of it beyond liveBound times the cold slot)
+// becomes stale build units (superseded outputs a
 // trim removes without losing warmth); a slot's dirty bytes reach the
-// store after flushLatency plus the bytes at the commit throughput
-// (calibrated on production, Nov 11-12: task end to flushed head p50 45 s,
-// p90 6.7 min for growth p50 0.64 GB, p90 5.5 GB).
+// store after flushLatency plus the bytes at the commit throughput.
+// Production before storage v2 (Nov 11-12: task end to flushed head p50
+// 45 s, p90 6.7 min for growth p50 0.64 GB, p90 5.5 GB) fits 10 s +
+// 15 MB/s: commits waited for the 30 s head deadline, queued behind other
+// repositories' flushes and skipped captures. Storage v2 removes the
+// waits (per-repository maintenance, queued captures, upload outside the
+// commit lock, the head moves when its pages are clean), leaving the
+// commit itself, bounded by hashing at 32 MB/s: 2 s + 32 MB/s (to be
+// confirmed in production).
 //
-// Two worker models: StorageV1 is the worker until storage v2
-// (manageDisk: above the disk budget, 90 %, idle slots least recently
-// used are policy-pruned, then dropped; the scheduler's prune shrinks the
-// placed repository's own slot to the requested bytes; 97 % stops
-// admissions). StorageV2 keeps a reserve free (a floor plus the forecast
-// growth of the running builds), trims each slot to its budget after a
-// build, demotes idle flushed slots in ascending cost per byte and
-// reports the ledger the scheduler plans with.
-
-// StorageModel selects the simulated worker's disk management.
-type StorageModel int
-
-const (
-	StorageV1 StorageModel = iota
-	StorageV2
-)
+// The worker (storage v2) keeps a reserve free (a floor plus the
+// forecast growth of the running builds), trims each slot to its budget
+// after a build, demotes idle flushed slots in ascending cost per byte and
+// reports the ledger the scheduler plans with. Before storage v2 the
+// worker pruned idle slots least recently used above its disk budget and
+// the scheduler's prune shrank the placed repository's own slot; that
+// model produced testdata/storage-gate-base.json.
 
 const (
 	otherBytes      = 18 << 30 // a fresh machine's used disk (prod: 17.5 GB on 196-215 GB)
 	garbageShare    = 0.8
-	flushLatency    = 10 * time.Second
-	commitBandwidth = 15e6 // bytes/s
-	v1PruneShare    = 0.6  // garbage units unread for 5 runs
-	v2TrimShare     = 0.8  // garbage units unread for 3 runs
+	liveBound       = 1.25 // the live state of a slot is at most this times its cold size
+	flushLatency    = 2 * time.Second
+	commitBandwidth = 32e6 // bytes/s
+	trimShare       = 0.8  // garbage units unread for 3 runs (the trim)
 	warmStartSlack  = 0.15 // a restore within 15 % of the warm run counts warm
 )
 
@@ -116,7 +114,9 @@ func leased(m *machine, repo string) bool {
 	return false
 }
 
-// endBuild updates r's slot on m after the build and returns its size.
+// endBuild updates r's slot on m after the build and returns its size
+// at the end of the session (what the worker reports, before the
+// background trim).
 func (s *sim) endBuild(m *machine, r *run) int64 {
 	j := r.j
 	sl := m.slots[j.Repo]
@@ -125,8 +125,11 @@ func (s *sim) endBuild(m *machine, r *run) int64 {
 		m.slots[j.Repo] = sl
 	}
 	if r.warm || r.restored {
+		// New outputs supersede old ones: the live state stays within
+		// liveBound of the cold slot, the rest of the growth is garbage.
 		g := r.growth
-		sl.garbage += int64(float64(g) * garbageShare)
+		live := min(int64(float64(g)*(1-garbageShare)), max(int64(liveBound*float64(sl.base))-sl.live(), 0))
+		sl.garbage += g - live
 		sl.bytes += g
 	} else {
 		sl.bytes, sl.garbage, sl.base = r.growth, 0, r.growth
@@ -139,15 +142,14 @@ func (s *sim) endBuild(m *machine, r *run) int64 {
 	lag := flushLatency + time.Duration(float64(max(r.growth, 0))/commitBandwidth*float64(time.Second))
 	sl.flushAt = s.now.Add(lag)
 	s.lags = append(s.lags, lag)
-	if s.o.Storage == StorageV2 {
-		if b := s.slotBudget(m, sl); sl.bytes > b*3/4 {
-			s.r.TrimmedBytes += sl.trim(v2TrimShare)
-		}
+	after := sl.bytes
+	if b := s.slotBudget(m, sl); sl.bytes > b*3/4 {
+		s.r.TrimmedBytes += sl.trim(trimShare)
 	}
-	return sl.bytes
+	return after
 }
 
-// slotBudget is a v2 slot's budget: twice its cold size, 10 GB to 40 %
+// slotBudget is a slot's budget: twice its cold size, 10 GB to 40 %
 // of the disk.
 func (s *sim) slotBudget(m *machine, sl *buildSlot) int64 {
 	b := max(2*sl.base, 10<<30)
@@ -176,7 +178,7 @@ type reclaimable struct {
 	cost  float64 // build seconds expected to be lost
 }
 
-// ledger lists what v2 can free on m in reclaim order. urgent includes
+// ledger lists what the worker can free on m in reclaim order. urgent includes
 // idle slots not yet flushed (an urgent flush first).
 func (s *sim) ledger(m *machine, keep string, urgent bool) []reclaimable {
 	var out []reclaimable
@@ -190,7 +192,7 @@ func (s *sim) ledger(m *machine, keep string, urgent bool) []reclaimable {
 		if leased(m, repo) {
 			continue
 		}
-		if n := int64(float64(sl.garbage) * v2TrimShare); n > 0 {
+		if n := int64(float64(sl.garbage) * trimShare); n > 0 {
 			out = append(out, reclaimable{repo: repo, bytes: n})
 		}
 		if repo == keep || !(urgent || sl.flushed(s.now)) {
@@ -200,7 +202,7 @@ func (s *sim) ledger(m *machine, keep string, urgent bool) []reclaimable {
 		reuse := sl.gap().Seconds() / (sl.gap().Seconds() + idle.Seconds())
 		ws := sl.live() / 2
 		restore := scheduler.LazyRestore(m.size.Stack, sl.live(), ws, s.o.Bandwidth).Seconds()
-		out = append(out, reclaimable{repo: repo, slot: true, bytes: sl.bytes - int64(float64(sl.garbage)*v2TrimShare), cost: restore * reuse})
+		out = append(out, reclaimable{repo: repo, slot: true, bytes: sl.bytes - int64(float64(sl.garbage)*trimShare), cost: restore * reuse})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		return out[i].cost/float64(max(out[i].bytes, 1)) < out[j].cost/float64(max(out[j].bytes, 1))
@@ -208,7 +210,7 @@ func (s *sim) ledger(m *machine, keep string, urgent bool) []reclaimable {
 	return out
 }
 
-// reclaim frees v2 entries on m until want bytes are free; it returns the
+// reclaim frees ledger entries on m until want bytes are free; it returns the
 // expected build seconds lost.
 func (s *sim) reclaim(m *machine, want int64, keep string, urgent bool) float64 {
 	lost := 0.0
@@ -221,7 +223,7 @@ func (s *sim) reclaim(m *machine, want int64, keep string, urgent bool) float64 
 			continue
 		}
 		if !e.slot {
-			s.r.TrimmedBytes += sl.trim(v2TrimShare)
+			s.r.TrimmedBytes += sl.trim(trimShare)
 			continue
 		}
 		if !sl.flushed(s.now) { // urgent flush: in the store now
@@ -243,99 +245,29 @@ func (s *sim) flush(m *machine, repo string) {
 }
 
 // manageDisk is the worker's background disk management after a build
-// and on every tick.
+// and on every tick: below twice the reserve free it reclaims up to three
+// times the reserve; below half the reserve it admits no sessions.
 func (s *sim) manageDisk(m *machine) {
 	if m.disk <= 0 {
 		return
 	}
-	if s.o.Storage == StorageV2 {
-		res := s.reserve(m)
-		if free := m.disk - s.used(m); free < 2*res {
-			s.reclaim(m, 3*res, "", false)
-		}
-		m.diskFull = m.disk-s.used(m) < res/2
-		return
+	res := s.reserve(m)
+	if free := m.disk - s.used(m); free < 2*res {
+		s.reclaim(m, 3*res, "", false)
 	}
-	budget := m.disk * 9 / 10
-	low := budget * 85 / 100
-	switch share := float64(s.used(m)) / float64(m.disk); {
-	case !m.diskFull && share >= 0.97:
-		m.diskFull = true
-	case m.diskFull && share < 0.95:
-		m.diskFull = false
-	}
-	if s.used(m) <= budget {
-		return
-	}
-	type ref struct {
-		repo string
-		sl   *buildSlot
-	}
-	var refs []ref
-	for repo, sl := range m.slots {
-		if !leased(m, repo) {
-			refs = append(refs, ref{repo, sl})
-		}
-	}
-	sort.Slice(refs, func(i, j int) bool {
-		if !refs[i].sl.used.Equal(refs[j].sl.used) {
-			return refs[i].sl.used.Before(refs[j].sl.used)
-		}
-		return refs[i].repo < refs[j].repo
-	})
-	for _, cold := range []bool{false, true} {
-		for _, r := range refs {
-			if s.used(m) <= low {
-				return
-			}
-			if cold {
-				if _, ok := m.slots[r.repo]; ok {
-					delete(m.slots, r.repo)
-					delete(m.warm, r.repo)
-					s.r.Evictions++
-				}
-			} else {
-				s.r.TrimmedBytes += r.sl.trim(v1PruneShare)
-			}
-		}
-	}
+	m.diskFull = m.disk-s.used(m) < res/2
 }
 
-// pruneV1 is the v1 worker's prune before a placement: the placed
-// repository's own slot is pruned to target bytes (garbage first, then
-// live state; losing more than a third of the live state makes it cold).
-func (s *sim) pruneV1(m *machine, repo string, target int64) {
-	sl := m.slots[repo]
-	if sl == nil || sl.bytes <= target {
-		return
-	}
-	over := sl.bytes - target
-	g := min(over, sl.garbage)
-	sl.garbage -= g
-	sl.bytes -= g
-	over -= g
-	if over <= 0 {
-		return
-	}
-	if over*3 > sl.live() {
-		delete(m.slots, repo)
-		delete(m.warm, repo)
-		return
-	}
-	sl.bytes -= over
-}
-
-// guard runs after time advanced: v2 reclaims synchronously below the
-// reserve; a disk that is still over full fails the most recently
-// started build (ENOSPC), which is retried.
+// guard is the worker's ENOSPC guard after time advanced: below the
+// reserve it reclaims synchronously (flushing idle slots urgently); a
+// disk still over full fails the most recently started build (ENOSPC),
+// which is retried.
 func (s *sim) guard(m *machine) {
 	if m.disk <= 0 || len(m.runs) == 0 {
 		return
 	}
-	if s.o.Storage == StorageV2 {
-		if res := s.reserve(m); m.disk-s.used(m) < res {
-			s.reclaim(m, res, "", true)
-		}
+	if res := s.reserve(m); m.disk-s.used(m) < res {
+		s.reclaim(m, res, "", true)
 	}
 	for s.used(m) > m.disk && len(m.runs) > 0 {
 		k := len(m.runs) - 1
@@ -354,7 +286,7 @@ func (s *sim) guard(m *machine) {
 	}
 }
 
-// ledgerOf is the v2 worker's report of m's disk.
+// ledgerOf is the worker's report of m's disk.
 func (s *sim) ledgerOf(m *machine) *scheduler.DiskLedger {
 	used := s.used(m)
 	l := &scheduler.DiskLedger{Total: m.disk, Free: m.disk - used, Reserve: s.reserve(m)}
@@ -395,4 +327,23 @@ func (s *sim) forecast(j *job) int64 {
 		return 2 * g
 	}
 	return 2 << 30
+}
+
+// pendingFor reports whether a head of repo is being flushed.
+func (s *sim) pendingFor(repo string) bool {
+	for _, p := range s.pending {
+		if p.snap.Repo == repo {
+			return true
+		}
+	}
+	return false
+}
+
+// restoredSlot is a slot restored from a head of bytes for a repository
+// whose cold slot has cold bytes: what exceeds its live bound is garbage.
+func restoredSlot(bytes, cold int64, now time.Time) *buildSlot {
+	if cold <= 0 {
+		cold = bytes
+	}
+	return &buildSlot{bytes: bytes, base: cold, garbage: max(bytes-int64(liveBound*float64(cold)), 0), first: now, used: now, flushAt: now}
 }

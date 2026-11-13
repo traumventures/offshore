@@ -3,6 +3,7 @@ package scheduler
 import (
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/traumventures/offshore/internal/medium"
@@ -36,7 +37,7 @@ const (
 	DefaultTail             = 0.0 // idle tail charged to a new machine, as a fraction of idle_stop
 	DefaultBoot             = 90 * time.Second
 	DefaultStart            = 30 * time.Second
-	DefaultPrune            = 20 * time.Second
+	DefaultReclaim          = 2 * time.Second
 	DefaultResize           = 60 * time.Second
 	DefaultBandwidth        = 200 << 20 // bytes/s between a provider and its own store
 	DefaultCrossBW          = 50 << 20  // bytes/s between a provider and another store
@@ -44,8 +45,8 @@ const (
 	// DefaultDiskPrice is the price of one GB of machine disk per hour
 	// (~0.08 per GB-month, EBS gp3).
 	DefaultDiskPrice = 0.08 / 730
-	// diskFull is the fraction of the disk the scheduler fills at most
-	// when the worker does not report its budget.
+	// diskFull is the local tier's share of a disk without a reported
+	// capacity.
 	diskFull = 0.9
 )
 
@@ -257,61 +258,38 @@ func slotNeed(m Machine, t Task, restoreBytes int64) int64 {
 	return max(t.Profile.SlotBytes, restoreBytes)
 }
 
-// prunable estimates what pruning frees on m for t: other repositories'
-// slots (least recently used first) and a third of t's own slot.
-func prunable(m Machine, t Task) int64 {
-	var n int64
-	for repo, b := range m.SlotBytes {
-		if repo == t.RepoID {
-			n += b / 3
-		} else {
-			n += b
-		}
-	}
-	return n
-}
-
-// slotsToPrune is how many other repositories' slots a prune of missing
-// bytes removes (largest first).
-func slotsToPrune(m Machine, t Task, missing int64) int {
-	var bs []int64
-	for repo, b := range m.SlotBytes {
-		if repo != t.RepoID {
-			bs = append(bs, b)
-		}
-	}
-	sort.Slice(bs, func(i, j int) bool { return bs[i] > bs[j] })
-	n := 0
-	for _, b := range bs {
-		if missing <= 0 {
-			break
-		}
-		missing -= b
-		n++
-	}
-	return n
-}
-
-// prepare returns the ways to run rc on m with the disk handling it needs:
-// as is (when the slot fits), after pruning other slots, or after growing
-// the disk to one of several targets (room for the slot, the working set
-// in the local tier, twice that). Each way carries the thrash penalty of
-// the local capacity it leaves, so the caller scores slot handling,
-// restore and thrashing jointly. A restore or move keeps its kind and
-// grows the disk in the same step (SlotAction.Grow); it never prunes:
-// evicting another warm slot for a restored one ping-pongs between
-// repositories (sim: 3x the thrashing, 5x the restores on team-week).
-// The result is empty when nothing makes room.
+// prepare returns the ways to run rc on m with the disk handling it
+// needs, from the worker's ledger (docs/design-storage-v2.md): as is when
+// the slot fits the free space above the reserve; after a reclaim
+// (SlotAction.Reclaim) when the reclaimable entries cover it, at the cost
+// of the build seconds they are expected to lose (demoted slots restore
+// from their store heads, so usually little); or after growing the disk
+// to one of several targets (room for the slot, the working set in the
+// local tier, twice that). Each way carries the thrash penalty of the
+// local capacity it leaves, so the caller scores slot handling, restore
+// and thrashing jointly. A machine that cannot make room is no option:
+// no session runs into a full disk.
 func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) []runChoice {
 	_, ws, capacity := thrashOf(f, m, t)
 	refetch := refetchOf(f, m.Provider, t)
-	missing := int64(0)
-	if m.DiskTotal > 0 && need > 0 {
-		limit := m.DiskBudget
-		if limit <= 0 {
-			limit = int64(diskFull * float64(m.DiskTotal))
+	short, reclaim := int64(0), int64(0)
+	var lost time.Duration
+	if l := m.Disk; l != nil && need > 0 {
+		short = need - (l.Free - l.Reserve)
+		var got int64
+		for _, e := range l.Reclaim {
+			if got >= short {
+				break
+			}
+			if e.Class == ReclaimSlot && e.Repo == t.RepoID {
+				continue // the slot the task runs on
+			}
+			got += e.Bytes
+			lost += time.Duration(e.Cost * float64(time.Second))
 		}
-		missing = need - (limit - m.DiskUsed)
+		if short > 0 && got >= short {
+			reclaim = need
+		}
 	}
 	var out []runChoice
 	// finish adds the thrash penalty of capacity cap.
@@ -323,30 +301,25 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) []
 		}
 		out = append(out, c)
 	}
-	joint := rc.slot.Kind == SlotRestore || rc.slot.Kind == SlotMove
-	if missing <= 0 {
+	switch {
+	case short <= 0:
 		finish(rc, capacity)
-	} else if !joint && prunable(m, t) >= missing {
+	case reclaim > 0:
 		c := rc
-		// Pruning other repositories' slots makes their next builds cold.
-		pr := DefaultPrune + time.Duration(slotsToPrune(m, t, missing))*time.Duration(float64(DefaultRun)*DefaultColdPenalty)
-		c.run += pr
-		c.prep += pr
-		c.slot = SlotAction{Kind: SlotPrune, Repo: t.RepoID, Bytes: missing}
-		c.reason += ", prune slots"
+		c.run += DefaultReclaim + lost
+		c.prep += DefaultReclaim
+		c.slot.Repo, c.slot.Reclaim = t.RepoID, reclaim
+		c.reason += ", reclaim disk"
 		finish(c, capacity)
 	}
 	// A disk resized recently cannot grow again (EBS: once per 6 h).
 	if !m.CanResize || f.Now.Before(m.ResizableAt) {
-		if c, ok := diskTight(out, rc, missing, m.Warm(t.RepoID)); ok {
-			finish(c, capacity)
-		}
-		return out
+		return shortNew(out, m, rc)
 	}
 	s, hasSize := sizeOf(f, m)
 	var grows []int64
-	if missing > 0 {
-		grows = append(grows, max(missing*2, 10<<30)) // grow generously: resizes are slow
+	if short > 0 {
+		grows = append(grows, max(short*2, 10<<30)) // grow generously: resizes are slow
 	}
 	if ws > capacity && capacity > 0 && growsCapacity(m) {
 		g := max(ws+ws/4-capacity, 10<<30)
@@ -366,7 +339,7 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) []
 			target = s.Volume.Max
 		}
 		g = target - m.DiskTotal
-		if g <= 0 || g < missing || seen[target] {
+		if g <= 0 || g < short || seen[target] {
 			continue
 		}
 		seen[target] = true
@@ -374,11 +347,7 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) []
 		c.run += DefaultResize
 		c.prep += DefaultResize
 		c.cost += float64(g) / 1e9 * p.diskPriceOf(m) * hours(left)
-		if joint {
-			c.slot.Grow = target
-		} else {
-			c.slot = SlotAction{Kind: SlotResize, Repo: t.RepoID, Bytes: target}
-		}
+		c.slot.Repo, c.slot.Grow = t.RepoID, target
 		c.reason += ", resize disk"
 		cap := capacity
 		if growsCapacity(m) && cap > 0 {
@@ -389,33 +358,22 @@ func (p Default) prepare(f Pool, m Machine, t Task, rc runChoice, need int64) []
 		}
 		finish(c, cap)
 	}
-	if c, ok := diskTight(out, rc, missing, m.Warm(t.RepoID)); ok {
-		finish(c, capacity)
-	}
-	return out
+	return shortNew(out, m, rc)
 }
 
-// diskTightPenalty is the time charged to a run on a machine whose disk
-// the model sees short by more than pruning or a resize can free.
-const diskTightPenalty = 5 * time.Minute
+// diskShortPenalty is charged to a new machine whose fresh disk is
+// smaller than the slot and cannot grow: the last resort, so that a task
+// whose slot fits no disk still runs (the worker's guard and reclaim
+// handle the disk) instead of waiting for its queue timeout.
+const diskShortPenalty = time.Hour
 
-// diskTight keeps the run on a warm slot possible when its growth does
-// not fit the disk and neither a prune nor a resize covers it (a cold run
-// or restore needs the whole slot and goes elsewhere or waits): the disk usage counts
-// data outside the slots (images, unaccounted files) that no prune
-// frees, and without any option the task waited for capacity until its
-// queue timeout while machines were started and idle-stopped around it
-// (production: every task of a repository timed out for an hour). The
-// worker protects the disk itself (budget prune, no admission at 97 %);
-// the penalty lets a machine with room win when there is one.
-func diskTight(out []runChoice, rc runChoice, missing int64, warm bool) (runChoice, bool) {
-	if len(out) > 0 || missing <= 0 || !warm || rc.slot.Kind != SlotNone {
-		return rc, false
+func shortNew(out []runChoice, m Machine, rc runChoice) []runChoice {
+	if len(out) > 0 || !strings.HasPrefix(m.ID, "new:") {
+		return out
 	}
-	rc.run += diskTightPenalty
-	rc.prep += diskTightPenalty
-	rc.reason += ", disk tight"
-	return rc, true
+	rc.run += diskShortPenalty
+	rc.reason += ", disk short"
+	return append(out, rc)
 }
 
 // diskPriceOf is the price per GB-hour of m's hot medium (the configured
@@ -472,7 +430,6 @@ func (p Default) runChoices(f Pool, m Machine, t Task) []runChoice {
 		}
 		rc := runChoice{run: restore + scale(run), prep: restore, cost: float64(moved) / 1e9 * price,
 			slot: SlotAction{Kind: SlotRestore, Repo: t.RepoID, Snapshot: s}, reason: reason}
-		rc.cost += p.copyCost(f, m, t, s.Bytes) // a second warm copy while the warm machine keeps its own
 		add(rc, slotNeed(m, t, s.Bytes))
 	}
 	if src, ok := p.moveSource(f, m, t); ok {

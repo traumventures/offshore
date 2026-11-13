@@ -42,31 +42,27 @@ func TestCostOptimizationTradesWaitAgainstCold(t *testing.T) {
 	}
 }
 
-func TestPlaceFullDiskPrunesOrResizes(t *testing.T) {
+func TestPlaceFullDiskReclaimsOrResizes(t *testing.T) {
 	m := machine("m", res(8, 16), Resources{})
-	m.Size, m.DiskTotal, m.DiskUsed = "m", 100*gib, 88*gib
+	m.Size, m.DiskTotal = "m", 100*gib
 	m.SlotBytes = map[string]int64{"other": 40 * gib}
+	m.Disk = &DiskLedger{Total: 100 * gib, Free: 12 * gib, Pinned: 48 * gib, Reserve: 10 * gib,
+		Reclaim: []Reclaimable{{Class: ReclaimSlot, Repo: "other", Bytes: 40 * gib, Cost: 30}}}
 	tk := profiled(time.Minute, 3*time.Minute)
 	tk.Profile.SlotBytes = 20 * gib
 	pol := Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1}}
 	pl := pol.Place(Pool{Now: now, Sizes: priced, Machines: []Machine{m}}, tk)
-	if pl.Kind != Assign || pl.Slot.Kind != SlotPrune || pl.Slot.Bytes != 20*gib-(90-88)*gib {
-		t.Fatalf("want prune of the missing bytes, got %+v", pl)
+	if pl.Kind != Assign || pl.Slot.Reclaim != 20*gib || pl.Slot.Steps() != "reclaim" {
+		t.Fatalf("want a reclaim of the slot's bytes, got %+v", pl)
 	}
-	// The worker's reported budget replaces the default 90%.
-	mb := m
-	mb.DiskBudget = 99 * gib
-	if pl := pol.Place(Pool{Now: now, Sizes: priced, Machines: []Machine{mb}}, tk); pl.Slot.Kind != SlotPrune || pl.Slot.Bytes != 20*gib-(99-88)*gib {
-		t.Fatalf("budget 99G: want prune of 9G, got %+v", pl)
-	}
-	// Nothing to prune: resize when the provider can.
-	m.SlotBytes = nil
+	// Nothing reclaimable: the machine is no option (a new one is).
+	m.Disk.Reclaim, m.Disk.Pinned = nil, 88*gib
 	if pl := pol.Place(Pool{Now: now, Sizes: priced, Machines: []Machine{m}}, tk); pl.Kind != Wait {
 		t.Fatalf("no room and no resize: want wait, got %+v", pl)
 	}
 	m.CanResize = true
 	pl = pol.Place(Pool{Now: now, Sizes: priced, Machines: []Machine{m}}, tk)
-	if pl.Kind != Assign || pl.Slot.Kind != SlotResize || pl.Slot.Bytes <= m.DiskTotal {
+	if pl.Kind != Assign || pl.Slot.Grow <= m.DiskTotal || pl.Slot.Reclaim != 0 {
 		t.Fatalf("want resize, got %+v", pl)
 	}
 }

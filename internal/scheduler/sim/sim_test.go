@@ -232,8 +232,8 @@ func TestSimDiskFull(t *testing.T) {
 	}
 	tr := Trace{Start: DefaultStart, End: 6000, Jobs: js}
 	r := Run(tr, diskOpts(scheduler.Config{}, 50*gib, false))
-	if r.Completed != len(js) || r.Evictions > 1 || r.Prunes == 0 && r.Machines < 2 {
-		t.Fatalf("no resize: want prunes or a machine per repository, got %+v", r)
+	if r.Completed != len(js) || r.Evictions > 1 || r.Reclaims == 0 && r.Machines < 2 || r.ENOSPC > 0 {
+		t.Fatalf("no resize: want reclaims or a machine per repository, no ENOSPC, got %+v", r)
 	}
 	r = Run(tr, diskOpts(scheduler.Config{}, 50*gib, true))
 	if r.Completed != len(js) || r.Resizes == 0 || r.Evictions > 1 || r.WarmHits < 8 {

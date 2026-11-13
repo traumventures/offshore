@@ -8,6 +8,7 @@
 package scheduler
 
 import (
+	"strings"
 	"time"
 
 	"github.com/traumventures/offshore/internal/medium"
@@ -164,20 +165,16 @@ type Machine struct {
 	Pressure  Pressure
 	Sessions  int
 	WarmRepos []string // repositories with an unexpired build cache
-	// DiskTotal and DiskUsed are the machine disk (0 = unknown); SlotBytes
+	// DiskTotal is the machine disk (0 = unknown); SlotBytes
 	// the size of each repository's build slot (repo id -> bytes).
 	DiskTotal int64
-	DiskUsed  int64
 	// Disk is the worker's physical ledger of the disk (nil: not
-	// reported); with it DiskUsed and DiskBudget are not used.
-	Disk *DiskLedger
-	// DiskBudget is the bytes the worker lets the disk fill before pruning
-	// (0 = unknown: diskFull of DiskTotal).
-	DiskBudget int64
-	SlotBytes  map[string]int64
-	IdleSince  time.Time // zero while sessions run
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
+	// reported, no disk handling).
+	Disk      *DiskLedger
+	SlotBytes map[string]int64
+	IdleSince time.Time // zero while sessions run
+	CreatedAt time.Time
+	ExpiresAt time.Time
 	// ReadyAt is when a starting machine is expected to accept sessions
 	// (zero: unknown, the provider's boot or start latency applies).
 	ReadyAt time.Time
@@ -244,6 +241,8 @@ type ProviderState struct {
 	// Store is the name of the provider's object store (snapshots, global
 	// caches); empty = the provider name.
 	Store string
+	// Resize: the provider can grow machine disks (provider.DiskResizer).
+	Resize bool
 }
 
 // Demand is the recent demand of an environment (see Forecast).
@@ -386,8 +385,6 @@ type SlotKind int
 
 const (
 	SlotNone    SlotKind = iota
-	SlotPrune            // prune slots on the machine to free SlotAction.Bytes
-	SlotResize           // grow the machine disk to SlotAction.Bytes
 	SlotRestore          // restore SlotAction.Snapshot into the slot
 	// SlotMove saves the warm slot on machine SlotAction.From (Bytes) to the
 	// store and restores that fresh snapshot into the slot here.
@@ -395,29 +392,38 @@ const (
 )
 
 func (k SlotKind) String() string {
-	return [...]string{"none", "prune", "resize", "restore", "move"}[k]
+	return [...]string{"none", "restore", "move"}[k]
 }
 
-// SlotAction prepares the build slot of a placed task.
+// SlotAction prepares the build slot of a placed task. The disk handling
+// comes first: Reclaim makes that many bytes free above the worker's
+// reserve (its one reclaim order), Grow grows the disk to that size.
 type SlotAction struct {
 	Kind     SlotKind
 	Repo     string
 	Bytes    int64
 	Snapshot Snapshot
 	From     string // SlotMove: the machine holding the warm slot
-	// Grow is the disk size a SlotRestore or SlotMove grows the disk to in
-	// the same step (0: no resize): a restore that needs room or whose
-	// working set does not fit the local tier.
-	Grow int64
+	Reclaim  int64
+	Grow     int64
 }
+
+// None reports whether the action does nothing.
+func (a SlotAction) None() bool { return a.Kind == SlotNone && a.Reclaim == 0 && a.Grow == 0 }
 
 // Steps names the action with its preparation, e.g. "resize+restore".
 func (a SlotAction) Steps() string {
-	s := a.Kind.String()
-	if a.Grow > 0 {
-		s = "resize+" + s
+	var steps []string
+	if a.Reclaim > 0 {
+		steps = append(steps, "reclaim")
 	}
-	return s
+	if a.Grow > 0 {
+		steps = append(steps, "resize")
+	}
+	if a.Kind != SlotNone || len(steps) == 0 {
+		steps = append(steps, a.Kind.String())
+	}
+	return strings.Join(steps, "+")
 }
 
 // Placement is the decision for one task.
@@ -448,10 +454,11 @@ const (
 	Destroy                   // remove Machine and its disk
 	Drain                     // no new sessions on Machine
 	Undrain                   // accept sessions again
+	Grow                      // grow Machine's disk to Bytes (in the background)
 )
 
 func (k ActionKind) String() string {
-	return [...]string{"create", "start", "stop", "destroy", "drain", "undrain"}[k]
+	return [...]string{"create", "start", "stop", "destroy", "drain", "undrain", "grow"}[k]
 }
 
 // Action is one pool change decided by Plan.
@@ -463,6 +470,8 @@ type Action struct {
 	// Volume is the detached cache volume a Create attaches (empty: a
 	// fresh volume for volume sizes, none for local ones).
 	Volume string
+	// Bytes is the disk size a Grow grows to.
+	Bytes  int64
 	Reason string
 	// Decision is the scale-out decision behind a Start or Create (cost
 	// model policies; nil otherwise).

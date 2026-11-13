@@ -397,7 +397,7 @@ func runAttempt(parent context.Context, repo *config.Repo, profile config.Tool, 
 		Argv: argv, Cwd: cwd, Env: env,
 		Grant: prep.Grant, MemoryOvercommit: prep.MemoryOvercommit,
 		Caches: ProtoCaches(repo), SlotTTL: prep.BuildTTL, Store: prep.Store,
-		Eager: profile.Eager, Lease: prep.Lease,
+		Eager: profile.Eager, Lease: prep.Lease, SlotGrowth: prep.SlotGrowth,
 		Linker: repo.Environment.Linker, TraceParent: tracing.Inject(ctx), Labels: rec.Labels,
 	}
 	if repo.Outputs.Mode == config.OutputsFuse && opt.align != nil {

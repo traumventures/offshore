@@ -91,7 +91,7 @@ func TestPlaceResizesDiskForWorkingSet(t *testing.T) {
 	f := Pool{Now: now, Sizes: localSizes(), Machines: []Machine{m}}
 	tk := wsTask(40 * gib)
 	fast := Default{Cfg: Config{CostOptimization: 0.5, CPUOvercommit: 1, MemoryOvercommit: 1}}.Place(f, tk)
-	if fast.Kind != Assign || fast.Slot.Kind != SlotResize || fast.Slot.Bytes < 20*gib+(50-20)*gib || !strings.Contains(fast.Reason, "working set") {
+	if fast.Kind != Assign || fast.Slot.Grow < 20*gib+(50-20)*gib || !strings.Contains(fast.Reason, "working set") {
 		t.Fatalf("want a resize for the working set, got %+v", fast)
 	}
 	cheap := Default{Cfg: Config{CostOptimization: 1, CPUOvercommit: 1, MemoryOvercommit: 1}}.Place(f, tk)
@@ -168,7 +168,7 @@ func TestCalibratedRefetchFlipsResize(t *testing.T) {
 		t.Fatalf("default factor: want to thrash, got %+v", pl)
 	}
 	f.Refetch = map[string]float64{"aws": 10}
-	if pl := pol.Place(f, wsTask(40*gib)); pl.Slot.Kind != SlotResize || strings.Contains(pl.Reason, "thrashing") {
+	if pl := pol.Place(f, wsTask(40*gib)); pl.Slot.Grow == 0 || strings.Contains(pl.Reason, "thrashing") {
 		t.Fatalf("calibrated factor 10: want a resize, got %+v", pl)
 	}
 }
@@ -192,8 +192,10 @@ func TestRestoreAndResizeJointly(t *testing.T) {
 	}
 	// A full disk: the restore keeps its kind and grows the disk in the
 	// same step (before, the resize replaced the restore and the build ran
-	// cold); it never prunes another repository's warm slot.
-	m.SlotBytes, m.DiskUsed = map[string]int64{"other": 12 * gib}, 14*gib
+	// cold). The other repository's slot is not flushed yet (pinned), so
+	// no reclaim makes room.
+	m.SlotBytes = map[string]int64{"other": 12 * gib}
+	m.Disk = &DiskLedger{Total: 20 * gib, Free: 6 * gib, Pinned: 14 * gib, Reserve: 5 * gib}
 	tk.Profile.WorkingSet = 5 * gib
 	f.Machines = []Machine{m}
 	for _, r := range []float64{0, 0.5, 1} {
@@ -225,7 +227,7 @@ func TestNoResizeForWorkingSetBelowFixedLocalTier(t *testing.T) {
 	m.Stack = StackOf(20*gib, medium.Default("aws-ec2", medium.LocalNVMe), medium.Default("aws-ec2", medium.Volume), medium.Default("aws-ec2", medium.Store))
 	f := Pool{Now: now, Machines: []Machine{m}}
 	for _, rc := range (Default{}).runChoices(f, m, wsTask(40*gib)) {
-		if rc.slot.Kind == SlotResize {
+		if rc.slot.Grow > 0 {
 			t.Fatalf("resize offered: %+v", rc)
 		}
 	}

@@ -213,25 +213,6 @@ func quantileEnd(r Release, q float64, now time.Time) time.Time {
 	return end
 }
 
-// copyCost is the storage of a second warm copy of t's slot (bytes) on m
-// while another machine keeps its own (default policy): the disk until m
-// expires, at most a day.
-func (p Default) copyCost(f Pool, m Machine, t Task, bytes int64) float64 {
-	if bytes <= 0 {
-		return 0
-	}
-	for _, o := range f.Machines {
-		if o.ID != m.ID && o.State != Gone && o.Warm(t.RepoID) {
-			left := m.ExpiresAt.Sub(f.Now)
-			if m.ExpiresAt.IsZero() || left <= 0 || left > 24*time.Hour {
-				left = 24 * time.Hour
-			}
-			return float64(bytes) / 1e9 * p.diskPriceOf(m) * hours(left)
-		}
-	}
-	return 0
-}
-
 // owner is who a task belongs to for fair queueing.
 func owner(t Task) string {
 	if t.Owner != "" {

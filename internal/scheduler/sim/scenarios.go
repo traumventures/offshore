@@ -220,8 +220,8 @@ func EvalPools() []EvalPool {
 
 // GrowthTrace is a multi-day trace of Rust repositories whose slots grow
 // with every warm build like production's (Nov 11-12: growth per warm
-// build p50 0.64 GB, p90 5.5 GB; cold slots 12-40 GB, working sets 40 %
-// of the slot): without trimming they fill a 200 GB disk within a day.
+// build p50 0.64 GB, p90 5.5 GB; cold slots 12-40 GB, working sets a fifth
+// of the slot: p50 0.21 of slot_bytes_after): without trimming they fill a 200 GB disk within a day.
 func GrowthTrace(seed uint64, days int) Trace {
 	repos := []Repo{
 		{Name: "app", Env: "rust", Rate: 6, Duration: 240, CPU: 6, Memory: 12 * gib, Peak: 0.7, Burst: 0.3},
@@ -237,7 +237,7 @@ func GrowthTrace(seed uint64, days int) Trace {
 		j := &tr.Jobs[i]
 		slot := slots[j.Repo]
 		g := 0.64 * float64(gib) * math.Exp(sigma*r.NormFloat64())
-		j.SlotBytes, j.SlotGrowth, j.WorkingSet = Bytes(slot), Bytes(int64(math.Min(g, 20*float64(gib)))), Bytes(slot*2/5)
+		j.SlotBytes, j.SlotGrowth, j.WorkingSet = Bytes(slot), Bytes(int64(math.Min(g, 20*float64(gib)))), Bytes(slot/5)
 	}
 	return tr
 }

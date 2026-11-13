@@ -43,7 +43,7 @@ func TestSlotOpHonorsDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	begin := time.Now()
-	_, err = WorkerSlotOps{}.PruneSlot(ctx, SlotTarget{Machine: "m", Addr: ln.Addr().String(), Fingerprint: id.Fingerprint}, "repo", 0)
+	_, err = WorkerSlotOps{}.ReclaimSlot(ctx, SlotTarget{Machine: "m", Addr: ln.Addr().String(), Fingerprint: id.Fingerprint}, "repo", 0)
 	if err == nil {
 		t.Fatal("no error from a worker that never answers")
 	}

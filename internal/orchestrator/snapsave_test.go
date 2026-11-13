@@ -19,7 +19,7 @@ type recordingSlots struct {
 	restored []string
 }
 
-func (r *recordingSlots) PruneSlot(context.Context, SlotTarget, string, int64) (int64, error) {
+func (r *recordingSlots) ReclaimSlot(context.Context, SlotTarget, string, int64) (int64, error) {
 	return 0, nil
 }
 

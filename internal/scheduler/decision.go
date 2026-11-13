@@ -3,6 +3,7 @@ package scheduler
 import (
 	"fmt"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -101,17 +102,15 @@ func round6(v float64) float64 {
 // runOption describes running t on m with run choice rc.
 func runOption(kind string, m Machine, t Task, rc runChoice, wait time.Duration) *Option {
 	slot := rc.slot.Steps()
-	switch rc.slot.Kind {
-	case SlotNone:
-		slot = "cold"
+	if rc.slot.Kind == SlotNone {
+		w := "cold"
 		if m.Warm(t.RepoID) {
-			slot = "warm"
+			w = "warm"
 		}
-	case SlotPrune, SlotResize:
-		if m.Warm(t.RepoID) {
-			slot += "+warm"
+		if rc.slot.None() {
+			slot = w
 		} else {
-			slot += "+cold"
+			slot = strings.TrimSuffix(slot, "none") + w
 		}
 	}
 	return &Option{Kind: kind, Machine: m.ID, Provider: m.Provider, Size: m.Size, Slot: slot, Volume: m.Volume, Reason: rc.reason,

@@ -176,8 +176,8 @@ func localCapacity(m Machine) int64 {
 		return m.VM.Capacity
 	case m.Stack.Capacity > 0:
 		return m.Stack.Capacity
-	case m.DiskBudget > 0:
-		return m.DiskBudget
+	case m.Disk != nil:
+		return m.Disk.Total - m.Disk.Reserve
 	}
 	return int64(diskFull * float64(m.DiskTotal))
 }

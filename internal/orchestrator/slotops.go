@@ -70,9 +70,9 @@ func (w WorkerSlotOps) call(ctx context.Context, t SlotTarget, op proto.SlotOp) 
 	return res, nil
 }
 
-// PruneSlot implements SlotOps.
-func (w WorkerSlotOps) PruneSlot(ctx context.Context, t SlotTarget, repo string, targetBytes int64) (int64, error) {
-	res, err := w.call(ctx, t, proto.SlotOp{Op: proto.SlotReclaim, Repo: repo, FreeBytes: targetBytes})
+// ReclaimSlot implements SlotOps.
+func (w WorkerSlotOps) ReclaimSlot(ctx context.Context, t SlotTarget, repo string, freeBytes int64) (int64, error) {
+	res, err := w.call(ctx, t, proto.SlotOp{Op: proto.SlotReclaim, Repo: repo, FreeBytes: freeBytes})
 	return res.Freed, err
 }
 

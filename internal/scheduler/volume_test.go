@@ -50,14 +50,15 @@ func TestPlanAttachesWarmDetachedVolume(t *testing.T) {
 // The resize cooldown (EBS: 6 h) blocks a resize; the task waits instead.
 func TestResizeCooldown(t *testing.T) {
 	m := machine("m", res(8, 16), Resources{})
-	m.Provider, m.Size, m.DiskTotal, m.DiskUsed, m.CanResize = "aws", "v", 100*gib, 88*gib, true
+	m.Provider, m.Size, m.DiskTotal, m.CanResize = "aws", "v", 100*gib, true
+	m.Disk = &DiskLedger{Total: 100 * gib, Free: 12 * gib, Pinned: 88 * gib, Reserve: 10 * gib}
 	m.Medium, m.Stack = medium.Volume, volSize().Stack
 	tk := profiled(time.Minute, 3*time.Minute)
 	tk.Profile.SlotBytes = 20 * gib
 	pol := Default{Cfg: Config{CPUOvercommit: 1, MemoryOvercommit: 1}}
 	f := Pool{Now: now, Sizes: []Size{volSize()}, Machines: []Machine{m}}
 	pl := pol.Place(f, tk)
-	if pl.Kind != Assign || pl.Slot.Kind != SlotResize || pl.Slot.Bytes < m.DiskTotal+50*gib {
+	if pl.Kind != Assign || pl.Slot.Grow < m.DiskTotal+50*gib {
 		t.Fatalf("want a resize of at least one step, got %+v", pl)
 	}
 	f.Machines[0].ResizableAt = now.Add(time.Hour)

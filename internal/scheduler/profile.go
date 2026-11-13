@@ -62,6 +62,8 @@ type Profile struct {
 const (
 	DefaultRun         = 2 * time.Minute
 	DefaultColdPenalty = 0.5 // cold = warm * (1 + penalty)
+	// minColdFactor bounds a learned cold run from below.
+	minColdFactor = 1 + DefaultColdPenalty/2
 	// MinRefetchRuns is how many thrashing runs a key needs before its
 	// own refetch factor replaces the provider's.
 	MinRefetchRuns = 2
@@ -81,15 +83,17 @@ func (p Profile) WarmRun() time.Duration {
 }
 
 // ColdRun is the expected duration without a slot on a machine of prov:
-// never shorter than the warm run (the learned medians of few runs of
-// different sizes can say otherwise; then a cold machine would always
-// beat the warm one).
+// at least minColdFactor times the warm run (the learned medians of few
+// runs of different sizes can say otherwise; then a cold build would
+// beat a warm slot or a restore, sim growth-5d: two thirds of the cold
+// builds had a fresh head to restore).
 func (p Profile) ColdRun(prov string) time.Duration {
+	floor := time.Duration(float64(p.WarmRun()) * minColdFactor)
 	if d, ok := p.ColdBy[prov]; ok && d > 0 {
-		return max(d, p.WarmRun())
+		return max(d, floor)
 	}
 	if p.Cold > 0 {
-		return max(p.Cold, p.WarmRun())
+		return max(p.Cold, floor)
 	}
 	return time.Duration(float64(p.WarmRun()) * (1 + DefaultColdPenalty))
 }

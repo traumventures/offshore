@@ -1,5 +1,7 @@
 package scheduler
 
+import "fmt"
+
 // DiskLedger is the physical account of a cache disk
 // (docs/design-storage-v2.md): Used = Pinned + Σ Reclaim[i].Bytes, and a
 // new session may take Room() bytes.
@@ -50,3 +52,56 @@ func (l DiskLedger) Reclaimable() int64 {
 // Room is the bytes a new session may take: free plus reclaimable,
 // less the reserve.
 func (l DiskLedger) Room() int64 { return l.Free + l.Reclaimable() - l.Reserve }
+
+// freshUsed is what a new machine's disk holds before its first session
+// (system, images; production: 17.5 GB of 196-215 GB), at most a tenth.
+const freshUsed = 18 << 30
+
+// FreshDisk is the ledger a new machine (or a detached volume holding
+// slots) is expected to report for a disk of total bytes (nil: unknown).
+func FreshDisk(total int64, slots map[string]int64) *DiskLedger {
+	if total <= 0 {
+		return nil
+	}
+	l := &DiskLedger{Total: total, Reserve: MinReserve(total)}
+	used := min(int64(freshUsed), total/10)
+	for _, b := range slots {
+		used += b
+	}
+	l.Free, l.Pinned = max(total-used, 0), used
+	return l
+}
+
+// MinReserve is the worker's reserve without running sessions: 5 GB or
+// a tenth of the disk (the default disk_budget of 90 %).
+func MinReserve(total int64) int64 { return max(5<<30, total/10) }
+
+// growAt is the share of a disk that pinned data plus the reserve may
+// take before the disk grows: early, because EBS allows one change per
+// 6 h and space must be there before it is needed.
+const growAt = 0.6
+
+// growDisks grows the disks of running machines whose pinned data and
+// reserve exceed growAt, by half (at least 50 GB, at most the size's
+// volume maximum), in the background: no placement waits for it.
+func (p Default) growDisks(st *planState) {
+	f := st.f
+	for _, m := range f.Machines {
+		l := m.Disk
+		if m.State != Running || l == nil || l.Total <= 0 || !m.CanResize || f.Now.Before(m.ResizableAt) {
+			continue
+		}
+		if float64(l.Pinned+l.Reserve) <= growAt*float64(l.Total) {
+			continue
+		}
+		target := l.Total + max(l.Total/2, 50<<30)
+		if s, ok := sizeOf(f, m); ok && s.Volume.Max > 0 {
+			target = min(target, s.Volume.Max)
+		}
+		if target <= l.Total {
+			continue
+		}
+		st.acts = append(st.acts, Action{Kind: Grow, Machine: m.ID, Bytes: target,
+			Reason: fmt.Sprintf("pinned data and reserve above %.0f %% of the disk", 100*growAt)})
+	}
+}
