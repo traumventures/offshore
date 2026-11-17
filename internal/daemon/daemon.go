@@ -193,6 +193,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	// mount point that is about to be mounted.
 	d.outputs.remountSaved()
 	go d.outputs.checkCommitted(ctx)
+	go d.sweepRoots(ctx)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -452,13 +453,20 @@ func (d *Daemon) record(r *events.Run) {
 func (d *Daemon) rootByPath(p string) *root {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.roots[p]
+	r := d.roots[p]
+	if r != nil {
+		r.lastUse = time.Now()
+	}
+	return r
 }
 
 // rootFor returns the tracked root for path, creating it on first use.
 func (d *Daemon) rootFor(path string, rules manifest.Rules) (*root, error) {
 	d.mu.Lock()
 	r, ok := d.roots[path]
+	if ok {
+		r.lastUse = time.Now()
+	}
 	d.mu.Unlock()
 	if ok {
 		r.setRules(rules)
@@ -473,8 +481,10 @@ func (d *Daemon) rootFor(path string, rules manifest.Rules) (*root, error) {
 	defer d.mu.Unlock()
 	if existing, ok := d.roots[path]; ok {
 		r.close()
+		existing.lastUse = time.Now()
 		return existing, nil
 	}
+	r.lastUse = time.Now()
 	d.roots[path] = r
 	return r, nil
 }
