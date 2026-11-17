@@ -28,10 +28,13 @@ type root struct {
 	watcher  *fsnotify.Watcher
 	watched  map[string]bool
 	overflow bool
-	lastUse  time.Time
 	closed   bool
 	// onChange receives the paths of every published delta.
 	onChange func(paths []string)
+
+	// lastUse is guarded by Daemon.mu, not mu: eviction decides under
+	// Daemon.mu, so a root handed out by rootFor is never evicted at once.
+	lastUse time.Time
 }
 
 func (r *root) setOnChange(fn func([]string)) {
